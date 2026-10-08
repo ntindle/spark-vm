@@ -1326,9 +1326,9 @@ def test_socket_command_gap_fast_forwards_over_cron_cursor(
         ctx, monkeypatch, tmp_path, capsys):
     # #1143 / D-GH1: the every-minute cron ingest advanced the shared
     # cursor past the gap (it skipped the malformed row per D-MAL1 and
-    # consumed the later seqs) — the session's gap guard fast-forwards
+    # acked the later seqs) — the session's gap guard fast-forwards
     # its prefix to the shared cursor (same epoch) instead of holding,
-    # and the next frame processes normally. Seqs 2 and 3 were consumed
+    # and the next frame processes normally. Seqs 2 and 3 were handled
     # by the cron (their pendings are gone); the socket must skip them
     # without executing and without wedging.
     approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
@@ -1395,6 +1395,44 @@ def test_socket_command_gap_no_fast_forward_on_moved_epoch(
     out = capsys.readouterr().out
     assert "cursor fast-forward" not in out
     assert "moved epoch" in out
+
+
+def test_socket_command_gap_no_fast_forward_without_epoch_evidence(
+        ctx, monkeypatch, tmp_path, capsys):
+    # #1143 / D-GH1 epoch gate, no-evidence case: neither the shared
+    # cursor nor the frames carry an epoch, so the incarnation is
+    # unknown — the guard must keep the hold rather than fast-forward
+    # on vacuous None == None equality. The re-drive heals the true
+    # missing row as usual.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgatenoe000001", 2: "s5bgatenoe000002",
+            3: "s5bgatenoe000003"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 3}, f)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, None, inner(1, aids[1])),
+                    ("send-command", 3, None, inner(3, aids[3])),  # gap
+                    ("send-command", 2, None, inner(2, aids[2])),
+                    ("send-command", 3, None, inner(3, aids[3])),  # re-drive
+                    ("expect-acks", [1, 2, 3]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 2, 3], \
+        f"no-evidence gate broke the re-drive order: {acks}"
+    for aid in aids.values():
+        assert _s5b_consumed(approvals, aid) is not None, \
+            f"aid {aid} was never stamped"
+    out = capsys.readouterr().out
+    assert "cursor fast-forward" not in out
+    assert "no epoch evidence" in out
 
 
 def test_socket_command_malformed_frame_no_ack(ctx, monkeypatch, tmp_path,

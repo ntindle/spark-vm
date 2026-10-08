@@ -2982,8 +2982,13 @@ class _PhoneHomeSession:
         - The epoch gate: fast-forward only when the cursor's epoch
           equals the frame's epoch — the incarnation the session would
           adopt for this frame per the #947 contract in
-          _save_socket_ingest_state. A moved epoch is the #848/#958
-          stale-epoch case, not a fast-forward case.
+          _save_socket_ingest_state. Both sides must carry epoch
+          evidence: with no epoch on either side the incarnation is
+          unknown, so the guard keeps the hold (the #947 contract ships
+          on both sides, so the no-evidence case only fires on
+          legacy/hand-made cursor files or a plane that omits epochs).
+          A moved epoch is the #848/#958 stale-epoch case, not a
+          fast-forward case.
         - The hold is now bounded to ~one cron tick and self-heals
           without a reconnect.
         """
@@ -3044,6 +3049,19 @@ class _PhoneHomeSession:
                 _phone_home_say(self.d,
                                 f"gap after acked prefix {old_prefix}: "
                                 "shared cursor has a non-integer epoch — "
+                                "keeping the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if epoch is None or shared_epoch is None:
+                # No epoch evidence on one or both sides: the incarnation
+                # is unknown, so the prefix must not advance (the #947
+                # contract ships on both sides, so this only fires on
+                # legacy/hand-made cursor files or a plane that omits
+                # epochs). Keep the hold — degrade, never wedge.
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: no "
+                                f"epoch evidence (shared cursor epoch "
+                                f"{shared_epoch}, frame epoch {epoch}) — "
                                 "keeping the hold (degrade, never wedge)",
                                 self.token)
                 return False
