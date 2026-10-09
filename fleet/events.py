@@ -1759,8 +1759,9 @@ def cmd_events_watch(store_dir):
             _short(a.get("to")),
             _clean_text((_str_or_none(a.get("fired_at")) or "?")[:19])))
         lines.append("      %s" % _clean_text(a.get("detail") or ""))
-        lines.append("      alert_id=%s (fleet events ack --alert-id <id>)"
-                     % _clean_text(a.get("alert_id")))
+        alert_id = _clean_text(a.get("alert_id"))
+        lines.append("      alert_id=%s (fleet events ack --alert-id %s)"
+                     % (alert_id, alert_id))
     print("\n".join(lines))
     return None, 1
 
