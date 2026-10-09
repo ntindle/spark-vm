@@ -669,3 +669,54 @@ def test_placement_json_empty_string_arg_rejected():
         cred_ui.placement_json("custom_header", "")
     with pytest.raises(ValueError, match="bad query param name"):
         cred_ui.placement_json("query_param", "")
+
+
+@pytest.mark.parametrize("path,expected_status", [
+    ("/", 200),
+    ("/api/version", 200),
+    ("/no-such-route", 404),
+])
+def test_security_headers_on_every_response(server, path, expected_status):
+    """#281 re-sweep: every response — the public index, the public
+    version endpoint, and error pages — must carry the anti-framing,
+    anti-sniffing, and no-referrer headers, or a same-box page could
+    frame the management UI and clickjack an operator session."""
+    port, _token = server
+    status, headers, _body = _req(port, "GET", path)
+    assert status == expected_status
+    lowered = {k.lower(): v for k, v in headers.items()}
+    assert lowered.get("x-frame-options") == "DENY"
+    assert lowered.get("x-content-type-options") == "nosniff"
+    assert lowered.get("referrer-policy") == "no-referrer"
+
+
+def _assert_security_headers(headers):
+    lowered = {k.lower(): v for k, v in headers.items()}
+    assert lowered.get("x-frame-options") == "DENY"
+    assert lowered.get("x-content-type-options") == "nosniff"
+    assert lowered.get("referrer-policy") == "no-referrer"
+
+
+def test_security_headers_on_401_and_403(server):
+    """The auth/CSRF rejections go through the same _send path, so the
+    headers must be present there too — a missing header on exactly the
+    security-boundary responses would be the worst place to miss one."""
+    port, _token = server
+    status, headers, _body = _req(port, "GET", "/api/creds")
+    assert status == 401  # no token: _check_auth
+    _assert_security_headers(headers)
+    status, headers, _body = _req(port, "POST", "/api/set", body={},
+                                  headers={"Content-Type": "application/json"})
+    assert status == 403  # no X-Cred-UI header: _check_csrf
+    _assert_security_headers(headers)
+
+
+def test_security_headers_on_authenticated_200(server, monkeypatch):
+    """The most representative real response — an authenticated 200 JSON
+    from the management API — carries the headers too."""
+    port, token = server
+    monkeypatch.setattr(cred_ui, "snapshot", lambda: {"creds": []})
+    status, headers, _body = _req(port, "GET", "/api/creds",
+                                  headers=_authz(token))
+    assert status == 200
+    _assert_security_headers(headers)
