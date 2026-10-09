@@ -7,9 +7,10 @@ first-party vendor re-verification against the cycle-65 baseline —
 `boat.dev/pricing`, 7th consecutive cycle) / 0 retries / 0 searches;
 17 enumerated items + 1 standing re-carry + 1 out-of-list read + 1
 Vercel sitemap read (supporting item 4a)).
-Surveyor B: delta news scan — **1 CANDIDATE / 14 clean dedupes / 15
+Surveyor B: delta news scan — **1 CANDIDATE / 13 clean dedupes / 13
 flagged-only** (15 searches, 15 successful / 0 failed, 1 page opened —
-the fold-gate item, read in full).
+the fold-gate item, read in full; doc lists are the surveyor capture's
+enumerations condensed — see the count-honesty check).
 **Corpus move this cycle: 1 new filing (C77 — AWS Strands Box,
 vendor-confirmed), 1 fold (C75 DigitalOcean Harness Runtime pricing:
 active-CPU billing went live), 0 mints beyond the filing, 0 re-folds
@@ -31,12 +32,19 @@ notes, in the goal workspace — not part of this repo).
 > established `boat.dev/pricing` 404 re-confirmation, documented
 > inside item 7b). The two C65 UNVERIFIED items (Docker sbx-releases
 > render gap, DO limits sub-page) both RESOLVED this cycle — renders
-> confirmed, zero UNVERIFIED remain. Surveyor B's header (1 CANDIDATE
-> / 14 clean dedupes / 15 flagged-only) reconciles with its 1 candidate
-> + 14 dedupe + 15 flagged-only enumerations; 1 page opened — the
-> AWS Strands Box first-party launch post, the one item that met the
-> fold gate's first-party-read requirement, verified independently by
-> the integrator (opened and read in full, 2026-10-09 ~09:2x CDT).
+> confirmed, zero UNVERIFIED remain. Surveyor B's doc lists enumerate
+> exactly 1 candidate + 13 dedupes + 13 flagged-only, reconciling with
+> their headers. The doc condenses the surveyor capture's 14 dedupes /
+> 15 flagged-only: two dedupes (Vercel Drives, Hugo CVE-2026-100690)
+> live as standing-state items (both no-change); the retired C65
+> Cloudflare "Environments for Claude Managed Agents" item is dropped;
+> one flagged item ("OpenAI dots inspire open-source imitators") was
+> removed at Product review — it appeared in the integrator's
+> independent search results but in neither surveyor capture, so the
+> doc's zero-fabrication statement could not cover it. 1 page opened —
+> the AWS Strands Box first-party launch post, the one item that met
+> the fold gate's first-party-read requirement, verified independently
+> by the integrator (opened and read in full, 2026-10-09 ~09:2x CDT).
 > Corpus-number integrity: last issued C-number C76; this cycle issues
 > C77, exactly one forward.
 
@@ -138,7 +146,7 @@ Moderate entries, no "100690" on the page; E2B pricing, AgentComputer
 tiers, TermSquad tiers, boat.dev rate card (`docs.boat.dev/pricing`),
 ascii.dev/boat YC listings all verbatim.
 
-## Surveyor B — delta news scan (1 / 14 / 15)
+## Surveyor B — delta news scan (1 / 13 / 13)
 
 15 searches (15 successful / 0 failed), 1 page opened — the AWS
 Strands Box first-party launch post (the one item that met the fold
@@ -154,7 +162,7 @@ harness-agnostic, roadmap to multi-OS and "Bring Box to deployed
 agents" (Bedrock AgentCore, ECS, K8s). Distinct from C73 — new
 candidate, not a dupe.
 
-**Clean dedupes (14):** Modal $750M (C11) — no close ("nearing"/
+**Clean dedupes (13):** Modal $750M (C11) — no close ("nearing"/
 "closing in on"/"pending transaction," company declining comment —
 TechCrunch recrawl, kaupr.io, aibreakingwire); Baseten ~$26B (C11) —
 no close ("Neither round has closed" / "valuations under discussion,
@@ -168,7 +176,7 @@ release; boat.dev — rate card unchanged; Deno / Fly.io Sprites — no
 in-window vendor news; Docker Cloud Sandboxes — Sep-24 launch
 recrawls only; TermSquad — tiers verbatim per the A lane.
 
-**Flagged-only (15):** Perplexity SPACE — carry (Part II still not
+**Flagged-only (13):** Perplexity SPACE — carry (Part II still not
 sighted); Cloudflare Containers rebuild — carry (old Sandbox SDK 0.x
 bug/security fixes only until December 31, 2026); Cloudflare
 Containers multi-tenant flaw recap (NEW — pre-window Sep-4→24
@@ -193,8 +201,7 @@ third-party press release; AWS lockdown described second-hand) —
 flagged-only, watch for AWS first-party security response/advisory**;
 **Bedrock AgentCore SDK CVEs CVE-2026-12530 / CVE-2026-16796 (NEW —
 msspalert Oct 6, third-party) — flagged-only, watch for AWS vendor
-advisory**; OpenAI dots inspire open-source imitators (NEW —
-thin lane-adjacent color, no sandbox facts).
+advisory**.
 
 **Zero-fabrication statements (both surveyors):** every verdict
 grounded in a first-party page actually opened (A) or a search result
@@ -212,7 +219,8 @@ branch, or PR touched by the surveyors.
   closed rounds". No first-party close announcement anywhere.
 - **C12 — OPEN (66th consecutive first-party read).** AgentComputer
   publishes no egress pricing line.
-- **C68:** resolved (C57); not graded in the A lane.
+- **C68** (the named DevDay-keynote full-pass exception, graded in the
+  C57 watch): resolved; not graded in the A lane.
 - **Modal egress billing — EFFECTIVE 2026-10-01.** Page still
   verbatim 2026-10-09; no went-live banner, no usage-posture change;
   first bill including egress still postured for November 1, 2026.
@@ -246,8 +254,7 @@ branch, or PR touched by the surveyors.
 
 C11 FILE ON CLOSE; C76 — CVE / technical write-up / patch
 disclosure (still open); **C77 Strands Box — watch for GA / multi-OS
-delivery / deployed-agents (Bedrock AgentCore) follow-through and the
-GitHub repo's first release beyond v0.1.0**; Modal egress
+delivery / deployed-agents (Bedrock AgentCore) follow-through and the repo's first post-preview release**; Modal egress
 first-party re-confirm (A lane); Drives GA standing; Hugo
 CVE-2026-100690 third-party-only; NanoCo re-grade (still needs
 first-party material); Perplexity SPACE Part II; OpenAI DNS-escape
