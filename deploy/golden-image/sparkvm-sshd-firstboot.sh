@@ -24,9 +24,11 @@
 # Test seams (documented, test-only): SPARKVM_DATA_ROOT overrides /data;
 # SPARKVM_SSH_ETC_DIR overrides /etc/ssh (tests must not touch the real
 # one); SPARKVM_FIRSTBOOT_NO_EXEC=1 skips the final exec (prints what it
-# would exec instead). A seam set in a root run logs a loud WARNING —
-# production must never set these (see the trust-boundary note in
-# data-prep.sh).
+# would exec instead); SPARKVM_SSH_RUN_DIR overrides the sshd privilege-
+# separation dir (/run/sshd — not writable outside root, so the contract
+# tests point it at a tmp dir on CI's non-root runner). A seam set in a
+# root run logs a loud WARNING — production must never set these (see the
+# trust-boundary note in data-prep.sh).
 set -euo pipefail
 
 # Loud warning when a test seam is active in a root run (see data-prep.sh
@@ -34,7 +36,7 @@ set -euo pipefail
 # verified, so the seams stay functional and any production use is
 # visible instead of silently ignored).
 if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    for _seam in SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_FIRSTBOOT_NO_EXEC; do
+    for _seam in SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_FIRSTBOOT_NO_EXEC SPARKVM_SSH_RUN_DIR; do
         if [ -n "${!_seam:-}" ]; then
             echo "sparkvm-sshd-firstboot: WARNING: test seam $_seam is set in a root run" >&2
         fi
@@ -133,7 +135,10 @@ fi
 
 # /run is a fresh tmpfs on most runtimes — the build-time /run/sshd may not
 # survive. sshd refuses to start without it, and the box would lose SSH.
-mkdir -p /run/sshd
+# SPARKVM_SSH_RUN_DIR is the test seam (see header); production keeps the
+# pinned /run/sshd default.
+SSH_RUN_DIR="${SPARKVM_SSH_RUN_DIR:-/run/sshd}"
+mkdir -p "$SSH_RUN_DIR"
 
 if [ "${SPARKVM_FIRSTBOOT_NO_EXEC:-0}" = "1" ]; then
     echo "sparkvm-sshd-firstboot: (test seam) would exec /usr/sbin/sshd -D -e" >&2

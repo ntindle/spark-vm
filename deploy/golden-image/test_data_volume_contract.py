@@ -76,12 +76,14 @@ def box(tmp_path):
     (bindir / "mountpoint").chmod(0o755)
     logdir = tmp_path / "keygen-log"
     logdir.mkdir()
+    run_dir = tmp_path / "sshd-run"
     env = {
         "PATH": str(bindir) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
         "SPARKVM_DATA_ROOT": str(data),
         "SPARKVM_SSH_ETC_DIR": str(ssh_etc),
         "SPARKVM_DATA_PREP_SKIP_CHOWN": "1",  # swapd missing on test hosts
         "SPARKVM_FIRSTBOOT_NO_EXEC": "1",
+        "SPARKVM_SSH_RUN_DIR": str(run_dir),  # /run/sshd not writable non-root
         "STUB_LOG": str(logdir),
         "STUB_MOUNTPOINT_RC": "0",  # the fake /data counts as mounted
     }
@@ -225,6 +227,32 @@ def test_seam_warning_as_root(box):
     assert "WARNING: test seam SPARKVM_DATA_ROOT is set in a root run" in r.stderr
 
 
+def test_firstboot_run_dir_seam_default_pinned():
+    """Structural pin: the run-dir seam defaults to /run/sshd — the mkdir
+    behavior below must not be accidentally dropped or repointed in
+    production (a test-only seam that forgot its default would silently
+    stop creating the dir sshd needs)."""
+    src = open(FIRSTBOOT).read()
+    assert re.search(
+        r'^SSH_RUN_DIR="\$\{SPARKVM_SSH_RUN_DIR:-/run/sshd\}"$', src,
+        re.MULTILINE,
+    )
+    assert re.search(r'^mkdir -p "\$SSH_RUN_DIR"$', src, re.MULTILINE)
+
+
+def test_firstboot_creates_sshd_run_dir(box):
+    """The firstboot script creates sshd's privilege-separation dir (the
+    /run is a fresh-tmpfs line). Via the SPARKVM_SSH_RUN_DIR seam: CI's
+    non-root runner cannot write /run/sshd, which is exactly the failure
+    that reded this PR's shard-unit run."""
+    data, ssh_etc, env, logdir = box
+    run_dir = env["SPARKVM_SSH_RUN_DIR"]
+    assert not os.path.exists(run_dir)  # the script creates it, not us
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert os.path.isdir(run_dir)
+
+
 def test_firstboot_defensive_ensure_without_data_prep(box):
     """D-V4: the sshd entrypoint ensures /data/ssh itself — no trust in
     data-prep's timing. Keys generate THROUGH the symlinks onto the
@@ -353,6 +381,7 @@ def test_scripts_concurrent_no_race(tmp_path):
             "SPARKVM_SSH_ETC_DIR": str(ssh_etc),
             "SPARKVM_DATA_PREP_SKIP_CHOWN": "1",
             "SPARKVM_FIRSTBOOT_NO_EXEC": "1",
+            "SPARKVM_SSH_RUN_DIR": str(root / "sshd-run"),
             "STUB_LOG": str(logdir),
             "STUB_MOUNTPOINT_RC": "0",
         }
