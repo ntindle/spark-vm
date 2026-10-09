@@ -50,6 +50,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+
+- S4b phone-home docs are re-pinned to the shipped state: the socket-acknowledgement consume-half and the socket gap-hold wedge heal have both landed, so the docs no longer list them as still to build — the remaining open work is S4b-3 (#1002), S6 live acceptance (#960), and the p1 follow-up #1187. (#1194)
+
 ### Fixed
 
 - The release workflow's golden-image build gate now also runs when a release is published through the recovery path (the tag-pushed/publish-failed state): the tag step emits the release tag when the cut succeeds OR the recovery succeeds, and the gate runs whenever that tag is present — so a release that needed operator-visible recovery still gets its baked-secrets scan and manifest preflight. (#1189)

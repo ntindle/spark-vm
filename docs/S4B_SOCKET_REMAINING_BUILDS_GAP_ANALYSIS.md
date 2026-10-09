@@ -1,13 +1,15 @@
 # S4b remaining-builds gap analysis: the socket gap-hold wedge (#1143) and the road to #960
 
 **Vision vs current state.** Statuses pinned to this repo at main
-`8c65a0f` (2026-10-07) and to the base analysis
-`docs/S4B_SOCKET_LIFECYCLE_GAP_ANALYSIS.md` (written 2026-10-04, §2/§5 refreshed 2026-10-07, pinned to main
-`7b20178`), the wire spec `docs/PHONE_HOME_WIRE_PROTOCOL.md` §3.3 with
-the D-MAL1 policy (#1118, 2026-10-07) and the S4b-2a implementation pin
-(#1001, adopted 2026-10-07). Plane-side facts carry forward from the
-base doc's §2 — no plane re-read this turn; nothing below claims a
-fresh deployed checkout. Doc-first; honesty rules apply
+`a5e5c57` (2026-10-08, evening refresh) and to the base analysis
+`docs/S4B_SOCKET_LIFECYCLE_GAP_ANALYSIS.md` (written 2026-10-04, §2/§5 refreshed 2026-10-07,
+evening-refreshed 2026-10-08 — #1001 closed), the wire spec
+`docs/PHONE_HOME_WIRE_PROTOCOL.md` §3.3 with the D-MAL1 policy (#1118,
+2026-10-07), the S4b-2a implementation pin (#1001 slice 2a, adopted
+2026-10-07), and the S4b-2b consume-half pin (SHIPPED 2026-10-08, #1001
+closed). Plane-side facts carry forward from the base doc's §2 — no
+plane re-read this turn; nothing below claims a fresh deployed checkout.
+Doc-first; honesty rules apply
 (`docs/POSITIONING.md`): everything below is **current state and work
 to do**, not promises.
 
@@ -16,9 +18,10 @@ to do**, not promises.
 #958's plane half is decomposed (S4b-1–S4b-4, base doc §5): S4b-4
 journal sink and S4b-1 hello/identity/generation fence shipped and
 deployed; S4b-2's emit half (2a) is pinned in the wire spec and
-partially landed in the deployed worker checkout; S4b-2b (socket
-`command_ack` consume-half) and S4b-3 (ping/alarm revocation re-verify
-+ hibernation) are open under #1001/#1002; #960 (S6) is the
+landed in the deployed worker checkout; S4b-2b (socket `command_ack`
+consume-half) SHIPPED 2026-10-08 (#1001 closed, PR #1188 — see §2);
+S4b-3 (ping/alarm revocation re-verify + hibernation) is open under
+#1002; #960 (S6) is the
 integration gate. The lane's standing degradation contract, from the
 wire doc: a carrier failure degrades to **fetch-path latency, never
 loss** — the every-minute HTTPS cron ingest (`spark-pair.py ingest`,
@@ -35,9 +38,9 @@ builds.
 | Element | Current state |
 |---|---|
 | Malformed-row policy (D-MAL1) | **Shipped — #1118 (2026-10-07), both carriers.** The box skips a malformed `command` frame loudly in `_handle_socket_command` — never executed, never acked, never holding the per-session `_acked_prefix`. The HTTPS carrier's cursor advances past the malformed row instead of acking it. |
-| S4b-2a emit-half wire-spec pin | **Adopted — #1001 slice 2a (2026-10-07, PR #1141).** Wire spec §3.3 now pins: re-drive on every (re)bind and on the D15 wakeup RPC reads the acked watermark (`MAX(seq)` over `state='acked'`), emits `command` frames in seq order for current-epoch rows with `seq > watermark`, leases stamped exactly as the HTTPS path; malformed rows skipped (never emitted), journaled LOUDLY as `phone_home.redrive_malformed`; every re-drive pass journals `phone_home.redrive`. The emit-half code is in the deployed worker checkout (in-flight #1001 work); the consume-half (2b) stays open. |
+| S4b-2a emit-half wire-spec pin | **Adopted — #1001 slice 2a (2026-10-07, PR #1141).** Wire spec §3.3 now pins: re-drive on every (re)bind and on the D15 wakeup RPC reads the acked watermark (`MAX(seq)` over `state='acked'`), emits `command` frames in seq order for current-epoch rows with `seq > watermark`, leases stamped exactly as the HTTPS path; malformed rows skipped (never emitted), journaled LOUDLY as `phone_home.redrive_malformed`; every re-drive pass journals `phone_home.redrive`. The emit-half code is in the deployed worker checkout; the consume-half (2b) **SHIPPED 2026-10-08** (#1001 closed, PR #1188) — the DO consumes socket `command_ack` frames into the same `state='acked'` watermark the re-drive reads (shared module-level `_ack_command_row`, also used by the HTTPS `/commands/ack` path; see the base doc §2). |
 | Box-side sequence-gap guard | **Shipped, with a documented residual — #976 S5b.** `pairing/spark_pair.py`: `_PhoneHomeSession` keeps a per-session `_acked_prefix`; a `command` frame with `seq > _acked_prefix + 1` is held ("gap after acked prefix … waiting on the re-drive") — not acked, not executed. The class docstring already names the residual: a DO-skipped malformed *row* surfaces to this guard as a sequence gap, and the guard holds later frames on it — "live delivery degrades to the cron path until reconnect or plane repair". The HTTPS cron path itself always flows past the bad row. |
-| The wedge (#1143) | **Filed 2026-10-07 (arch, p2).** Scenario: prefix 4 acked; row 5 malformed (DO skips per D-MAL1, never emits); rows 6, 7 valid. Frames 6, 7 hit `6 > 4 + 1` → held; the hold never heals within the session — the re-drive will never emit 5. The durable queue never wedges (the cron backstop), but the socket — the fast path — degrades to a dead session on any malformed row once a prefix is established. Four candidate designs named (a)–(d). |
+| The wedge (#1143) | **Healed — D-GH1 SHIPPED 2026-10-08 (#1154).** The wedge scenario (prefix 4 acked; row 5 malformed, DO skips per D-MAL1; rows 6, 7 valid — frames 6, 7 hit `6 > 4 + 1` and hold forever because the re-drive will never emit 5) no longer holds: the box's gap guard fast-forwards its `_acked_prefix` to the shared durable cursor on the same epoch, bounding the hold to ~one cron tick. The four candidate designs (a)–(d) and D-GH2's interim document-and-accept are superseded; D-GH3 wire tombstones stay deferred (revisit triggers unchanged). |
 | Gap-hold test contract | `pairing/test_phone_home.py::test_socket_command_gap_holds_prefix` pins the hold: seq 3 is not stamped until the missing seq 2 arrives via re-drive. |
 
 ## 3. Findings
@@ -144,17 +147,33 @@ builds.
 
 | Build | Issue | State after this doc |
 |---|---|---|
-| S4b-2b socket `command_ack` consume-half (hoisted shared ack helper) | #1001 | Open — unchanged by this doc; independent of D-GH1 (box-side only). |
+| S4b-2b socket `command_ack` consume-half (hoisted shared ack helper) | #1001 | **SHIPPED 2026-10-08 (PR #1188, #1001 closed).** |
 | S4b-3 ping/alarm revocation re-verify + hibernation (D17/D18) | #1002 | Open — unchanged; its 90 s pong-timeout rule is the other bound on session life. |
-| Gap-hold wedge → cursor fast-forward build | #1143 | **Design pinned (D-GH1–D-GH5); build-ready.** Box-side only, one slot, in-repo, testable — lands in any order relative to 2b/3. |
+| Gap-hold wedge → cursor fast-forward build | #1143 | **SHIPPED 2026-10-08 — D-GH1 as #1154.** The four candidate designs and D-GH2's interim are superseded; D-GH3 wire tombstones stay deferred. |
 | S6 live acceptance | #960 | Open — consumes all of the above. |
+| Live 500 on `/commands/pending` when an expired approval exists (#873 B2 path) | #1187 | **Open (p1).** Pre-existing on the pre-2b deploy (reproduced, not a 2b regression); follow-up of the 2b lane. |
 
 No new issues filed: the one genuinely-new gap (F-S4b-8) already has
 its item (#1143), and F-S4b-9's wire-doc caveat rides the #1143 build
 (D-GH4). Pointer comments on #1143 (the D-GH decision record) and
 #958 (lane tracker).
 
-## 6. Explicit non-scope
+## 6. 2026-10-08 evening refresh (S4b-2b shipped, #1001 closed)
+
+Movement since the 2026-10-07 pin: #1001 S4b-2b shipped the same day —
+the DO consumes socket `command_ack` frames into the shared
+`state='acked'` watermark (shared module-level `_ack_command_row`, also
+used by the HTTPS `/commands/ack` path), generation must equal the bound
+generation, malformed `seq` closes `protocol-error`, unknown `seq`
+loud-dropped (PR #1188; #1001 closed 2026-10-08; deployed live). The
+lane's remaining open builds are S4b-3 (#1002: ping/alarm re-verify +
+hibernation, D17/D18), S6 live acceptance (#960), and the 2b lane's
+p1 follow-up #1187 (live 500 on `/commands/pending` when an expired
+approval exists — pre-existing, reproduced on the pre-2b deploy, not a
+2b regression). The §5 table above is re-pinned to this state; the
+deployed 2b checkout is not re-read by this refresh.
+
+## 7. Explicit non-scope
 
 Stream/input frame classes (#853/#919), approval decisions (#873 — the same durable queue on both carriers, not a socket-exempt channel; not re-litigated here), any write to liveness (§8 —
 the socket never touches it), the S6 live acceptance itself (#960),

@@ -1,14 +1,17 @@
 # S4b socket-lifecycle gap analysis: the plane DO's session logic (#958)
 
 **Vision vs current state.** Statuses pinned to this repo at main
-`bae081e` (2026-10-08) and to the deployed plane worker — the S4a slice
+`a5e5c57` (2026-10-08, evening refresh) — the S4a slice
 landed 2026-10-04 (upgrade route + `BoxDO` accept-and-hold, deployed
 live via `deploy_worker.py`; the deployed source is the
 `diff-958-s4a-worker.patch` state), the S4b-4 journal sink shipped
-2026-10-04 (#999, PR #1014), and S4b-1 (hello/identity/generation fence)
-shipped and deployed live 2026-10-05 (#1000, PR #1055). The plane lives
-outside this repo, so plane-side facts below are pinned to that deployed
-checkout, not to a repo commit. Doc-first; honesty rules apply
+2026-10-04 (#999, PR #1014), S4b-1 (hello/identity/generation fence)
+shipped and deployed live 2026-10-05 (#1000, PR #1055), and S4b-2b
+(socket `command_ack` consume-half + shared `_ack_command_row` hoist)
+shipped and deployed live 2026-10-08 (#1001, PR #1188). The plane lives
+outside this repo, so plane-side facts below carry forward from the §2
+table — the deployed 2b checkout is not re-read by this refresh.
+Doc-first; honesty rules apply
 (`docs/POSITIONING.md`): everything below is **current state and work to
 do**, not promises.
 
@@ -336,10 +339,13 @@ live smoke per slice). Each slice extends the real-worker harness
 before any deploy. #960 (S6) consumes all four: its six-item checklist
 (two-box no-cross-talk, revoke-during-socket, reconnect-resume,
 stale-generation fence, fallback honored, epoch untouched) is the
-integration gate. S4b-4 (#999) and S4b-1 (#1000) have shipped; #958 stays
-OPEN until S4b-2 (#1001) and S4b-3 (#1002) land (S4b-2's emit half is
-partially landed in the deployed checkout — see §2); #847 stays OPEN until
-S4b + S6.
+integration gate. S4b-4 (#999), S4b-1 (#1000), and S4b-2 (#1001 — the
+emit half 2a plus the socket `command_ack` consume-half 2b, both in the
+deployed checkout — see §2) have shipped; #958 stays OPEN until S4b-3
+(#1002) and S6 (#960) land. The 2b lane's follow-up is filed as #1187
+(p1: live 500 on `/commands/pending` when an expired approval exists —
+pre-existing on the pre-2b deploy, not a 2b regression). #847 stays OPEN
+until S4b + S6.
 
 ## 8. 2026-10-08 refresh note (#1143 gap-hold wedge healed, D-GH1 shipped)
 
@@ -383,3 +389,8 @@ arc (#1143 filed 2026-10-07 → D-GH1 shipped as #1154, merged 2026-10-08):
   the 2026-10-07 pin — no 2026-10-08 evidence for the deployed checkout
   exists in the cited sources. Nothing here re-pins the deployed
   checkout.
+
+- **Superseded, evening 2026-10-08:** the "stays open" claim above no
+  longer holds for S4b-2b — it shipped the same day (#1001 closed,
+  PR #1188; see §5's amendment). S4b-3 stays open on #1002, S6 on #960;
+  the 2b lane's follow-up is #1187 (p1).
