@@ -608,6 +608,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        # Response hardening (issue #281 re-sweep): the management UI
+        # previously sent none of these. X-Frame-Options DENY keeps any
+        # other localhost page from framing the unlock/delete flows
+        # (clickjacking an operator's session); nosniff stops MIME
+        # sniffing of the JSON API; no-referrer keeps the page from
+        # leaking its origin on any future outbound navigation. Nothing
+        # frames cred-ui legitimately, so DENY is safe on every route,
+        # including the public index and version endpoints.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 

@@ -131,6 +131,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The hosted control plane now re-verifies a box's credential on every phone-home socket frame and on a 10-minute wake: a revoked token closes the session within one frame (revocation lands in ≤ 30 s for a compliant box, ≤ 10 min for a silent one), with expired and post-grace-lapse tokens closed the same way. The socket also runs on the hibernation API now, so idle sessions cost the plane almost nothing — the DO hibernates between the box's own pings and a 10-minute alarm wake — while staying instantly wakeable. (#1002)
 
+### Security
+
+- The credential manager's web UI now sends anti-framing and anti-sniffing response headers on every page and API response: no other page on the box (or anywhere else) can embed the management UI in a frame to clickjack an operator's unlock or delete flows, browsers will not MIME-sniff API responses, and the page no longer sends referrer information. (#TBD)
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
