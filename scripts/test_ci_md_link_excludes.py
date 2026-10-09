@@ -92,7 +92,10 @@ def ci_excludes():
     ]
     if len(matches) != 1:
         raise AssertionError(
-            f"expected exactly one lychee args line in ci.yml, found {len(matches)}"
+            f"expected exactly one lychee args line in ci.yml, found {len(matches)} "
+            "(the pin anchors on an `args:` line containing `--no-progress` "
+            "with single-quoted `--exclude '...'` tokens — if the job's arg "
+            "shape changed, update the extraction, don't weaken the test)"
         )
     pats = re.findall(r"--exclude\s+'([^']+)'", matches[0])
     if not pats:

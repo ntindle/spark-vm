@@ -6,7 +6,8 @@ bot-blocked there, so lychee can never check them. The set has grown well
 past the 2026-09-23 eight (boat.dev, businesswire.com, daytona.io,
 fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com,
 plus the release-compare URL pattern); the full current set is
-machine-inventoried in `docs/CI.md` (the `<!-- link-check-excludes -->` block,
+machine-inventoried in `docs/CI.md` (the `<!-- link-check-excludes:start -->`
+block,
 pinned against `ci.yml` by `scripts/test_ci_md_link_excludes.py`).
 
 This document covers all lychee-excluded hosts/patterns. The original three
@@ -56,6 +57,7 @@ the exclusion.
    ```sh
    HOSTS=$(sed -n '/<!-- link-check-excludes:start -->/,/<!-- link-check-excludes:end -->/p' docs/CI.md \
      | sed '/<!--/,/-->/d' \
+     | grep -v '^$' \
      | grep -vE '^(release-compare-url|github-blob-urls|archive-single-url)$' \
      | sed 's/\./\\./g' | paste -sd'|')
    grep -rEno "https?://[^] )'\"]*($HOSTS)[^] )'\"]*" --include="*.md" .
