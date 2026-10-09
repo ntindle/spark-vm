@@ -114,8 +114,12 @@ the environment, or any log.
 
 [`deploy.sh`](deploy.sh) is the rebuild documentation — the repo is the
 only source. It deploys the swap proxy, the inference proxy, `confirmd`,
-and the push worker. Run it from the repo root, as the operator (not from
-the jail):
+and the push worker. Besides the narrow writers above, `deploy.sh` also
+installs `confirm-request` (the CLI that files a pending approval for
+the `confirmd` page, `/usr/local/bin`) and
+the shared `credvalidate.py` validation module the writers import
+(`/usr/local/bin`, root-owned 0644 — imported, never executed). Run it
+from the repo root, as the operator (not from the jail):
 
 ```bash
 ./proxy/deploy.sh [--no-restart]

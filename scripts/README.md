@@ -17,6 +17,20 @@ failure. (CI's merge gate is eight checks; the two the script can't run —
 the markdown link check and the PNG screenshot smoke test — are named in
 its output, not run.)
 
+The exact step names the gate prints (the machine-readable inventory,
+pinned against `local-gate.sh`'s `step "..."` calls by
+`test_readme_inventories.py` — a step renamed in the script must be
+renamed here):
+
+<!-- gate-steps:start -->
+shard plan
+changelog ritual lint
+changed-paths gate
+docs index coverage
+shellcheck (severity=error, changed *.sh)
+python tests
+<!-- gate-steps:end -->
+
 ```bash
 ./scripts/local-gate.sh           # everything
 ./scripts/local-gate.sh --quick   # cheap checks only, no suite
@@ -107,3 +121,38 @@ keep the project's contribution rituals from drifting:
 
 Run from the repo root: `python3 -m pytest` (see `pytest.ini` for the
 suite inventory — CI runs exactly this).
+
+### Test-file inventory
+
+Every `test_*.py` in this directory, with the subject it pins. This table
+is machine-checked by `test_readme_inventories.py`: a new test file must
+be added here (contributors), so the README's map of the pin tests can
+never drift from what's on disk.
+
+| test file | pins |
+|---|---|
+| `test_apply_rulesets.py` | rulesets-as-code deliverables (issue #174) |
+| `test_basename_uniqueness.py` | repo-wide test-file basename uniqueness (pytest import contract) |
+| `test_bounded_http.py` | `bounded_http.py` bounded threading server |
+| `test_ci_md_link_excludes.py` | `docs/CI.md` link-check exclusion inventory |
+| `test_ci_md_suite_inventory.py` | CI python-tests suite inventory |
+| `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
+| `test_contributing_ci_gates.py` | `CONTRIBUTING.md` merge-gate check list |
+| `test_contributing_suites.py` | `CONTRIBUTING.md` test-suite inventory |
+| `test_cut_release.py` | `cut-release.sh` release tooling |
+| `test_deploy_gate_tests_coverage.py` | `deploy/components.conf` gate test-file registration |
+| `test_docs_index_coverage.py` | `docs/` index coverage |
+| `test_frontdoor_deploy.py` | sparkvm.dev front-door deploy (H28) |
+| `test_funnel_metrics.py` | `funnel_metrics.py` waitlist funnel queries |
+| `test_lint_changelog_ritual.py` | changelog ritual linter |
+| `test_local_gate.py` | `local-gate.sh` merge-gate runner |
+| `test_pytest_ini_covers_all.py` | `pytest.ini` testpaths reachability |
+| `test_readme_inventories.py` | this README's gate-steps + test inventory (this table) |
+| `test_self_update.py` | `self_update.py` read-only toolset inventory |
+| `test_site_branding.py` | `site/` brand-logo assets + wiring (issue #852) |
+| `test_sparkvm_version.py` | `sparkvm_version.py` version reader |
+| `test_waitlist_invites.py` | `site/waitlist_invites.py` + waitlistd invite additions (H15) |
+| `test_waitlist_jobs.py` | `site/waitlist_jobs.py` + waitlistd lifecycle additions (H15) |
+| `test_waitlist_page.py` | waitlist page build slice (`site/`) |
+| `test_waitlist_patha.py` | `site/waitlist_patha.py` + waitlistd path-A additions (H15) |
+| `test_waitlistd.py` | `site/waitlistd.py` daemon (H15) |

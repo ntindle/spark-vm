@@ -269,6 +269,64 @@ def test_firstboot_seam_warning_covers_all_documented_seams():
     assert header_seams <= set(seams), header_seams - set(seams)
 
 
+def test_firstboot_body_consumed_seams_are_all_canonical():
+    """Structural pin (QA-trail, #1233): the third leg of the seam pin.
+
+    The existing test pins doc <-> _SEAMS in both directions, but a
+    SPARKVM_* seam consumed in the script BODY while absent from both the
+    header doc and _SEAMS would warn nowhere in a root run and stay
+    green, despite the comment claiming _SEAMS as the canonical list.
+    Scan the body (everything after `set -euo pipefail`) for
+    SPARKVM_[A-Z_]+ references and require every one to be in _SEAMS,
+    so the WARNING loop cannot silently miss a test seam.
+    """
+    src = open(FIRSTBOOT).read()
+    body = src.split("set -euo pipefail", 1)[1]
+    m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
+    assert m, "the canonical _SEAMS list must exist in the script"
+    canonical = set(m.group(1).split())
+    consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', body))
+    # The _SEAMS=(...) definition line itself lives in the body and names
+    # the four seams as plain tokens — harmless, since the assertion is
+    # that every consumed name IS in the canonical list.
+    assert consumed <= canonical, \
+        "seams consumed in the script body but missing from _SEAMS: %s" % \
+        ", ".join(sorted(consumed - canonical))
+
+
+def test_data_prep_seam_list_is_canonical_and_complete():
+    """Structural pin: data-prep.sh gets the same _SEAMS discipline as
+    sparkvm-sshd-firstboot.sh — the root-run WARNING loop iterates the
+    single canonical _SEAMS list (not an inline copy), every listed seam
+    is documented in the header, and every SPARKVM_* name consumed in the
+    body is in _SEAMS. A new test seam added to the body must be added to
+    _SEAMS or the suite fails; a seam dropped from _SEAMS stops warning
+    loudly instead of silently."""
+    src = open(DATA_PREP).read()
+    body = src.split("set -euo pipefail", 1)[1]
+    m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
+    assert m, "the canonical _SEAMS list must exist in the script"
+    canonical = m.group(1).split()
+    assert canonical == [
+        "SPARKVM_DATA_ROOT", "SPARKVM_SSH_ETC_DIR",
+        "SPARKVM_DATA_PREP_SKIP_CHOWN",
+    ]
+    assert re.search(r'^\s*for _seam in "\$\{_SEAMS\[@\]\}"; do$', src,
+                     re.MULTILINE), \
+        "the WARNING loop must iterate _SEAMS, not a duplicated list"
+    header = src.split("set -euo pipefail")[0]
+    for name in canonical:
+        assert re.search(r'^#.*\b%s\b' % name, header, re.MULTILINE), name
+    # No header-reverse assertion here (unlike the firstboot pin): the
+    # header legitimately cites identity-seed-hook.sh's SPARKVM_PAIR_CLIENT
+    # as a trust-boundary reference, and that seam is not data-prep's to
+    # warn about.
+    consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', body))
+    assert consumed <= set(canonical), \
+        "seams consumed in data-prep.sh's body but missing from _SEAMS: %s" % \
+        ", ".join(sorted(consumed - set(canonical)))
+
+
 def test_firstboot_creates_sshd_run_dir(box):
     """The firstboot script creates sshd's privilege-separation dir (the
     /run is a fresh-tmpfs line). Via the SPARKVM_SSH_RUN_DIR seam: CI's
