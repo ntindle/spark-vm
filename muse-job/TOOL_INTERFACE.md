@@ -172,7 +172,13 @@ the job tree in the manager-side journals dir
 `~/.local/share/muse-job/journals/<slug>.jsonl` (issue #1130; pre-#1130
 in-tree journals migrate on first manager append, and `muse-job log`
 falls back to them read-only), so the job agent has no writable path to
-its own turn history either.
+its own turn history either. The phase-job occupancy record likewise lives
+outside the job tree at `~/.local/share/muse-job/phase-msp-occupancy.json`
+(issue #1132): the watchdog stamps it whenever it polls a live `phase-*`
+session on the MSP transport (which has no tmux session to probe), and the
+one-phase-job-at-a-time bar consults fresh stamps (45-minute TTL) so a
+phase job cannot auto-recover while another phase job is live on the other
+transport, in either direction.
 Pristine clones live under `~/repos/<host>/<path...>` (namespaced by the
 repo URL's host + full path, so `github.com/org/foo` and
 `gitlab.com/org/foo` never share one clone -- issue #10; local paths and

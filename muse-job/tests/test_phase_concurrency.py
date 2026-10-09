@@ -329,3 +329,203 @@ def test_watch_recheck_fires_on_midpass_sibling_start(cli, monkeypatch, capsys):
     assert by_job["phase-dead"]["signal"] == "deferred"
     assert by_job["phase-dead"]["detail"].startswith(cli._PHASE_DEFERRED_DETAIL)
     assert ran == []  # the re-check fired before any tmux session existed
+
+
+# --- issue #1132: MSP-side phase occupancy ------------------------------------
+# The #804 bar only probed tmux sessions, so a phase-* job live on the MSP
+# transport (the default since #979) was invisible in both directions. The
+# watch pass now stamps a manager-side occupancy record whenever it polls a
+# live phase-* MSP session; the bar bars on fresh stamps. TTL is 3x the
+# 15-minute watch cadence; stale/missing/malformed records fail open.
+
+
+def test_msp_occupancy_bars_sibling(cli, monkeypatch):
+    _make_job(cli, "phase-dead")
+    cli._phase_msp_occupancy_note("phase-live", True)
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-dead") is True
+
+
+def test_msp_occupancy_stale_fails_open(cli, monkeypatch, tmp_path):
+    _make_job(cli, "phase-dead")
+    path = cli._PHASE_MSP_OCCUPANCY_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"phase-live": time.time() - cli._PHASE_MSP_OCCUPANCY_TTL_S - 1}, f)
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-dead") is False
+
+
+def test_msp_occupancy_self_not_counted(cli, monkeypatch):
+    _make_job(cli, "phase-only")
+    cli._phase_msp_occupancy_note("phase-only", True)
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-only") is False
+
+
+def test_msp_occupancy_malformed_fails_open(cli, monkeypatch):
+    _make_job(cli, "phase-dead")
+    path = cli._PHASE_MSP_OCCUPANCY_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("not json{{{")
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    # No raise, no bar: a record the bar cannot trust must not block recovery.
+    assert cli._phase_concurrency_bars_resume("phase-dead") is False
+
+
+def test_msp_occupancy_note_non_phase_noop(cli):
+    cli._phase_msp_occupancy_note("worker-1", True)
+    assert not os.path.exists(cli._PHASE_MSP_OCCUPANCY_PATH)
+    assert cli._phase_msp_occupancy_live() == {}
+
+
+def test_msp_occupancy_note_and_clear(cli):
+    cli._phase_msp_occupancy_note("phase-a", True)
+    assert "phase-a" in cli._phase_msp_occupancy_live()
+    cli._phase_msp_occupancy_note("phase-a", False)
+    assert cli._phase_msp_occupancy_live() == {}
+
+
+def _fake_msp_view(state):
+    return types.SimpleNamespace(
+        state=state, active_turn_id="turn-1" if state == "working" else None,
+        pending_summary="", last_event_at=time.time(), last_terminal=None)
+
+
+class _FakeRecovery:
+    ACTION_NONE = "none"
+    ACTION_CONTINUED = "continued"
+    ACTION_RESUMED = "resumed"
+
+    def __init__(self):
+        self.calls = []
+
+    def recover_dead_turn(self, host, session_id, job_dir):
+        self.calls.append((host, session_id, job_dir))
+        return types.SimpleNamespace(
+            action=self.ACTION_CONTINUED, detail="re-anchored", attempts=[])
+
+
+def _msp_watch_fakes(cli, monkeypatch, view_state):
+    """Drive _watch_msp_job hermetically: fake the serve call + poll, and
+    the recovery module behind the _MSP_IMPORTS cache."""
+    recovery = _FakeRecovery()
+    monkeypatch.setattr(cli, "_MSP_IMPORTS",
+                        (None, None, None, None, recovery))
+    monkeypatch.setattr(cli, "_msp_call",
+                        lambda slug, job, fn, pre_resume=True: fn(None))
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, slug, job: _fake_msp_view(view_state))
+    return recovery
+
+
+def _make_msp_job(cli, slug):
+    return _make_job(cli, slug, transport="msp", session_uuid="sid-" + slug)
+
+
+def test_watch_msp_stalled_defers_on_live_sibling(cli, monkeypatch, capsys):
+    # Direction 2 of #1132: an MSP phase job's recovery ladder is the MSP
+    # analog of the tmux "one recovery attempt" -- it must emit the same
+    # deferred signal while another phase-* job is live on MSP.
+    _make_msp_job(cli, "phase-dead")
+    cli._phase_msp_occupancy_note("phase-live", True)
+    recovery = _msp_watch_fakes(cli, monkeypatch, "stalled")
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-dead"]["signal"] == "deferred"
+    assert by_job["phase-dead"]["detail"] == (
+        cli._PHASE_DEFERRED_DETAIL +
+        " (msp stalled-turn recovery; next pass retries)")
+    assert recovery.calls == []  # no resurrection attempt
+
+
+def test_watch_msp_stalled_recovers_when_unbarred(cli, monkeypatch, capsys):
+    _make_msp_job(cli, "phase-dead")
+    recovery = _msp_watch_fakes(cli, monkeypatch, "stalled")
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-dead"]["signal"] == "recovered"
+    assert len(recovery.calls) == 1
+
+
+def test_watch_msp_stamps_occupancy_on_live_poll(cli, monkeypatch, capsys):
+    # Direction 1 of #1132: the tmux-side bar consults these stamps, so a
+    # tmux phase job cannot auto-resume next to a live MSP phase job.
+    _make_msp_job(cli, "phase-live")
+    _msp_watch_fakes(cli, monkeypatch, "working")
+    _watch_events(cli, capsys)
+    assert "phase-live" in cli._phase_msp_occupancy_live()
+
+
+def test_watch_msp_clears_occupancy_on_session_closed(cli, monkeypatch, capsys):
+    _make_msp_job(cli, "phase-gone")
+    cli._phase_msp_occupancy_note("phase-gone", True)
+    _msp_watch_fakes(cli, monkeypatch, "session_closed")
+    events = _watch_events(cli, capsys)
+    assert "phase-gone" not in cli._phase_msp_occupancy_live()
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-gone"]["signal"] == "needs-attention"
+
+
+def test_msp_kill_clears_occupancy(cli, monkeypatch):
+    # A deliberate kill must not defer a sibling's auto-recovery for a TTL.
+    _make_msp_job(cli, "phase-killed")
+    cli._phase_msp_occupancy_note("phase-killed", True)
+    monkeypatch.setattr(cli, "_msp_call",
+                        lambda slug, job, fn, pre_resume=True: None)
+    rc = cli._msp_kill(argparse.Namespace(slug="phase-killed"))
+    assert rc == 0
+    assert "phase-killed" not in cli._phase_msp_occupancy_live()
+
+
+def test_close_clears_occupancy(cli, tmp_path):
+    _make_closable_job(cli, "phase-done", tmp_path)
+    cli._phase_msp_occupancy_note("phase-done", True)
+    rc = cli.cmd_close(argparse.Namespace(slug="phase-done"))
+    assert rc == 0
+    assert "phase-done" not in cli._phase_msp_occupancy_live()
+
+
+# --- issue #1153: close must not crash on a manually-removed job dir --------
+
+def _make_closable_job(cli, slug, tmp_path, **fields):
+    # close's trusted_job_paths demands a pristine repo under ~/repos with
+    # the derived worktree registered (defense in depth, issue #11).
+    import subprocess
+    jd = _make_job(cli, slug, **fields)
+    repo = os.path.join(str(tmp_path), "repos", "r")
+    os.makedirs(repo, exist_ok=True)
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-q", "--allow-empty",
+                    "-m", "init"], check=True)
+    work = os.path.join(jd, "work")
+    subprocess.run(["git", "-C", repo, "worktree", "add", "-q",
+                    "-b", "job/" + slug, work], check=True)
+    job = cli.load_job(slug)
+    job["pristine"] = repo
+    cli.save_job(job, slug)
+    return jd
+
+
+def test_close_missing_job_dir_closes_record(cli, tmp_path):
+    import shutil
+    _make_closable_job(cli, "gone-job", tmp_path)
+    shutil.rmtree(cli.job_dir("gone-job"))
+    rc = cli.cmd_close(argparse.Namespace(slug="gone-job"))
+    assert rc == 0
+    assert cli.load_job("gone-job")["state"] == "closed"
+
+
+def test_close_missing_job_dir_msp_closes_record(cli, tmp_path, capsys):
+    # The MSP close path runs _msp_close_runtime first; with the job dir
+    # gone the serve-log open fails closed (warning, no spawn) and the
+    # record still closes.
+    import shutil
+    _make_closable_job(cli, "gone-msp", tmp_path,
+                       transport="msp", session_uuid="sid-gone-msp")
+    shutil.rmtree(cli.job_dir("gone-msp"))
+    rc = cli.cmd_close(argparse.Namespace(slug="gone-msp"))
+    assert rc == 0
+    assert cli.load_job("gone-msp")["state"] == "closed"

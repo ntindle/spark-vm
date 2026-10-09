@@ -633,6 +633,13 @@ def _phase_concurrency_bars_resume(slug):
     direction self-heals on the next pass. cmd_resume re-checks the bar
     itself on the `_from_watch` auto-recovery path, so the window is only
     the re-check-to-new-session gap.
+
+    Issue #1132: the bar is transport-aware. A phase-* job on the MSP
+    transport has no tmux session, so the sibling check above would miss
+    it; the watch pass stamps a manager-side occupancy record whenever it
+    polls a live phase-* MSP session (see _phase_msp_occupancy_note), and
+    this function additionally bars while any *other* phase-* slug holds
+    a fresh stamp. Own stamp never bars (same as the tmux self check).
     """
     if not slug.startswith("phase-"):
         return False
@@ -640,8 +647,93 @@ def _phase_concurrency_bars_resume(slug):
         siblings = sorted(os.listdir(JOBS_DIR))
     except OSError:
         return False
-    return any(s != slug and s.startswith("phase-") and tmux_alive(s)
-               for s in siblings if not s.startswith("."))
+    if any(s != slug and s.startswith("phase-") and tmux_alive(s)
+           for s in siblings if not s.startswith(".")):
+        return True
+    # Issue #1132: the MSP transport has no tmux session, so a live
+    # phase-* MSP job is invisible to the check above. The watch pass
+    # already polls every active MSP job's view, so it stamps a
+    # manager-side occupancy record (below) instead of opening a fresh
+    # `muse serve` host per sibling. Stale, missing, or malformed records
+    # fail OPEN, same as the tmux OSError path: occupancy is advisory
+    # cost protection, never a liveness claim the watchdog must trust
+    # to block recovery.
+    return any(s != slug for s in _phase_msp_occupancy_live())
+
+
+# --- issue #1132: MSP-side phase occupancy -----------------------------------
+# The #804 bar above was transport-blind: MSP is the default transport
+# since #979, so a phase-* job on MSP was invisible in both directions --
+# a tmux phase job could auto-resume next to a live MSP phase job, and an
+# MSP phase job's recovery ladder had no gate at all. The occupancy record
+# closes both directions without a per-sibling serve host.
+
+_PHASE_MSP_OCCUPANCY_PATH = os.path.join(
+    HOME, ".local", "share", "muse-job", "phase-msp-occupancy.json")
+
+# 3x the 15-minute watchdog cadence: one missed pass never wedges the bar,
+# and a dead box's stale stamps age out on their own.
+_PHASE_MSP_OCCUPANCY_TTL_S = 45 * 60
+
+# view.state values where the serve session counts as a live phase-*
+# occupant. Mirrors the tmux bar's coarse "session exists" reading: a
+# session between turns (idle), mid-recovery (stalled), or parked on an
+# operator decision (blocked_*) is still a live job that will keep
+# reasoning. turn_failed/session_closed mean the session is gone.
+_MSP_PHASE_LIVE_STATES = frozenset({
+    "working", "idle", "stalled", "turn_cancelled",
+    "blocked_approval", "blocked_input",
+})
+_MSP_PHASE_DEAD_STATES = frozenset({"turn_failed", "session_closed"})
+
+
+def _phase_msp_occupancy_live():
+    """Slugs with a fresh MSP phase-occupancy stamp. Fail-open: any read
+    or shape problem yields no occupants (the bar must never newly block
+    recovery on a record it cannot trust)."""
+    try:
+        with open(_PHASE_MSP_OCCUPANCY_PATH) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    now = time.time()
+    out = {}
+    for s, ts in d.items():
+        if (isinstance(s, str) and s.startswith("phase-")
+                and isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                and 0 <= now - ts <= _PHASE_MSP_OCCUPANCY_TTL_S):
+            out[s] = ts
+    return out
+
+
+def _phase_msp_occupancy_note(slug, live):
+    """Stamp (live=True) or clear (live=False) one slug's occupancy.
+
+    Manager-side atomic write (issue #11 pattern); best-effort -- a
+    failed stamp never breaks the watch pass, and the TTL bounds any
+    wedge. The prompt preamble never names this path (issue #1130
+    pattern): the same-user caveat from #11/#1130 applies -- this is not
+    a privilege boundary against a determined shell user, only removal
+    of the known writable path.
+    """
+    if not slug.startswith("phase-"):
+        return
+    try:
+        occ = _phase_msp_occupancy_live()  # fresh only; stale entries GC'd
+        if live:
+            occ[slug] = time.time()
+        else:
+            occ.pop(slug, None)
+        os.makedirs(os.path.dirname(_PHASE_MSP_OCCUPANCY_PATH), exist_ok=True)
+        tmp = _write_json_tmp(_PHASE_MSP_OCCUPANCY_PATH, occ)
+        try:
+            os.replace(tmp, _PHASE_MSP_OCCUPANCY_PATH)
+        finally:
+            _discard_tmp(tmp)
+    except OSError:
+        pass
 
 
 def with_lock(slug, fn):
@@ -3045,12 +3137,19 @@ def _close(slug):
     # (worktree add -b would otherwise fail: branch already exists).
     run("git", "-C", pristine, "branch", "-D", branch, check=False)
     jd = job_dir(slug)
-    tmpd = os.path.join(jd, "tmp")
-    shutil.rmtree(tmpd, ignore_errors=True)
-    for fn in os.listdir(jd):
-        if fn.endswith(".log") and not fn.endswith(".gz"):
-            p = os.path.join(jd, fn)
-            run("gzip", "-f", p, check=False)
+    if os.path.isdir(jd):
+        tmpd = os.path.join(jd, "tmp")
+        shutil.rmtree(tmpd, ignore_errors=True)
+        for fn in os.listdir(jd):
+            if fn.endswith(".log") and not fn.endswith(".gz"):
+                p = os.path.join(jd, fn)
+                run("gzip", "-f", p, check=False)
+    # else (issue #1153): the job dir was removed by hand -- nothing to
+    # archive. The record below still closes; close must not crash on a
+    # missing dir.
+    # Issue #1132: the serve session is deleted above for MSP jobs, so a
+    # closed phase-* job is no longer an occupant -- clear the stamp.
+    _phase_msp_occupancy_note(slug, False)
     job["state"] = "closed"
     job["closed_at"] = time.time()
     save_job(job, slug)
@@ -3882,6 +3981,10 @@ def _msp_kill(args):
                   file=sys.stderr)
     job["state"] = "killed"
     save_job(job, slug)
+    # Issue #1132: the serve session is deleted above, so the job is no
+    # longer an MSP phase occupant -- clear the stamp so a deliberate
+    # kill does not defer a sibling's auto-recovery for a full TTL.
+    _phase_msp_occupancy_note(slug, False)
     print(json.dumps({"slug": slug, "transport": "msp", "session": "deleted",
                       "state": "killed"}))
     return 0
@@ -4040,6 +4143,16 @@ def _watch_msp_job(slug, job, events, now):
         job["state"] = job_state
         save_job(job, slug)
 
+    if slug.startswith("phase-"):
+        # Issue #1132: stamp the manager-side phase occupancy from this
+        # pass's own poll -- the #804 bar consults it because an MSP
+        # session has no tmux session to probe. Terminal states clear the
+        # stamp; unknown future states leave it (the TTL bounds staleness).
+        if state in _MSP_PHASE_LIVE_STATES:
+            _phase_msp_occupancy_note(slug, True)
+        elif state in _MSP_PHASE_DEAD_STATES:
+            _phase_msp_occupancy_note(slug, False)
+
     if state in ("blocked_approval", "blocked_input"):
         events.append({"job": slug, "signal": "blocked",
                        "detail": f"MSP session blocked: "
@@ -4056,6 +4169,17 @@ def _watch_msp_job(slug, job, events, now):
                                  "re-anchor or `muse-job kill` to end it"})
         return
     if state == "stalled":
+        # Issue #1132: the recovery ladder is the MSP analog of the tmux
+        # "one recovery attempt" -- gate it on the #804 bar the same way,
+        # emitting the same deferred signal on over-admit. The pinned
+        # detail string is reused verbatim (watchers grep for it) with a
+        # suffix naming the MSP path, mirroring the #1131 re-check shape.
+        # Manual `muse-job resume` stays the deliberate bypass by design.
+        if _phase_concurrency_bars_resume(slug):
+            events.append({"job": slug, "signal": "deferred",
+                           "detail": _PHASE_DEFERRED_DETAIL +
+                           " (msp stalled-turn recovery; next pass retries)"})
+            return
         def go2(host):
             # recover_dead_turn polls the view and detects the dead shape
             # internally; it takes (host, session_id, job_dir) and returns
