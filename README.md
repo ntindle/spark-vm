@@ -274,7 +274,7 @@ put it to work.
 | `ONBOARDING.md` | From-zero guide: Tailscale join, VM setup, SSH wiring, deploy order, verify checklist |
 | `docs/` ([index](docs/README.md)) | Long-form docs: positioning, hosted-product specs, research corpus, competitor corpus, loop governance |
 | `ENVIRONMENT.md` / `SETUP.md` | Environment notes and the credential-system writeup |
-| `proxy/` ([README](proxy/README.md)) | Transparent-swapping egress proxy (`deploy.sh` installs it + the inference proxy + `confirmd`) |
+| `proxy/` ([README](proxy/README.md)) | Transparent-swapping egress proxy (`deploy.sh` installs it + the inference proxy + `confirmd` + the push worker) |
 | `cred/` / `credlib/` | The `cred` CLI and its library: `hsurr:<name>` placeholders, narrow sudo writers, audit trail |
 | `cred-ui/` | Phone-friendly web UI for the credential store (localhost-only, systemd user service) |
 | `cua/` | Whole-desktop automation: Xvfb + XFCE + official CUA driver + localhost-only HTTP bridge |
@@ -291,7 +291,7 @@ put it to work.
 | `site/` | Waitlist web surface: landing page + waitlist signup backend + invite operator tooling (reconcile, reinstate, and diagnose invite state) |
 | `assets/` | Demo assets + hero art (marketing visuals, regenerated in place) |
 | `VERSION` / `CHANGELOG.md` / `CONTRIBUTING.md` | Versioning, the changelog ritual, and the contributor process |
-| `scripts/` ([README](scripts/README.md)) | Assorted helpers: the local merge gate, release and repo-sync tooling, self-update probes, CI pin tests |
+| `scripts/` ([README](scripts/README.md)) | Assorted helpers: the local merge gate, release and repo-sync tooling, self-update probes, governance application, demo assets, funnel metrics, bounded HTTP, CI pin tests |
 
 ## Contributing
 

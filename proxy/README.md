@@ -69,9 +69,9 @@ enforces that ownership race-free at deploy (refuses to `chown`/`chmod`
 would otherwise get the next unattended deploy to hand them a system
 directory).
 
-**Narrow writers** are the only way in. Each is invoked via sudo under the
-least-privilege [sudoers-swapd](sudoers-swapd) fragment and does exactly
-one thing:
+**Narrow writers** are the only way in. The `/usr/local/bin/cred-*`
+family is invoked by the operator via sudo under the least-privilege
+[sudoers-swapd](sudoers-swapd) fragment, and each does exactly one thing:
 
 - `cred-store-set` / `cred-store-get` / `cred-store-delete` — write/read/
   delete a secret in the store. Writes store stdin **verbatim**; every
@@ -81,12 +81,18 @@ one thing:
   contract for the inference-secrets dir.
 - `cred-registry-set` / `cred-registry-set-inference` — registry entries
   (host bindings, placements) in `credentials.json`.
-- `cred-grant-revoke` and `grant-writer` — grant lifecycle; `grant-writer`
-  is the **single** writer for `grants.json` (exclusive fcntl lock,
-  atomic rewrite), called by confirmd on approval.
 - `cred-ui-token-set` — the token for the phone-friendly credential UI.
-- `privileged_read.py` — the one open discipline for privileged reads
-  (`O_RDONLY | O_NOFOLLOW`, fails on symlinks instead of reading through).
+
+The grant lifecycle runs differently — not via the sudoers fragment.
+`grant-writer` is exec'd directly by confirmd (which already runs as
+swapd) at `/home/swapd/grant-writer`: the **single** writer for
+`grants.json` (exclusive fcntl lock, atomic rewrite), called on approval.
+`cred-grant-revoke` is a CLI that swapd (or root) runs and that delegates
+to it.
+
+And `privileged_read.py` is not a writer at all — it is the one open
+discipline for privileged reads, imported by the writers (`O_RDONLY |
+O_NOFOLLOW`, fails on symlinks instead of reading through).
 
 ## Using it: `with-proxy`
 
@@ -117,7 +123,8 @@ the jail):
 `--no-restart` installs everything without restarting services (used by
 the fleet auto-deploy); a manual `--no-restart` caller owns the restart
 step instead (`systemctl daemon-reload`, then restart `swap-proxy.service`,
-`swap-inference.service`, `confirmd.service`, and `push-worker.service`).
+`swap-inference.service`, `confirmd.service`, and `push-worker.service`,
+plus `systemctl enable --now summons-sweep.timer`).
 Restart is not optional hygiene — a still-running proxy keeps its old
 group memberships and old unit files until restarted.
 
