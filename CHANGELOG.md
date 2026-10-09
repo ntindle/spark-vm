@@ -133,7 +133,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
-- The credential manager's web UI now sends anti-framing and anti-sniffing response headers on every page and API response: no other page on the box (or anywhere else) can embed the management UI in a frame to clickjack an operator's unlock or delete flows, browsers will not MIME-sniff API responses, and the page no longer sends referrer information. (#TBD)
+- The credential manager's web UI now sends anti-framing and anti-sniffing response headers on every page and API response: no other page on the box (or anywhere else) can embed the management UI in a frame to clickjack an operator's unlock or delete flows, browsers will not MIME-sniff API responses, and the page no longer sends referrer information. (#1229)
 
 ## [0.7.0] - 2026-10-08
 
