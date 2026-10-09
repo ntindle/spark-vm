@@ -11,9 +11,59 @@ against `main`, and on manual `workflow_dispatch` runs.
 | `python-tests` | The aggregate gate over the shards, keeping the exact `python tests` check name the branch-protection ruleset requires. `if: always()` plus an explicit result check over the `changes` / `plan` / shard verdicts: green on the docs-only path (`changes` success, `plan` + shards skipped — `plan`'s `if` is exactly the `code_changed` gate, so that combination means docs-only) or when `plan` and every shard succeeded; every other combination (failed/cancelled plan, failed/cancelled shard, failed `changes` job) fails the gate. A failed shard can never read as a passing gate. |
 | `docs-guard` | `scripts/test_docs_index_coverage.py`: every `docs/*.md` file must have an index row in `docs/README.md`. Always runs — including on docs-only PRs where `python-tests` is skipped, since the test lives in that suite. |
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
-| `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the bot-blocking hosts — boat.dev, businesswire.com, daytona.io, fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com, plus the release-compare URL pattern — see the exclusion comments in `.github/workflows/ci.yml`; the local-run block below documents the manual re-sweep ritual for the medium.com / businesswire.com / globenewswire.com subset). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
+| `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the bot-blocking hosts/URL patterns — the full current set is inventoried in a machine-readable comment block in this file's source (invisible in GitHub's rendered view) and pinned against `.github/workflows/ci.yml` by `scripts/test_ci_md_link_excludes.py`, so this doc can never silently disagree with the job again; see the exclusion comments in `ci.yml` for each entry's bot-block verification trail, and the local-run block below documents the manual re-sweep ritual). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
 | `png-check` | Playwright screenshots example.com (`scripts/pw-test.py`) and `scripts/png-check.py` validates the PNG signature/dimensions |
 | `changelog-ritual` | `scripts/lint-changelog-ritual.py` enforces the CHANGELOG ritual's rules 1 + 4: entries must not reference workspace-internal paths (`agent_notes/`, `hidden_files/`, `workspace/goals/`) that never exist in a reader's checkout. The ritual preamble documenting the rule is exempt. |
+
+<!-- link-check-excludes:start -->
+<!-- One token per line, sorted. Bare hostnames come from the job's host-level
+     --exclude regexes (normalized: scheme, optional (www.)?/([a-z0-9-]+.)?
+     prefix, and trailing /.* stripped); the three named tokens are the
+     job's non-host URL-pattern excludes. Regenerate from
+     .github/workflows/ci.yml when the job's list changes — never hand-edit.
+     Pinned by scripts/test_ci_md_link_excludes.py. -->
+agentcomputer.ai
+archive-single-url
+ascii.dev
+automaid.it.com
+boat.dev
+boxd.sh
+businesswire.com
+cdm.link
+cloud.google.com
+daytona.io
+dev.to
+docs.docker.com
+e2b.dev
+epho.io
+financialcontent.com
+fourweekmba.com
+gamingonlinux.com
+github-blob-urls
+globenewswire.com
+huawei.com
+investors.digitalocean.com
+ipfray.com
+itbrief.asia
+itbrief.com.au
+lifestyle.independent.mk
+lifestyle.thepointnews.com
+mactech.com
+marketminute.com
+marktechpost.com
+medium.com
+openai.com
+perplexity.ai
+pocketnews.com.my
+producthunt.com
+red5.net
+release-compare-url
+termsquad.com
+theregister.com
+tvgreport.com
+wowza.com
+x264.org
+<!-- link-check-excludes:end -->
 
 # replicate the CI jobs locally before opening a PR:
 
