@@ -68,6 +68,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - S4b phone-home docs are re-pinned to the shipped state: the socket-acknowledgement consume-half and the socket gap-hold wedge heal have both landed, so the docs no longer list them as still to build — the remaining open work is S4b-3 (#1002), S6 live acceptance (#960), and the p1 follow-up #1187. (#1194)
 
+- Attestation-token crash-window design ahead of the provisioning orchestrator: if the orchestrator crashes (or the driver call fails) after the plane mints the single-use pairing token but before any machine exists, the token's plaintext is gone — the plane stores only its hash and can't re-issue it. The recovery is a reconcile-driven supersede to a new attempt with a fresh token (old record flipped to superseded, old token invalidated immediately, no 24-hour wait since there is no machine to orphan), with the attempt number materialized on the provision record as the reconciler's match key. (#1215)
+
 - The golden image now seeds a provisioned box's identity on first boot: when the provisioner injects the box identity, control-plane URL, and single-use attestation token into the machine config, a new one-shot boot hook presents the token to the pairing client so the box can enroll without an operator typing a pairing code. Boxes booted without those variables are untouched — no enrollment, a loud log, never an invented identity — and the token is presented at most once, never re-presented after enrollment or an in-flight pairing. (#1213)
 
 ### Fixed
