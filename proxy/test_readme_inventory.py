@@ -54,19 +54,32 @@ def _readme_writer_names():
 
 
 def _deploy_bin_installs():
+    """Map /usr/local/bin/<name> -> install line for every `sudo install`
+    line in deploy.sh that targets /usr/local/bin, regardless of source
+    directory.
+
+    deploy.sh installs to /usr/local/bin from several source dirs
+    (proxy/, credlib/ -> credvalidate.py, confirm/ -> confirm-request),
+    so the capture must not be coupled to the proxy/ source dir: a future
+    cred-* writer installed from credlib/ or confirm/ — exactly the shape
+    credvalidate.py and confirm-request take today — must still be seen by
+    the writer pins below.
+    """
     src = DEPLOY.read_text()
     installs = {}
     for m in re.finditer(
-        r"^\s*sudo\s+install(?:\s+\S+)*?\s+proxy/(\S+)\s+/usr/local/bin/(\S+)\s*$",
+        r"^\s*sudo\s+install(?:\s+\S+)*?\s+(\S+)\s+(/usr/local/bin/\S+)\s*$",
         src,
         re.MULTILINE,
     ):
         source, dest = m.group(1), m.group(2)
-        assert source == dest, (
-            "deploy.sh renames proxy/%s to /usr/local/bin/%s — the writer "
-            "pin assumes source == dest" % (source, dest)
-        )
-        installs[dest] = m.group(0).strip()
+        name = dest.rsplit("/", 1)[1]
+        if source.startswith("proxy/"):
+            assert source.rsplit("/", 1)[1] == name, (
+                "deploy.sh renames %s to %s — the writer pin assumes "
+                "source == dest" % (source, dest)
+            )
+        installs[name] = m.group(0).strip()
     return installs
 
 
