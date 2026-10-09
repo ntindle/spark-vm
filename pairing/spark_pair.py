@@ -2314,6 +2314,10 @@ _WS_UPGRADE_TIMEOUT = 30  # explicit handshake deadline (create_connection's
 # timeout lingers on the socket; naming it here so a future refactor
 # can't silently drop the bound)
 _WS_GENERATION_FILE = "phone_home_generation.json"
+# Durable reconnect-backoff attempt (#1022): next to the generation file.
+# A crash-looping daemon resumes at (or near) the 60 s cap instead of
+# resetting to the 1 s initial delay on every restart.
+_WS_BACKOFF_FILE = "phone_home_backoff.json"
 # Wire-spec §3.1 control class: these JSON text frames MUST be ≤ 4 KB.
 _WS_CONTROL_TYPES = frozenset(
     ["hello", "welcome", "ping", "pong", "close", "command_ack"])
@@ -2681,6 +2685,51 @@ def _phone_home_adopt_generation(d, generation):
         os.replace(tmp, path)
     except OSError as e:
         raise _WsError(f"generation file unwritable ({e})")
+
+
+# -- Durable backoff attempt (#1022) ----------------------------------------------
+
+def _phone_home_load_backoff_attempt(d):
+    """Read the persisted reconnect-backoff attempt.
+
+    A crash-looping daemon resumes at (or near) the 60 s backoff cap
+    instead of resetting to the 1 s initial delay on every restart: the
+    attempt counter persists next to the generation file. A missing or
+    corrupt file means the counter is unknown: return 0 (the wire spec's
+    1 s initial). That is the honest fallback — the generation-claim
+    fence carries the safety property; the backoff is only the hot-loop
+    damper, so a lost counter may never wedge or mislead the reconnect
+    logic.
+    """
+    path = os.path.join(d, _WS_BACKOFF_FILE)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    if (isinstance(data, dict)
+            and isinstance(data.get("attempt"), int)
+            and not isinstance(data.get("attempt"), bool)
+            and data["attempt"] >= 0):
+        return data["attempt"]
+    return 0
+
+
+def _phone_home_save_backoff_attempt(d, attempt):
+    """Persist the reconnect-backoff attempt, crash-safe temp+rename.
+
+    Advisory state only: a wedged state dir gets a loud log line, never
+    a traceback and never a killed reconnect loop — the generation file
+    is the durable safety property, this file is the hot-loop damper.
+    """
+    path = os.path.join(d, _WS_BACKOFF_FILE)
+    tmp = path + ".tmp"
+    try:
+        _write_private(tmp, json.dumps({"attempt": attempt}).encode())
+        os.replace(tmp, path)
+    except OSError as e:
+        _phone_home_say(d, f"backoff state unwritable ({e}) — reconnect "
+                           f"loop continues at in-memory attempt {attempt}")
 
 
 def _phone_home_bump_epoch(d, token=()):
@@ -3574,7 +3623,11 @@ def cmd_phone_home(args):
                        f"{_plane_text(box_id)} (S5a connection core + S5b "
                        "socket command frames/acks; "
                        "heartbeat stays the only liveness signal)", token)
-    attempt, rotate_tried = 0, False
+    # #1022: resume the persisted backoff attempt — a crash-looping daemon
+    # keeps its capped backoff across restarts instead of resetting to
+    # the 1 s initial delay every time.
+    attempt = _phone_home_load_backoff_attempt(d)
+    rotate_tried = False
     pending_generation = None  # set by the stale-generation adopt path
     try:
         while not _PHONE_HOME_STOP:
@@ -3625,7 +3678,9 @@ def cmd_phone_home(args):
                 if new_token is None:
                     return 1  # rotate printed the guidance already
                 token = new_token
-                rotate_tried, attempt = True, 0
+                rotate_tried = True
+                attempt = 0
+                _phone_home_save_backoff_attempt(d, attempt)
                 continue
             except _WsUpgradeFailed as e:
                 _phone_home_fail(d, f"upgrade failed: {e} — will retry "
@@ -3635,6 +3690,7 @@ def cmd_phone_home(args):
                 if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
                     break
                 attempt += 1
+                _phone_home_save_backoff_attempt(d, attempt)
                 continue
             except _WsError as e:
                 _phone_home_fail(d, f"phone-home error: {e} — will retry "
@@ -3642,6 +3698,7 @@ def cmd_phone_home(args):
                 if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
                     break
                 attempt += 1
+                _phone_home_save_backoff_attempt(d, attempt)
                 continue
             if welcomed:
                 # Each healthy session earns its own rotate budget: a 401
@@ -3653,9 +3710,11 @@ def cmd_phone_home(args):
                 # instead of starting over at 1 s (#1027).
                 rotate_tried = False
                 attempt = 0
+                _phone_home_save_backoff_attempt(d, attempt)
             kind = outcome[0]
             if kind == "stopped":
                 _phone_home_say(d, "stopping on signal", token)
+                _phone_home_save_backoff_attempt(d, 0)
                 return 0
             if kind == "transport-lost":
                 _phone_home_say(d, "socket lost — reconnecting with backoff "
@@ -3664,6 +3723,7 @@ def cmd_phone_home(args):
                 if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
                     break
                 attempt += 1
+                _phone_home_save_backoff_attempt(d, attempt)
                 continue
             if kind == "bug":
                 _phone_home_fail(d, f"{outcome[1]} — not reconnecting "
@@ -3712,6 +3772,7 @@ def cmd_phone_home(args):
                            "stale-generation fence (counter loss → "
                            "epoch+1 per §5) — reconnecting", token)
                 pending_generation, attempt = param, 0
+                _phone_home_save_backoff_attempt(d, attempt)
                 # A beat before the adopt reconnect: a plane emitting
                 # repeated stale-generation closes must not pin the box in
                 # a zero-delay TCP+TLS reconnect loop.
@@ -3753,6 +3814,7 @@ def cmd_phone_home(args):
                 if _ws_sleep_or_stop(param):
                     break
                 attempt = 0
+                _phone_home_save_backoff_attempt(d, attempt)
                 continue
             # Any other server-directed reconnect (expired): back off with
             # a floor, growing on repeats — a plane emitting closes in a
@@ -3760,12 +3822,21 @@ def cmd_phone_home(args):
             if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
                 break
             attempt += 1
+            _phone_home_save_backoff_attempt(d, attempt)
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
         except OSError:
             pass
+    # #1022: reaching here means the loop ended without a return, which
+    # only happens on a deliberate stop — either _ws_sleep_or_stop's
+    # stop-flag break or the while condition observing the flag after a
+    # signal arrived mid-iteration. Reset the persisted backoff attempt
+    # so the next deliberate start begins at the 1 s initial delay
+    # again. (Failure exits return from inside the loop and never reach
+    # here, keeping the capped backoff for the crash-loop case.)
+    _phone_home_save_backoff_attempt(d, 0)
     _phone_home_say(d, "stopping on signal", token)
     return 0
 

@@ -419,6 +419,11 @@ endpoint returns the deleted-row counts. (#1013)
   third-party framing dependencies required, JSON text frames only, and
   the §5 durable-generation requirement.
 - Reconnect backoff (box): 1 s initial, doubling, 60 s cap, ±25% jitter.
+  The attempt counter persists across daemon restarts (crash-safe
+  state file next to the generation file), so a crash-looping box
+  resumes near the cap instead of re-entering the 1 s initial delay
+  on every restart; a clean SIGTERM/SIGINT shutdown and any healthy
+  session reset it to 0.
   The DO MAY shed with `going-away` if connects exceed ~1 per 5 s per
   box; the box MUST then wait ≥ 60 s.
 - The box MUST NOT auto-reconnect on `revoked` (fall back to HTTPS;

@@ -115,7 +115,7 @@ byte cap with single-generation rotation in the shared `_fail`
 helper — one change covers all four logs, with no logrotate
 dependency on the box.
 
-### F-BD-4 — crash loops burn generations and reset backoff
+### F-BD-4 — crash loops burn generations and reset backoff — RESOLVED 2026-10-09 (#1022 shipped)
 
 Backoff `attempt` and the `rotate_tried` budget are in-memory only;
 every daemon restart resets to the 1 s initial backoff, and every
@@ -127,6 +127,15 @@ handle it), but in-flight command acks churn and the S4b-4 journal
 sink records connect churn. **D23** accepts this as a residual with
 an optional p3 follow-up (persist the backoff attempt across
 restarts).
+
+**Resolution:** the attempt counter now persists in a crash-safe
+state file next to the generation file (`phone_home_backoff.json`,
+temp+rename, 0600). A restarted daemon resumes its capped backoff;
+a clean SIGTERM/SIGINT shutdown and any healthy session reset it to
+0 (the #1027 earn-back rule, now durable). The generation-claim
+behavior is unchanged. The residual that remains is the generation
+burn itself (one file increment per connect) — still accepted per
+D23.
 
 ### F-BD-5 — no cron stagger (unmeasured, presumably negligible)
 
@@ -255,7 +264,8 @@ All `track:hosted-product`, filed from this analysis:
   F-BD-6/F-BD-7.
 - **#1022 (p3)** — cross-restart backoff persistence (D23
   follow-up): persist the backoff attempt so crash loops keep the
-  60 s cap instead of resetting to 1 s. F-BD-4.
+  60 s cap instead of resetting to 1 s. F-BD-4. **SHIPPED 2026-10-09**
+  — F-BD-4 marked resolved above.
 
 Not filed: the box-payload installer — belongs to #906
 (claim→provision orchestrator); noted in F-BD-6.
