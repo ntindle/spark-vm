@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Contributors get a one-command local merge gate: the contributor guide's merge-gate section used to list seven locally-replicable checks as separate commands to run by hand, so a green local test run could still go red on CI from a skipped check. A new gate script now runs them in one shot — the shard-plan check, changelog ritual lint, the changed-paths evaluation (docs-only diffs skip the test suite, like CI, and uncommitted changes count as code), docs index coverage, shellcheck on changed shell scripts, and then the full test suite — stopping at the first failure, with a cheap-checks-only mode for a fast pass. (#TBD)
+- Contributors get a one-command local merge gate: the contributor guide's merge-gate section used to list seven locally-replicable checks as separate commands to run by hand, so a green local test run could still go red on CI from a skipped check. A new gate script now runs them in one shot — the shard-plan check, changelog ritual lint, the changed-paths evaluation (docs-only diffs skip the test suite, like CI, and uncommitted changes count as code), docs index coverage, shellcheck on changed shell scripts, and then the full test suite — stopping at the first failure, with a cheap-checks-only mode for a fast pass. (#1216)
 
 - Provisioning design-ahead for the Fly driver build: pins what the driver can now assume (the golden image exists and is gated per build, the provider interface contract is fixed) and names the three gaps its build must close — the box's first-boot identity hook, the SSH host-key attestation behind the connection bundle, and which box state must live on the persistent volume. (#1206)
 
