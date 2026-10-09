@@ -105,6 +105,8 @@ architecture, and the doc's own F3 already assumes its key mechanism:
 
 ### F2 — suspend AND park both map: Fly offers both primitives
 
+**[2026-10-09 supersession note — see docs/FLY_DRIVER_DESIGN_AHEAD.md F-D8]:** `harness/provider_iface.py` adjudication #1 (shipped) superseded the `parked` state: a driver-requested suspend *always* surfaces as `suspended` regardless of substrate mechanism; warm-vs-cold rides the `memory_resume` / `wake_kind` axes, never the state name. The `stopped → parked` mapping in F2/F3 below and the `parked` definition under "Proposed interface-level contract language" predate the contract — the #905 driver build follows `provider_iface.py`.
+
 - `POST /v1/apps/{app}/machines/{id}/suspend` starts suspension; states
   `suspending` → `suspended`; resume is `POST .../start`, which attempts a
   snapshot resume and falls back to a cold start if the snapshot was
