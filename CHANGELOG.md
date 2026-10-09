@@ -123,6 +123,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - S4b socket-lifecycle gap analysis re-pinned to 2026-10-08: records the box-side heal of the socket gap-hold wedge (shipped as #1154, already in 0.7.0) and confirms the remaining open builds — the socket-ack consume half (#1001), ping/alarm re-verify (#1002), and live acceptance (#960). (#1183)
 
+- The hosted control plane now re-verifies a box's credential on every phone-home socket frame and on a 10-minute wake: a revoked token closes the session within one frame (revocation lands in ≤ 30 s for a compliant box, ≤ 10 min for a silent one), with expired and post-grace-lapse tokens closed the same way. The socket also runs on the hibernation API now, so idle sessions cost the plane almost nothing — the DO hibernates between the box's own pings and a 10-minute alarm wake — while staying instantly wakeable. (#1002)
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
