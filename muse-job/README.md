@@ -47,46 +47,86 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 - Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
 
-### Stillborn-spawn detection (issue #994)
+### Detached per-turn supervisor (issue #1129)
 
-A spawn that returns from `turn/start` has only proven the turn started
-— not that the agent engaged. The real #994 failure was the serve host
-cancelling the first turn server-side within ~1ms of start, after which
-the job sat `active` forever with nothing working. This guard applies to
-the default MSP transport only — the legacy `--tmux` path has no
-first-turn watch.
+`muse serve` has no detached-turn flag: a turn cannot outlive the serve
+host that accepted it. The old spawn called `turn/start` and then
+`host.close()`, SIGTERMing the turn before any model output — every MSP
+spawn killed its own first turn by construction.
 
-`spawn` therefore verifies the first turn actually engages before it
-declares success:
+Every MSP turn now runs under a **detached supervisor** (the hidden
+`_msp_supervise` subcommand): `spawn`/`steer`/`resume` fork it and return
+as soon as the turn is live, and the supervisor holds the serve host
+open until the turn reaches a terminal state. It owns the turn's
+lifecycle. Supervisor state (pidfile, started record, heartbeat, view
+snapshot, steer queue, prompt file, process log) lives in the operator-owned
+metadata dir (`~/.local/share/muse-job/jobs/<slug>/supervisor/`), never
+the agent-visible job dir — the #1145 treatment, so the agent has no
+preamble-visible path to plant or rewrite it (same-user caveat: not a
+privilege boundary against a determined shell user):
 
-- It subscribes to turn notifications *before* `turn/start` — a terminal
-  the server emits in that gap would otherwise be silently dropped.
-- It then watches up to 10 seconds: the turn is *engaged* (still
-  running — the normal case), *done* (a fast prompt completed), or
-  *dead* (the turn reached `cancelled`, `interrupted`, `failed`, or an
-  unrecognized terminal — unrecognized fails closed rather than
-  guessing).
-- A dead first turn at spawn time means the spawn never engaged (no
-  user exists yet to cancel or interrupt a just-started turn), so the
-  spawn fails loudly and the job is marked `blocked`, **never**
-  `active`. The `job.json` record keeps a `stillborn` section with the
-  turn id, a vocabulary-gated terminal label, and the event-method
-  journal (method names only — prompts and secrets are never logged
-  in the record).
-- The raw server-supplied terminal string is never persisted or
-  printed: every emission boundary goes through a vocabulary gate
-  (`cancelled`/`interrupted`/`failed`/`completed`/`unknown`), so a
-  hostile or malformed server value can't inject log lines.
-- The watchdog short-circuits stillborn jobs: it emits a
-  `needs-attention` signal carrying the full two-path retry advice —
-  new slug, or close-first same-slug with job-dir removal, the same
-  wording the spawn error uses — and returns without touching the job.
-  Without the
-  short-circuit, the cancelled turn would replay to `active` and the
-  watchdog would resurrect the zombie on its next pass.
-- The 10-second watch is paid on every healthy spawn (the loop exits early
-  on a terminal event) — a bounded one-time tax; a stranded `active` job
-  costs far more.
+- **Poll + heartbeat** (`supervisor.heartbeat`, 120 s TTL) and a **view
+  snapshot** (`supervisor.view.json`) — `status`/`log`/`watch` read the
+  journal + snapshot instead of attaching a second host.
+- **Steer queue** (`steer-queue.jsonl`, flock-guarded): `steer` appends a
+  turn-tagged entry and returns; the supervisor drains the queue into
+  the live turn (a steer queued for an older turn is dropped, never
+  delivered to a later one).
+- **Journal**: every poll/steer outcome is journaled as redacted signals.
+- **Teardown**: SIGTERM/SIGINT set a stop flag so the `finally` always
+  closes the host — no orphaned serve. A host that stays dead for 5
+  consecutive polls exits the supervisor instead of livelocking it.
+- **Files** (all under
+  `~/.local/share/muse-job/jobs/<slug>/supervisor/` — the operator-owned
+  metadata dir, never the agent-visible job dir):
+  `supervisor.pid`, `supervisor.started.json` (the live
+  `{"session_id", "turn_id"}`), `supervisor.heartbeat` (120 s TTL),
+  `supervisor.view.json` (atomic tmp+rename snapshot),
+  `steer-queue.jsonl` (flock-guarded), `supervisor.prompt.md`, and
+  `msp-supervise.log` (the supervisor's stdout/stderr — the file a
+  launch failure names with "see `<log>`").
+
+User-visible output contracts (changed by this design):
+
+- `spawn` prints `{"slug", "transport": "msp", "session_id", "turn_id",
+  "state"}` — `turn_id` is new; `state` is the re-read job state (a
+  stillborn first turn can already read `blocked`).
+- `steer` on a live-supervised job prints `{"slug", "steer": "queued",
+  "turn_id"}` — the message is queued, not delivered synchronously;
+  `turn_id` names the turn it was queued against.
+- `resume` on a supervised job prints `{"status": "supervisor-alive"}`
+  instead of re-attaching.
+- `status` may serve the supervisor's snapshot when the session is
+  held: JSON gains `"snapshot": true` + `snapshot_age_s`; the text
+  render prints a `snapshot: <age>s old (supervisor holds the session)`
+  line so a stale turn id is never mistaken for a live poll.
+
+Sessions are single-attach: while the supervisor holds a session,
+`session/resume` from another host fails with `-32021 "already in
+use"`. The read paths (`status`, `watch`) translate that into a
+snapshot fallback instead of crashing; the recovery ladder is skipped
+when the supervisor holds the session (it can't attach) and the
+operator is paged to `steer`/`kill` instead. `kill` and `close` SIGTERM
+the supervisor first — its teardown cancels the turn — then delete the
+session as before.
+
+### Stillborn first turns (issue #994, contract preserved)
+
+The old spawn verified first-turn engagement before declaring success;
+under the supervisor the spawn CLI is already gone when the turn's fate
+is known, so the **supervisor** carries the contract: a first turn that
+dies before engaging (cancelled/interrupted/unknown, never seen active)
+is marked `blocked` with the `stillborn` record (`turn_id`, a
+vocabulary-gated terminal label, the event-method journal) — never left
+`active` in steady state (the spawn CLI may briefly print `active`
+before the supervisor converges the state — see the output contracts
+below). The watchdog's stillborn short-circuit pages on that record
+with the two-path retry advice, exactly as before. A turn that
+*completes* instantly is not stillborn: the done-claim path
+(`SUMMARY.md`) owns that outcome. The engagement gate itself
+(`begin_first_turn_watch` / `await_first_turn_engagement` in
+`msp_turn.py`) remains as a tested library for any future caller that
+needs a spawn-time liveness proof.
 
 To retry a stillborn spawn, pick one path — the job dir cannot be both
 removed and closed (removing the dir deletes the work tree, logs, and
@@ -103,7 +143,10 @@ in the metadata dir, issue #11):
 
 The legacy tmux transport is the safe retry: the first-turn cancellation
 is a suspected MSP/serve-host race (session/branchChanged, per issue #994)
-the `--tmux` path never hits (it has no first-turn watch).
+the `--tmux` path never hits. Note the retry advice below still names
+`--tmux` for the *new* slug path — the old spawn error's wording is kept
+verbatim so the watchdog's stillborn short-circuit and the spawn failure
+stay consistent.
 
 ### TUI auto-update policy (issue #699)
 

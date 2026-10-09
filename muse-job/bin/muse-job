@@ -3549,13 +3549,642 @@ def _msp_call(slug, job, fn, pre_resume=True):
     try:
         if pre_resume:
             sid = _msp_require_sid(job, slug)
-            msp_session.resume_session(host, sid)
+            try:
+                msp_session.resume_session(host, sid)
+            except Exception as e:
+                if _msp_is_held_elsewhere(e):
+                    raise _MSPSessionHeldElsewhere(
+                        f"session {sid} is held by another host "
+                        f"(the MSP supervisor?)") from e
+                raise
         return fn(host)
     finally:
         try:
             host.close()
         except Exception:
             pass
+
+
+# --- MSP supervisor: one detached serve host per live turn ------------------
+# Root cause of the 2026-10-04/06 spawn deaths (diagnosed by the
+# msp-spawn-diagnosis job): _spawn_msp called turn/start and then
+# immediately host.close(), SIGTERMing the `muse serve` process the
+# accepted turn runs inside of -- the turn died before producing any
+# model output. `muse serve` has no detached-turn flag, so a turn cannot
+# outlive its accepting host: every turn muse-job starts now runs under a
+# detached supervisor (this file's hidden `_msp_supervise` subcommand)
+# that holds the serve host open until the turn reaches a terminal state.
+# The spawn/steer/resume CLIs return as soon as the turn is live;
+# status/log/watch read the supervisor's journal + view snapshot, and
+# steer is delivered through a queue file the supervisor drains.
+#
+# Sessions are single-attach: while the supervisor holds a session,
+# session/resume from another host fails with -32021 "already in use"
+# (the secondary defect in the same diagnosis). _msp_call translates that
+# into _MSPSessionHeldElsewhere so read paths fall back to the snapshot
+# instead of crashing.
+
+_MSP_ALREADY_IN_USE_CODE = -32021
+_MSP_SUPERVISOR_POLL_S = 15
+_MSP_SUPERVISOR_HEARTBEAT_TTL_S = 120
+_MSP_SUPERVISOR_START_TIMEOUT_S = 90
+# A started.json this fresh belongs to a concurrent launcher that just
+# won the race (its pidfile lands just after): join its turn instead of
+# forking a duplicate supervisor.
+_MSP_SUPERVISOR_LAUNCH_JOIN_S = 10
+
+
+class _MSPSessionHeldElsewhere(RuntimeError):
+    """session/resume refused: another host (the supervisor) holds it."""
+
+
+class _SnapshotView:
+    """Attribute-access adapter over the supervisor's view snapshot."""
+
+    def __init__(self, snap):
+        self.state = snap.get("msp_state")
+        self.pending_summary = snap.get("pending")
+        self.last_terminal = None
+        self.snapshot_age_s = round(
+            time.time() - snap.get("t", time.time()), 1)
+
+
+def _msp_is_held_elsewhere(err):
+    """True when err is the single-attach refusal for session/resume."""
+    if getattr(err, "code", None) == _MSP_ALREADY_IN_USE_CODE:
+        return True
+    return "already in use" in str(err)
+
+
+def _msp_supervisor_dir(slug):
+    """Operator-owned supervisor state dir (issue #1145).
+
+    The job dir is agent-writable (issue #11): the pidfile, started
+    record, heartbeat, view snapshot, steer queue, prompt file, and
+    process log live
+    here instead -- in the manager-side metadata dir the prompt preamble
+    never names, the same treatment #1145 gave the job record and #1156
+    gave the turn-event journal. An agent that could rewrite the pidfile
+    could point the kill path at an arbitrary pid; one that could plant
+    the started record could authorize a launch-race join; one that could
+    delete the heartbeat could fake a supervisor death and fork a
+    duplicate supervisor on the same worktree.
+    """
+    d = os.path.join(METADATA_DIR, slug, "supervisor")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _msp_supervisor_files(slug):
+    md = _msp_supervisor_dir(slug)
+    return {
+        "pid": os.path.join(md, "supervisor.pid"),
+        "started": os.path.join(md, "supervisor.started.json"),
+        "heartbeat": os.path.join(md, "supervisor.heartbeat"),
+        "view": os.path.join(md, "supervisor.view.json"),
+        "queue": os.path.join(md, "steer-queue.jsonl"),
+        "prompt": os.path.join(md, "supervisor.prompt.md"),
+        "log": os.path.join(md, "msp-supervise.log"),
+    }
+
+
+def _msp_supervisor_pid_is_ours(slug, pid):
+    """True when /proc/<pid>/cmdline shows our _msp_supervise for slug.
+
+    The pidfile now lives in the operator-owned metadata dir (issue
+    #1145), but a stale pidfile can still name a recycled pid, so it
+    must never authorize a signal on its own: the pid must also belong
+    to a supervisor process. Fail-closed when /proc is unreadable.
+    (Pid-reuse confusion, not a privilege boundary -- same user -- but
+    the manager must not be a confused deputy.)"""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            cmd = f.read()
+    except OSError:
+        return False
+    return b"_msp_supervise" in cmd and slug.encode() in cmd
+
+
+def _msp_supervisor_alive(slug):
+    """True when a supervisor process is live and heartbeating for slug."""
+    files = _msp_supervisor_files(slug)
+    try:
+        with open(files["pid"]) as f:
+            pid = int(f.read().strip())
+        pid_mtime = os.path.getmtime(files["pid"])
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        # No such process: stale pidfile, safe to drop -- but only if
+        # it still names the pid we observed (a concurrent supervisor
+        # may have written its own pidfile since).
+        _msp_supervisor_forget(slug, pid)
+        return False
+    except OSError:
+        # EPERM etc: something lives at that pid but we cannot tell
+        # what -- never unlink, never claim.
+        return False
+    if not _msp_supervisor_pid_is_ours(slug, pid):
+        # The pidfile names a non-supervisor (stale pid reuse or a
+        # planted pid): it authorizes nothing. Drop it -- but only if
+        # it still names the pid we observed.
+        _msp_supervisor_forget(slug, pid)
+        return False
+    try:
+        hb_age = time.time() - os.path.getmtime(files["heartbeat"])
+    except OSError:
+        hb_age = None
+    if hb_age is None:
+        # Freshly launched, no heartbeat yet: trust a recent pidfile.
+        return (time.time() - pid_mtime) < 60
+    return hb_age < _MSP_SUPERVISOR_HEARTBEAT_TTL_S
+
+
+def _msp_supervisor_forget(slug, pid=None):
+    """Drop a stale pidfile; never raises.
+
+    When pid is given, unlink only if the pidfile names that pid -- a
+    supervisor exiting without ever writing its pidfile (failed
+    startup, hand-invoked duplicate while the real supervisor holds
+    the session) must not delete the live supervisor's pidfile on its
+    way out.
+    """
+    if pid is not None:
+        try:
+            with open(_msp_supervisor_files(slug)["pid"]) as f:
+                if int(f.read().strip()) != pid:
+                    return
+        except (OSError, ValueError):
+            return
+    try:
+        os.unlink(_msp_supervisor_files(slug)["pid"])
+    except OSError:
+        pass
+
+
+def _msp_read_snapshot(slug):
+    """The supervisor's latest view snapshot dict, or None."""
+    try:
+        with open(_msp_supervisor_files(slug)["view"]) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _msp_enqueue_steer(slug, message, turn_id=None):
+    """Append a steer message to the supervisor's queue (flock-guarded).
+
+    turn_id tags the entry for the turn it was queued against; a
+    supervisor only delivers entries matching its own turn, so a steer
+    that loses a race with turn completion can never land on a later
+    turn."""
+    path = _msp_supervisor_files(slug)["queue"]
+    entry = json.dumps({"ts": time.time(), "message": message,
+                        "turn_id": turn_id}) + "\n"
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(entry)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _msp_read_started(slug, max_age_s):
+    """The supervisor's started record, or None when absent/stale.
+
+    max_age_s bounds how old the record may be: a concurrent launcher
+    that won the race wrote it moments ago (its pidfile lands just
+    before), so a fresh record is the turn we join instead of forking a
+    duplicate supervisor.
+
+    The started record lives in the operator-owned metadata dir (issue
+    #1145), but fail closed on a malformed or incomplete record anyway.
+    In particular a record without a
+    turn_id must never authorize a join -- the carried prompt would
+    enqueue with turn_id=None, and the drain's falsy-tag guard would
+    deliver it to a LATER turn (cross-turn steer leak).
+    """
+    files = _msp_supervisor_files(slug)
+    try:
+        if time.time() - os.path.getmtime(files["started"]) > max_age_s:
+            return None
+        with open(files["started"]) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not record.get("session_id") \
+            or not record.get("turn_id"):
+        return None
+    return record
+
+
+def _msp_launch_supervisor(slug, prompt=None):
+    """Fork the detached supervisor; wait until its turn is live.
+
+    prompt: when given, written to supervisor.prompt.md for the new
+    turn; otherwise the supervisor uses prompt.md.
+    Returns the supervisor's {"session_id": ..., "turn_id": ...}.
+
+    Concurrent launchers for one slug serialize on a dedicated launch
+    lock (separate from the per-slug job lock, which spawn/steer already
+    hold -- re-taking it here would self-deadlock). The loser joins the
+    winner's turn instead of forking a duplicate supervisor: two
+    supervisors would mean two sessions and two turns on one worktree.
+    """
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    lockp = os.path.join(JOBS_DIR, ".%s.msp-launch.lock" % slug)
+    with open(lockp, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            return _msp_launch_supervisor_locked(slug, prompt)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _msp_launch_supervisor_locked(slug, prompt=None):
+    # A concurrent launcher may have won while we waited for the launch
+    # lock: its started.json is fresh (written moments ago), so join its
+    # turn. A prompt we carry would have been the new turn's prompt; the
+    # turn already exists, so deliver it as a steer instead of dropping
+    # it silently. Join only when the supervisor is actually alive: a
+    # fresh record from a crashed winner authorizes nothing, and
+    # _msp_read_started already failed closed on malformed records
+    # (turn_id is guaranteed truthy here).
+    started = _msp_read_started(slug, _MSP_SUPERVISOR_LAUNCH_JOIN_S)
+    if started is not None and _msp_supervisor_alive(slug):
+        if prompt is not None:
+            _msp_enqueue_steer(slug, prompt,
+                               turn_id=started.get("turn_id"))
+        return started
+    files = _msp_supervisor_files(slug)
+    if prompt is not None:
+        with open(files["prompt"], "w") as f:
+            f.write(prompt)
+    elif os.path.exists(files["prompt"]):
+        os.unlink(files["prompt"])
+    try:
+        os.unlink(files["started"])
+    except OSError:
+        pass
+    # Fresh fork: drop the previous supervisor's volatile state. The
+    # metadata dir (issue #1145) is not swept with the job dir, so a
+    # stale steer queue / view / heartbeat / pidfile would otherwise
+    # survive a close and haunt the next job on this slug -- in
+    # particular a stale untagged steer-queue entry would drain into
+    # the new job's turn.
+    for stale in ("queue", "view", "heartbeat", "pid"):
+        try:
+            os.unlink(files[stale])
+        except OSError:
+            pass
+    # The supervisor is detached and long-lived: it must not depend on
+    # the parent's PATH. `muse` lives in ~/.local/bin, which non-login
+    # shells (cron, ssh) often lack.
+    env = dict(os.environ)
+    local_bin = os.path.join(os.path.expanduser("~"), ".local", "bin")
+    if os.path.isdir(local_bin) and \
+            local_bin not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+    logf = open(files["log"], "a")
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "_msp_supervise", slug],
+            start_new_session=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            cwd=job_dir(slug),
+        )
+    finally:
+        logf.close()
+    deadline = time.time() + _MSP_SUPERVISOR_START_TIMEOUT_S
+    while time.time() < deadline:
+        try:
+            with open(files["started"]) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"MSP supervisor for {slug} exited during startup "
+                f"(see {files['log']})")
+        time.sleep(0.5)
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    raise RuntimeError(
+        f"MSP supervisor for {slug} did not start a turn in "
+        f"{_MSP_SUPERVISOR_START_TIMEOUT_S}s (see {files['log']})")
+
+
+def _msp_kill_supervisor(slug):
+    """SIGTERM the supervisor; True when one was live. Never raises."""
+    files = _msp_supervisor_files(slug)
+    if not _msp_supervisor_alive(slug):
+        # alive() already ruled the pidfile stale: re-read it and pass
+        # the observed pid so a concurrent supervisor's fresh pidfile
+        # is never unlinked by us. Unconditional only when the pidfile
+        # is absent or unparseable -- then it cannot name anything.
+        try:
+            with open(files["pid"]) as f:
+                stale_pid = int(f.read().strip())
+        except (OSError, ValueError):
+            _msp_supervisor_forget(slug)
+        else:
+            _msp_supervisor_forget(slug, stale_pid)
+        return False
+    try:
+        with open(files["pid"]) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return False
+    if not _msp_supervisor_pid_is_ours(slug, pid):
+        # Pidfile does not name a supervisor for this slug: nothing to
+        # stop. Drop the bogus pidfile -- only if it still names the
+        # pid we observed.
+        _msp_supervisor_forget(slug, pid)
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        _msp_supervisor_forget(slug, pid)
+        return True
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        if not os.path.exists(files["pid"]):
+            break
+        time.sleep(0.5)
+    else:
+        # Re-verify identity before the SIGKILL fallback: 15s elapsed
+        # since the first check and the pid may have been reused.
+        if not _msp_supervisor_pid_is_ours(slug, pid):
+            _msp_supervisor_forget(slug, pid)
+            return True
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            deadline2 = time.time() + 5
+            while time.time() < deadline2:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.5)
+        except OSError:
+            pass
+    # Cleanup after the kill: drop the pidfile only if it still names
+    # the pid we stopped (a concurrent supervisor's fresh pidfile must
+    # survive us).
+    _msp_supervisor_forget(slug, pid)
+    return True
+
+
+def _msp_supervisor_heartbeat(slug):
+    try:
+        with open(_msp_supervisor_files(slug)["heartbeat"], "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _msp_supervisor_write_view(slug, view):
+    files = _msp_supervisor_files(slug)
+    snap = {
+        "t": time.time(),
+        "msp_state": view.state,
+        "active_turn_id": view.active_turn_id,
+        "pending": view.pending_summary,
+        "last_activity_age_s": (
+            round(time.time() - view.last_event_at, 1)
+            if view.last_event_at else None),
+    }
+    tmp = files["view"] + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(snap, f)
+        os.replace(tmp, files["view"])
+    except OSError:
+        pass
+
+
+def _msp_drain_steer_queue(slug, host, sid, tid, view):
+    """Deliver queued steers into the live turn; drop orphans/stale. Never raises."""
+    _, _, msp_turn, msp_events, _ = _msp_imports()
+    path = _msp_supervisor_files(slug)["queue"]
+    try:
+        f = open(path, "r+")
+    except OSError:
+        return
+    with f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            lines = f.readlines()
+            f.seek(0)
+            f.truncate()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            message = entry.get("message")
+        except ValueError:
+            continue
+        if not message or not isinstance(message, str):
+            continue
+        entry_tid = entry.get("turn_id")
+        if entry_tid and entry_tid != tid:
+            detail = "steer dropped: queued for an older turn"
+            try:
+                sig = msp_events.JobSignal("steer", "steer/queued",
+                                           detail=detail)
+                _msp_journal_append(slug, [sig])
+            except Exception:
+                pass
+            continue
+        if view.active_turn_id:
+            try:
+                msp_turn.steer_turn(host, sid, message,
+                                    expected_turn_id=view.active_turn_id)
+                detail = ("steer delivered to turn "
+                          f"{view.active_turn_id[:8]}")
+            except Exception as e:
+                detail = f"steer failed: {e}"[:160]
+        else:
+            detail = "steer dropped: no active turn"
+        try:
+            sig = msp_events.JobSignal("steer", "steer/queued", detail=detail)
+            _msp_journal_append(slug, [sig])
+        except Exception:
+            pass
+
+
+def _msp_supervise_loop(slug, job, host, sid, tid, stop):
+    """Hold the turn: poll+heartbeat+steer-queue until terminal or stop."""
+    _, _, msp_turn, _, _ = _msp_imports()
+    saw_active = False
+    polls = 0
+    fails = 0
+    terminal_method = None
+    journal = []
+    while not stop["flag"]:
+        # Bounded event-driven wait for this turn's terminal event.
+        try:
+            seen = msp_turn.watch_turn_events(
+                host, sid, tid, timeout=_MSP_SUPERVISOR_POLL_S)
+        except Exception:
+            seen = []
+        for n in seen:
+            method = n.get("method")
+            if isinstance(method, str):
+                journal.append(method)
+            # Both wire shapes (method-level turn/cancelled and the real
+            # server's turn/completed + params.terminal -- issue #994's
+            # journal) classify through the shared _turn_terminal gate.
+            term = msp_turn._turn_terminal(n, tid)
+            if term is not None and terminal_method is None:
+                terminal_method = term
+        terminal_hit = terminal_method is not None
+        # Poll + drain BEFORE the terminal break: the queue must be
+        # empty when the supervisor exits, otherwise a steer queued in
+        # the race window would leak to a later supervisor's turn (the
+        # turn_id tag is the second line of defense).
+        try:
+            view = _msp_poll(host, slug, job)
+            fails = 0
+        except Exception:
+            # Transport blip: heartbeat anyway. But a host that stays
+            # dead must not livelock the supervisor (and its heartbeat)
+            # forever -- after sustained poll failure, exit and release.
+            fails += 1
+            _msp_supervisor_heartbeat(slug)
+            if terminal_hit or fails >= 5:
+                break
+            time.sleep(5)
+            continue
+        polls += 1
+        if view.active_turn_id == tid:
+            saw_active = True
+        _msp_supervisor_write_view(slug, view)
+        _msp_supervisor_heartbeat(slug)
+        try:
+            _msp_drain_steer_queue(slug, host, sid, tid, view)
+        except Exception:
+            pass
+        if terminal_hit:
+            break
+        if view.active_turn_id is None and (saw_active or polls >= 3):
+            # Turn reached terminal between subscribe windows (or died
+            # instantly before the first poll ever saw it active).
+            break
+    if (not stop["flag"] and not saw_active
+            and terminal_method != "completed"):
+        # Issue #994's contract survives the supervisor redesign: a first
+        # turn that dies before engaging must never sit "active" -- the
+        # spawn CLI is already gone by now, so the supervisor marks the
+        # job blocked with the stillborn record the watchdog already
+        # pages on (same vocabulary the old spawn path used, via the
+        # shared _terminal_label gate). A turn that *completed* instantly
+        # is left alone: the done-claim path (SUMMARY.md) owns that
+        # outcome, not the stillborn machinery.
+        job = load_job(slug)  # re-read: a kill may have landed mid-turn
+        job["state"] = "blocked"
+        job["stillborn"] = {
+            "turn_id": tid,
+            "terminal": msp_turn._terminal_label(terminal_method),
+            "journal": journal[:50],
+        }
+        save_job(job, slug)
+
+
+def _msp_supervise_cmd(args):
+    """Detached per-turn supervisor: hold the serve host until the turn
+    reaches a terminal state. Never invoked by hand."""
+    slug = args.slug
+    files = _msp_supervisor_files(slug)
+    job = load_job(slug)
+    jd = job_dir(slug)
+    prompt = None
+    for name in (files["prompt"], os.path.join(jd, "prompt.md")):
+        try:
+            with open(name) as f:
+                prompt = f.read()
+            break
+        except OSError:
+            continue
+    if not prompt:
+        raise RuntimeError("supervisor: no prompt found")
+    work, _, _ = trusted_job_paths(slug, job)
+    msp_host, msp_session, msp_turn, msp_events, _ = _msp_imports()
+    host = _msp_host_for(slug)
+    stop = {"flag": False}
+
+    def _on_term(signum, frame):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
+    try:
+        # Resume the recorded session when it still exists (steer/resume
+        # relaunches); otherwise start fresh on the same worktree.
+        sid = job.get("session_uuid")
+        if sid:
+            try:
+                msp_session.resume_session(host, sid)
+            except Exception as e:
+                if _msp_session_gone(e):
+                    sid = None
+                else:
+                    raise
+        if not sid:
+            session, _cursor = msp_session.start_session(
+                host, work, approval_mode=msp_session.YOLO_APPROVAL_MODE)
+            sid = session.get("sessionId") or session.get("id")
+            if not sid:
+                raise RuntimeError("session/start returned no session id")
+        turn, _result = msp_turn.start_turn(host, sid, prompt)
+        tid = (turn or {}).get("turnId")
+        if not tid:
+            raise RuntimeError("turn/start returned no turn id")
+        # Re-read before the read-modify-write save: the operator's kill
+        # may have landed during session/turn startup, and the fork-time
+        # dict would clobber its "killed" mark back to "active".
+        job = load_job(slug)
+        job["session_uuid"] = sid
+        job["session_started_at"] = time.time()
+        save_job(job, slug)
+        # Pidfile BEFORE started.json: a fresh started record implies a
+        # pidfile exists, so the launch-race join's aliveness check has
+        # no false-negative window (the pidfile-recency branch of
+        # _msp_supervisor_alive covers the pre-heartbeat window).
+        with open(files["pid"], "w") as f:
+            f.write(str(os.getpid()))
+        with open(files["started"], "w") as f:
+            json.dump({"session_id": sid, "turn_id": tid}, f)
+        _msp_supervise_loop(slug, job, host, sid, tid, stop)
+    finally:
+        # Closing the host SIGTERMs the serve child: the turn's teardown.
+        # The SIGTERM/SIGINT handler above routes through the loop's stop
+        # flag so this finally always runs -- no orphaned serve. Only
+        # drop the pidfile when it names this process: a supervisor that
+        # failed before writing its pidfile must not unlink the live
+        # supervisor's pidfile on its way out.
+        try:
+            host.close()
+        except Exception:
+            pass
+        _msp_supervisor_forget(slug, pid=os.getpid())
+    return 0
 
 
 # The redacted signal journal: every poll journals its replayed JobSignals
@@ -3704,113 +4333,94 @@ def _msp_poll(host, slug, job, replay_wait=2.0):
 
 
 def _spawn_msp(slug, args):
-    """Spawn a job driven over MSP: worktree setup (shared), then
-    session/start + turn/start on `muse serve`."""
+    """Spawn a job driven over MSP: worktree setup (shared), then a
+    detached supervisor owns session/start + turn/start and holds the
+    serve host until the turn reaches a terminal state.
+
+    The turn cannot outlive its accepting host (`muse serve` has no
+    detached-turn flag), so closing the host here -- as the old code did
+    right after turn/start -- SIGTERMs the turn before any model output.
+    The supervisor is the MSP analogue of the tmux session that keeps
+    tmux jobs alive after the spawn CLI exits.
+    """
     job, work, jd = _spawn_prepare(slug, args, PREAMBLE_MSP, None)
     job["transport"] = "msp"
     save_job(job, slug)
-    msp_host, msp_session, msp_turn, msp_events, _ = _msp_imports()
-    host = _msp_host_for(slug)
     try:
-        session, _cursor = msp_session.start_session(
-            host, work, approval_mode=msp_session.YOLO_APPROVAL_MODE)
-        sid = session.get("sessionId") or session.get("id")
-        if not sid:
-            raise RuntimeError(f"session/start returned no session id: "
-                               f"{str(session)[:200]}")
-        with open(os.path.join(jd, "prompt.md")) as f:
-            full_prompt = f.read()
-        # Subscribe BEFORE turn/start: the reader thread dispatches
-        # only to registered subscribers, so a terminal the server
-        # emits in the gap between turn/start returning and a later
-        # subscribe would be silently dropped -- and the #994
-        # cancellation landed ~1ms after turn start. Buffered notes are
-        # replayed for the turn id once the await binds it.
-        watch = msp_turn.begin_first_turn_watch(host, sid)
-        try:
-            turn, _result = msp_turn.start_turn(host, sid, full_prompt)
-        except BaseException:
-            msp_turn.close_first_turn_watch(watch)
-            raise
-        # Issue #994: a turn/start that returns is not proof the spawn
-        # engaged -- the real serve host cancelled the first turn
-        # server-side within ~1ms, and the job sat "active" forever with
-        # nothing working. Verify the first turn is alive (or done)
-        # before declaring the spawn a success; a dead first turn fails
-        # the spawn loudly and marks the job blocked, never active.
-        eng = msp_turn.await_first_turn_engagement(watch, turn["turnId"])
-        if eng["status"] == "dead":
-            # The terminal string is server-controlled: never persist
-            # or print it raw (log injection / unbounded input). The
-            # raw value stays on the in-memory eng record and the
-            # exception attribute for debugging; every emission
-            # boundary uses the vocabulary-gated label.
-            term_label = msp_turn._terminal_label(eng["terminal"])
-            job["session_uuid"] = sid
-            job["state"] = "blocked"
-            job["stillborn"] = {
-                "turn_id": turn["turnId"],
-                "terminal": term_label,
-                "journal": eng["journal"],
-            }
-            save_job(job, slug)
-            raise msp_turn.TurnStillbornError(
-                f"muse-job spawn {slug!r}: the first turn died before "
-                f"engaging (terminal={term_label!r}, "
-                f"{len(eng['journal'])} events in {eng['elapsed_s']:.1f}s); "
-                f"the job is marked blocked, not active. Event methods: "
-                f"{','.join(eng['journal'])}. The blocked job record "
-                f"(event journal under job.json 'stillborn') is kept at "
-                f"{jd} for diagnosis. To retry, pick one path -- the job "
-                f"dir cannot be both removed and closed (removing the dir "
-                f"deletes the work tree, logs, and diagnosis `close` "
-                f"would archive -- the record itself lives in the "
-                f"metadata dir): new slug (keeps the diagnosis): "
-                f"`muse-job spawn <new-slug> --tmux`, then "
-                f"`muse-job close {slug}` to archive the blocked record; "
-                f"same slug: `muse-job close {slug}` first (this tears "
-                f"down the git worktree and deletes the job branch), then "
-                f"remove {jd} -- `spawn` refuses a slug whose dir still "
-                f"exists -- then `muse-job spawn {slug} --tmux`. If the "
-                f"turn was cancelled server-side within ~1s of start, "
-                f"this matches issue #994 (session/branchChanged race "
-                f"suspect).",
-                turn_id=turn["turnId"], terminal=eng["terminal"],
-                journal=eng["journal"])
-        job["session_uuid"] = sid
-        job["session_started_at"] = time.time()
-        save_job(job, slug)
+        # The detached supervisor owns session/start + turn/start and
+        # holds the serve host until the turn reaches a terminal state
+        # (issue #1129). The #994/#997 stillborn contract travels with it:
+        # the supervisor loop's instant-death break marks a first turn
+        # that dies before engaging as blocked -- never active -- with
+        # the stillborn record on the metadata-dir job record, which the
+        # watchdog already pages on. The spawn-time engagement watch is
+        # superseded by design (see the README's "contract preserved"
+        # section and test_spawn_msp_stillborn_contract_superseded_note).
+        started = _msp_launch_supervisor(slug)
     except BaseException:
         # Mirror the tmux path: don't leave a half-spawned job behind.
-        try:
-            host.close()
-        except Exception:
-            pass
+        _msp_kill_supervisor(slug)
         raise
-    host.close()
+    job = load_job(slug)  # supervisor recorded session_uuid
     print(json.dumps({"slug": slug, "transport": "msp",
-                      "session_id": job["session_uuid"], "state": "active"}))
+                      "session_id": job.get("session_uuid"),
+                      "turn_id": started.get("turn_id"),
+                      # The supervisor may already have marked the job
+                      # blocked (stillborn first turn): report the
+                      # re-read state, never a hardcoded "active".
+                      "state": job.get("state", "active")}))
     return 0
 
 
 def _msp_steer(job, args):
-    """Steer an MSP job: poll the view, then steer the live turn or start a
-    fresh one when nothing is running (the turn-id match in the view is the
-    anti-cross-turn guard -- a steer never lands on the wrong turn)."""
+    """Steer an MSP job.
+
+    Supervisor alive: queue the message; the supervisor steers it into
+    the live turn (the anti-cross-turn guard lives server-side via
+    expectedTurnId). No supervisor: poll; an orphaned live turn gets a
+    best-effort direct steer, otherwise a fresh supervised turn carries
+    the message as its prompt (a turn started on the ephemeral steer
+    host would die at close -- the old bug in a new place).
+    """
     slug = args.slug
+    if _msp_supervisor_alive(slug):
+        snap = _msp_read_snapshot(slug)
+        turn_id = (snap or {}).get("active_turn_id")
+        _msp_enqueue_steer(slug, args.message, turn_id=turn_id)
+        print(json.dumps({"slug": slug, "steer": "queued",
+                          "turn_id": turn_id}))
+        return 0
     _, _, msp_turn, _, _ = _msp_imports()
 
     def go(host):
         view = _msp_poll(host, slug, job)
-        sid = _msp_require_sid(job, slug)
-        if view.active_turn_id:
+        return {"active_turn_id": view.active_turn_id}
+
+    try:
+        out = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # Lost the race: a supervisor took the session between our
+        # liveness check and the resume. Queue instead of failing.
+        snap = _msp_read_snapshot(slug)
+        turn_id = (snap or {}).get("active_turn_id")
+        _msp_enqueue_steer(slug, args.message, turn_id=turn_id)
+        print(json.dumps({"slug": slug, "steer": "queued",
+                          "turn_id": turn_id}))
+        return 0
+    if out["active_turn_id"]:
+        # Orphaned live turn (no supervisor): best-effort direct steer.
+        # The turn runs on another (possibly dead) host; closing our
+        # host only drops our own connection.
+        def go2(host):
+            sid = _msp_require_sid(job, slug)
             msp_turn.steer_turn(host, sid, args.message,
-                                expected_turn_id=view.active_turn_id)
-            return {"steered_turn": view.active_turn_id}
-        turn, _result = msp_turn.start_turn(host, sid, args.message)
-        return {"started_turn": (turn or {}).get("turnId")}
-    out = _msp_call(slug, job, go)
-    print(json.dumps({"slug": slug, **out}))
+                                expected_turn_id=out["active_turn_id"])
+            return {"steered_turn": out["active_turn_id"]}
+        out2 = _msp_call(slug, job, go2)
+        print(json.dumps({"slug": slug, **out2}))
+        return 0
+    started = _msp_launch_supervisor(slug, prompt=args.message)
+    print(json.dumps({"slug": slug, "started_turn": started.get("turn_id")}))
     return 0
 
 
@@ -3864,13 +4474,21 @@ def _msp_status(job, slug, args):
         except OSError:
             st["progress_age_s"] = None
         return st
-    st = _msp_call(slug, job, go)
+    try:
+        st = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # The supervisor holds the session (single-attach): read its
+        # view snapshot instead of polling live.
+        st = _msp_status_from_snapshot(slug, job)
     if args.json:
         print(json.dumps(st, indent=2, default=str))
     else:
         print(f"job {st['slug']}: transport=msp state={_clean_text(st['job_state'])} "
               f"msp={_clean_text(st['msp_state'])} "
               f"turn={_clean_text(st['active_turn_id'] or '-')}")
+        if st.get("snapshot"):
+            print(f"  snapshot: {st['snapshot_age_s']:.0f}s old "
+                  f"(supervisor holds the session)")
         if st["pending"]:
             print(f"  pending: {_clean_text(st['pending'])[:200]}")
         if st["progress_age_s"] is not None:
@@ -3915,6 +4533,39 @@ def _read_bounded_tail(path, limit):
         if first_nl != -1:
             text = text[first_nl + 1:]
     return text.splitlines(keepends=True)
+
+def _msp_status_from_snapshot(slug, job):
+    """Status from the supervisor's view snapshot (session held elsewhere)."""
+    snap = _msp_read_snapshot(slug)
+    if snap is None:
+        raise RuntimeError(
+            f"session held by supervisor but no view snapshot for {slug}")
+    job_state = _MSP_STATE_TO_JOB.get(snap.get("msp_state"), "active")
+    if job.get("state") != job_state:
+        job["state"] = job_state
+        save_job(job, slug)
+    try:
+        pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
+        progress_age_s = time.time() - pm
+    except OSError:
+        progress_age_s = None
+    return {
+        "slug": slug,
+        "transport": "msp",
+        "job_state": job_state,
+        "session_uuid": job.get("session_uuid"),
+        "elapsed_h": (time.time() - _num(job.get("started_at"),
+                                         time.time())) / 3600,
+        "budget_hours": _num(job.get("budget_hours"), 8),
+        "dir_bytes": _cached_dir_bytes(job, slug),
+        "msp_state": snap.get("msp_state"),
+        "active_turn_id": snap.get("active_turn_id"),
+        "pending": snap.get("pending"),
+        "last_activity_age_s": snap.get("last_activity_age_s"),
+        "progress_age_s": progress_age_s,
+        "snapshot": True,
+        "snapshot_age_s": round(time.time() - snap.get("t", time.time()), 1),
+    }
 
 
 def _msp_log(args):
@@ -3981,9 +4632,16 @@ def _msp_kill(args):
     No tmux pane or process tree exists for MSP jobs -- the serve child is
     a per-command connection (opened/closed around each call), so there is
     nothing to reap. The killed state keeps the watchdog off, same as the
-    tmux path (issue #5)."""
+    tmux path (issue #5).
+
+    The supervisor (if live) is SIGTERMed first: its teardown closes the
+    serve host, which cancels the turn. Then the session is deleted
+    best-effort as before."""
     slug = args.slug
     job = load_job(slug)
+    if _msp_kill_supervisor(slug):
+        print(f"muse-job: note: stopped MSP supervisor for {slug}",
+              file=sys.stderr)
     sid = job.get("session_uuid")
     if sid:
         def go(host):
@@ -4003,7 +4661,6 @@ def _msp_kill(args):
                       "state": "killed"}))
     return 0
 
-
 def _msp_resume(args, _from_watch=False):
     """resume for an MSP job: session/resume the recorded session id.
 
@@ -4013,6 +4670,11 @@ def _msp_resume(args, _from_watch=False):
     monitored states mid-recovery is left alone."""
     slug = args.slug
     job = load_job(slug)
+    if _msp_supervisor_alive(slug):
+        print(json.dumps({"slug": slug, "transport": "msp",
+                          "resumed": job.get("session_uuid"),
+                          "status": "supervisor-alive"}))
+        return 0
     sid = _msp_require_sid(job, slug)
     _, msp_session, msp_turn, _, _ = _msp_imports()
 
@@ -4024,22 +4686,18 @@ def _msp_resume(args, _from_watch=False):
                 raise
             # Fresh session, same worktree: re-anchor like the tmux
             # fallback-fresh path.
-            work, _, _ = trusted_job_paths(slug, job)
-            session, _cursor = msp_session.start_session(
-                host, work, approval_mode=msp_session.YOLO_APPROVAL_MODE)
-            new_sid = session.get("sessionId") or session.get("id")
-            if not new_sid:
-                raise RuntimeError("session/start returned no session id")
-            prompt = _reanchor_prompt(slug, job)
-            msp_turn.start_turn(host, new_sid, prompt)
-            return {"resumed": "fallback-fresh", "session_id": new_sid}
+            return {"resumed": "fallback-fresh"}
         session = result.get("session", result) if isinstance(result, dict) else {}
         return {"resumed": sid,
                 "status": (session or {}).get("status")}
     out = _msp_call(slug, job, go, pre_resume=False)
     if out.get("resumed") == "fallback-fresh":
-        job["session_uuid"] = out["session_id"]
-        job["session_started_at"] = time.time()
+        # Fresh session + re-anchor turn, held by a supervisor: a turn
+        # started on this ephemeral host would die at close.
+        _msp_launch_supervisor(slug, prompt=_reanchor_prompt(slug, job))
+        job = load_job(slug)  # supervisor recorded the new session id
+        out = {"resumed": "fallback-fresh",
+               "session_id": job.get("session_uuid")}
     if _from_watch:
         fresh = load_job(slug)
         if fresh.get("state") not in ("active", "blocked"):
@@ -4079,6 +4737,9 @@ def _reanchor_prompt(slug, job):
 def _msp_close_runtime(slug, job):
     """Best-effort session/delete for close. Called from _close before the
     shared archive/remove-worktree flow."""
+    # Stop the supervisor first: it works against the worktree being
+    # removed below, and holds the session the delete targets.
+    _msp_kill_supervisor(slug)
     sid = job.get("session_uuid")
     if not sid:
         return
@@ -4144,8 +4805,20 @@ def _watch_msp_job(slug, job, events, now):
 
     def go(host):
         return _msp_poll(host, slug, job)
+    held_elsewhere = False
     try:
         view = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # The supervisor holds the session (single-attach): monitor via
+        # its view snapshot instead of a live poll.
+        snap = _msp_read_snapshot(slug)
+        if snap is None:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "MSP session held by supervisor but no "
+                                     "view snapshot; cannot monitor it"})
+            return
+        view = _SnapshotView(snap)
+        held_elsewhere = True
     except Exception as e:
         events.append({"job": slug, "signal": "needs-attention",
                        "detail": f"MSP poll failed: {e}"})
@@ -4199,9 +4872,19 @@ def _watch_msp_job(slug, job, events, now):
         # them, so the residual sibling-start window is the same accepted
         # class as #1131's (and the stamps are 15-min stale by design).
         if _phase_concurrency_bars_resume(slug):
-            events.append({"job": slug, "signal": "deferred",
-                           "detail": _PHASE_DEFERRED_DETAIL +
-                           " (msp stalled-turn recovery; next pass retries)"})
+            if held_elsewhere:
+                # The recovery ladder needs an attached host; the
+                # supervisor holds the session. Surface for the operator
+                # instead of running a ladder that cannot attach.
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": "MSP turn stalled; supervisor holds "
+                                         "the session so the recovery ladder "
+                                         "cannot attach -- `muse-job steer` to "
+                                         "nudge or `muse-job kill` to end it"})
+            else:
+                events.append({"job": slug, "signal": "deferred",
+                               "detail": _PHASE_DEFERRED_DETAIL +
+                               " (msp stalled-turn recovery; next pass retries)"})
             return
         def go2(host):
             # recover_dead_turn polls the view and detects the dead shape
@@ -4303,6 +4986,10 @@ def main():
 
     s = sub.add_parser("watch", help="watchdog pass over active jobs")
     s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("_msp_supervise", help=argparse.SUPPRESS)
+    s.add_argument("slug")
+    s.set_defaults(fn=_msp_supervise_cmd)
 
     args = ap.parse_args()
     try:
