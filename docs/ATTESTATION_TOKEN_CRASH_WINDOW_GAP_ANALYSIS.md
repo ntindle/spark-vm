@@ -23,6 +23,11 @@ lands.
 For the crash analysis, the mint→pair pipeline has six hops (the
 decisions each hop already pins are named):
 
+**This turn's acceptance:** a crash between mint and `provision()` is
+claimant-invisible — the next reconcile tick supersedes the dead attempt
+and re-provisions with a fresh token, the claim pairs with no operator
+steps, and no #1214 alert fires for the superseded attempt.
+
 1. Orchestrator calls the plane's owner-auth create-record endpoint
    (D-O4: the orchestrator never writes D1; it holds an owner key).
 2. Plane mints the 256-bit base64url token, stores **only the hash**
@@ -47,17 +52,19 @@ decisions each hop already pins are named):
 | Window | State at crash | Recoverable today? |
 |---|---|---|
 | **W0** — post-mint (hop 2), pre-`provision()` (hop 3) | Plaintext only in dead memory; plane holds hash + `pending` record; **no machine exists** | **No.** Nothing owns the recovery — this is #1209's gap. |
-| W1 — `provision()` in flight | Machine may or may not exist | Yes — D-O1: driver dedupes on the attempt key and returns the existing `vm_id` on retry; reconcile does list→match→then-provision. |
+| W1a — `provision()` in flight, machine created | Token already in the machine's env; no plaintext needed | Yes — D-O1: driver dedupes on the attempt key and returns the existing `vm_id` on retry. |
+| **W1b** — `provision()` in flight, **no** machine created | Plaintext lost across restart, exactly as in W0; a retried `provision()` for the same attempt would inject an empty/missing token into machine env — the box boots, #1203's hook fails closed (`exit 0` + loud log), and the record sits `pending` until the TTL-lapse path | **No — routes through D-TW1.** The restarted reconciler is a fresh process; D-O1's dedupe has no `vm_id` to return. To the reconciler, W1b is observationally identical to W0 ("pending record + no machine matched by the attempt metadata key") and follows the same supersede trigger. |
 | W2 — post-provision, pre-record (hop 4) | Machine exists, token already in its env | Yes — reconcile finds the machine by the metadata key; no plaintext needed. |
 | W3 — machine exists, never pairs (TTL lapses / box dead) | Record `pending`, token hash valid, machine live or dead | Yes — D-O3 sweeper stamps `expired` past the TTL; the destroy worker (#1076) stamps `destroyed`. |
 | W4 — consumed token replayed | Record consumed | Yes — 403 + plane-side audit row (D-O2, #1108). |
 
-W1–W4 are owned. W0 is the only window where the attempt is
-**unrecoverable as specified**: the reconciler's list→match finds an
-unconsumed `pending` record with no matching machine and re-issues
-`provision()` — but the orchestrator no longer holds the token
+W1a, W2, W3, W4 are owned. W0 and W1b are the windows where the
+attempt is **unrecoverable as specified**: the reconciler's list→match
+finds an unconsumed `pending` record with no matching machine and
+re-issues `provision()` — but the orchestrator no longer holds the token
 plaintext and the plane cannot return it. Re-issuing the provision is
-specified but unprovisionable.
+specified but unprovisionable. D-TW1 answers both: to the reconciler they
+are the same observation.
 
 ## 3. Findings: what W0 pins open
 
@@ -84,18 +91,23 @@ specified but unprovisionable.
 
 ## 4. Decisions pinned (D-TW series)
 
-- **D-TW1 — W0 recovery is reconcile-driven supersede to
+- **D-TW1 — W0 (and W1b) recovery is reconcile-driven supersede to
   attempt_{n+1}.** (This answers #1209.)
   The reconciler treats "pending record + no machine matched by the
   attempt metadata key" as a failed attempt: it flips the old record
   `pending → superseded` (the old token invalidated at supersede time —
-  #1109's rule extends to pre-machine attempts; F-TW3's "no machine"
-  precondition satisfies D-O3's "known-dead, never merely slow"), then
-  proceeds with attempt_{n+1} (fresh create-record call → fresh token).
-  This composes with D-O1's attempt-scoped idempotency (the new attempt
-  has its own key, so the dead attempt's machine — which does not exist
-  — can never be returned for the new attempt) and with D-C5's
-  retry-chain lineage (`attempt_n`, `supersedes attempt_{n-1}`).
+  D-O3's rule, filed as #1109, extends to pre-machine attempts; F-TW3's
+  "no machine" precondition satisfies D-O3's "known-dead, never merely
+  slow"), then proceeds with attempt_{n+1} (fresh create-record call →
+  fresh token). This composes with D-O1's attempt-scoped idempotency
+  (the new attempt has its own key, so the dead attempt's machine —
+  which does not exist — can never be returned for the new attempt) and
+  with D-C5's retry-chain lineage (`attempt_n`,
+  `supersedes attempt_{n-1}`). Listing-lag residual: if a later listing
+  surfaces a machine carrying a *superseded* attempt's metadata key, the
+  reconciler destroys it (D-O1's teardown applied retroactively — a
+  machine with a dead token can never pair, so it is an orphaned
+  billable resource, not a live box).
 - **D-TW2 — rejected (a): orchestrator-side plaintext persistence.**
   It reintroduces the exact plaintext-custody problem D-P2 was designed
   to avoid: a second secret store with its own custody story, its own
@@ -116,7 +128,8 @@ specified but unprovisionable.
   attempt is older than the driver's create-settle bound (tunable,
   minutes — belt-and-suspenders for listing lag; with the flock-serialized
   sole writer of D-O4, no concurrent orchestrator exists, so an
-  unlisted machine means it was never created). The 24 h token TTL is
+  unlisted machine means it was never created; the age is measured from
+  the record's creation timestamp). The 24 h token TTL is
   **not** a gate here: the record is unrecoverable *now* — waiting out
   the TTL would stall the claim for a full day for a box that was never
   born, and D-O3's "never supersede merely-slow" caution does not apply
@@ -128,19 +141,23 @@ specified but unprovisionable.
   #1089's contract; `tenant_id` is in the machine metadata key and is
   checked, not joined on). D-C5's retry-chain lineage already names
   `attempt_n` / `supersedes attempt_{n-1}`; the #1089 schema build must
-  materialize `attempt_n` as a column (it is the reconciler's match key),
-  and the create-record endpoint's response must echo it so the
-  orchestrator's own bookkeeping and the record agree.
+  materialize `attempt_n` as a column (it is the reconciler's match key).
+  The orchestrator assigns `attempt_n` (it must exist before the
+  `driver.provision()` call carrying the D-O1 key); the create-record
+  request carries it and the response echoes it, so the orchestrator's
+  own bookkeeping and the record agree.
 - **D-TW6 — #1214's alert does not fire on superseded records.**
   Supersede is a normal, audited transition (`pending → superseded`),
-  not an anomaly. #1214's scope — a TTL-lapsed `pending` record with no
-  pairing and no box — explicitly excludes superseded records; the
-  supersede's own audit row (D-TW7) is the signal that the attempt was
-  deliberately replaced.
+  not an anomaly. #1214's trigger keys on TTL-lapsed `pending` records
+  for provisioned boxes; a superseded record is no longer `pending` and
+  never became a box — so the alert must not fire on it (this is this
+  doc's refinement, not #1214's original scope). The supersede's own
+  audit row (D-TW7) is the signal that the attempt was deliberately
+  replaced.
 - **D-TW7 — the supersede writes a plane-side audit row naming the
   cause** (`w0-no-machine`), so #1074's ledger ingestion and #1214's
   alert can distinguish a deliberate W0 supersede from a TTL expiry.
-  Precedent: #1108's consume-time audit on replay.
+  Precedent: D-O2's consume-time audit on replay (the #1108 contract).
 - **D-TW8 — no box-side change.** #1203's hook never sees a token in W0
   (no machine booted) and its never-re-present rule is unaffected. A
   superseded attempt's hook can never exist, so there is nothing for the
@@ -156,8 +173,9 @@ specified but unprovisionable.
 - The attestation-token wire contract (#1108, open), the provision-record
   store (#1089, open), the orchestrator build (#906, with #1107 claim
   binding + #1110 placement filed), the provision-record lifecycle +
-  sweeper (#1109, open — D-TW1/D-TW4 refine its supersede scope, noted by
-  pointer comment, not re-filed), the never-paired alert (#1214, open),
+  sweeper (#1109, open — D-TW1/D-TW4 refine its supersede scope to cover
+  pre-machine attempts; to be noted by a pointer comment on #1109 when
+  this ships, not re-filed), the never-paired alert (#1214, open),
   the box-side hook (#1203, shipped), the idempotency key (D-O1, #1107),
   the 24 h TTL pin (#1108/D-O2 — "a first pin, not a researched
   constant"; the create-settle bound in D-TW4 gets the same treatment),
