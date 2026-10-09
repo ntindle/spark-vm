@@ -161,6 +161,30 @@ def fakes(monkeypatch):
     m_turn.await_first_turn_engagement = await_first_turn_engagement
     m_turn.close_first_turn_watch = close_first_turn_watch
     m_turn.TurnStillbornError = TurnStillbornError
+    # Mirror the REAL terminal-classification API shape: the supervisor
+    # loop classifies through _turn_terminal (both wire shapes: the
+    # fixture's method-level turn/cancelled and the real serve host's
+    # turn/completed + params.terminal -- issue #994) and persists via
+    # the vocabulary-gated _terminal_label.
+    def _turn_terminal(note, turn_id):
+        if not isinstance(note, dict):
+            return None
+        params = note.get("params")
+        if not isinstance(params, dict) or params.get("turnId") != turn_id:
+            return None
+        method = note.get("method")
+        if method == "turn/completed":
+            terminal = params.get("terminal")
+            if isinstance(terminal, str) and terminal:
+                return terminal
+            return "completed"
+        if method == "turn/cancelled":
+            return "cancelled"
+        if method == "turn/interrupted":
+            return "interrupted"
+        return None
+
+    m_turn._turn_terminal = _turn_terminal
     m_turn._terminal_label = lambda t: (
         t if t in ("cancelled", "interrupted", "failed", "completed")
         else "unknown")
@@ -245,56 +269,55 @@ def _read_job(cli, slug):
 
 # -- spawn ---------------------------------------------------------------
 
-def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
+def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch,
+                                                 capsys):
+    # Issue #1129: spawn no longer drives session/turn itself -- a
+    # detached supervisor owns the serve host (the old path SIGTERMed the
+    # turn at host.close()). This pins the spawn-wiring contract: the
+    # supervisor is launched, its recorded session_uuid is re-read, and
+    # the spawn reports the supervised turn id as active.
     slug = "mspjob"
-    jd = os.path.join(cli.job_dir(slug), "")
-    captured = {}
+    launched = []
 
     def fake_prepare(slug, args, preamble, tmux_name):
-        captured["preamble"] = preamble
-        captured["tmux_name"] = tmux_name
         os.makedirs(os.path.join(cli.job_dir(slug), "tmp"), exist_ok=True)
-        # the real _spawn_prepare writes preamble + body into prompt.md
         with open(os.path.join(cli.job_dir(slug), "prompt.md"), "w") as f:
             f.write(preamble.format(jobdir=cli.job_dir(slug)) + "PROMPT-BODY")
         return ({"slug": slug}, os.path.join(cli.job_dir(slug), "work"),
                 cli.job_dir(slug))
 
+    def fake_launch(slug, prompt=None):
+        launched.append((slug, prompt))
+        # the supervisor's contract: it records session_uuid itself
+        job = cli.load_job(slug)
+        job["session_uuid"] = "sess-1"
+        cli.save_job(job, slug)
+        return {"session_id": "sess-1", "turn_id": "turn-1"}
+
     monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
+    monkeypatch.setattr(cli, "_msp_launch_supervisor", fake_launch)
     rc = cli._spawn_msp(slug, argparse.Namespace(slug=slug))
     assert rc == 0
-    assert captured["preamble"] is cli.PREAMBLE_MSP
-    assert "tmux" not in captured["preamble"]
-    assert captured["tmux_name"] is None
+    assert launched == [(slug, None)], "supervisor must be launched once"
     job = _read_job(cli, slug)
     assert job["transport"] == "msp"
     assert job["session_uuid"] == "sess-1"
-    # serve got the yolo approval mode and the workdir as workspace root
-    assert fakes.modules["msp_session"].started["approval_mode"] == "allowAll"
-    assert fakes.modules["msp_session"].started["workspace_root"].endswith(
-        os.path.join(slug, "work"))
-    # the first turn carries the full prompt (preamble + body)
-    sid, prompt = fakes.modules["msp_turn"].started_turns[0]
-    assert sid == "sess-1"
-    assert "over the Muse Session Protocol" in prompt
-    assert "PROMPT-BODY" in prompt
-    # serve child opened and closed around the spawn
-    host = FakeHost.instances[-1]
-    assert host.serve_argv == ["muse", "serve"]
-    assert host.client_name == "muse_job"
-    assert host.closed
+    out = json.loads(capsys.readouterr().out)
+    assert out["slug"] == slug
+    assert out["transport"] == "msp"
+    assert out["session_id"] == "sess-1"
+    assert out["turn_id"] == "turn-1"
+    assert out["state"] == "active"
+    # no serve host is opened by the spawn path itself anymore
+    assert not FakeHost.instances
 
 
-def test_spawn_msp_stillborn_dead_first_turn(cli, fakes, monkeypatch):
-    # Issue #994: a first turn that dies before engaging must fail the
-    # spawn loudly -- the job is marked blocked (never active), the
-    # stillborn record is persisted, and TurnStillbornError carries the
-    # remediation. This pins the spawn-wiring contract; the unit tests
-    # only cover the engagement gate in isolation.
-    slug = "mspstill"
-    fakes.engagement = {"status": "dead", "terminal": "cancelled",
-                        "journal": ["turn/started", "turn/completed"],
-                        "elapsed_s": 0.1}
+def test_spawn_reports_blocked_when_supervisor_marked_stillborn(
+        cli, fakes, monkeypatch, capsys):
+    # Product B4: spawn prints the re-read job state, never a hardcoded
+    # "active" -- the supervisor may already have marked a stillborn
+    # first turn blocked before spawn's final read.
+    slug = "mspblocked"
 
     def fake_prepare(slug, args, preamble, tmux_name):
         os.makedirs(os.path.join(cli.job_dir(slug), "tmp"), exist_ok=True)
@@ -303,34 +326,435 @@ def test_spawn_msp_stillborn_dead_first_turn(cli, fakes, monkeypatch):
         return ({"slug": slug}, os.path.join(cli.job_dir(slug), "work"),
                 cli.job_dir(slug))
 
+    def fake_launch(slug, prompt=None):
+        job = cli.load_job(slug)
+        job["session_uuid"] = "sess-1"
+        job["state"] = "blocked"
+        job["stillborn"] = {"turn_id": "turn-1", "terminal": "cancelled",
+                            "journal": ["turn/cancelled"]}
+        cli.save_job(job, slug)
+        return {"session_id": "sess-1", "turn_id": "turn-1"}
+
     monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
-    m_turn = fakes.modules["msp_turn"]
-    with pytest.raises(m_turn.TurnStillbornError) as excinfo:
+    monkeypatch.setattr(cli, "_msp_launch_supervisor", fake_launch)
+    rc = cli._spawn_msp(slug, argparse.Namespace(slug=slug))
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "blocked"
+
+
+def test_spawn_msp_supervisor_launch_failure_kills_supervisor(
+        cli, fakes, monkeypatch):
+    # A supervisor that dies during startup must not leave a half-spawn:
+    # spawn kills any supervisor residue and re-raises loudly.
+    slug = "mspfail"
+    killed = []
+
+    def fake_prepare(slug, args, preamble, tmux_name):
+        os.makedirs(os.path.join(cli.job_dir(slug), "tmp"), exist_ok=True)
+        with open(os.path.join(cli.job_dir(slug), "prompt.md"), "w") as f:
+            f.write("PROMPT-BODY")
+        return ({"slug": slug}, os.path.join(cli.job_dir(slug), "work"),
+                cli.job_dir(slug))
+
+    def fake_launch(slug, prompt=None):
+        raise RuntimeError("supervisor exited during startup")
+
+    monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
+    monkeypatch.setattr(cli, "_msp_launch_supervisor", fake_launch)
+    monkeypatch.setattr(cli, "_msp_kill_supervisor",
+                        lambda s: killed.append(s) or True)
+    with pytest.raises(RuntimeError, match="exited during startup"):
         cli._spawn_msp(slug, argparse.Namespace(slug=slug))
-    # the watch was subscribed before turn/start (the subscribe-gap fix)
-    assert m_turn.watch_calls, "begin_first_turn_watch was not called"
-    assert m_turn.awaited[0][1] == "turn-1"
+    assert killed == [slug]
+
+
+def test_msp_is_held_elsewhere(cli):
+    # -32021 is the single-attach refusal (session held by a supervisor).
+    class Coded(Exception):
+        def __init__(self, code):
+            self.code = code
+    assert cli._msp_is_held_elsewhere(Coded(-32021))
+    assert cli._msp_is_held_elsewhere(Exception("session already in use"))
+    assert not cli._msp_is_held_elsewhere(Exception("boom"))
+    assert not cli._msp_is_held_elsewhere(Coded(-32600))
+
+
+def test_enqueue_steer_writes_turn_tagged_entry(cli, fakes):
+    # Steer queue entries are tagged with the turn they were queued
+    # against so a supervisor never delivers a stale steer to a later
+    # turn (flock-guarded append).
+    slug = "mspq"
+    _make_job(cli, slug)
+    cli._msp_enqueue_steer(slug, "nudge the agent", turn_id="turn-9")
+    # The steer queue lives in the operator-owned supervisor state dir
+    # (issue #1145), not the agent-visible job dir.
+    path = cli._msp_supervisor_files(slug)["queue"]
+    with open(path) as f:
+        entry = json.loads(f.read().strip())
+    assert entry["message"] == "nudge the agent"
+    assert entry["turn_id"] == "turn-9"
+    assert entry["ts"] > 0
+
+
+def test_supervise_loop_breaks_on_terminal(cli, fakes, monkeypatch):
+    # The supervisor loop exits when the turn reaches a terminal state;
+    # it heartbeats and snapshots the view on the way out.
+    slug = "mspsup"
+    jd = _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/completed", "params": {"turnId": tid}}])
+    view = FakeView(state="working", active_turn_id="turn-1")
+    monkeypatch.setattr(cli, "_msp_poll", lambda host, s, job: view)
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    stop = {"flag": False}
+    cli._msp_supervise_loop(slug, {"slug": slug}, host, "sess-1", "turn-1",
+                            stop)
+    files = cli._msp_supervisor_files(slug)
+    assert os.path.exists(files["heartbeat"])
+    with open(files["view"]) as f:
+        snap = json.load(f)
+    assert snap["msp_state"] == "working"
+    assert snap["active_turn_id"] == "turn-1"
+
+
+def test_supervise_loop_marks_stillborn_on_instant_death(cli, fakes,
+                                                        monkeypatch):
+    # Issue #994's contract under the supervisor design: a first turn
+    # that dies before engaging must never sit "active" -- the
+    # supervisor marks the job blocked with the stillborn record the
+    # watchdog already pages on (same vocabulary as the old spawn path).
+    slug = "mspsup2"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/cancelled", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": False})
     job = _read_job(cli, slug)
     assert job["state"] == "blocked"
     assert job["stillborn"]["turn_id"] == "turn-1"
     assert job["stillborn"]["terminal"] == "cancelled"
-    assert job["stillborn"]["journal"] == ["turn/started", "turn/completed"]
-    # the error names the real retry steps: the blocked job dir is kept,
-    # so "retry with --tmux" alone would hit "job dir exists"
-    msg = str(excinfo.value)
-    assert "--tmux" in msg
-    assert "new slug" in msg
-    # #1026: the two retry paths are pinned with close-first ordering --
-    # new-slug (keeps the diagnosis, close archives the blocked record)
-    # and same-slug (close tears down worktree+branch, THEN remove dir).
-    close_cmd = f"muse-job close {slug}"
-    assert msg.count(close_cmd) == 2, f"expected two close paths in: {msg}"
-    same_slug_tail = msg.split("same slug")[1]
-    assert same_slug_tail.index(close_cmd) < same_slug_tail.index(
-        f"remove {cli.job_dir(slug)}"), "same-slug path must close before removing the dir"
-    assert "issue #994" in msg
-    assert excinfo.value.turn_id == "turn-1"
-    assert excinfo.value.terminal == "cancelled"
+    assert "turn/cancelled" in job["stillborn"]["journal"]
+
+
+def test_supervise_loop_leaves_instant_completion_alone(cli, fakes,
+                                                       monkeypatch):
+    # A turn that *completed* instantly is not stillborn: the done-claim
+    # path (SUMMARY.md) owns that outcome, so the supervisor must not
+    # mark it blocked.
+    slug = "mspsup3"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/completed", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": False})
+    job = _read_job(cli, slug)
+    assert job["state"] == "active"
+    assert "stillborn" not in job
+
+
+def test_supervise_loop_params_level_cancelled_is_stillborn(
+        cli, fakes, monkeypatch):
+    # QA B1: the real serve host emits turn/completed with
+    # params.terminal="cancelled" (issue #994's journal) -- the loop
+    # must classify through _turn_terminal, not raw method matching,
+    # or the #994 contract is void against the real server.
+    slug = "mspsup5"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/completed",
+          "params": {"turnId": tid, "terminal": "cancelled"}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": False})
+    job = _read_job(cli, slug)
+    assert job["state"] == "blocked"
+    assert job["stillborn"]["turn_id"] == "turn-1"
+    assert job["stillborn"]["terminal"] == "cancelled"
+
+
+def test_supervise_loop_no_mark_when_turn_was_active(cli, fakes, monkeypatch):
+    # Vacuity pin for the `not saw_active` gate: a turn that engaged
+    # and later died is a mid-turn death (recovery ladder territory),
+    # not a stillborn first turn.
+    slug = "mspsup6"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/cancelled", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id="turn-1"))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": False})
+    job = _read_job(cli, slug)
+    assert job["state"] == "active"
+    assert "stillborn" not in job
+
+
+def test_supervise_loop_no_mark_when_stopped(cli, fakes, monkeypatch):
+    # Vacuity pin for the `not stop["flag"]` gate: a supervisor torn
+    # down by kill/close must not mark stillborn+blocked on its way out
+    # (kill's own "killed" save would be followed by a stillborn record
+    # the watchdog pages on forever).
+    slug = "mspsup7"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/cancelled", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": True})
+    job = _read_job(cli, slug)
+    assert job["state"] == "active"
+    assert "stillborn" not in job
+
+
+def test_supervise_loop_no_event_death_marks_unknown(cli, fakes, monkeypatch):
+    # The polls>=3 no-event break: a turn that vanishes with no
+    # terminal event and never engages is still a stillborn, labeled
+    # "unknown" via the shared _terminal_label gate.
+    slug = "mspsup8"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = lambda host, sid, tid, timeout=None: []
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    cli._msp_supervise_loop(slug, _read_job(cli, slug), host, "sess-1",
+                            "turn-1", {"flag": False})
+    job = _read_job(cli, slug)
+    assert job["state"] == "blocked"
+    assert job["stillborn"]["terminal"] == "unknown"
+
+
+def test_supervise_loop_exits_on_sustained_poll_failure(
+        cli, fakes, monkeypatch):
+    # QA B2: the anti-livelock guard counts poll failures -- a dead host
+    # (watch returns [], poll raises every time) must exit the loop
+    # after 5 consecutive failures instead of heartbeating forever. The
+    # loop runs in a daemon thread with a bounded join: on a B2
+    # regression the test FAILS loudly instead of hanging the suite
+    # (the pre-QA-round shape spun forever here).
+    import threading
+    slug = "mspsup9"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = lambda host, sid, tid, timeout=None: []
+    polls = []
+    def bad_poll(host, s, job):
+        polls.append(1)
+        raise RuntimeError("transport dead")
+    monkeypatch.setattr(cli, "_msp_poll", bad_poll)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    t = threading.Thread(
+        target=cli._msp_supervise_loop,
+        args=(slug, _read_job(cli, slug), host, "sess-1", "turn-1",
+              {"flag": False}),
+        daemon=True)
+    t.start()
+    t.join(timeout=15)
+    assert not t.is_alive(), \
+        "supervisor loop did not exit on sustained poll failure"
+    assert len(polls) == 5, f"expected 5 poll attempts, got {len(polls)}"
+    # the dead host is released, not heartbeated forever; the never-
+    # engaged turn is stillborn (no terminal seen -> unknown)
+    job = _read_job(cli, slug)
+    assert job["state"] == "blocked"
+    assert job["stillborn"]["terminal"] == "unknown"
+
+
+def test_supervise_loop_stillborn_save_rereads_job(cli, fakes, monkeypatch):
+    # QA B4 (first re-read): the stillborn save re-reads the job before
+    # writing -- a kill landing mid-turn must not be clobbered back to
+    # "active" by the loop's fork-time dict. Pin: a stale marker on the
+    # passed-in dict must NOT reach the saved record.
+    slug = "mspsup10"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/cancelled", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id=None))
+    host = FakeHost(["muse", "serve"], client_name="muse_job")
+    saved = []
+    real_save = cli.save_job
+    def spy(job, s):
+        saved.append(dict(job))
+        return real_save(job, s)
+    monkeypatch.setattr(cli, "save_job", spy)
+    stale = _read_job(cli, slug)
+    stale["_qa_stale_marker"] = True  # fork-time dict; disk lacks it
+    cli._msp_supervise_loop(slug, stale, host, "sess-1", "turn-1",
+                            {"flag": False})
+    stillborn_saves = [j for j in saved if "stillborn" in j]
+    assert stillborn_saves, "expected the stillborn save to fire"
+    fresh = stillborn_saves[-1]
+    assert "_qa_stale_marker" not in fresh, \
+        "stillborn save wrote the stale fork-time dict, not a re-read"
+    assert fresh["state"] == "blocked"
+    assert fresh["stillborn"]["turn_id"] == "turn-1"
+
+
+def test_supervise_cmd_session_save_rereads_job(cli, fakes, monkeypatch):
+    # QA B4 (second re-read): _msp_supervise_cmd re-reads the job before
+    # the session save -- an operator kill landing during session/turn
+    # startup must not be clobbered back to "active". Pin: the kill's
+    # marker, written to disk mid-startup, must reach the saved record.
+    slug = "mspsup11"
+    _make_job(cli, slug)
+    m_turn = fakes.modules["msp_turn"]
+    m_turn.watch_turn_events = (
+        lambda host, sid, tid, timeout=None:
+        [{"method": "turn/completed", "params": {"turnId": tid}}])
+    monkeypatch.setattr(cli, "_msp_poll",
+                        lambda host, s, job: FakeView(state="working",
+                                                     active_turn_id="turn-1"))
+    # trusted_job_paths is orthogonal to the re-read; stub it so this
+    # test stays about the save, not git-worktree plumbing.
+    monkeypatch.setattr(cli, "trusted_job_paths",
+                        lambda s, j: (os.path.join(cli.job_dir(s), "work"),
+                                      "qa-repo", "job/" + s))
+    orig_start = m_turn.start_turn
+    def start_turn_with_kill(host, sid, prompt, *, command_id=None, **kw):
+        # The operator's kill lands during session/turn startup: the
+        # on-disk job is now newer than the cmd's fork-time dict.
+        job = cli.load_job(slug)
+        job["state"] = "killed"
+        job["_qa_kill_marker"] = True
+        cli.save_job(job, slug)
+        return orig_start(host, sid, prompt, command_id=command_id, **kw)
+    monkeypatch.setattr(m_turn, "start_turn", start_turn_with_kill)
+    saved = []
+    real_save = cli.save_job
+    def spy(job, s):
+        saved.append(dict(job))
+        return real_save(job, s)
+    monkeypatch.setattr(cli, "save_job", spy)
+    cli._msp_supervise_cmd(argparse.Namespace(slug=slug))
+    session_saves = [j for j in saved if "session_started_at" in j]
+    assert session_saves, "expected the supervisor session save to fire"
+    fresh = session_saves[-1]
+    assert fresh["state"] == "killed", \
+        "session save clobbered the operator kill back to active"
+    assert fresh.get("_qa_kill_marker") is True, \
+        "session save wrote the stale fork-time dict, not a re-read"
+
+
+def test_msp_turn_terminal_classification_real_module(cli, fakes,
+                                                      monkeypatch):
+    # QA B3: the suite fakes msp_turn, so the B1 regression test only
+    # exercised a hand-written mirror of _turn_terminal. Pin the REAL
+    # module (same SourceFileLoader mechanism as the CLI) so
+    # classifier drift breaks CI, not production.
+    monkeypatch.delitem(sys.modules, "msp_turn", raising=False)
+    monkeypatch.delitem(sys.modules, "msp_session", raising=False)
+    monkeypatch.delitem(sys.modules, "msp_host", raising=False)
+    bin_dir = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "bin"))
+    monkeypatch.syspath_prepend(bin_dir)
+    real = load_script("msp_turn_real_qa_b3",
+                       os.path.join(bin_dir, "msp_turn.py"))
+    t = real._turn_terminal
+    # params-level shape (real serve host -- issue #994's journal)
+    assert t({"method": "turn/completed",
+              "params": {"turnId": "x", "terminal": "cancelled"}},
+             "x") == "cancelled"
+    assert t({"method": "turn/completed",
+              "params": {"turnId": "x", "terminal": "failed"}},
+             "x") == "failed"
+    assert t({"method": "turn/completed",
+              "params": {"turnId": "x", "terminal": "weird-new-shape"}},
+             "x") == "weird-new-shape"
+    assert t({"method": "turn/completed", "params": {"turnId": "x"}},
+             "x") == "completed"
+    assert t({"method": "turn/completed",
+              "params": {"turnId": "x", "terminal": ""}},
+             "x") == "completed"
+    # method-level shape (fixture)
+    assert t({"method": "turn/cancelled", "params": {"turnId": "x"}},
+             "x") == "cancelled"
+    assert t({"method": "turn/interrupted", "params": {"turnId": "x"}},
+             "x") == "interrupted"
+    # turnId filtering + malformed shapes classify None
+    assert t({"method": "turn/cancelled", "params": {"turnId": "y"}},
+             "x") is None
+    assert t({"method": "turn/cancelled"}, "x") is None
+    assert t("not-a-dict", "x") is None
+    assert t({"method": "turn/completed", "params": "nope"}, "x") is None
+    assert t({"method": "turn/evaporated", "params": {"turnId": "x"}},
+             "x") is None
+    # _terminal_label vocabulary gate
+    lab = real._terminal_label
+    for ok in ("cancelled", "interrupted", "failed", "completed"):
+        assert lab(ok) == ok
+    assert lab("bogus") == "unknown"
+    assert lab(None) == "unknown"
+    assert lab("") == "unknown"
+
+
+def test_spawn_msp_stillborn_contract_superseded_note(cli, fakes, monkeypatch):
+    # Issue #1129 supersedes the #994 spawn-time engagement gate: the
+    # supervisor -- not the spawn CLI -- owns turn/start, so there is no
+    # begin_first_turn_watch / await_first_turn_engagement /
+    # TurnStillbornError on the spawn path anymore. A turn that dies
+    # instantly is observed by the supervisor loop (instant-death break),
+    # and the engagement gate stays unit-tested in test_msp_turn.py.
+    # This test pins that the old spawn-time stillborn machinery is NOT
+    # invoked: spawn must not touch the watch API at all.
+    slug = "mspstill"
+    m_turn = fakes.modules["msp_turn"]
+
+    def fake_prepare(slug, args, preamble, tmux_name):
+        os.makedirs(os.path.join(cli.job_dir(slug), "tmp"), exist_ok=True)
+        with open(os.path.join(cli.job_dir(slug), "prompt.md"), "w") as f:
+            f.write("PROMPT-BODY")
+        return ({"slug": slug}, os.path.join(cli.job_dir(slug), "work"),
+                cli.job_dir(slug))
+
+    def fake_launch(slug, prompt=None):
+        job = cli.load_job(slug)
+        job["session_uuid"] = "sess-1"
+        cli.save_job(job, slug)
+        return {"session_id": "sess-1", "turn_id": "turn-1"}
+
+    monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
+    monkeypatch.setattr(cli, "_msp_launch_supervisor", fake_launch)
+    rc = cli._spawn_msp(slug, argparse.Namespace(slug=slug))
+    assert rc == 0
+    assert not m_turn.watch_calls, "spawn must not use the first-turn watch"
+    assert not m_turn.awaited, "spawn must not await engagement"
+    job = _read_job(cli, slug)
+    assert "stillborn" not in job
 
 
 def test_spawn_msp_sets_no_auto_update(cli, fakes, monkeypatch):
@@ -376,15 +800,268 @@ def test_steer_active_turn(cli, fakes):
     assert fakes.modules["msp_turn"].started_turns == []
 
 
-def test_steer_no_active_turn_starts_turn(cli, fakes):
+def test_steer_no_active_turn_launches_supervisor(cli, fakes, monkeypatch,
+                                                  capsys):
+    # Issue #1129: with no supervisor and no live turn, steer launches a
+    # FRESH supervised turn carrying the message as its prompt -- starting
+    # the turn on the ephemeral steer host would reintroduce the old
+    # spawn bug (the turn dies at host.close()).
     slug = "mspsteer2"
     _make_job(cli, slug)
     fakes.view = FakeView(state="idle", active_turn_id=None)
+    launched = []
+    monkeypatch.setattr(cli, "_msp_launch_supervisor",
+                        lambda s, prompt=None: launched.append((s, prompt))
+                        or {"turn_id": "turn-9"})
     job = _read_job(cli, slug)
-    cli._msp_steer(job, argparse.Namespace(slug=slug, message="go",
-                                           allow_secrets=False))
+    rc = cli._msp_steer(job, argparse.Namespace(slug=slug, message="go",
+                                               allow_secrets=False))
+    assert rc == 0
     assert fakes.modules["msp_turn"].steered == []
-    assert fakes.modules["msp_turn"].started_turns == [("sess-1", "go")]
+    assert fakes.modules["msp_turn"].started_turns == [], \
+        "no turn may start on the ephemeral steer host"
+    assert launched == [(slug, "go")]
+    out = json.loads(capsys.readouterr().out)
+    assert out["started_turn"] == "turn-9"
+
+
+def test_steer_queues_with_turn_id_when_supervisor_alive(
+        cli, fakes, monkeypatch, capsys):
+    # Product B3: the queued output names the turn the steer was queued
+    # against, so the operator can confirm the target.
+    slug = "mspsteer3"
+    _make_job(cli, slug)
+    enqueued = []
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    monkeypatch.setattr(cli, "_msp_read_snapshot",
+                        lambda s: {"active_turn_id": "turn-7", "t": 0})
+    monkeypatch.setattr(cli, "_msp_enqueue_steer",
+                        lambda s, m, turn_id=None: enqueued.append(
+                            (s, m, turn_id)))
+    job = _read_job(cli, slug)
+    rc = cli._msp_steer(job, argparse.Namespace(slug=slug, message="go",
+                                               allow_secrets=False))
+    assert rc == 0
+    assert enqueued == [(slug, "go", "turn-7")]
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"slug": slug, "steer": "queued", "turn_id": "turn-7"}
+
+
+def test_supervisor_forget_only_unlinks_own_pidfile(cli, fakes):
+    # Security B1: a supervisor exiting without ever writing its pidfile
+    # (failed startup, hand-invoked duplicate) must not delete the live
+    # supervisor's pidfile on its way out.
+    slug = "mspforget"
+    _make_job(cli, slug)
+    pidfile = cli._msp_supervisor_files(slug)["pid"]
+    with open(pidfile, "w") as f:
+        f.write("99999")
+    cli._msp_supervisor_forget(slug, pid=os.getpid())
+    assert os.path.exists(pidfile), "another supervisor's pidfile unlinked!"
+    cli._msp_supervisor_forget(slug, pid=99999)
+    assert not os.path.exists(pidfile)
+
+
+def test_supervisor_files_live_in_metadata_dir_not_job_dir(cli, fakes):
+    # Issue #1145: supervisor state must never live in the agent-visible
+    # job dir -- _msp_supervisor_dir is the single source of truth, and
+    # a regression here silently re-exposes the pidfile/started-record/
+    # heartbeat attack surface the B1/B2/B3 tests don't pin.
+    slug = "msploc"
+    _make_job(cli, slug)
+    md = os.path.abspath(cli.METADATA_DIR)
+    jd = os.path.abspath(cli.job_dir(slug))
+    for name, path in cli._msp_supervisor_files(slug).items():
+        ap = os.path.abspath(path)
+        assert ap.startswith(md + os.sep), f"{name} outside METADATA_DIR"
+        assert not ap.startswith(jd + os.sep), \
+            f"{name} in agent-visible job dir"
+
+
+def test_supervisor_alive_rejects_non_supervisor_pid(cli, fakes):
+    # Security B2: a pidfile naming a live non-supervisor pid (stale pid
+    # reuse or planted) must not read as alive -- and must not authorize
+    # a signal. The pidfile is dropped as bogus.
+    slug = "mspalive"
+    _make_job(cli, slug)
+    pidfile = cli._msp_supervisor_files(slug)["pid"]
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))  # live, but not a supervisor
+    assert not cli._msp_supervisor_alive(slug)
+    assert not os.path.exists(pidfile), "bogus pidfile not dropped"
+
+
+def test_launch_join_instead_of_fork(cli, fakes, monkeypatch):
+    # Security B3: a concurrent launcher that loses the race joins the
+    # winner's turn instead of forking a duplicate supervisor; a prompt
+    # it carries is delivered as a steer so it isn't silently dropped.
+    # (Aliveness is a separate guard, pinned by the tests below; here
+    # the winner is alive.)
+    slug = "mspjoin"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    with open(files["started"], "w") as f:
+        json.dump({"session_id": "sess-9", "turn_id": "turn-9"}, f)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    forks = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: forks.append(a) or None)
+    enqueued = []
+    monkeypatch.setattr(cli, "_msp_enqueue_steer",
+                        lambda s, m, turn_id=None: enqueued.append(
+                            (s, m, turn_id)))
+    started = cli._msp_launch_supervisor(slug, prompt="late steer")
+    assert started == {"session_id": "sess-9", "turn_id": "turn-9"}
+    assert forks == [], "duplicate supervisor forked!"
+    assert enqueued == [(slug, "late steer", "turn-9")]
+
+
+def test_launch_join_requires_alive_supervisor(cli, fakes, monkeypatch):
+    # Security B2 (phantom join): a fresh started record from a crashed
+    # winner authorizes nothing -- the loser must fork instead of
+    # joining a turn that doesn't exist.
+    slug = "mspjoin2"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    with open(files["started"], "w") as f:
+        json.dump({"session_id": "sess-9", "turn_id": "turn-9"}, f)
+    with open(files["pid"], "w") as f:
+        f.write("999999999")  # dead pid: no supervisor alive
+    forks = []
+    def fake_popen(*a, **k):
+        forks.append(a)
+        with open(files["started"], "w") as f:
+            json.dump({"session_id": "sess-new", "turn_id": "turn-new"}, f)
+        return types.SimpleNamespace(terminate=lambda: None, poll=lambda: 0)
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    enqueued = []
+    monkeypatch.setattr(cli, "_msp_enqueue_steer",
+                        lambda s, m, turn_id=None: enqueued.append(
+                            (s, m, turn_id)))
+    started = cli._msp_launch_supervisor(slug, prompt="late steer")
+    assert len(forks) == 1, "phantom join: loser must fork, not join"
+    assert started == {"session_id": "sess-new", "turn_id": "turn-new"}
+    assert enqueued == [], "carried prompt must not enqueue on fork"
+
+
+def test_launch_join_rejects_malformed_started_record(cli, fakes,
+                                                      monkeypatch):
+    # Security B2 (cross-turn steer leak): the job dir is agent-writable
+    # (issue #11), so a started record without a turn_id must never
+    # authorize a join -- the carried prompt would enqueue with
+    # turn_id=None and the drain would deliver it to a LATER turn.
+    # (The winner is alive here: this is the actual attack shape -- an
+    # agent plants a malformed record while a real supervisor runs.)
+    slug = "mspjoin3"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    with open(files["started"], "w") as f:
+        json.dump({"session_id": "sess-9"}, f)  # turn_id missing
+    with open(files["pid"], "w") as f:
+        f.write(str(os.getpid()))
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    forks = []
+    def fake_popen(*a, **k):
+        forks.append(a)
+        with open(files["started"], "w") as f:
+            json.dump({"session_id": "sess-new", "turn_id": "turn-new"}, f)
+        return types.SimpleNamespace(terminate=lambda: None, poll=lambda: 0)
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    enqueued = []
+    monkeypatch.setattr(cli, "_msp_enqueue_steer",
+                        lambda s, m, turn_id=None: enqueued.append(
+                            (s, m, turn_id)))
+    started = cli._msp_launch_supervisor(slug, prompt="late steer")
+    assert len(forks) == 1, "malformed record must not authorize a join"
+    assert started == {"session_id": "sess-new", "turn_id": "turn-new"}
+    assert enqueued == [], "no None-tagged steer may enqueue"
+
+
+def test_read_started_rejects_bad_records(cli, fakes):
+    # _msp_read_started fails closed on every malformed shape: missing
+    # session_id, missing turn_id, non-dict JSON, unparseable JSON,
+    # stale mtime. Absent file was already covered (returns None).
+    slug = "mspjoin4"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    cases = [
+        {"session_id": "s"},                        # no turn_id
+        {"turn_id": "t"},                           # no session_id
+        {"session_id": "", "turn_id": "t"},         # empty session_id
+        {"session_id": "s", "turn_id": ""},         # empty turn_id
+        ["not", "a", "dict"],                       # non-dict JSON
+        "just a string",
+    ]
+    for i, record in enumerate(cases):
+        with open(files["started"], "w") as f:
+            json.dump(record, f)
+        assert cli._msp_read_started(slug, 10) is None, f"case {i}: {record}"
+    with open(files["started"], "w") as f:
+        f.write("{not json")
+    assert cli._msp_read_started(slug, 10) is None
+    # stale mtime: valid shape, 0s window
+    with open(files["started"], "w") as f:
+        json.dump({"session_id": "s", "turn_id": "t"}, f)
+    old = time.time() - 100
+    os.utime(files["started"], (old, old))
+    assert cli._msp_read_started(slug, 10) is None
+    # and the happy path still reads
+    with open(files["started"], "w") as f:
+        json.dump({"session_id": "s", "turn_id": "t"}, f)
+    assert cli._msp_read_started(slug, 10) == {"session_id": "s",
+                                              "turn_id": "t"}
+
+
+def test_supervisor_forget_keeps_replaced_pidfile(cli, fakes):
+    # Security B1: forget(pid) unlinks only while the pidfile still
+    # names that pid -- a pidfile replaced (concurrent supervisor)
+    # between observation and forget must survive.
+    slug = "mspforget"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    dead = 999999999
+    with open(files["pid"], "w") as f:
+        f.write(str(dead))
+    cli._msp_supervisor_forget(slug, dead)
+    assert not os.path.exists(files["pid"])
+    # replaced between observation and forget: survives
+    with open(files["pid"], "w") as f:
+        f.write(str(dead))
+    with open(files["pid"], "w") as f:
+        f.write(str(os.getpid()))
+    cli._msp_supervisor_forget(slug, dead)
+    with open(files["pid"]) as f:
+        assert f.read().strip() == str(os.getpid())
+
+
+def test_kill_supervisor_stale_path_passes_observed_pid(cli, fakes,
+                                                        monkeypatch):
+    # Security B1 (3599 path): the stale-forget re-reads the pidfile and
+    # passes the observed pid instead of blindly unlinking; garbage
+    # falls back to unconditional (it can name nothing alive). Pin the
+    # argument, not just the outcome -- the old unconditional shape
+    # passes pid=None.
+    slug = "mspkill3"
+    _make_job(cli, slug)
+    files = cli._msp_supervisor_files(slug)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: False)
+    calls = []
+    real_forget = cli._msp_supervisor_forget
+    def spy(s, pid=None):
+        calls.append(pid)
+        return real_forget(s, pid)
+    monkeypatch.setattr(cli, "_msp_supervisor_forget", spy)
+    with open(files["pid"], "w") as f:
+        f.write("999999999")
+    assert cli._msp_kill_supervisor(slug) is False
+    assert calls == [999999999], f"expected forget(pid=observed), got {calls}"
+    assert not os.path.exists(files["pid"])
+    with open(files["pid"], "w") as f:
+        f.write("garbage")
+    assert cli._msp_kill_supervisor(slug) is False
+    assert calls == [999999999, None], \
+        f"garbage must fall back to unconditional, got {calls}"
+    assert not os.path.exists(files["pid"])
 
 
 # -- status / log ----------------------------------------------------------
@@ -486,6 +1163,9 @@ def test_msp_call_pre_resumes_session(cli, fakes, monkeypatch):
 
 
 def test_resume_fallback_fresh_on_gone_session(cli, fakes, monkeypatch):
+    # Issue #1129: a gone session relaunches under a supervisor -- the
+    # re-anchor turn must be held by the supervisor, never by the
+    # ephemeral resume host (which would die at close, the old bug).
     slug = "mspresume2"
     _make_job(cli, slug)
 
@@ -498,14 +1178,28 @@ def test_resume_fallback_fresh_on_gone_session(cli, fakes, monkeypatch):
                         lambda s, j: (work, "/repos/x", f"job/{s}"))
     with open(os.path.join(cli.job_dir(slug), "PROGRESS.md"), "w") as f:
         f.write("did the thing\n")
+    launched = []
+
+    def fake_launch(slug, prompt=None):
+        launched.append((slug, prompt))
+        # the supervisor's contract: it records the new session itself
+        job = cli.load_job(slug)
+        job["session_uuid"] = "sess-2"
+        cli.save_job(job, slug)
+        return {"session_id": "sess-2", "turn_id": "turn-2"}
+
+    monkeypatch.setattr(cli, "_msp_launch_supervisor", fake_launch)
     rc = cli.cmd_resume(argparse.Namespace(slug=slug))
     assert rc == 0
-    # fresh session started, re-anchor turn carries the PROGRESS tail
-    sid, prompt = fakes.modules["msp_turn"].started_turns[0]
-    assert "did the thing" in prompt
-    assert "Do NOT repeat" in prompt
+    # the re-anchor prompt carries the PROGRESS tail, delivered via the
+    # supervisor -- nothing starts on the ephemeral host
+    assert len(launched) == 1
+    assert launched[0][0] == slug
+    assert "did the thing" in launched[0][1]
+    assert "Do NOT repeat" in launched[0][1]
+    assert fakes.modules["msp_turn"].started_turns == []
     job = _read_job(cli, slug)
-    assert job["session_uuid"] == "sess-1"
+    assert job["session_uuid"] == "sess-2"
 
 
 # -- watch -----------------------------------------------------------------
