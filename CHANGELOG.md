@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The bdrive daemon now hardens its socket directory for the planned jail bind-mount (issue #169): the socket's directory — not the socket file — is the mount unit so daemon restarts never go stale, the directory is created traverse-only for exactly the client group and the daemon refuses to start if it holds anything but the socket file, and every accepted connection is checked against the exact configured client uids (never a uid range, which would admit the jail's root). A new systemd unit keeps the directory across restarts. (#1223)
+
 - Approval records are now stored with owner-only file permissions instead of world-readable ones: the approval history (which credentials were approved or denied for which hosts and paths) is the same class of data the audit log already keeps private, but the records were written readable by any local user on the box. No secret values were ever in these records — this closes the inconsistency, not an active leak. (#1211) (#1212)
 
 - The Fly driver design-ahead no longer presents the wake-reprovisioning flag as the reason SSH host-key fingerprints stay stable across machine wakes: the flag only means the driver never re-checks the fingerprint after a wake, so the doc now names machine-config environment persistence as the sole stability guarantee and marks the build-time verification as non-optional — if the environment does not survive cold stops, the pinned fingerprint would silently desync. (#1210)
