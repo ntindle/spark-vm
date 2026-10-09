@@ -73,7 +73,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Phone-home socket acknowledgements now advance the command queue's delivery watermark on the plane: when a box acks a command over its live socket, the plane records it exactly as if the ack had arrived over the HTTPS fetch path — acks from a stale or future session generation are rejected, malformed acks close the session, and both paths share one idempotent consume so they can never drift. The wire-protocol and socket-lifecycle docs pin the shipped behavior. (#1001) (#TBD)
+- Phone-home socket acknowledgements now advance the command queue's delivery watermark on the plane: when a box acks a command over its live socket, the plane records it exactly as if the ack had arrived over the HTTPS fetch path — acks from a stale or future session generation are rejected, malformed acks close the session, and both paths share one idempotent consume so they can never drift. The wire-protocol and socket-lifecycle docs pin the shipped behavior. (#1001) (#1188)
 
 - The proxy deploy script now tells a `--no-restart` operator exactly what the skipped step owns: daemon-reload, restarts of the swap proxy, inference proxy, approvals daemon, and push worker, and enabling the summons-sweep timer. Until those run, the still-running proxy lacks the new filing group (approval filings demote to a logged refusal, fail-closed, instead of filing), and the push-handoff configuration stays inert. (#1182)
 
