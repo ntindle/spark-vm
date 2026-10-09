@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- Closing a job whose directory exists but is unreadable (operator permission-mangled) no longer crashes — the job record still closes cleanly. (#1172) (#TBD)
+- Closing a job whose directory exists but is unreadable (operator permission-mangled) no longer crashes — the job record still closes cleanly. (#1172) (#1186)
 
 - Release-notes body cap: the oversized-notes failure diagnostic now gives a copy-paste recovery that marks prereleases as prerelease and recreates the release tag at the release commit (it previously assumed the tag already existed, which is only true for `--publish-only`); the trim report counts dangling subsection headers separately from dropped lines; the trim note renders as its own paragraph; and the no-curated-section path is pinned to die loudly rather than emit a trim note pointing at a changelog section that doesn't exist. (#1181)
 
