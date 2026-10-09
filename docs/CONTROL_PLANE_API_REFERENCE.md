@@ -24,20 +24,26 @@ source of truth), `worker.py` wins and this doc owes a fix-up turn.
 
 ## Auth classes
 
-There are exactly two credential classes in separate namespaces, plus
+There are three credential classes in separate namespaces, plus
 the unauthenticated pairing flow. A box Bearer <redacted> presented at an
 owner endpoint never matches; an owner key presented at a box endpoint
-never matches.
+never matches; an agent session presented at any write endpoint never
+matches (agent sessions are read-only by policy).
 
 | Class | Format | Where it rides | TTL |
 |---|---|---|---|
 | Owner API key | `svm_` + 43 urlsafe chars | `Authorization: Bearer <key>` | None — long-lived; rotate by mint + revoke |
 | Box bearer token | opaque | `Authorization: Bearer <token>` | 24 h (`token_expires_at`); the previous token stays valid 15 min on heartbeats and `/rotate` after a rotation |
+| Agent session (#1225) | `svma_` + 43 urlsafe chars | `Authorization: Bearer <session>` | 15 min (`expires_at`); accepted ONLY on `GET /v1/boxes` and `GET /v1/boxes/{id}` |
 | None (pairing flow) | pairing code (8 chars, shown once) + ed25519 proof-of-possession | request response + approve body; signature in redeem body | Pairing code 15 min (lazy expiry on read); at most 50 pairings pending (429 beyond) |
 
 The plane stores only SHA-256 hashes of all three secret classes
-(`owner_keys.key_hash`, `boxes.token_hash`, `pairings.code_hash`). A box's
+(`owner_keys.key_hash`, `boxes.token_hash`, `pairings.code_hash`,
+`agent_sessions.token_hash`). A box's
 ed25519 keypair never leaves the box (public key only on the plane).
+An AgentID id_token is never a plane credential — presenting one as a
+bearer token 401s everywhere; it must be exchanged at
+`POST /v1/agent/exchange` first.
 
 ## Endpoints
 
@@ -71,7 +77,7 @@ proof-of-possession over the server-issued challenge.
 | `GET /v1/pairing/{id}/status` | none | Box polls; `{challenge}` only when approved |
 | `POST /v1/pairing/{id}/redeem` | none | `{signature(b64)}` over the challenge → `{box_id, token, token_expires_at}`; the first 24 h Bearer <redacted> issued |
 
-### Fleet read endpoints (`/v1/boxes*`) — auth: owner key
+### Fleet read endpoints (`/v1/boxes*`) — auth: owner key or agent session (#1225)
 
 (Grounded in ntindle's #843 ship comment, 2026-10-02 — these endpoints
 live in the ops checkout's `worker.py`, not this repo; the shipped
@@ -81,6 +87,26 @@ dashboard's calls below are the repo-side witness.)
 |---|---|
 | `GET /v1/boxes` | Fleet list → `{ok, boxes}`. The dashboard's fleet view calls it on sign-in and every 30 s auto-refresh (`r.data.boxes`). Unauthenticated → 401. |
 | `GET /v1/boxes/{id}` | Box detail → `{ok, box}` (hostname, uptime, services, key fingerprint, token expiry, last-status). Unauthenticated → 401. |
+
+### Agent endpoints (`/v1/agent/*`) — #1225, plane half of #1199
+
+AgentID (OIDC) agent sign-in for the owner's agent: the dashboard's agent
+session exchanges its id_token here for a short-lived read-only plane
+session. The id_token is re-verified server-side (ES256 over the pinned
+JWKS `https://auth.agentid.com/v0/jwks.json`, kid-matched, 6 h cache with
+one immediate refresh on unknown kid) and the claims are enforced
+(`iss`, `aud` == the owner-configured client_id, `actor_type == "agent"`,
+`exp`/`iat`).
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `POST /v1/agent/exchange` | none | `{id_token}` → `{ok, session_token, token_type: "agent", expires_at, read_only: true, actor: {sub, email, owner_email}}`. `400` on missing/invalid body; `401` on any verification failure (bad signature, unknown kid — one JWKS refresh, floored at 1 per 5 min — wrong iss/aud, non-agent actor_type, missing/invalid sub, expired); `503` while no client_id is configured or the JWKS fetch fails — fail-closed. The session is 15 min, `svma_`-prefixed, SHA-256 at rest, accepted only on the fleet read endpoints above. |
+| `PUT /v1/agent/config` | owner | `{"client_id": "..."}` — sets the relying-party client_id the exchange checks `aud` against. Upsert. |
+| `GET /v1/agent/config` | owner | → `{ok, client_id}` (`null` while unconfigured). |
+
+Owner steps before agents can sign in: register the app in the AgentID
+console as a PUBLIC client (same step as #1199), then
+`PUT /v1/agent/config`.
 
 ### Box endpoints (`/v1/boxes/*`) — auth: box Bearer <redacted> unless noted
 
