@@ -29,7 +29,10 @@ install dest fails direction 1 and renaming a README writer name fails
 both directions; a new undocumented cred-* installed from proxy/ AND
 from confirm/ each fail direction 2 by name; an install line with a
 trailing comment fails the unparsed-line guard instead of slipping
-through; moving a comment-only SPARKVM_* mention below the split anchor
+through; a commented-out install line no longer resurrects via a
+cross-line slurp (direction 1 fails); a cred-* writer installed under a
+renamed dest from a non-proxy/ source dir fails the rename assertion;
+moving a comment-only SPARKVM_* mention below the split anchor
 does not fail the seam scan.
 """
 
@@ -78,25 +81,39 @@ def _deploy_bin_installs():
     the writer pins below.
     """
     src = DEPLOY.read_text()
+    # Join backslash continuations so a wrapped install parses as one
+    # logical line. Every pattern below is line-local ([^\S\n], never a
+    # bare \s): a \s token matches \n, which let a non-/usr/local/bin
+    # install line slurp forward across newlines and resurrect a
+    # commented-out install — a silent bypass of direction 1 (QA).
+    src = re.sub(r"\\\n", " ", src)
     installs = {}
     strict = re.compile(
-        r"^\s*sudo\s+install(?:\s+\S+)*?\s+(\S+)\s+(/usr/local/bin/\S+)\s*$",
-        re.MULTILINE,
+        r"^[^\S\n]*sudo[^\S\n]+install(?:[^\S\n]+\S+)*?[^\S\n]+"
+        r"(\S+)[^\S\n]+(/usr/local/bin/\S+)[^\S\n]*$"
     )
-    for m in strict.finditer(src):
+    for line in src.splitlines():
+        m = strict.match(line)
+        if not m:
+            continue
         source, dest = m.group(1), m.group(2)
         name = dest.rsplit("/", 1)[1]
-        if source.startswith("proxy/"):
-            assert source.rsplit("/", 1)[1] == name, (
-                "deploy.sh renames %s to %s — the writer pin assumes "
-                "source == dest" % (source, dest)
-            )
-        installs[name] = m.group(0).strip()
+        # The rename assertion holds for every source dir, not just
+        # proxy/: a cred-* writer installed under a renamed dest from
+        # confirm/ or credlib/ is exactly the installed-but-undocumented
+        # drift direction 2 must catch, and a silent rename must fail
+        # loudly instead of slipping through (QA).
+        assert source.rsplit("/", 1)[1] == name, (
+            "deploy.sh renames %s to %s — the writer pin assumes "
+            "source == dest" % (source, dest)
+        )
+        installs[name] = line.strip()
     # Fail loudly on any /usr/local/bin install line the strict pattern
-    # did not consume (trailing comment, line continuation, reformat): a
-    # silently skipped line would pass the pins below vacuously.
+    # did not consume (trailing comment, reformat): a silently skipped
+    # line would pass the pins below vacuously. Line-local like the
+    # strict pattern above.
     loose = re.findall(
-        r"^\s*sudo\s+install\b.*?\s(/usr/local/bin/\S+)",
+        r"^[^\S\n]*sudo[^\S\n]+install\b.*?[^\S\n](/usr/local/bin/\S+)",
         src,
         re.MULTILINE,
     )
