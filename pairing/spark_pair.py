@@ -67,6 +67,7 @@ import re
 import signal
 import socket
 import ssl
+import stat
 import struct
 import sys
 import time
@@ -1388,7 +1389,11 @@ def _ingest_stamp_consumed(approvals, aid, record):
     path = os.path.join(approvals, "consumed", aid + ".json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        # Issue #1211: 0600, not 0644 — the record carries credential
+        # names, hosts, methods, and path prefixes (the data class the
+        # proxy keeps 0600 per finding 198), and the box-side consumed/
+        # dir is not access-restricted. O_EXCL: always newly created.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
     try:
@@ -1503,13 +1508,50 @@ def _ingest_stalled_record(approvals, aid, key):
     return None
 
 
+def _repair_approval_file_modes(approvals):
+    """Issue #1211, box side: tighten pre-fix 0644 approval records to
+    0600. Records written before the #1211 deploy keep their 0644 mode —
+    the O_EXCL stampers never touch an existing file and the
+    answered->consumed renames preserve the birth mode. Walk answered/ +
+    consumed/ and chmod 0600 every *.json, best-effort: a mode we cannot
+    tighten is loud, never fatal.
+    """
+    for sub in ("answered", "consumed"):
+        d = os.path.join(approvals, sub)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(".json"):
+                continue
+            p = os.path.join(d, fn)
+            try:
+                if stat.S_IMODE(os.stat(p).st_mode) != 0o600:
+                    os.chmod(p, 0o600)
+            except OSError as e:
+                _ingest_say(f"WARNING: cannot tighten {p}: {e}")
+
+
 def _ingest_write_answered(approvals, aid, rec):
     """Atomic tmp+replace write of the answered/ record (the human-history
     half of the stamp; the proxy reads consumed/)."""
     answered_path = os.path.join(approvals, "answered", aid + ".json")
     os.makedirs(os.path.dirname(answered_path), exist_ok=True)
     tmp = answered_path + ".tmp"
-    with open(tmp, "w") as f:
+    # Issue #1211: the answered record carries credential names, hosts,
+    # methods, and path prefixes — the data class the proxy keeps 0600
+    # (finding 198) — and answered/ has no directory-level restriction.
+    # Unlink a stale .tmp first (best-effort: a crashed run can leave
+    # one behind, and plain O_CREAT would reuse it without changing its
+    # mode); O_EXCL then creates 0600 from birth and refuses a planted
+    # symlink instead of following it.
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(rec, f, indent=2)
     os.replace(tmp, answered_path)
 
@@ -1967,6 +2009,9 @@ def cmd_ingest(args):
         _ingest_fail(d, f"approvals dir {approvals} is missing — is "
                         "confirmd installed on this box?", redact=(token,))
         return 1
+    # Issue #1211: tighten any pre-fix 0644 approval records to 0600
+    # (records the O_EXCL stampers never touch).
+    _repair_approval_file_modes(approvals)
     # Serialize overlapping cron ticks: two ingests racing the same queue
     # would double-stamp (the idempotency log covers crashes, not
     # concurrency — keep it serial).

@@ -11,6 +11,7 @@ Nothing touches /home/swapd; all approvals state lives in a tmp dir.
 """
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -114,6 +115,20 @@ class ExpiredTerminalStampTests(unittest.TestCase):
                                                         "proxy"))
             rec = self._consumed(AID)
         self.assertEqual(rec["expired_by"], "proxy")
+
+    def test_stamp_consumed_record_mode_0600(self):
+        """#1211: the stamped consumed/<aid>.json is 0600, not 0644. It
+        carries credential names, hosts, methods, and path prefixes —
+        the data class _open_audit_log() keeps 0600 (finding 198) —
+        and consumed/ has no directory-level restriction."""
+        item = _expired_pending()
+        p = self._plant_pending(item)
+        with self._ctx()[0]:
+            self.assertTrue(sa._stamp_expired_consumed(AID, item, p,
+                                                       "proxy"))
+        mode = stat.S_IMODE(os.stat(
+            self.approvals / "consumed" / (AID + ".json")).st_mode)
+        self.assertEqual(mode, 0o600)
 
     # --- filing-scan reap integration ---
 

@@ -364,7 +364,13 @@ def _stamp_expired_consumed(aid, it, pending_path, expired_by):
     path = os.path.join(str(APPROVALS_DIR), "consumed", aid + ".json")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        # Issue #1211: 0600, not 0644. The record carries credential
+        # names, hosts, methods, and path prefixes — the exact data
+        # class _open_audit_log() keeps 0600 (finding 198) — and unlike
+        # pending/ (#1167's 2770 dir), consumed/ has no directory-level
+        # restriction. O_EXCL means the file is always newly created,
+        # so the create mode is sufficient (umask cannot weaken 0600).
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
     try:

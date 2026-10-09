@@ -390,6 +390,50 @@ class ConfirmdTests(unittest.TestCase):
         it.pop("_csrf_nonces", None)
         self.assertNotIn("_csrf_nonces", it)
 
+    def test_1211_answered_record_mode_0600(self):
+        """#1211: the answered/consumed record is 0600, not 0644. It
+        carries credential names, hosts, methods, and path prefixes —
+        the data class the proxy keeps 0600 (finding 198) — and neither
+        answered/ nor consumed/ has a directory-level restriction."""
+        aid = self._fresh_aid()
+        nonce = cd._mint_csrf_nonce(aid)
+        it = {"id": aid, "summary": "s", "kind": "grant-request",
+              "credential": "github", "host": "github.com",
+              "method": "POST", "path_prefix": "/gists",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00"}
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps(it))
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda code: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=AssertionError("no error")):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        consumed = self.approvals / "consumed" / (aid + ".json")
+        self.assertTrue(consumed.exists())
+        self.assertEqual(stat.S_IMODE(consumed.stat().st_mode), 0o600)
+
+    def test_1211_repair_tightens_legacy_0644_records(self):
+        """#1211: the startup repair chmods pre-fix 0644 answered/ +
+        consumed/ records to 0600, best-effort (unreadable files are
+        loud, never fatal)."""
+        planted = []
+        for sub in ("answered", "consumed"):
+            p = self.approvals / sub / "legacy-aid.json"
+            p.write_text(json.dumps({"id": "legacy-aid"}))
+            os.chmod(p, 0o644)
+            planted.append(p)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._repair_approval_file_modes()
+        for p in planted:
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+
     # --- #77: low-risk hardening leftovers -------------------------------
 
     def test_77_answered_dir_recreates(self):

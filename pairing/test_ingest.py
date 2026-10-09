@@ -9,6 +9,7 @@ cursor contract, tenant/aid binding, and fail-closed behavior.
 import io
 import json
 import os
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -191,6 +192,48 @@ def test_ingest_deny_stamps_consumed_and_advances_cursor(ctx, monkeypatch,
                                            AID + ".json"))
     assert plane.acked == [11]
     assert _cursor(ctx) == 11
+
+
+def test_ingest_consumed_record_mode_0600(ctx, monkeypatch):
+    """#1211: the box-side consumed/<aid>.json is 0600, not 0644. It
+    carries credential names, hosts, methods, and path prefixes — the
+    data class the proxy keeps 0600 (finding 198) — and the box-side
+    consumed/ dir is not access-restricted."""
+    _file_pending(ctx)
+    plane = FakePlane(commands=[_cmd(11)], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 0
+    p = os.path.join(ctx.approvals, "consumed", AID + ".json")
+    assert os.path.exists(p)
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+def test_ingest_write_answered_mode_0600(ctx):
+    """#1211: _ingest_write_answered pins answered/<aid>.json 0600, not
+    0644 — same data class as the consumed record (finding 198)."""
+    rec = {"id": AID, "credential": "openai", "host": "api.openai.com",
+           "method": "POST", "path_prefix": "/v1/chat",
+           "decision": "approve", "decision_origin": "plane"}
+    spark_pair._ingest_write_answered(ctx.approvals, AID, rec)
+    p = os.path.join(ctx.approvals, "answered", AID + ".json")
+    assert os.path.exists(p)
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    with open(p) as f:
+        assert json.load(f)["decision"] == "approve"
+
+
+def test_ingest_repair_tightens_legacy_0644_records(ctx):
+    """#1211, box side: the ingest-startup repair chmods pre-fix 0644
+    answered/ + consumed/ records to 0600, best-effort."""
+    planted = []
+    for sub in ("answered", "consumed"):
+        p = os.path.join(ctx.approvals, sub, "legacy-aid.json")
+        with open(p, "w") as f:
+            json.dump({"id": "legacy-aid"}, f)
+        os.chmod(p, 0o644)
+        planted.append(p)
+    spark_pair._repair_approval_file_modes(ctx.approvals)
+    for p in planted:
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
 def test_ingest_deny_pops_planted_grant_ttl(ctx, monkeypatch):

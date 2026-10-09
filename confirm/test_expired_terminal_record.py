@@ -11,6 +11,7 @@ Tailscale calls are mocked; no network or /home/swapd is touched.
 import json
 import os
 import pwd
+import stat
 import sys
 import tempfile
 import threading
@@ -128,6 +129,20 @@ class ExpiredTerminalRecordTests(unittest.TestCase):
         self.assertNotIn("_csrf_nonces", rec)
         self.assertNotIn("answered_at", rec)
         self.assertNotIn("answered_by", rec)
+
+    def test_stamp_consumed_record_mode_0600(self):
+        """#1211: the stamped consumed/<aid>.json is 0600, not 0644. It
+        carries credential names, hosts, methods, and path prefixes —
+        the data class the proxy keeps 0600 (finding 198) — and
+        consumed/ has no directory-level restriction."""
+        item = _pending_item()
+        p = self._plant_pending(item)
+        with self._ctx():
+            self.assertTrue(cd._stamp_expired_consumed(AID, item, p,
+                                                       "confirmd"))
+        mode = stat.S_IMODE(os.stat(
+            self.approvals / "consumed" / (AID + ".json")).st_mode)
+        self.assertEqual(mode, 0o600)
 
     def test_stamp_bad_aid_refused(self):
         """An aid that fails ID_RE raises ValueError and touches nothing
