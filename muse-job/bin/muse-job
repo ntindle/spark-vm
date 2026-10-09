@@ -640,6 +640,8 @@ def _phase_concurrency_bars_resume(slug):
     polls a live phase-* MSP session (see _phase_msp_occupancy_note), and
     this function additionally bars while any *other* phase-* slug holds
     a fresh stamp. Own stamp never bars (same as the tmux self check).
+    First-pass window: a phase-* MSP job is invisible here between spawn
+    and its first watch poll -- same accepted race class as #1131.
     """
     if not slug.startswith("phase-"):
         return False
@@ -727,6 +729,9 @@ def _phase_msp_occupancy_note(slug, live):
         else:
             occ.pop(slug, None)
         os.makedirs(os.path.dirname(_PHASE_MSP_OCCUPANCY_PATH), exist_ok=True)
+        # Last-writer-wins on concurrent stamps; bounded, not eliminated:
+        # the loser re-stamps on its next pass and the TTL is 45 minutes,
+        # so the worst case is one pass of fail-open (the design default).
         tmp = _write_json_tmp(_PHASE_MSP_OCCUPANCY_PATH, occ)
         try:
             os.replace(tmp, _PHASE_MSP_OCCUPANCY_PATH)
@@ -4148,6 +4153,11 @@ def _watch_msp_job(slug, job, events, now):
         # pass's own poll -- the #804 bar consults it because an MSP
         # session has no tmux session to probe. Terminal states clear the
         # stamp; unknown future states leave it (the TTL bounds staleness).
+        # First-pass window: a phase-* MSP job is invisible to the bar
+        # between spawn and its first watch poll (up to one 15-min pass).
+        # Accepted: the bar is advisory cost protection (fail-open by
+        # design), and stamping at spawn would wedge the bar fail-closed
+        # for a full TTL on a failed spawn -- the worse failure.
         if state in _MSP_PHASE_LIVE_STATES:
             _phase_msp_occupancy_note(slug, True)
         elif state in _MSP_PHASE_DEAD_STATES:
@@ -4175,6 +4185,10 @@ def _watch_msp_job(slug, job, events, now):
         # detail string is reused verbatim (watchers grep for it) with a
         # suffix naming the MSP path, mirroring the #1131 re-check shape.
         # Manual `muse-job resume` stays the deliberate bypass by design.
+        # No #1131-style re-check inside the ladder: the bar check and the
+        # recover call happen in the same pass with no shell-out between
+        # them, so the residual sibling-start window is the same accepted
+        # class as #1131's (and the stamps are 15-min stale by design).
         if _phase_concurrency_bars_resume(slug):
             events.append({"job": slug, "signal": "deferred",
                            "detail": _PHASE_DEFERRED_DETAIL +

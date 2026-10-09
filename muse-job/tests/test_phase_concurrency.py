@@ -42,6 +42,21 @@ def cli(monkeypatch, tmp_path):
     return load_script("muse_job_cli_phase804", CLI_PATH)
 
 
+@pytest.fixture(autouse=True)
+def _preserve_no_auto_update():
+    # _msp_host_for sets MUSE_NO_AUTO_UPDATE=1 process-wide (issue #212
+    # policy); the close-on-missing-dir tests exercise the real
+    # _msp_close_runtime path, so keep it from leaking into sibling test
+    # modules -- test_tui_update_policy asserts the variable's absence
+    # (issue #1153 review).
+    had = os.environ.get("MUSE_NO_AUTO_UPDATE")
+    yield
+    if had is None:
+        os.environ.pop("MUSE_NO_AUTO_UPDATE", None)
+    else:
+        os.environ["MUSE_NO_AUTO_UPDATE"] = had
+
+
 def _make_job(cli, slug, **fields):
     jd = cli.job_dir(slug)
     os.makedirs(jd, exist_ok=True)
@@ -356,6 +371,45 @@ def test_msp_occupancy_stale_fails_open(cli, monkeypatch, tmp_path):
     assert cli._phase_concurrency_bars_resume("phase-dead") is False
 
 
+def _write_occupancy_raw(cli, mapping):
+    path = cli._PHASE_MSP_OCCUPANCY_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(mapping, f)
+
+
+def test_msp_occupancy_ttl_boundary_is_inclusive(cli, monkeypatch):
+    # The `<=` edge: a stamp exactly TTL old still bars. Freeze the
+    # module's clock so the write/read gap cannot push it over the edge.
+    _make_job(cli, "phase-dead")
+    now = time.time()
+    _write_occupancy_raw(cli, {"phase-live": now - cli._PHASE_MSP_OCCUPANCY_TTL_S})
+
+    class _FrozenTime:
+        def time(self):
+            return now
+
+    monkeypatch.setattr(cli, "time", _FrozenTime())
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-dead") is True
+
+
+def test_msp_occupancy_future_stamp_fails_open(cli, monkeypatch):
+    # Clock-skew guard: a future timestamp is rejected, not trusted.
+    _make_job(cli, "phase-dead")
+    _write_occupancy_raw(cli, {"phase-live": time.time() + 60})
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-dead") is False
+
+
+@pytest.mark.parametrize("bad_ts", [True, False, "12345", None, [1]])
+def test_msp_occupancy_bad_timestamp_shape_fails_open(cli, monkeypatch, bad_ts):
+    _make_job(cli, "phase-dead")
+    _write_occupancy_raw(cli, {"phase-live": bad_ts})
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    assert cli._phase_concurrency_bars_resume("phase-dead") is False
+
+
 def test_msp_occupancy_self_not_counted(cli, monkeypatch):
     _make_job(cli, "phase-only")
     cli._phase_msp_occupancy_note("phase-only", True)
@@ -384,6 +438,17 @@ def test_msp_occupancy_note_and_clear(cli):
     cli._phase_msp_occupancy_note("phase-a", True)
     assert "phase-a" in cli._phase_msp_occupancy_live()
     cli._phase_msp_occupancy_note("phase-a", False)
+    assert cli._phase_msp_occupancy_live() == {}
+
+
+def test_msp_occupancy_note_oserror_is_best_effort(cli, tmp_path):
+    # If the manager-side dir cannot be created (here: a regular file
+    # squats at ~/.local/share/muse-job), the stamp fails silently and
+    # the reader fails open -- the watch pass never breaks on this.
+    squat = tmp_path / ".local" / "share" / "muse-job"
+    squat.parent.mkdir(parents=True, exist_ok=True)
+    squat.write_text("squat")
+    cli._phase_msp_occupancy_note("phase-live", True)  # must not raise
     assert cli._phase_msp_occupancy_live() == {}
 
 
@@ -449,19 +514,27 @@ def test_watch_msp_stalled_recovers_when_unbarred(cli, monkeypatch, capsys):
     assert len(recovery.calls) == 1
 
 
-def test_watch_msp_stamps_occupancy_on_live_poll(cli, monkeypatch, capsys):
+@pytest.mark.parametrize("state", ["working", "idle", "stalled",
+                                   "turn_cancelled", "blocked_approval",
+                                   "blocked_input"])
+def test_watch_msp_stamps_occupancy_on_live_poll(cli, monkeypatch, capsys,
+                                                 state):
     # Direction 1 of #1132: the tmux-side bar consults these stamps, so a
     # tmux phase job cannot auto-resume next to a live MSP phase job.
+    # Every live state in _MSP_PHASE_LIVE_STATES must stamp.
     _make_msp_job(cli, "phase-live")
-    _msp_watch_fakes(cli, monkeypatch, "working")
+    _msp_watch_fakes(cli, monkeypatch, state)
     _watch_events(cli, capsys)
     assert "phase-live" in cli._phase_msp_occupancy_live()
 
 
-def test_watch_msp_clears_occupancy_on_session_closed(cli, monkeypatch, capsys):
+@pytest.mark.parametrize("state", ["turn_failed", "session_closed"])
+def test_watch_msp_clears_occupancy_on_dead_poll(cli, monkeypatch, capsys,
+                                                 state):
+    # Both _MSP_PHASE_DEAD_STATES clear the stamp: the session is gone.
     _make_msp_job(cli, "phase-gone")
     cli._phase_msp_occupancy_note("phase-gone", True)
-    _msp_watch_fakes(cli, monkeypatch, "session_closed")
+    _msp_watch_fakes(cli, monkeypatch, state)
     events = _watch_events(cli, capsys)
     assert "phase-gone" not in cli._phase_msp_occupancy_live()
     by_job = {e["job"]: e for e in events}
