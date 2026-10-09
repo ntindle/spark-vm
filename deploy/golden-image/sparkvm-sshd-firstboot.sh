@@ -24,19 +24,27 @@
 # Test seams (documented, test-only): SPARKVM_DATA_ROOT overrides /data;
 # SPARKVM_SSH_ETC_DIR overrides /etc/ssh (tests must not touch the real
 # one); SPARKVM_FIRSTBOOT_NO_EXEC=1 skips the final exec (prints what it
-# would exec instead); SPARKVM_SSH_RUN_DIR overrides the sshd privilege-
-# separation dir (/run/sshd — not writable outside root, so the contract
-# tests point it at a tmp dir on CI's non-root runner). A seam set in a
-# root run logs a loud WARNING — production must never set these (see the
-# trust-boundary note in data-prep.sh).
+# would exec instead); SPARKVM_SSH_RUN_DIR overrides the dir this script
+# creates for sshd's privilege separation (/run/sshd — not writable
+# outside root, so the contract tests point it at a tmp dir on CI's
+# non-root runner). The canonical seam list is _SEAMS (defined just
+# below; the WARNING loop iterates it, so the header doc and the loop
+# cannot drift). A seam set in a root run logs a loud WARNING —
+# production must never set these (see the trust-boundary note in
+# data-prep.sh).
 set -euo pipefail
+
+# Canonical list of test seams (see header). The WARNING loop below is
+# the single consumer: a seam listed here gets a loud warning in a root
+# run; a seam consumed below but not listed here cannot warn.
+_SEAMS=(SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_FIRSTBOOT_NO_EXEC SPARKVM_SSH_RUN_DIR)
 
 # Loud warning when a test seam is active in a root run (see data-prep.sh
 # for the rationale: the contract tests run as root where they are
 # verified, so the seams stay functional and any production use is
 # visible instead of silently ignored).
 if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    for _seam in SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_FIRSTBOOT_NO_EXEC SPARKVM_SSH_RUN_DIR; do
+    for _seam in "${_SEAMS[@]}"; do
         if [ -n "${!_seam:-}" ]; then
             echo "sparkvm-sshd-firstboot: WARNING: test seam $_seam is set in a root run" >&2
         fi

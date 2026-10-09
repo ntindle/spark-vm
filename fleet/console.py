@@ -343,8 +343,11 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true",
                         help="print one screen and exit (the default; "
                              "accepted for symmetry with --watch)")
-    parser.add_argument("--watch", type=float, default=0, metavar="SECONDS",
-                        help="refresh every SECONDS instead of --once")
+    parser.add_argument("--watch", type=float, default=None,
+                        metavar="SECONDS",
+                        help="refresh every SECONDS instead of --once "
+                             "(an explicit 0 or non-positive value is a "
+                             "usage error)")
     args = parser.parse_args(argv)
     if not api_host_is_loopback(args.api):
         print("error: --api must be a loopback host (the fleet read API "
@@ -355,7 +358,10 @@ def main(argv=None):
         print("error: --timeout must be a positive finite number of "
               "seconds", file=sys.stderr)
         return 64
-    if args.watch:
+    if args.watch is not None:
+        # Note: default=None means the flag was omitted (one-shot mode);
+        # an explicit --watch 0 must NOT fall through to run_once — a zero
+        # refresh interval is a usage error, not a silent one-shot.
         try:
             return run_watch(args)
         except ConsoleError as exc:

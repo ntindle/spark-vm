@@ -3,9 +3,10 @@
 The console consumes the S1 read API, so these tests run the real
 API handlers against a fixture store and the real ``fleet events
 watch`` CLI, and pin: (a) the alert board renders pending rows exactly
-like the CLI (conformance); (b) the wave board names the reserved-shape
-unavailability verbatim; (c) the loopback guard, exit codes, and
-fetch-failure honesty.
+like the CLI (conformance); (b) the wave board states the reserved-shape
+unavailability in plain operator language first, with the API's named
+reason labeled on the line below; (c) the loopback guard, exit codes,
+and fetch-failure honesty.
 
 Run from the repo root:  python3 -m pytest fleet/test_console.py -q
 """
@@ -439,6 +440,24 @@ def test_watch_negative_interval_is_usage_error():
     assert "--watch needs a positive finite interval" in err
     assert "Traceback" not in err
     assert out == ""
+
+
+def test_watch_zero_is_usage_error_not_silent_once():
+    # --watch 0 must fail loudly (exit 64): silently degrading to the
+    # one-shot path is a fail-dangerous misread of the operator's intent.
+    code, out, err = main_capture_full("--watch", "0")
+    assert code == 64
+    assert "--watch needs a positive finite interval" in err
+    assert "Traceback" not in err
+    assert out == ""
+
+
+def test_watch_omitted_runs_once_not_watch():
+    # The default (no --watch flag) must be the one-shot path: against an
+    # unreachable API it exits 2 quickly, while watch mode would loop.
+    code, out = main_capture("--api", "http://127.0.0.1:1", "--timeout", "2")
+    assert code == 2
+    assert "ALERTS: cannot reach the fleet API" in out
 
 
 def test_watch_header_proves_liveness():

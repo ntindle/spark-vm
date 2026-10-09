@@ -240,6 +240,35 @@ def test_firstboot_run_dir_seam_default_pinned():
     assert re.search(r'^mkdir -p "\$SSH_RUN_DIR"$', src, re.MULTILINE)
 
 
+def test_firstboot_seam_warning_covers_all_documented_seams():
+    """Structural pin: the root-run WARNING loop iterates the single
+    canonical _SEAMS list, not its own copy — a seam consumed below but
+    missing from the loop would warn nowhere, and a list that drifted
+    from the header doc would lie to operators."""
+    src = open(FIRSTBOOT).read()
+    m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
+    assert m, "the canonical _SEAMS list must exist in the script"
+    assert m.group(1).split() == [
+        "SPARKVM_DATA_ROOT", "SPARKVM_SSH_ETC_DIR",
+        "SPARKVM_FIRSTBOOT_NO_EXEC", "SPARKVM_SSH_RUN_DIR",
+    ]
+    assert re.search(r'^\s*for _seam in "\$\{_SEAMS\[@\]\}"; do$', src,
+                     re.MULTILINE), \
+        "the WARNING loop must iterate _SEAMS, not a duplicated list"
+    # Every name in the canonical list must also be documented in the
+    # header's test-seam block (a seam nobody documented is undiscoverable).
+    header = src.split("set -euo pipefail")[0]
+    seams = m.group(1).split()
+    for name in seams:
+        assert re.search(r'^#.*\b%s\b' % name, header, re.MULTILINE), name
+    # Reverse: every seam the header documents must be in the canonical
+    # list — a header-documented seam forgotten in _SEAMS would never
+    # warn in a root run, silently.
+    header_seams = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', header))
+    assert header_seams, "the header's seam block must name the seams"
+    assert header_seams <= set(seams), header_seams - set(seams)
+
+
 def test_firstboot_creates_sshd_run_dir(box):
     """The firstboot script creates sshd's privilege-separation dir (the
     /run is a fresh-tmpfs line). Via the SPARKVM_SSH_RUN_DIR seam: CI's

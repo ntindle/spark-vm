@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The fleet console's `--watch 0` is now a loud usage error instead of silently running once: an explicit zero used to fall through the falsy argument check into the one-shot path, contradicting the documented exit-64 behavior for a non-positive interval. The golden-image first-boot script's test-seam docs now name the single canonical seam list the root-run warning loop iterates (so the doc and the loop can't drift), pinned by a new test that fails the suite if they ever do. (#795) (#1230)
+
 - The bdrive daemon now hardens its socket directory for the planned jail bind-mount (issue #169): the socket's directory — not the socket file — is the mount unit so daemon restarts never go stale, the directory is created traverse-only for exactly the client group and the daemon refuses to start if it holds anything but the socket file, and every accepted connection is checked against the exact configured client uids (never a uid range, which would admit the jail's root). A new systemd unit keeps the directory across restarts. (#1223)
 
 - Approval records are now stored with owner-only file permissions instead of world-readable ones: the approval history (which credentials were approved or denied for which hosts and paths) is the same class of data the audit log already keeps private, but the records were written readable by any local user on the box. No secret values were ever in these records — this closes the inconsistency, not an active leak. (#1211) (#1212)
