@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- A provisioning-lane convergence pin for the hosted-provisioning vision: with the golden-image producer, the first-boot identity-seeding hook, and the attestation crash-window design all landed in the last week, the docs now record what the #851 lane has gained versus what remains — the Fly driver build's inputs and build order, the decided-but-unbuilt host-key attestation and provision-record store, and the open spend-cap and metering slices — so the queue works off one current picture. (#TBD)
+- A provisioning-lane convergence pin for the hosted-provisioning vision: with the golden-image producer, the first-boot identity-seeding hook, and the attestation crash-window design all landed in the last week, the docs now record what the #851 lane has gained versus what remains — the Fly driver build's inputs and build order, the decided-but-unbuilt host-key attestation and provision-record store, and the open spend-cap and metering slices — so the queue works off one current picture. (#1217)
 
 - Contributors get a one-command local merge gate: the contributor guide's merge-gate section used to list seven locally-replicable checks as separate commands to run by hand, so a green local test run could still go red on CI from a skipped check. A new gate script now runs them in one shot — the shard-plan check, changelog ritual lint, the changed-paths evaluation (docs-only diffs skip the test suite, like CI, and uncommitted changes count as code), docs index coverage, shellcheck on changed shell scripts, and then the full test suite — stopping at the first failure, with a cheap-checks-only mode for a fast pass. (#1216)
 
