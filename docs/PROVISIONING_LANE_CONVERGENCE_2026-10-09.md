@@ -19,11 +19,11 @@ this lane.
   decomposition, F-P1–F-P3, D-P1–D-P4). This doc consumes it and does
   not re-file its gaps; it adds what moved on 2026-10-07 through
   2026-10-09.
-- `docs/FLY_DRIVER_DESIGN_AHEAD.md` (2026-10-09, `0fedc76`, #1206) — the
+- `docs/FLY_DRIVER_DESIGN_AHEAD.md` (landed as `0fedc76` via #1206; internal pin `48a8030`) — the
   #905 build's input contract (F-D1–F-D12, D-D1–D-D8). This doc consumes
   it; the build still owns it.
 - `docs/ORCHESTRATOR_ATTESTED_PAIRING_GAP_ANALYSIS.md` (#906/#907, O
-  series, D-O1–D-O4) and
+  series, D-O1–D-O5) and
   `docs/ATTESTATION_TOKEN_CRASH_WINDOW_GAP_ANALYSIS.md` (#907/#1209,
   D-TW series) — the orchestrator + attestation legs. This doc consumes
   them; it re-analyzes nothing.
@@ -126,7 +126,7 @@ The 2026-10-03 analysis filed #905–#908 and stopped. Since then:
 - **A never-paired alert is filed (#1214, p3).** Security's suggestion
   from the #1203 review: the plane should alert on
   provisioned-but-never-paired boxes.
-- **The orchestrator leg is decomposed (O series, #1106 recorder).**
+- **The orchestrator leg is decomposed (O series, #1107–#1110).**
   #1107 (claim-binding idempotency), #1108 (attestation wire contract),
   #1109 (provision-record lifecycle + supersede + sweeper),
   #1110 (orchestrator placement + record creation via the plane
@@ -162,13 +162,19 @@ The 2026-10-03 analysis filed #905–#908 and stopped. Since then:
 
 ## 4. The lane's build order (dependency order for the queue)
 
-D-P4's 2026-10-06 order, refreshed with the 2026-10-07–09 gains:
+D-P4's 2026-10-06 order, refreshed with the 2026-10-07–09 gains.
+D-P4's parallelism stands: the numbers below mark dependency groups,
+not a serial start-after order — a build may start once it has
+consumed the decided design contracts, and the build slices of the
+design issues proceed in parallel.
 
 1. **#1089** (provision-record schema contract) — before #906's
    record-store wiring and #1074's provision-record ingestion, since
    both consume the schema.
-2. **#1108** (attestation wire contract) — the box half is shipped
-   (#1203); the plane validate-and-consume half is #907's build scope.
+2. **#1108** (attestation wire contract) — the contract is decided and
+   consumed by #905's build; the box presentation half is shipped
+   (#1203); the plane validate-and-consume half is #907's build scope
+   (see item 7).
 3. **#1205** (/data contract) — the #905 provision path must know where
    provision-time writes land.
 4. **#1204** (host-key attestation) — #905's `ssh_info()` build scope;
@@ -178,19 +184,25 @@ D-P4's 2026-10-06 order, refreshed with the 2026-10-07–09 gains:
    #905's first slice (H4 live-API clearance is granted). The F-D12
    handoff branch ((a) machine-exec disabled at handoff vs (b)
    operator-signed §6 invariant-5 revision) is named by the driver's PR.
+   #905 may start now: it consumes the decided contracts (#1089 D1
+   schema, #1108 wire contract, #1204 env-persistence design, #1205
+   /data contract) and carries #1204's build-time env-persistence
+   verification.
 6. **#906** (claim→provision orchestrator) — consumes the claim stream,
    calls `provision()` with the fail-closed claim key (D-O1), the
-   #1089 record store, the #1108 token, and the #1075 cap-check hook.
+   #1089 record store, the #1108 token, and the #1075 cap-check hook
+   (interface decided; built in parallel — #906's first cut ships
+   behind the H4 policy caps until the hook lands).
 7. **#907** (plane-attested pairing) — validate + atomically consume the
-   token, approve with the typed reason.
+   token (the #1108 plane half), approve with the typed reason.
 8. **#1074 → #1075 → #1076** (spend-cap), **#1077** ([POLICY]);
-   **#1047 → emission worker → #1048** (metering).
+   **#1047 → F-P2/#1088 → #1048** (metering).
 
 ## 5. Dated amendments (supersession notes)
 
 - **D-D8 (2026-10-09, recorded in FLY_DRIVER_DESIGN_AHEAD):** the
-  2026-10-03 G51.4 pin ("tracked under the driver issue, not a separate
-  issue") is superseded for the golden-image leg only — the hook is
+  2026-10-03 G51.4 pin — "G51.4 rides #905 (the driver issue); relates
+  to #134 (open)" — is superseded for the golden-image leg only — the hook is
   image-side (`deploy/golden-image/`), re-tracked to #1203 (closed).
   The exec-install `/data` leg stays deferred with the F1b alternative
   per D-D2.
@@ -224,4 +236,5 @@ D-P4's 2026-10-06 order, refreshed with the 2026-10-07–09 gains:
 - This doc files no new issues and changes no code. Everything the
   2026-10-07–09 verification pass surfaced was already filed; #851
   stays open (provisioning vision tracker) alongside #905–#908,
-  #1074–#1077, #1047/#1048, #1089, #1107–#1110, #1204, #1205, and #1214.
+  #1074–#1077, #1047/#1048, #1089, #1107–#1110, #1204, #1205, #1209
+  (answered, open), and #1214.
