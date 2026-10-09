@@ -3145,13 +3145,22 @@ def _close(slug):
     if os.path.isdir(jd):
         tmpd = os.path.join(jd, "tmp")
         shutil.rmtree(tmpd, ignore_errors=True)
-        for fn in os.listdir(jd):
+        try:
+            entries = os.listdir(jd)
+        except OSError:
+            # Issue #1172: the job dir exists but is unreadable (operator
+            # permission-mangled). The #1153 isdir guard doesn't cover it --
+            # listdir raises PermissionError while stat succeeds. Treat like
+            # the missing-dir case: nothing to archive, the record below
+            # still closes.
+            entries = []
+        for fn in entries:
             if fn.endswith(".log") and not fn.endswith(".gz"):
                 p = os.path.join(jd, fn)
                 run("gzip", "-f", p, check=False)
     # else (issue #1153): the job dir was removed by hand -- nothing to
     # archive. The record below still closes; close must not crash on a
-    # missing dir.
+    # missing dir (nor, per #1172, on an unreadable one).
     # Issue #1132: the serve session is deleted above for MSP jobs, so a
     # closed phase-* job is no longer an occupant -- clear the stamp.
     _phase_msp_occupancy_note(slug, False)

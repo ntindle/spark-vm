@@ -602,3 +602,38 @@ def test_close_missing_job_dir_msp_closes_record(cli, tmp_path, capsys):
     rc = cli.cmd_close(argparse.Namespace(slug="gone-msp"))
     assert rc == 0
     assert cli.load_job("gone-msp")["state"] == "closed"
+
+
+# --- issue #1172: close must not crash on an unreadable job dir --------------
+
+def _fail_listdir_on(cli, monkeypatch, path):
+    # listdir raises PermissionError while isdir succeeds (stat needs no
+    # read permission). chmod 0 would be the real trigger, but the suite
+    # can run as root (permission checks bypassed), so force the failure
+    # path deterministically instead.
+    real_listdir = os.listdir
+    target = os.path.abspath(path)
+
+    def _boom(p):
+        if os.path.abspath(p) == target:
+            raise PermissionError(13, "Permission denied", p)
+        return real_listdir(p)
+
+    monkeypatch.setattr(os, "listdir", _boom)
+
+
+def test_close_unreadable_job_dir_closes_record(cli, tmp_path, monkeypatch):
+    jd = _make_closable_job(cli, "noread-job", tmp_path)
+    _fail_listdir_on(cli, monkeypatch, jd)
+    rc = cli.cmd_close(argparse.Namespace(slug="noread-job"))
+    assert rc == 0
+    assert cli.load_job("noread-job")["state"] == "closed"
+
+
+def test_close_unreadable_job_dir_msp_closes_record(cli, tmp_path, monkeypatch):
+    jd = _make_closable_job(cli, "noread-msp", tmp_path,
+                            transport="msp", session_uuid="sid-noread-msp")
+    _fail_listdir_on(cli, monkeypatch, jd)
+    rc = cli.cmd_close(argparse.Namespace(slug="noread-msp"))
+    assert rc == 0
+    assert cli.load_job("noread-msp")["state"] == "closed"
