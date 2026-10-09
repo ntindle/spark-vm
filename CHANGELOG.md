@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The phone-home daemon now remembers its reconnect backoff across restarts: a crash-looping box keeps waiting near the 60-second cap instead of hammering the plane at the 1-second initial delay after every restart, while a clean shutdown or a healthy session still resets the backoff to 1 second. (#1022) (#1200)
+
 - S4b phone-home docs are re-pinned to the shipped state: the socket-acknowledgement consume-half and the socket gap-hold wedge heal have both landed, so the docs no longer list them as still to build — the remaining open work is S4b-3 (#1002), S6 live acceptance (#960), and the p1 follow-up #1187. (#1194)
 
 ### Fixed

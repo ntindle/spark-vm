@@ -2001,3 +2001,137 @@ def test_dispatch_crash_redacts_token_from_traceback(ctx, monkeypatch,
     captured = capsys.readouterr()
     assert TOKEN not in captured.err
     assert "<redacted>" in captured.err
+
+
+# -- durable backoff attempt (#1022) --------------------------------------------
+
+def _backoff_path(ctx):
+    return os.path.join(ctx.dir, spark_pair._WS_BACKOFF_FILE)
+
+
+def test_backoff_attempt_roundtrip(ctx):
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 7)
+    assert spark_pair._phone_home_load_backoff_attempt(ctx.dir) == 7
+    # crash-safe temp+rename: no .tmp litter left behind, 0600 perms.
+    assert not os.path.exists(_backoff_path(ctx) + ".tmp")
+    assert oct(os.stat(_backoff_path(ctx)).st_mode & 0o777) == "0o600"
+
+
+def test_backoff_attempt_missing_or_corrupt_is_zero(ctx):
+    assert spark_pair._phone_home_load_backoff_attempt(ctx.dir) == 0
+    for bad in (b"not json", b"[1,2]", b'{"attempt": "x"}',
+                b'{"attempt": true}', b'{"attempt": -3}', b'{}'):
+        with open(_backoff_path(ctx), "wb") as f:
+            f.write(bad)
+        assert spark_pair._phone_home_load_backoff_attempt(ctx.dir) == 0, bad
+
+
+def _recorded_backoff_delays(monkeypatch):
+    """Stub _ws_backoff_delay: record the attempt arg, sleep nothing."""
+    seen = []
+    def fake(attempt, rng=None):
+        seen.append(attempt)
+        return 0.0
+    monkeypatch.setattr(spark_pair, "_ws_backoff_delay", fake)
+    return seen
+
+
+def test_restart_resumes_persisted_backoff(ctx, monkeypatch):
+    # #1022: a crash-looping daemon resumes at the persisted attempt,
+    # not at the 1 s initial delay. Seed attempt 5 (as a previous
+    # incarnation would have persisted it), fail the upgrade once, then
+    # exit via a revoked close.
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 5)
+    seen = _recorded_backoff_delays(monkeypatch)
+    # Session 1 stalls past the welcome timeout: transport-lost with NO
+    # healthy session (welcomed=False), so the resumed attempt 5 drives
+    # the backoff. Session 2 exits via a revoked close.
+    stub = StubDO([[("welcome-dwell", 1.5)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+    # The first (and only) backoff of this incarnation used the resumed
+    # attempt 5 — the 1 s initial delay was NOT re-entered.
+    assert seen == [5], seen
+    # Session 2's welcome earned the #1027 reset before the revoked
+    # close landed: the raw file must read 0, pinning the persistence
+    # of the healthy-session reset on the resume path.
+    with open(_backoff_path(ctx)) as f:
+        assert json.load(f)["attempt"] == 0
+
+
+def test_persisted_backoff_survives_crash(ctx, monkeypatch):
+    # #1022: every failure persists the grown attempt, so a daemon that
+    # dies mid-loop (uncaught exception ~ crash) restarts at the capped
+    # backoff instead of the 1 s initial delay.
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 5)
+    seen = _recorded_backoff_delays(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_connect(*a):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise spark_pair._WsError("boom")
+        raise RuntimeError("test done")
+
+    monkeypatch.setattr(spark_pair, "_phone_home_connect", fake_connect)
+    with pytest.raises(RuntimeError, match="test done"):
+        spark_pair.cmd_phone_home(ctx)
+    assert seen == [5, 6], seen
+    assert spark_pair._phone_home_load_backoff_attempt(ctx.dir) == 7
+
+
+def test_healthy_session_resets_backoff_attempt(ctx, monkeypatch):
+    # #1022 + #1027 earn-back: a healthy session resets the persisted
+    # attempt to 0, so the next failure starts a fresh backoff episode.
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 5)
+    seen = _recorded_backoff_delays(monkeypatch)
+    stub = StubDO([[("welcome",), ("close-tcp",)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+    # welcomed session 1 reset the seeded 5 -> 0, then transport-lost
+    # backed off at attempt 0 and persisted attempt 1.
+    assert seen == [0], seen
+    # Session 2's welcome reset the persisted attempt to 0 again before
+    # the revoked close — assert the raw file so this test pins the
+    # persistence of the reset, not just the in-memory counter.
+    with open(_backoff_path(ctx)) as f:
+        assert json.load(f)["attempt"] == 0
+
+
+def test_clean_stop_resets_backoff_attempt(ctx, monkeypatch):
+    # #1022: a clean SIGTERM/SIGINT shutdown resets the persisted
+    # attempt — the next deliberate start begins at 1 s again. Reads
+    # the raw file so the test pins the write itself, not the loader.
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 5)
+    monkeypatch.setattr(spark_pair, "_phone_home_connect",
+                        lambda *a: (("stopped",), True))
+    assert spark_pair.cmd_phone_home(ctx) == 0
+    with open(_backoff_path(ctx)) as f:
+        assert json.load(f)["attempt"] == 0
+
+
+def test_sigterm_during_backoff_resets_persisted_attempt(ctx, monkeypatch):
+    # #1022: the clean-stop reset must also fire on the post-loop path —
+    # SIGTERM arriving during a backoff sleep breaks out of the loop via
+    # _ws_sleep_or_stop's stop flag (the common crash-loop shutdown
+    # case), which is a different code path from the stopped-outcome
+    # inline reset above.
+    spark_pair._phone_home_save_backoff_attempt(ctx.dir, 5)
+
+    def fake_delay(attempt, rng=None):
+        # Set from inside the loop: cmd_phone_home resets the flag at
+        # startup, so this models SIGTERM landing mid-backoff.
+        spark_pair._PHONE_HOME_STOP = True
+        return 30.0
+
+    monkeypatch.setattr(spark_pair, "_ws_backoff_delay", fake_delay)
+    monkeypatch.setattr(
+        spark_pair, "_phone_home_connect",
+        lambda *a: (_ for _ in ()).throw(spark_pair._WsError("boom")))
+    assert spark_pair.cmd_phone_home(ctx) == 0
+    with open(_backoff_path(ctx)) as f:
+        assert json.load(f)["attempt"] == 0
