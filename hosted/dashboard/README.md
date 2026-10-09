@@ -17,6 +17,13 @@ unchanged).
   endpoints list and revoke, they cannot mint). The key is held in the
   tab's `sessionStorage` only — the page never puts it in a cookie,
   `localStorage`, or a URL. Sign out (or close the tab) drops it.
+- **Agent sign-in (AgentID).** Standard OIDC public client + PKCE S256
+  against `https://auth.agentid.com` — a separate sign-in path for
+  agents owned by the fleet owner. Agent sessions are read-only by
+  policy (pairing approvals and action-approval taps stay human-only)
+  and are held in `sessionStorage` only. Fleet API access for agents
+  needs the control-plane follow-up (`POST /v1/agent/exchange`); see
+  the Agent sign-in section below.
 - **Fleet list.** Box name, id, status, and last-heartbeat age. Boxes with
   no heartbeat in the last **5 minutes** are marked **STALE** (boxes
   heartbeat every ~60s by default, so 5 minutes is ~5 missed beats);
@@ -43,6 +50,54 @@ unchanged).
   `Bearer` token; a 401 anywhere returns the UI to the sign-in screen.
   The dashboard only ever shows the signed-in owner's boxes (the plane
   scopes fleet reads by owner key).
+
+## Agent sign-in (AgentID)
+
+Agents owned by the fleet owner can sign in with
+[AgentID](https://www.agentid.com/llms-full.txt) — a standard OpenID
+Connect identity provider for agents (`iss https://auth.agentid.com`,
+ES256 id_tokens, PKCE S256). The dashboard registers as a **public**
+OIDC client (`token_endpoint_auth_method: "none"`): the browser flow
+uses a S256 code challenge, and there is **no client secret anywhere**
+(`test_no_client_secret_anywhere` pins this).
+
+**Auth model (explicit):** the page has two actor types.
+
+- `actor_type: "human"` — the existing owner API key (`svm_…`). Full
+  owner powers, including pairing approvals and action-approval taps.
+- `actor_type: "agent"` — the AgentID OIDC session. **Read-only by
+  policy.** Agents never approve pairings and never tap action-approval
+  decisions; those stay human-only.
+
+**Current status:** the client-side flow is complete (sign-in button →
+PKCE authorize redirect → callback code exchange → id_token claim
+validation → agent identity card, all client-side, session in
+`sessionStorage` only). Fleet API access for agent sessions is **not
+yet enabled on the control plane**: the agent id_token is never sent to
+the plane as a Bearer (the plane would 401 it), and the agent view says
+so. Enabling it is a control-plane follow-up: `POST
+/v1/agent/exchange`, validating the ES256 id_token signature against
+the AgentID JWKS, checking `iss`/`aud`/`exp`/`actor_type`, and minting
+a short-lived read-only session scoped to the `owner_sub`'s fleet.
+
+**Finishing the setup (needs the owner):**
+
+1. Register the app in the AgentID console as a **public** client
+   (browser-authenticated; neither RFC 7591 dynamic registration —
+   401 without an account — nor `agentid-cli init --name`, which only
+   registers confidential `client_secret_basic`/`client_secret_post`
+   clients and wants to store the secret in `.env.local`, can produce
+   the public client this page needs).
+2. Redirect URIs: every plane origin that serves this page — at minimum
+   the hosted plane's root (`https://api.sparkvm.dev/`); add each
+   self-hosted plane origin too, or the IdP refuses the redirect.
+3. Request scopes `openid` + `owner_email` (the owner's email arrives as
+   the `owner_email` id_token claim).
+4. Paste the issued `client_id` into the `AGENTID` config block in
+   `dashboard.html` (the `client_id: ""` field just below the
+   "AgentID (agent) sign-in" comment — public client ids are not
+   secrets), then run `./sync_dashboard.py` to re-inline the page
+   into the worker.
 
 ## Canonical-copy rule
 
