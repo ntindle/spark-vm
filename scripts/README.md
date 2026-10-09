@@ -17,10 +17,12 @@ failure. (CI's merge gate is eight checks; the two the script can't run —
 the markdown link check and the PNG screenshot smoke test — are named in
 its output, not run.)
 
-The exact step names the gate prints (the machine-readable inventory,
-pinned against `local-gate.sh`'s `step "..."` calls by
+The exact step names the gate prints, in run order (the machine-readable
+inventory, pinned against `local-gate.sh`'s `step "..."` calls by
 `test_readme_inventories.py` — a step renamed in the script must be
-renamed here):
+renamed here, and order is contractual: the test compares the ordered
+list, so a deliberate reorder or a seventh step updates both the block
+and the pin):
 
 <!-- gate-steps:start -->
 shard plan

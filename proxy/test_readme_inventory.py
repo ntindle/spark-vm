@@ -24,9 +24,13 @@ Non-writer /usr/local/bin installs (with-proxy, confirm-request,
 credvalidate.py) are out of scope here: they are documented elsewhere in
 the README, not in the writer section.
 
-Non-vacuity: every assertion is sensitive to its contract — remove a
-writer from the README or from deploy.sh's install loop and the
-corresponding direction fails (verified by hand during development).
+Non-vacuity (all verified by neutering, then reverted): renaming an
+install dest fails direction 1 and renaming a README writer name fails
+both directions; a new undocumented cred-* installed from proxy/ AND
+from confirm/ each fail direction 2 by name; an install line with a
+trailing comment fails the unparsed-line guard instead of slipping
+through; moving a comment-only SPARKVM_* mention below the split anchor
+does not fail the seam scan.
 """
 
 import re
@@ -46,9 +50,17 @@ NON_BIN_WRITERS = {"grant-writer"}
 
 def _readme_writer_names():
     text = README.read_text()
+    assert WRITER_SECTION_START in text, (
+        "proxy/README.md no longer has the %r section heading — update "
+        "the pin's section bounds" % WRITER_SECTION_START
+    )
     start = text.index(WRITER_SECTION_START)
     # The writer section runs until the next top-level heading.
-    end = text.index("\n## ", start)
+    end = text.find("\n## ", start)
+    assert end != -1, (
+        "proxy/README.md's writer section is now the last section — the "
+        "pin needs a new end bound"
+    )
     section = text[start:end]
     return set(re.findall(r"`(cred-[a-z0-9-]+)`", section))
 
@@ -67,11 +79,11 @@ def _deploy_bin_installs():
     """
     src = DEPLOY.read_text()
     installs = {}
-    for m in re.finditer(
+    strict = re.compile(
         r"^\s*sudo\s+install(?:\s+\S+)*?\s+(\S+)\s+(/usr/local/bin/\S+)\s*$",
-        src,
         re.MULTILINE,
-    ):
+    )
+    for m in strict.finditer(src):
         source, dest = m.group(1), m.group(2)
         name = dest.rsplit("/", 1)[1]
         if source.startswith("proxy/"):
@@ -80,6 +92,22 @@ def _deploy_bin_installs():
                 "source == dest" % (source, dest)
             )
         installs[name] = m.group(0).strip()
+    # Fail loudly on any /usr/local/bin install line the strict pattern
+    # did not consume (trailing comment, line continuation, reformat): a
+    # silently skipped line would pass the pins below vacuously.
+    loose = re.findall(
+        r"^\s*sudo\s+install\b.*?\s(/usr/local/bin/\S+)",
+        src,
+        re.MULTILINE,
+    )
+    unconsumed = [
+        dest for dest in loose if dest.rsplit("/", 1)[1] not in installs
+    ]
+    assert not unconsumed, (
+        "proxy/deploy.sh has /usr/local/bin install lines the pin cannot "
+        "parse (trailing comment? continuation?): %s — extend the strict "
+        "pattern, do not let them slip through" % ", ".join(unconsumed)
+    )
     return installs
 
 

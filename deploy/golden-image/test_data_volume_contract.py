@@ -285,7 +285,16 @@ def test_firstboot_body_consumed_seams_are_all_canonical():
     m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
     assert m, "the canonical _SEAMS list must exist in the script"
     canonical = set(m.group(1).split())
-    consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', body))
+    # A seam *mentioned* in a body comment is not consumed by the script:
+    # strip full-line comments so a comment moved below the split anchor
+    # cannot fail the pin for the wrong reason. (Residual, documented:
+    # an inline trailing comment naming a SPARKVM_* token still counts —
+    # err on the side of listing it in _SEAMS.)
+    code = "\n".join(
+        line for line in body.splitlines()
+        if not re.match(r"^\s*#", line)
+    )
+    consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', code))
     # The _SEAMS=(...) definition line itself lives in the body and names
     # the four seams as plain tokens — harmless, since the assertion is
     # that every consumed name IS in the canonical list.
@@ -300,8 +309,9 @@ def test_data_prep_seam_list_is_canonical_and_complete():
     single canonical _SEAMS list (not an inline copy), every listed seam
     is documented in the header, and every SPARKVM_* name consumed in the
     body is in _SEAMS. A new test seam added to the body must be added to
-    _SEAMS or the suite fails; a seam dropped from _SEAMS stops warning
-    loudly instead of silently."""
+    _SEAMS *and* to this test's hardcoded exact list (order is
+    contractual — the list mirrors the script), or the suite fails; a
+    seam dropped from _SEAMS stops warning loudly instead of silently."""
     src = open(DATA_PREP).read()
     body = src.split("set -euo pipefail", 1)[1]
     m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
@@ -321,7 +331,16 @@ def test_data_prep_seam_list_is_canonical_and_complete():
     # header legitimately cites identity-seed-hook.sh's SPARKVM_PAIR_CLIENT
     # as a trust-boundary reference, and that seam is not data-prep's to
     # warn about.
-    consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', body))
+    consumed = set(re.findall(
+        r'\b(SPARKVM_[A-Z_]+)\b',
+        "\n".join(
+            line for line in body.splitlines()
+            if not re.match(r"^\s*#", line)
+        ),
+    ))
+    # Full-line comments stripped (see the firstboot test): a seam
+    # mentioned in a comment is not consumed. Inline trailing comments
+    # still count — list the seam.
     assert consumed <= set(canonical), \
         "seams consumed in data-prep.sh's body but missing from _SEAMS: %s" % \
         ", ".join(sorted(consumed - set(canonical)))

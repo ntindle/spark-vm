@@ -9,15 +9,22 @@ whose whole job is keeping the project's rituals honest:
    text echoed to the terminal. A step renamed in the script (or a step
    added without a docs touch) silently desyncs the README's description.
    The `<!-- gate-steps:start -->` block in the README is the
-   machine-readable inventory; this test pins it against the script.
+   machine-readable inventory; this test pins it against the script, in
+   run order (order is contractual — the gate executes the steps in this
+   sequence).
 2. **Test-file inventory** — the README's test-inventory table names
    every test_*.py in scripts/. A new pin test that lands without a table
    row (or a renamed/deleted file that leaves a stale row) currently
    drifts silently; this test pins the table against the directory.
 
-Non-vacuity: rename a step in local-gate.sh, or add/rename/remove a
-test_*.py without updating the README, and the corresponding test fails
-(verified by hand during development).
+Non-vacuity (all verified by neutering, then reverted): renaming a gate
+step in local-gate.sh fails the step test; appending a stray row to the
+README table fails the stale-row direction and deleting a row fails the
+missing-file direction; adding an unlisted SPARKVM_* reference to either
+script's body fails its seam test, while a comment-only mention does
+not; dropping a name from data-prep.sh's _SEAMS, reverting its loop to
+an inline list, or deleting a header doc line each fail the
+corresponding leg.
 """
 
 import re
@@ -52,11 +59,15 @@ def _script_step_names():
 
 
 def test_readme_gate_steps_match_local_gate():
-    """The README's six documented steps are exactly local-gate.sh's."""
+    """The README's six documented steps are exactly local-gate.sh's, in
+    run order (order is contractual — the gate executes them in this
+    sequence and the README describes them "in order")."""
     documented = _readme_gate_steps()
     assert len(documented) == 6, (
         "gate-steps inventory drift: expected the six merge-gate steps, "
-        "got %d: %s" % (len(documented), documented)
+        "got %d: %s — if a seventh step was deliberately added, update "
+        "the gate-steps block in scripts/README.md (and this pin) to "
+        "match" % (len(documented), documented)
     )
     actual = _script_step_names()
     assert actual == documented, (
