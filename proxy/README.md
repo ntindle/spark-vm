@@ -28,11 +28,12 @@ binding never swaps: fail closed. Everything else passes through untouched.
   server's access log on later requests), and `Cookie`, which is only
   swapped for credentials whose registry placement explicitly names it.
 - **Placements:** a registry `placement` restricts where an entry's value
-  may be inserted (bearer header only, one named header, query param,
-  or URL path segment). A declared placement that doesn't match the
-  placeholder's location fails closed; an unrecognized placement shape
-  fails closed too. An entry with no declared placement swaps anywhere
-  (migration).
+  may be inserted — `"bearer_header"` swaps only in an `Authorization: Bearer`
+  header, `{"custom_header": name}` only in that header, `{"query_param": name}`
+  only in the query string, `{"url_path_segment": name}` only in the URL path.
+  A declared placement that doesn't match the placeholder's location fails
+  closed; an unrecognized placement shape fails closed too. An entry with no
+  declared placement swaps anywhere (migration).
 - **Bodies:** `application/json` values are JSON-escaped before substitution;
   `application/x-www-form-urlencoded` bodies are parsed as a form, swapped,
   and re-encoded; anything else text is plain substitution.

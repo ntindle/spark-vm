@@ -2,16 +2,20 @@
 
 The helper scripts that keep the project running: the local merge gate,
 release tooling, repo sync, the self-update probes, governance application,
-demo assets, and the CI pin tests that keep the loop's own rituals honest.
+demo assets, and the CI pin tests that keep the project's contribution
+rituals honest.
 
 ## The merge gate: `local-gate.sh`
 
 [`CONTRIBUTING.md`](../CONTRIBUTING.md)'s "merge gate, locally" section
-points here. One command runs the seven locally-replicable CI checks in
+points here. One command runs the six locally-replicable CI checks in
 order — the shard-plan check, the changelog ritual lint, the changed-paths
 evaluation (docs-only diffs skip the test suite like CI does; uncommitted
-changes count as code), docs index coverage, shellcheck on changed shell
-scripts, then the full test suite — stopping at the first failure.
+changes count as code), docs index coverage, shellcheck severity=error on
+changed `*.sh` files, then the full test suite — stopping at the first
+failure. (CI's merge gate is eight checks; the two the script can't run —
+the markdown link check and the PNG screenshot smoke test — are named in
+its output, not run.)
 
 ```bash
 ./scripts/local-gate.sh           # everything
@@ -83,7 +87,7 @@ is a resource-exhaustion vector; this one caps it.
 ## The pin tests: `test_*.py`
 
 These are the regression net for the tooling itself — and the tests that
-keep the loop's rituals from drifting:
+keep the project's contribution rituals from drifting:
 
 - `test_local_gate.py` — pins the merge-gate script's behavior.
 - `test_contributing_ci_gates.py` / `test_contributing_suites.py` /
