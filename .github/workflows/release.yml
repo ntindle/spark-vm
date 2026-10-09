@@ -10,7 +10,12 @@
 # releases happen, in push order. The same run also calls the golden-image
 # build gate (workflow_call) after publishing: the tag push uses
 # GITHUB_TOKEN, which never triggers workflow runs, so the gate's own
-# `push: tags` trigger cannot fire on a real release (#1176).
+# `push: tags` trigger cannot fire on a real release (#1176). The gate
+# also runs when the recovery path publishes the release (cut failed,
+# recovery succeeded) — the tag step emits on cut-success OR
+# recovery-success and the gate job runs whenever that output is non-empty,
+# so a total failure (no release published) is the only path that skips
+# the gate.
 
 name: Cut release
 
@@ -55,10 +60,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Cut release
+        id: cut
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/cut-release.sh --ci
       - name: Recover tag-pushed / publish-failed state
+        id: recover
         # GitHub #659: the v0.5.0 cut pushed its tag but the publish step
         # failed. If this step ever runs (the cut step failed), publish the
         # release for the existing tag — --publish-only regenerates the
@@ -71,12 +78,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/cut-release.sh --publish-only --yes --ci
       - name: Expose the cut release tag
-        # Runs after the cut and after the recovery step, so both the
-        # normal path and the tag-pushed/publish-failed path expose the
-        # tag. The checkout is the per-run commit (preflight-guarded by
-        # cut-release.sh), so v$(cat VERSION) is exactly the tag that was
-        # just published. Skipped on job failure (no output → gate skipped).
+        # Emitted when the release actually got published: the cut
+        # published it, or the cut failed and the recovery step published
+        # it for the tag-pushed/publish-failed state (GitHub #659). In
+        # both paths the checkout is the per-run commit (preflight-guarded
+        # by cut-release.sh), so v$(cat VERSION) is exactly the tag that
+        # was just published. Both-failed means no release exists, so no
+        # tag is emitted and the gate stays skipped: emitting a tag there
+        # would point the golden-image gate at a release that was never
+        # published (and a superseded-run preflight failure is routine,
+        # not a release).
+        # The condition needs always(): the cut step failed in the recovery
+        # path, so without it this step (implicit success()) would be
+        # skipped and the gate would never run on the releases that most
+        # needed operator-visible recovery.
         id: tag
+        if: always() && (steps.cut.outcome == 'success' || steps.recover.outcome == 'success')
         run: echo "tag=v$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
   golden-image:
@@ -86,8 +103,16 @@ jobs:
     # a real release (#1176). The called workflow checks out the exact
     # release tag itself (v$(cat VERSION)); it needs no secrets and never
     # pushes (contents: read, build-only).
+    #
+    # The gate runs on every published release — including the recovery
+    # path, where the release job is red because the cut failed but the
+    # recovery step published the release anyway. Without always() the
+    # gate would silently skip exactly the releases that needed
+    # operator-visible recovery; the output check keeps it skipped on a
+    # total failure, where no release exists to gate.
     name: golden-image build gate
     needs: release
+    if: always() && needs.release.outputs.tag != ''
     permissions:
       contents: read
     uses: ./.github/workflows/golden-image.yml

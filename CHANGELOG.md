@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The release workflow's golden-image build gate now also runs when a release is published through the recovery path (the tag-pushed/publish-failed state): the gate emits its tag when the cut succeeds OR the recovery succeeds, and the gate runs whenever that tag is present — so a release that needed operator-visible recovery still gets its baked-secrets scan and manifest preflight. (#TBD)
+
 - Closing a job whose directory exists but is unreadable (operator permission-mangled) no longer crashes — the job record still closes cleanly. (#1172) (#1186)
 
 - Release-notes body cap: the oversized-notes failure diagnostic now gives a copy-paste recovery that marks prereleases as prerelease and recreates the release tag at the release commit (it previously assumed the tag already existed, which is only true for `--publish-only`); the trim report counts dangling subsection headers separately from dropped lines; the trim note renders as its own paragraph; and the no-curated-section path is pinned to die loudly rather than emit a trim note pointing at a changelog section that doesn't exist. (#1181)
