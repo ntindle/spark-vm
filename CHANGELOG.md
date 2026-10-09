@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- The deploy's `approval-filers` enrollment is now an idempotent helper that the future bdrive-user provisioning step is contracted to call at user-creation time, keeping the account enrolled in the filing-group membership it needs to file approvals (previously a bdrive user created without re-running the deploy would have been silently unable to file until the next deploy). (#1174)
+- The deploy's `approval-filers` enrollment is now an idempotent helper that the future bdrive-user provisioning step is contracted to call at user-creation time, keeping the account enrolled in the filing-group membership it needs to file approvals (previously a bdrive user created without re-running the deploy would have been silently unable to file until the next deploy). (#1197)
 
 - The release workflow's golden-image build gate now also runs when a release is published through the recovery path (the tag-pushed/publish-failed state): the tag step emits the release tag when the cut succeeds OR the recovery succeeds, and the gate runs whenever that tag is present — so a release that needed operator-visible recovery still gets its baked-secrets scan and manifest preflight. (#1189)
 
