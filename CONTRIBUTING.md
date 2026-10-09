@@ -113,6 +113,70 @@ collects the invocation dir instead of `pytest.ini`'s `testpaths` — so
 you get only the subtree's tests. Always run the suite from the root so
 `pytest.ini`'s `testpaths` apply.
 
+### The merge gate, locally
+
+`python3 -m pytest` is most of what CI checks, but not all of it — five
+more CI jobs gate the merge, and a PR that is green locally can still go
+red on CI if you skip the ones you can run. The five, with their local
+form:
+
+```bash
+# changelog ritual lint (a required CI check: CHANGELOG entries must not
+# reference workspace-internal paths; see the ritual at the top of
+# CHANGELOG.md)
+python3 scripts/lint-changelog-ritual.py
+
+# docs-index coverage: every docs/*.md file needs a row in docs/README.md.
+# It runs inside the full suite, and CI also runs it standalone on every
+# PR — including docs-only ones, where the python suite is skipped.
+python3 -m pytest scripts/test_docs_index_coverage.py -q
+```
+
+The suite carries two shellcheck gates: the warning gate
+(`cua/test_shell_scripts.py` covers `cua/bin/*.sh`;
+`deploy/test_auto_deploy.py` covers `deploy/auto-deploy.sh` and
+`proxy/deploy.sh`) and the one error-severity gate
+(`jail/test_build_smoke.py` on `jail/build.sh`). Both skip with a loud
+message when shellcheck is not installed — they do not fail. CI installs
+shellcheck from apt (unpinned) into the python-tests shards, so install
+it locally and the suite exercises the same gates; if CI's and your local
+shellcheck versions diverge, the warning sets can too — treat a local
+green as necessary but not sufficient.
+
+One CI job has no suite equivalent: the standalone `shellcheck` job runs
+`severity=error` over the repo's shell scripts — scripts the suite never
+covers (e.g. `harness/`, `fleet/`, `scripts/`). The closest local
+approximation for a PR that touches shell scripts:
+
+```bash
+git diff --name-only origin/main...HEAD -- '*.sh' | xargs -r shellcheck -S error
+```
+
+The PNG smoke test is locally runnable too — CI's own steps are the
+recipe: `pip install playwright`, then the one-time
+`python3 -m playwright install --with-deps chromium` (installs OS deps,
+escalates internally), then `python3 scripts/pw-test.py` and
+`python3 scripts/png-check.py`.
+
+The install-safety root tests live *inside* the `python tests` job rather
+than as their own job: they self-skip as non-root, so your local pytest
+run never executes them — but CI runs them under sudo as part of the
+python-tests shard. If your PR touches proxy install/deploy code, prove
+it the way the shard does:
+
+```bash
+sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest \
+  proxy/test_safe_install.py \
+  -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
+```
+
+Only the markdown link check has no practical local equivalent: lychee
+runs with a long bot-block exclusion list that lives in
+`.github/workflows/ci.yml`, and its verdict depends on runner-egress IP
+reputation (bot-blocks that don't reproduce from your IP), so the gate's
+result genuinely can't be replicated locally. For that one, read the CI
+run on your PR instead of trying to replicate it.
+
 ## Secrets: the one hard rule
 
 **Never commit real secrets, tokens, credentials, or private keys.**
