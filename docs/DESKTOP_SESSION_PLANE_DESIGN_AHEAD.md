@@ -72,10 +72,13 @@ journal (G54.7); the media-transits-Cloudflare trust call is documented
   deployed worker checkout (grep-verified 2026-10-09). The build starts
   from zero, against real primitives.
 - **F-S5 — a liveness gate the Oct-3 design never named.** The revocation
-  story requires a live control channel to the box. A session opened for a
-  box with no live phone-home socket cannot be revoked within any bound —
-  so opening it violates the revocation-latency acceptance. §3 pins the
-  fail-closed gate.
+  story requires the box be reachable within a bound. (Finding history:
+  the original draft framed this as "a box with no live phone-home
+  socket cannot be revoked within any bound" — the re-derived D-S3
+  supersedes that: revocation is *enforced* at the SFU delete, and the
+  box signal is deliverable at fetch-path latency, so the bound is a
+  per-carrier taxonomy, not a socket-presence absolute.) §3 pins the
+  reachability gate.
 - **F-S6 — the handle-at-rest discipline.** Session handles contain an SFU
   publish credential. The durable-command queue (`_ensure_approval_decision_command`,
   worker.py L4182 — `approval_decision` is the only command kind so far)
