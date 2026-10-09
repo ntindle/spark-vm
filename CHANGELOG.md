@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- The CI guide's link-check documentation no longer understates what the check skips: it named eight excluded hosts while the job already skipped 41 bot-blocking hosts and URL patterns, and the excluded-host re-sweep ritual still claimed to cover "all eight". The guide now carries the full exclusion inventory (kept honest by a new pin test that fails if the doc and the CI job ever disagree again), and the re-sweep procedure builds its host list from that inventory — so the links CI can never verify are all swept quarterly, not just the original eight. (#TBD)
+- The CI guide's link-check documentation no longer understates what the check skips: it named eight excluded hosts while the job already skipped 41 bot-blocking hosts and URL patterns, and the excluded-host re-sweep ritual still claimed to cover "all eight". The guide now carries the full exclusion inventory (kept honest by a new pin test that fails if the doc and the CI job ever disagree again), and the re-sweep procedure builds its host list from that inventory — so the links CI can never verify are all swept quarterly, not just the original eight. (#1208)
 
 - The contributor guide's merge-gate instructions no longer undercount the required CI checks: the "run the merge gate locally" section names all eight checks (the shard-plan check and the docs-only changed-paths gate were missing since the test-suite sharding landed), gives a local replication command for each, and a new pin test fails the suite if the doc's check list ever drifts from the branch-protection ruleset again. (#1207)
 
