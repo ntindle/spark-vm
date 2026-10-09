@@ -185,7 +185,7 @@ recrawls only; TermSquad — tiers verbatim per the A lane.
 sighted); Cloudflare Containers rebuild — carry (old Sandbox SDK 0.x
 bug/security fixes only until December 31, 2026); Cloudflare
 Containers multi-tenant flaw recap (NEW — pre-window Sep-4→24
-third-party recap of the remediated skip_block_zeroing incident;
+third-party recap of the remediated skip_block_zeroing incident —
 color, not a re-fold); Modal multi-node GPU clusters GA (Oct 1,
 training/inference, not the sandbox surface) — carry; OpenAI
 training-agent DNS-escape incident (third-party, predates window) —
@@ -202,7 +202,7 @@ Marketplace integration, plus the June field-guide $12M/$62M/
 Docker+Vercel backing) — **still flagged-only: re-grade bar still
 unmet** (fold requires first-party product/pricing/docs material);
 **Zenity Labs "AgentCorruption" AgentCore disclosure (NEW — Oct 8,
-third-party press release; AWS lockdown described second-hand) —
+third-party press release, AWS lockdown described second-hand) —
 flagged-only, watch for AWS first-party security response/advisory**;
 **Bedrock AgentCore SDK CVEs CVE-2026-12530 / CVE-2026-16796 (NEW —
 msspalert Oct 6, third-party) — flagged-only, watch for AWS vendor
