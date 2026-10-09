@@ -50,6 +50,7 @@ import pwd
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -269,8 +270,12 @@ NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 # CSRF-shaped bypass of the approval-origin binding. File-stored
 # `_csrf_nonces` / `_csrf` entries are now IGNORED ENTIRELY (never read,
 # not even the legacy slot); only the server-minted in-memory ring counts.
-# Stale `_csrf_nonces` keys may linger in old pending files — harmless, and
-# still stripped before items reach answered/ (see _stamp_expired_consumed).
+# Stale `_csrf_nonces` keys may linger in old pending files — harmless
+# (never read per #78), and stripped before items reach consumed/ via
+# the expired-stamp path (see _stamp_expired_consumed). The /answer path
+# writes the item verbatim, so a stale key can ride into answered/ —
+# still harmless (server-side ring-ignored, nonces expire, and the
+# records are 0600 per #1211).
 def _env_int(name, default, minimum):
     try:
         v = int(os.environ.get(name, str(default)))
@@ -1145,7 +1150,12 @@ def _stamp_expired_consumed(aid, it, pending_path, expired_by):
     rec["tenant_id"] = None
     path = os.path.join(consumed_dir(), aid + ".json")
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        # Issue #1211: 0600, not 0644 — same data class as the 0600
+        # audit log (credential names, hosts, methods, path prefixes;
+        # finding 198), and consumed/ has no directory-level
+        # restriction. O_EXCL: always newly created, so the create
+        # mode suffices (umask cannot weaken 0600).
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
     try:
@@ -1722,6 +1732,34 @@ def _sweep_answered(grace=None):
             os.replace(p, os.path.join(dst_d, fn))
         except OSError:
             continue
+
+
+def _repair_approval_file_modes():
+    """Issue #1211: tighten pre-fix 0644 approval records to 0600.
+
+    Records written before the #1211 deploy keep their 0644 mode — the
+    O_EXCL stampers return False on FileExistsError and never touch an
+    existing file, and the answered->consumed renames preserve whatever
+    mode the file was born with. At startup, walk answered/ + consumed/
+    and chmod 0600 every *.json, best-effort: a mode we cannot tighten
+    is loud, never fatal — serving must not fail closed over a
+    hardening repair.
+    """
+    for d in (answered_dir(), consumed_dir()):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(".json"):
+                continue
+            p = os.path.join(d, fn)
+            try:
+                if stat.S_IMODE(os.stat(p).st_mode) != 0o600:
+                    os.chmod(p, 0o600)
+            except OSError as e:
+                print("confirmd WARNING: cannot tighten %s: %s" % (p, e),
+                      flush=True)
 
 
 def _prune_consumed(limit=None):
@@ -2627,7 +2665,20 @@ class Handler(BaseHTTPRequestHandler):
         # runtime — issue #77 (L5).)
         dst = os.path.join(answered_dir(), aid + ".json")
         tmp = dst + ".tmp"
-        with open(tmp, "w") as f:
+        # Issue #1211: the answered record carries credential names,
+        # hosts, methods, and path prefixes — the data class the proxy
+        # keeps 0600 (finding 198) — and answered/ has no
+        # directory-level restriction. Unlink a stale .tmp first
+        # (best-effort: a crashed run can leave one behind, and plain
+        # O_CREAT would reuse it without changing its mode); O_EXCL
+        # then creates 0600 from birth and refuses a planted symlink
+        # instead of following it.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(it, f, indent=2)
         os.replace(tmp, dst)
         try:
@@ -2937,6 +2988,9 @@ def main():
     print("confirmd version=%s" % SPARKVM_VERSION, flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
+    # Issue #1211: tighten any pre-fix 0644 approval records to 0600
+    # before serving (records the O_EXCL stampers never touch).
+    _repair_approval_file_modes()
     # Issue #233: sweep any answered/ strays left by a previous run's
     # failed answered->consumed move before serving.
     _sweep_answered()
