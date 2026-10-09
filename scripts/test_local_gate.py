@@ -320,3 +320,22 @@ def test_gate_script_is_executable_and_strict():
     head = GATE.read_text().splitlines()[0]
     assert head == "#!/bin/bash"
     assert "set -euo pipefail" in GATE.read_text()
+
+
+def test_repo_shell_scripts_pass_shellcheck_error():
+    """The standalone shellcheck CI job runs severity=error over every .sh
+    file in the repo. A comment line beginning `# shellcheck` that is not a
+    valid directive (e.g. `# shellcheck CI job's ...`) fails the whole job
+    with SC1073 — this bit the local-gate.sh ship itself. Replicate the job
+    here when shellcheck is installed; skip loudly otherwise (the suite's
+    standing shellcheck-gate convention)."""
+    import shutil
+    if shutil.which("shellcheck") is None:
+        pytest.skip("shellcheck not installed — CI's standalone job does not skip")
+    sh_files = sorted(
+        str(p) for p in REPO_ROOT.rglob("*.sh")
+        if ".git/" not in str(p))
+    assert sh_files, "no .sh files found — the scan is vacuous"
+    out = subprocess.run(["shellcheck", "-S", "error", *sh_files],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout

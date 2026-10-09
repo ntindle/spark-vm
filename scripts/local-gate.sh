@@ -29,9 +29,9 @@
 #                             --worktree guard into a false "code")
 #   4. docs index coverage   (pytest scripts/test_docs_index_coverage.py —
 #                             runs on every PR like CI, docs-only included)
-#   5. shellcheck            (severity=error on changed *.sh — the standalone
-#                             shellcheck CI job's local approximation; suite
-#                             shellcheck gates live inside the python suite)
+#   5. shellcheck            (severity=error on changed *.sh — approximates
+#                             the standalone shellcheck CI job; the suite's
+#                             own shellcheck gates live inside the python suite)
 #   6. python tests          (python3 -m pytest, unless docs-only or --quick)
 #   7. markdown link check   (no local equivalent — named, not run)
 #   8. PNG screenshot smoke  (manual — recipe named, not run; needs a browser install)
@@ -176,8 +176,9 @@ step "shellcheck (severity=error, changed *.sh)"
 if ! command -v shellcheck >/dev/null 2>&1; then
   echo "local-gate: shellcheck not installed — skipping (CI's standalone job does not skip; install it to replicate)"
 elif git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  # Same approximation CONTRIBUTING.md documents for the standalone
-  # shellcheck CI job (which covers scripts the suite's gates never see).
+  # Approximation of the standalone CI job documented in CONTRIBUTING.md
+  # (severity=error over the repo's shell scripts, including ones the
+  # suite's gates never see).
   # NB: no --no-renames here — unlike the changed-paths gate, rename
   # detection is what we want: a renamed *.sh reports the surviving path,
   # while --no-renames would also list the deleted path and shellcheck
