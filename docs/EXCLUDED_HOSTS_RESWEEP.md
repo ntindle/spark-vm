@@ -1,26 +1,35 @@
 # Excluded-host link re-sweep
 
-CI's markdown-link check excludes several bot-blocking hosts at the host
-level (see the exclusion comments in `.github/workflows/ci.yml` — as of
-2026-09-23: boat.dev, businesswire.com, daytona.io, fourweekmba.com,
-globenewswire.com, medium.com, producthunt.com, tvgreport.com, plus the
-release-compare URL pattern). Automated fetchers get bot-blocked there, so
-lychee can never check them.
+CI's markdown-link check excludes bot-blocking hosts at the host level (see
+the exclusion comments in `.github/workflows/ci.yml`). Automated fetchers get
+bot-blocked there, so lychee can never check them. The set has grown well
+past the 2026-09-23 eight (boat.dev, businesswire.com, daytona.io,
+fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com,
+plus the release-compare URL pattern); the full current set is
+machine-inventoried in `docs/CI.md` (the `<!-- link-check-excludes -->` block,
+pinned against `ci.yml` by `scripts/test_ci_md_link_excludes.py`).
 
-This document covers all eight lychee-excluded hosts. The original three
+This document covers all lychee-excluded hosts/patterns. The original three
 from issue #106 (medium.com, businesswire.com, globenewswire.com) were
 hand-verified when the exclusion was introduced and are **never re-checked
-by CI afterwards** — so rot would accumulate silently. The five hosts
-excluded later (boat.dev, daytona.io, fourweekmba.com, producthunt.com,
-tvgreport.com) rot under the identical silent mechanism; follow-up issue
-#248 tracked extending the ritual to them, and the 2026-09-23 log row
-below is their first sweep. It exists to close issues #106 and #248.
+by CI afterwards** — so rot would accumulate silently. The hosts excluded
+later rot under the identical silent mechanism; follow-up issue #248
+tracked extending the ritual to the five added by 2026-09-23 (boat.dev,
+daytona.io, fourweekmba.com, producthunt.com, tvgreport.com), and the
+2026-09-23 log row below is their first sweep. Every host added since joins
+the ritual automatically: the sweep enumerates the pinned inventory, not a
+hardcoded host list. It exists to close issues #106 and #248.
 
 Executor: the spark-vm hourly build loop's docs turn. Trigger: re-sweep
 whenever the log table's last-sweep date below is older than ~90 days.
 **Next sweep due: 2026-12-22.**
 
 ## Excluded hosts (this ritual)
+
+The table below is the 2026-09-23 first-sweep record — the then-full
+eight-host set, kept as the historical baseline. The current set is the
+pinned inventory in `docs/CI.md`; the next sweep enumerates that inventory
+(step 1), so hosts added since are covered without another doc edit.
 
 | Host | Why CI skips it | `*.md` occurrences, raw (2026-09-23) |
 |---|---|---|
@@ -42,10 +51,22 @@ the exclusion.
 
 ## Re-sweep procedure (quarterly)
 
-1. Enumerate every excluded-host link in the repo:
+1. Enumerate every excluded-host link in the repo. Build the host alternation
+   from the pinned inventory in `docs/CI.md` — never paste a stale one:
    ```sh
-   grep -rEno "https?://[^] )'\"]*(medium\.com|businesswire\.com|globenewswire\.com|boat\.dev|daytona\.io|fourweekmba\.com|tvgreport\.com|producthunt\.com)[^] )'\"]*" --include="*.md" .
+   HOSTS=$(sed -n '/<!-- link-check-excludes:start -->/,/<!-- link-check-excludes:end -->/p' docs/CI.md \
+     | sed '/<!--/,/-->/d' \
+     | grep -vE '^(release-compare-url|github-blob-urls|archive-single-url)$' \
+     | sed 's/\./\\./g' | paste -sd'|')
+   grep -rEno "https?://[^] )'\"]*($HOSTS)[^] )'\"]*" --include="*.md" .
    ```
+   The three skipped tokens are the job's non-host URL-pattern excludes:
+   `release-compare-url` (release-ritual compare links, 404-by-design until
+   the release lands — machine-generated, excluded deliberately),
+   `github-blob-urls` (GitHub file-view pages, rate-limited not broken), and
+   `archive-single-url` (one pinned web.archive.org snapshot, per-URL
+   throttled). They are not host-level excludes and do not join the host
+   alternation.
    (The `[^] )'\"]` class excludes `]` as well — markdown-link closing
    brackets would otherwise glue onto the URL and inflate dedup counts.
    `]` must come first in the class; escaping it as `\]` silently matches
@@ -53,7 +74,7 @@ the exclusion.
 2. Derive the unique URLs by stripping the `file:line:` prefixes and
    deduplicating:
    ```sh
-   grep -rEno "https?://[^] )'\"]*(medium\.com|businesswire\.com|globenewswire\.com|boat\.dev|daytona\.io|fourweekmba\.com|tvgreport\.com|producthunt\.com)[^] )'\"]*" --include="*.md" . | sed -E 's/^[^:]*:[0-9]+://' | sort -u
+   grep -rEno "https?://[^] )'\"]*($HOSTS)[^] )'\"]*" --include="*.md" . | sed -E 's/^[^:]*:[0-9]+://' | sort -u
    ```
    The "unique URLs checked" number in the log is the output of this
    pipeline, not a naive `sort -u` of step 1.
@@ -65,7 +86,7 @@ the exclusion.
    `.`) glued onto a URL by the same greedy match also inflates the
    unique count. Verify the actual host of each candidate URL (the part
    between the scheme and the first `/`): keep it iff it is one of the
-   eight excluded hosts **or a subdomain of one** — i.e. the host must
+   excluded hosts **or a subdomain of one** — i.e. the host must
    match the host-level `--exclude` regexes in `.github/workflows/ci.yml`
    (`(www\.)?` / `([a-z0-9-]+\.)?` forms), so `www.daytona.io` and
    `docs.boat.dev` are kept but `github.com` is not. Drop candidates whose
