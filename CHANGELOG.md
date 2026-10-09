@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- The contributor guide's merge-gate instructions no longer undercount the required CI checks: the "run the merge gate locally" section names all eight checks (the shard-plan check and the docs-only changed-paths gate were missing since the test-suite sharding landed), gives a local replication command for each, and a new pin test fails the suite if the doc's check list ever drifts from the branch-protection ruleset again. (#TBD)
+- The contributor guide's merge-gate instructions no longer undercount the required CI checks: the "run the merge gate locally" section names all eight checks (the shard-plan check and the docs-only changed-paths gate were missing since the test-suite sharding landed), gives a local replication command for each, and a new pin test fails the suite if the doc's check list ever drifts from the branch-protection ruleset again. (#1207)
 
 ### Added
 
