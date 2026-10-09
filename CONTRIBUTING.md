@@ -117,8 +117,28 @@ you get only the subtree's tests. Always run the suite from the root so
 
 `python3 -m pytest` is most of what CI checks, but not all of it — seven
 more CI checks gate the merge, and a PR that is green locally can still go
-red on CI if you skip the ones you can run. The seven, with their local
-form:
+red on CI if you skip the ones you can run. The one-shot way to run them:
+
+```bash
+./scripts/local-gate.sh
+```
+
+It runs the shard-plan check, the changelog ritual lint, the changed-paths
+evaluation (docs-only diffs skip the python suite, like CI — your
+uncommitted changes count as code, so the suite still runs until you
+commit them), docs index coverage, shellcheck severity=error on your
+changed `*.sh` files, and then the full python suite — failing on the
+first failure.
+`./scripts/local-gate.sh --quick` runs only the cheap checks (no suite);
+`./scripts/local-gate.sh --plan` prints the steps without running them.
+The two checks the script doesn't run — the markdown link check (no
+practical local equivalent) and the PNG screenshot smoke test (manual
+recipe, see below) — are named in the output, not run.
+
+The seven, with their local form — `local-gate.sh` runs the same checks in
+one invocation (its changed-paths evaluator is the script's CI-verbatim
+form of the one-liner below; identical except on a zero-change diff, where
+the script fails closed and runs the suite, like CI):
 
 <!-- The required-check inventory this section claims. The branch-protection
 ruleset (deploy/rulesets/main-branch-protection.json) is the source of
