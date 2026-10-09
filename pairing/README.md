@@ -43,6 +43,20 @@ redeem: sign(challenge) ──POST /v1/pairing/{id}/redeem──▶ verifies ed2
 box saves token (0600), heartbeats as before
 ```
 
+### Attested path (provisioned boxes, #1108 box-side)
+
+Provisioned boxes skip the human ceremony: the provisioner seeds a
+single-use attestation token via machine-config env (G51.3) and the box's
+first-boot hook presents it (`deploy/golden-image/identity-seed-hook.sh`,
+#1203). `request` gains `--attestation-token` (or the
+`SPARKVM_ATTESTATION_TOKEN` env var — never put the token on argv where
+`ps` can see it); the request body gains the optional `attestation_token`
+field, and when the plane's response carries `auto_approved: true` the
+client skips the "give this code to the owner" output and records
+`attested: true` in `pairing.json`. The human path never sets the flag.
+The token itself is never printed. Plane-side validation, consumption, and
+the typed auto-approval are #907/#1108's half — still open.
+
 ## Token rotation (#846)
 
 Box Bearer <redacted> are short-lived (24 h). The box rotates its own token
@@ -574,7 +588,7 @@ stopgap, and the fleet must stay small.
   (signature verification; the Worker deploys as a single file).
   `test_ed25519.py` asserts the two copies stay byte-identical.
 - `spark_pair.py` — box client + owner approval CLI (stdlib only):
-  `init`, `request --name`, `redeem`, `approve [--pairing-id]`,
+  `init`, `request --name [--attestation-token]`, `redeem`, `approve [--pairing-id]`,
   `heartbeat`, `rotate [--auto]`, `revoke --box-id`,
   `ingest` (durable-command consumer, #874).
   State in `~/.config/spark-pair` (`--dir` / `SVM_PAIR_DIR` override);
@@ -592,7 +606,7 @@ stopgap, and the fleet must stay small.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | /v1/pairing/request | none | `{name, pubkey(b64), fingerprint}` → `{pairing_id, code, expires_at}` |
+| POST | /v1/pairing/request | none | `{name, pubkey(b64), fingerprint[, attestation_token]}` → `{pairing_id, code, expires_at}` (attested path: plane returns `auto_approved: true` and the client skips the human ceremony, #1108) |
 | GET | /v1/pairing | owner | pending/approved pairings (no code material) |
 | GET | /v1/pairing/{id} | owner | detail incl. fingerprint |
 | POST | /v1/pairing/{id}/approve | owner | `{code}` typed by the human |

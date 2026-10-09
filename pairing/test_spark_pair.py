@@ -29,6 +29,7 @@ class Ctx:
         self.pairing_id = None
         self.owner_key = "svm_owner_test"
         self.bootstrap = False
+        self.attestation_token = None  # request --attestation-token
         for k, v in kw.items():
             setattr(self, k, v)
 
@@ -111,6 +112,107 @@ def test_request_redeem_full_flow(ctx, monkeypatch, capsys):
     assert enroll["token"] == "SECRET"
     mode = stat.S_IMODE(os.stat(os.path.join(ctx.dir, "enrollment.json")).st_mode)
     assert mode == 0o600
+    assert not os.path.exists(os.path.join(ctx.dir, "pairing.json"))
+
+
+def test_request_without_token_omits_attestation_field(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    bodies = []
+
+    def fake_http(method, url, body=None, headers=None):
+        bodies.append(body)
+        return 201, {"ok": True, "pairing_id": "pair_abc",
+                     "code": "ABCD-EFGH", "expires_at": 9999999999}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    assert len(bodies) == 1
+    assert "attestation_token" not in bodies[0]
+
+
+def test_request_sends_attestation_token_flag(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    bodies = []
+    ctx.attestation_token = "tok-flag-abc"
+
+    def fake_http(method, url, body=None, headers=None):
+        bodies.append(body)
+        return 201, {"ok": True, "pairing_id": "pair_abc",
+                     "code": "ABCD-EFGH", "expires_at": 9999999999}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    assert bodies[0]["attestation_token"] == "tok-flag-abc"
+    out = capsys.readouterr().out
+    assert "tok-flag-abc" not in out  # the token is never printed
+    assert "ABCD-EFGH" in out  # human ceremony unchanged when not auto-approved
+
+
+def test_request_attestation_token_env_fallback(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    bodies = []
+    monkeypatch.setenv("SPARKVM_ATTESTATION_TOKEN", "tok-env-xyz")
+
+    def fake_http(method, url, body=None, headers=None):
+        bodies.append(body)
+        return 201, {"ok": True, "pairing_id": "pair_abc",
+                     "code": "ABCD-EFGH", "expires_at": 9999999999}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    assert bodies[0]["attestation_token"] == "tok-env-xyz"
+
+
+def test_request_attestation_flag_beats_env(ctx, monkeypatch):
+    _run_init(ctx)
+    bodies = []
+    ctx.attestation_token = "tok-flag-wins"
+    monkeypatch.setenv("SPARKVM_ATTESTATION_TOKEN", "tok-env-loses")
+
+    def fake_http(method, url, body=None, headers=None):
+        bodies.append(body)
+        return 201, {"ok": True, "pairing_id": "pair_abc",
+                     "code": "ABCD-EFGH", "expires_at": 9999999999}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    assert bodies[0]["attestation_token"] == "tok-flag-wins"
+
+
+def test_request_attested_response_skips_human_ceremony(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    ctx.attestation_token = "tok-attested"
+
+    def fake_http(method, url, body=None, headers=None):
+        assert body["attestation_token"] == "tok-attested"
+        # Attested response shape per #1108: no human code to show.
+        return 201, {"ok": True, "pairing_id": "pair_att",
+                     "expires_at": 9999999999, "auto_approved": True}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    out = capsys.readouterr().out
+    assert "auto-approved" in out
+    assert "Give this pairing code" not in out
+    assert "tok-attested" not in out
+    pairing = json.load(open(os.path.join(ctx.dir, "pairing.json")))
+    assert pairing["pairing_id"] == "pair_att"
+    assert pairing["attested"] is True
+    mode = stat.S_IMODE(os.stat(os.path.join(ctx.dir, "pairing.json")).st_mode)
+    assert mode == 0o600
+
+
+def test_request_attested_response_missing_pairing_id_fails_loud(
+        ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    ctx.attestation_token = "tok-attested"
+
+    def fake_http(method, url, body=None, headers=None):
+        return 201, {"ok": True, "auto_approved": True}  # malformed
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 1
+    assert "pairing_id/expires_at" in capsys.readouterr().out
     assert not os.path.exists(os.path.join(ctx.dir, "pairing.json"))
 
 
