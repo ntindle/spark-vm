@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- The release workflow's golden-image build gate now also runs when a release is published through the recovery path (the tag-pushed/publish-failed state): the gate emits its tag when the cut succeeds OR the recovery succeeds, and the gate runs whenever that tag is present — so a release that needed operator-visible recovery still gets its baked-secrets scan and manifest preflight. (#1189)
+- The release workflow's golden-image build gate now also runs when a release is published through the recovery path (the tag-pushed/publish-failed state): the tag step emits the release tag when the cut succeeds OR the recovery succeeds, and the gate runs whenever that tag is present — so a release that needed operator-visible recovery still gets its baked-secrets scan and manifest preflight. (#1189)
 
 - Closing a job whose directory exists but is unreadable (operator permission-mangled) no longer crashes — the job record still closes cleanly. (#1172) (#1186)
 
