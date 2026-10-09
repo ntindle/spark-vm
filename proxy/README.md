@@ -91,8 +91,9 @@ swapd) at `/home/swapd/grant-writer`: the **single** writer for
 to it.
 
 And `privileged_read.py` is not a writer at all — it is the one open
-discipline for privileged reads, imported by the writers (`O_RDONLY |
-O_NOFOLLOW`, fails on symlinks instead of reading through).
+discipline for privileged reads, imported by the deploy tooling
+(`safe_install.py`, `build_ca_bundle.py`) (`O_RDONLY | O_NOFOLLOW`,
+fails on symlinks instead of reading through).
 
 ## Using it: `with-proxy`
 
