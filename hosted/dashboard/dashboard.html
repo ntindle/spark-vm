@@ -96,6 +96,33 @@
   <div id="login-err" class="err hidden"></div>
 </section>
 
+<!-- agent login -->
+<section id="agent-login-view" class="card">
+  <h2 style="margin-top:0">Agent sign-in</h2>
+  <p class="muted">For agents owned by the fleet owner, via AgentID
+  (standard OpenID Connect with PKCE — no secret). Agent sessions are
+  <strong>read-only</strong>: pairing approvals and action-approval
+  decisions stay human-only.</p>
+  <div>
+    <button id="agent-login-btn" class="primary">Sign in as agent</button>
+  </div>
+  <div id="agent-login-err" class="err hidden"></div>
+  <p class="muted hidden" id="agent-login-unconfigured">AgentID is not
+  configured for this dashboard yet — see the README's AgentID section.</p>
+</section>
+
+<!-- agent session -->
+<section id="agent-view" class="card hidden">
+  <h2 style="margin-top:0">Signed in as agent</h2>
+  <dl class="detail" id="agent-dl"></dl>
+  <p class="muted">Agent sessions are read-only by policy. Fleet API
+  access for agents unlocks when the control plane ships session
+  exchange (<span class="mono">POST /v1/agent/exchange</span>); until
+  then this session proves identity only — it is never sent to the
+  plane.</p>
+  <p><button id="agent-logout-btn">Sign out</button></p>
+</section>
+
 <!-- app -->
 <main id="app-view" class="hidden">
   <h2>Fleet <span class="muted" id="fleet-count"></span></h2>
@@ -282,6 +309,93 @@ function approvalCard(a, now) {
         '</div><div class="err hidden"></div><div class="okmsg hidden"></div>'
       : '') +
     '</div>';
+}
+
+/* ---- AgentID (agent) sign-in ----
+   Standard OpenID Connect against https://auth.agentid.com (see
+   https://www.agentid.com/llms-full.txt): authorization-code flow with
+   PKCE S256 as a PUBLIC client — there is no client secret anywhere in
+   this page (token_endpoint_auth_method "none").
+   Auth-model decision, stated explicitly: this page has two actor types.
+   - actor_type "human": owner API key (svm_…) — full owner powers,
+     including pairing approvals and action-approval taps.
+   - actor_type "agent": AgentID OIDC session — READ-ONLY by policy.
+     Agents never approve pairings and never tap action-approval
+     decisions; those stay human-only in the views above.
+   The agent session below is display-only until the control plane
+   accepts agent sessions (follow-up: POST /v1/agent/exchange on the
+   plane, which re-verifies the ES256 id_token signature server-side).
+   The agent id_token is never sent to the plane as a Bearer — the
+   plane would 401 it and the login gate would bounce the agent out. */
+var AGENTID = {
+  issuer: "https://auth.agentid.com",
+  authorization_endpoint: "https://auth.agentid.com/v0/authorize",
+  token_endpoint: "https://auth.agentid.com/v0/token",
+  userinfo_endpoint: "https://auth.agentid.com/v0/userinfo",
+  // Filled in when the app is registered in the AgentID console as a
+  // PUBLIC client (redirect URIs = every plane origin that serves this
+  // page). A public client_id is not a secret — it ships in this page.
+  // Empty means "not configured": the agent sign-in card says so and
+  // the button stays disabled (see README.md).
+  client_id: "",
+  scope: "openid owner_email"
+};
+function b64urlDecode(s) {
+  // base64url -> UTF-8 string. atob + TextDecoder exist in every
+  // browser we serve and in node (the unit-test harness).
+  var b64 = String(s).replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  var bin = atob(b64), bytes = new Uint8Array(bin.length), i;
+  for (i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function parseIdToken(token) {
+  // Returns the id_token's payload claims. The signature is NOT
+  // verified here: the token arrives directly from the IdP token
+  // endpoint over TLS, audience-bound to this client, and the control
+  // plane re-verifies the ES256 signature server-side when agent
+  // session exchange lands. Display-only use.
+  var parts = String(token || "").split(".");
+  if (parts.length !== 3) throw new Error("malformed id_token");
+  return JSON.parse(b64urlDecode(parts[1]));
+}
+function validateAgentClaims(claims, opts) {
+  // Returns null when the claims are acceptable for an agent session,
+  // otherwise a human-readable reason. opts: {issuer, clientId, nonce, now}.
+  claims = claims || {};
+  if (claims.iss !== opts.issuer) return "unexpected issuer";
+  var aud = claims.aud;
+  var okAud = aud === opts.clientId ||
+    (Object.prototype.toString.call(aud) === "[object Array]" &&
+     aud.indexOf(opts.clientId) !== -1);
+  if (!okAud) return "audience mismatch";
+  // The agent sign-in path requires actor_type "agent" — a human
+  // identity here is a category error, not a lesser privilege.
+  if (claims.actor_type !== "agent") return "not an agent identity";
+  if (opts.nonce != null && claims.nonce !== opts.nonce)
+    return "nonce mismatch";
+  var now = opts.now | 0;
+  if (!(claims.exp > now)) return "token expired";
+  if (claims.iat != null && claims.iat > now + 300)
+    return "token issued in the future";
+  return null;
+}
+function agentidAuthorizeUrl(cfg, redirectUri, challenge, state, nonce) {
+  // Pure builder for the authorization redirect (public client + PKCE
+  // S256 — no secret involved).
+  var q = [
+    ["response_type", "code"],
+    ["client_id", cfg.client_id],
+    ["redirect_uri", redirectUri],
+    ["scope", cfg.scope],
+    ["state", state],
+    ["nonce", nonce],
+    ["code_challenge", challenge],
+    ["code_challenge_method", "S256"]
+  ].map(function (kv) {
+    return encodeURIComponent(kv[0]) + "=" + encodeURIComponent(kv[1]);
+  }).join("&");
+  return cfg.authorization_endpoint + "?" + q;
 }
 
 /* ---- app state ---- */
@@ -569,6 +683,158 @@ function approvePairing(card, pid) {
   });
 }
 
+/* ---- AgentID session (actor_type "agent") ----
+   Kept strictly separate from the human owner-key session above:
+   AGENT = { actor_type, owner_sub, owner_email, exp, id_token } or null.
+   Stored in sessionStorage only, like the owner key. Never attached
+   to plane API calls — the plane does not accept agent sessions yet. */
+var AGENT = null;
+var AGENTID_FLOW_KEY = "svm_agentid_flow";
+var AGENTID_SESSION_KEY = "svm_agent_session";
+function agentConfigured() { return !!AGENTID.client_id; }
+function randB64url(n) {
+  var b = new Uint8Array(n), i, s = "";
+  (window.crypto || {}).getRandomValues
+    ? window.crypto.getRandomValues(b)
+    : (function () { for (i = 0; i < n; i++) b[i] = Math.floor(Math.random() * 256); })();
+  for (i = 0; i < b.length; i++)
+    s += "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".charAt(b[i] & 63);
+  return s;
+}
+function pkceChallenge(verifier) {
+  // S256 code challenge. Falls back to "plain" only if SubtleCrypto is
+  // unavailable (non-secure context) — the flow still works because the
+  // verifier travels over TLS to the token endpoint.
+  if (window.crypto && window.crypto.subtle) {
+    return window.crypto.subtle.digest(
+      "SHA-256", new TextEncoder().encode(verifier)).then(function (buf) {
+        var bytes = new Uint8Array(buf), s = "", i;
+        for (i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      });
+  }
+  return Promise.resolve(verifier);
+}
+function agentRedirectUri() {
+  // The page calls the plane that served it, so the callback is this
+  // page's own origin root — but the origin must be registered on the
+  // AgentID app or the IdP refuses the redirect.
+  return location.origin + "/";
+}
+function saveAgentidFlow(flow) {
+  try { sessionStorage.setItem(AGENTID_FLOW_KEY, JSON.stringify(flow)); } catch (e) {}
+}
+function loadAgentidFlow() {
+  try {
+    var raw = sessionStorage.getItem(AGENTID_FLOW_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function clearAgentidFlow() {
+  try { sessionStorage.removeItem(AGENTID_FLOW_KEY); } catch (e) {}
+}
+function saveAgentSession(s) {
+  try { sessionStorage.setItem(AGENTID_SESSION_KEY, JSON.stringify(s)); } catch (e) {}
+}
+function loadAgentSession() {
+  try {
+    var raw = sessionStorage.getItem(AGENTID_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function agentLoginError(msg) {
+  var e = document.getElementById("agent-login-err");
+  e.textContent = msg; e.classList.remove("hidden");
+}
+function startAgentLogin() {
+  if (!agentConfigured()) {
+    document.getElementById("agent-login-unconfigured").classList.remove("hidden");
+    return Promise.resolve();
+  }
+  var state = randB64url(16), nonce = randB64url(16), verifier = randB64url(64);
+  var redirectUri = agentRedirectUri();
+  return pkceChallenge(verifier).then(function (challenge) {
+    saveAgentidFlow({ state: state, nonce: nonce, verifier: verifier,
+                      redirect_uri: redirectUri });
+    location.assign(agentidAuthorizeUrl(AGENTID, redirectUri, challenge,
+                                       state, nonce));
+  });
+}
+function finishAgentLogin() {
+  // OIDC callback: validate state, exchange the code (public client —
+  // code_verifier instead of a secret), validate the id_token claims.
+  var params = new URLSearchParams(location.search);
+  var code = params.get("code"), state = params.get("state");
+  if (!code) return Promise.resolve(false);
+  // Strip the code from the URL immediately so it is not left in
+  // history or shared links.
+  history.replaceState(null, "", location.pathname);
+  var flow = loadAgentidFlow();
+  clearAgentidFlow();
+  if (!flow || flow.state !== state) {
+    agentLoginError("Sign-in failed: state mismatch (possible CSRF) — try again.");
+    return Promise.resolve(true);
+  }
+  var body = "grant_type=authorization_code" +
+    "&code=" + encodeURIComponent(code) +
+    "&redirect_uri=" + encodeURIComponent(flow.redirect_uri) +
+    "&client_id=" + encodeURIComponent(AGENTID.client_id) +
+    "&code_verifier=" + encodeURIComponent(flow.verifier);
+  return fetch(AGENTID.token_endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body
+  }).then(function (resp) { return resp.json(); }).then(function (tok) {
+    if (!tok || !tok.id_token) throw new Error("no id_token in token response");
+    var claims = parseIdToken(tok.id_token);
+    var problem = validateAgentClaims(claims, {
+      issuer: AGENTID.issuer, clientId: AGENTID.client_id,
+      nonce: flow.nonce, now: Math.floor(Date.now() / 1000)
+    });
+    if (problem) throw new Error("id_token rejected: " + problem);
+    AGENT = { actor_type: "agent",
+              owner_sub: claims.owner_sub || "",
+              owner_email: claims.owner_email || "",
+              exp: claims.exp, id_token: tok.id_token };
+    saveAgentSession(AGENT);
+    showAgentView();
+    return true;
+  }).catch(function (err) {
+    agentLoginError("Agent sign-in failed: " +
+      (err && err.message ? err.message : err));
+    return true;
+  });
+}
+function showAgentView() {
+  document.getElementById("login-view").classList.add("hidden");
+  document.getElementById("agent-login-view").classList.add("hidden");
+  document.getElementById("agent-view").classList.remove("hidden");
+  document.getElementById("agent-dl").innerHTML =
+    row("Actor type", '<span class="mono">agent</span>') +
+    row("Owner email", esc(AGENT.owner_email || "—")) +
+    row("Owner sub", '<span class="mono">' + esc(AGENT.owner_sub || "—") + "</span>") +
+    row("Session expires", esc(fmtClock(AGENT.exp)));
+}
+function agentLogout() {
+  AGENT = null;
+  try { sessionStorage.removeItem(AGENTID_SESSION_KEY); } catch (e) {}
+  document.getElementById("agent-view").classList.add("hidden");
+  document.getElementById("login-view").classList.remove("hidden");
+  if (agentConfigured())
+    document.getElementById("agent-login-view").classList.remove("hidden");
+}
+function restoreAgentSession() {
+  var s = loadAgentSession();
+  if (!s || s.actor_type !== "agent") return false;
+  if (!(s.exp > Math.floor(Date.now() / 1000))) {
+    try { sessionStorage.removeItem(AGENTID_SESSION_KEY); } catch (e) {}
+    return false;
+  }
+  AGENT = s;
+  showAgentView();
+  return true;
+}
+
 document.getElementById("login-form").addEventListener("submit", function (ev) {
   ev.preventDefault();
   var btn = this.querySelector('button[type="submit"]');
@@ -588,10 +854,33 @@ document.getElementById("raw-toggle").addEventListener("click", function () {
   var hidden = pre.classList.toggle("hidden");
   this.textContent = hidden ? "Show raw status JSON" : "Hide raw status JSON";
 });
+document.getElementById("agent-login-btn").addEventListener("click", function () {
+  var btn = this;
+  btn.disabled = true;
+  document.getElementById("agent-login-err").classList.add("hidden");
+  startAgentLogin().then(function () {
+    // startAgentLogin redirects on success; re-enable only if we are
+    // still here (unconfigured or challenge failure).
+    btn.disabled = false;
+  });
+});
+document.getElementById("agent-logout-btn").addEventListener("click", function () {
+  agentLogout();
+});
 (function init() {
-  var saved = null;
-  try { saved = sessionStorage.getItem("svm_owner_key"); } catch (e) {}
-  if (saved) login(saved);
+  // AgentID callback (?code=…) is handled before anything else; it
+  // consumes the code and either lands on the agent view or reports.
+  finishAgentLogin().then(function (handled) {
+    if (handled) return;
+    var saved = null;
+    try { saved = sessionStorage.getItem("svm_owner_key"); } catch (e) {}
+    if (saved) { login(saved); return; }
+    if (restoreAgentSession()) return;
+    if (!agentConfigured())
+      document.getElementById("agent-login-unconfigured").classList.remove("hidden");
+    else
+      document.getElementById("agent-login-btn").disabled = false;
+  });
 })();
 </script>
 </body>

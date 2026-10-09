@@ -265,8 +265,27 @@ def test_required_views_and_ids():
     html = _html()
     for token in ("login-view", "app-view", "fleet-list", "detail-card",
                   "detail-approvals", "pairing-list", "key-input",
-                  "login-form", "logout-btn", "refresh-btn"):
+                  "login-form", "logout-btn", "refresh-btn",
+                  "agent-login-view", "agent-view", "agent-login-btn",
+                  "agent-logout-btn", "agent-dl"):
         assert 'id="%s"' % token in html, "missing #%s" % token
+
+
+def test_agentid_config_present_but_unconfigured():
+    html = _html()
+    # The public OIDC client id ships in the page once registered; it
+    # starts empty and the UI says so.
+    assert "AGENTID" in html
+    assert 'client_id: ""' in html
+    assert "agent-login-unconfigured" in html
+
+
+def test_no_client_secret_anywhere():
+    html = _html()
+    # AgentID is a PUBLIC client (PKCE, token_endpoint_auth_method
+    # "none"): a client secret must never appear in this page.
+    assert "client_secret" not in html.lower(), \
+        "client secret material must never ship in the dashboard"
 
 
 def test_owner_key_never_persisted_or_leaked():
@@ -622,6 +641,115 @@ console.log(JSON.stringify({
     assert o["null"] == ""
 
 
+# --- AgentID ------------------------------------------------------------
+
+import base64 as _b64
+
+
+def _agentid_token(payload):
+    """Craft an unsigned compact JWS carrying `payload` (signature is a
+    dummy — parseIdToken/validateAgentClaims are claim checks, not
+    signature checks; the plane re-verifies ES256 server-side)."""
+    def enc(o):
+        return _b64.urlsafe_b64encode(
+            json.dumps(o).encode()).rstrip(b"=").decode()
+    return enc({"alg": "ES256", "typ": "JWT"}) + "." + enc(payload) + ".sig"
+
+
+def _agentid_claims(**kw):
+    c = {"iss": "https://auth.agentid.com", "aud": "cid-123",
+         "actor_type": "agent", "nonce": "n-1", "iat": 1700,
+         "exp": 1900, "owner_sub": "owner-1",
+         "owner_email": "owner@example.com"}
+    c.update(kw)
+    return c
+
+
+def _agentid_opts(**kw):
+    o = {"issuer": "https://auth.agentid.com", "clientId": "cid-123",
+         "nonce": "n-1", "now": 1800}
+    o.update(kw)
+    return o
+
+
+def test_agentid_authorize_url():
+    o = _node_eval("""
+var url = agentidAuthorizeUrl(AGENTID, "https://plane.example/",
+                              "ch-al", "st-1", "no-1");
+console.log(JSON.stringify({url: url}));
+""")
+    u = o["url"]
+    assert u.startswith("https://auth.agentid.com/v0/authorize?")
+    for kv in ("response_type=code", "scope=openid%20owner_email",
+               "state=st-1", "nonce=no-1", "code_challenge=ch-al",
+               "code_challenge_method=S256",
+               "redirect_uri=https%3A%2F%2Fplane.example%2F"):
+        assert kv in u, "missing %r in %r" % (kv, u)
+    # No secret material in the authorize redirect, ever.
+    assert "secret" not in u.lower()
+
+
+def test_agentid_parse_id_token():
+    tok = _agentid_token(_agentid_claims())
+    o = _node_eval("""
+var c = parseIdToken(%s);
+console.log(JSON.stringify({actor: c.actor_type, email: c.owner_email,
+                            sub: c.owner_sub}));
+""" % json.dumps(tok))
+    assert o == {"actor": "agent", "email": "owner@example.com",
+                 "sub": "owner-1"}
+
+
+def test_agentid_parse_id_token_rejects_malformed():
+    o = _node_eval("""
+var errs = [];
+["nope", "a.b", "a.b.c.d"].forEach(function (t) {
+  try { parseIdToken(t); errs.push("no-throw"); }
+  catch (e) { errs.push("threw"); }
+});
+console.log(JSON.stringify({errs: errs}));
+""")
+    assert o["errs"] == ["threw", "threw", "threw"]
+
+
+def test_agentid_validate_claims_happy():
+    o = _node_eval("""
+var claims = parseIdToken(%s);
+console.log(JSON.stringify({
+  ok: validateAgentClaims(claims, %s),
+  audArray: validateAgentClaims(
+    parseIdToken(%s), %s),
+}));
+""" % (json.dumps(_agentid_token(_agentid_claims())),
+       json.dumps(_agentid_opts()),
+       json.dumps(_agentid_token(_agentid_claims(aud=["x", "cid-123"]))),
+       json.dumps(_agentid_opts())))
+    assert o["ok"] is None
+    assert o["audArray"] is None
+
+
+def test_agentid_validate_claims_rejects():
+    cases = [
+        ({"iss": "https://evil.example"}, {}, "unexpected issuer"),
+        ({"aud": "other"}, {}, "audience mismatch"),
+        ({"actor_type": "human"}, {}, "not an agent identity"),
+        ({"actor_type": "user"}, {}, "not an agent identity"),
+        ({}, {"nonce": "wrong"}, "nonce mismatch"),
+        ({"exp": 1700}, {}, "token expired"),
+        ({"iat": 1800 + 301}, {}, "token issued in the future"),
+    ]
+    for claim_kw, opt_kw, reason in cases:
+        o = _node_eval("""
+var claims = parseIdToken(%s);
+console.log(JSON.stringify({
+  problem: validateAgentClaims(claims, %s),
+}));
+""" % (json.dumps(_agentid_token(_agentid_claims(**claim_kw))),
+       json.dumps(_agentid_opts(**opt_kw))))
+        assert o["problem"] == reason, \
+            "expected %r for %r, got %r" % (reason, claim_kw, o["problem"])
+
+
 # --- app-state (DOM-stubbed node tests) ------------------------------------
 
 _APP_PREAMBLE = """
@@ -656,6 +784,11 @@ var sessionStorage = {
   getItem: function () { return null; },
   setItem: function () {}, removeItem: function () {},
 };
+var location = {
+  search: "", origin: "https://plane.test", pathname: "/",
+  assign: function (u) { location.assigned = u; },
+};
+var history = { replaceState: function () {} };
 """
 
 
@@ -759,3 +892,83 @@ card.getAttribute = function () { return "a_1"; };
     assert o["reenabled"] is True
     assert o["errShown"] is True
     assert o["lateIgnored"] is True
+
+
+def test_agentid_callback_exchange_lands_agent_view():
+    """AgentID callback (?code=&state=): state is validated, the code is
+    exchanged with the PKCE verifier (public client — no secret), the
+    id_token claims are validated, and the agent view renders the
+    owner identity. A state mismatch must fail closed without calling
+    the token endpoint."""
+    frag = """
+var store = {};
+sessionStorage.getItem = function (k) { return store[k] || null; };
+sessionStorage.setItem = function (k, v) { store[k] = v; };
+sessionStorage.removeItem = function (k) { delete store[k]; };
+AGENTID.client_id = "cid-123";
+function b64url(o) {
+  return Buffer.from(JSON.stringify(o)).toString("base64")
+    .replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+}
+var payload = { iss: "https://auth.agentid.com", aud: "cid-123",
+  actor_type: "agent", nonce: "n-1", iat: 1700, exp: 9999999999,
+  owner_sub: "owner-1", owner_email: "owner@example.com" };
+var tok = b64url({ alg: "ES256", typ: "JWT" }) + "." +
+          b64url(payload) + ".sig";
+var fetched = [];
+fetch = function (url, opts) {
+  fetched.push({ url: url, body: opts.body });
+  return Promise.resolve({ json: function () {
+    return Promise.resolve({ id_token: tok });
+  } });
+};
+store["svm_agentid_flow"] = JSON.stringify(
+  { state: "st-1", nonce: "n-1", verifier: "verifier-9",
+    redirect_uri: "https://plane.test/" });
+location.search = "?code=authcode&state=st-1";
+(async function () {
+  var handled = await finishAgentLogin();
+  var dl = document.getElementById("agent-dl").innerHTML;
+  var out = {
+    handled: handled,
+    agentShown: !document.getElementById("agent-view").classList
+      .contains("hidden"),
+    hasEmail: dl.indexOf("owner@example.com") !== -1,
+    hasActor: dl.indexOf(">agent<") !== -1,
+    tokenPosts: fetched.length === 1 &&
+      fetched[0].url === "https://auth.agentid.com/v0/token",
+    sendsCode: fetched[0].body.indexOf("code=authcode") !== -1,
+    sendsVerifier: fetched[0].body.indexOf("code_verifier=verifier-9") !== -1,
+    sendsClientId: fetched[0].body.indexOf("client_id=cid-123") !== -1,
+    noSecret: fetched[0].body.toLowerCase().indexOf("secret") === -1,
+    flowCleared: !("svm_agentid_flow" in store),
+    sessionSaved: (function () {
+      try { return JSON.parse(store["svm_agent_session"]).actor_type === "agent"; }
+      catch (e) { return false; }
+    })(),
+  };
+  // Now the hostile case: same code, wrong state — must fail closed.
+  fetched = [];
+  store["svm_agentid_flow"] = JSON.stringify(
+    { state: "st-1", nonce: "n-1", verifier: "verifier-9",
+      redirect_uri: "https://plane.test/" });
+  location.search = "?code=authcode&state=WRONG";
+  await finishAgentLogin();
+  out.csrfBlocked = fetched.length === 0 &&
+    !document.getElementById("agent-login-err").classList.contains("hidden");
+  console.log(JSON.stringify(out));
+})();
+"""
+    o = _node_app_eval(frag)
+    assert o["handled"] is True
+    assert o["agentShown"] is True
+    assert o["hasEmail"] is True
+    assert o["hasActor"] is True
+    assert o["tokenPosts"] is True
+    assert o["sendsCode"] is True
+    assert o["sendsVerifier"] is True
+    assert o["sendsClientId"] is True
+    assert o["noSecret"] is True
+    assert o["flowCleared"] is True
+    assert o["sessionSaved"] is True
+    assert o["csrfBlocked"] is True
