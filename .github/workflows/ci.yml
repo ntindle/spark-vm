@@ -516,11 +516,34 @@ jobs:
         # too, while the flagged article loads fully in a real browser
         # with content matching the citation. Rate-limiting, not broken
         # links.)
+        # x264.org 403s automated fetchers (bot-block; verified 2026-10-09:
+        # three consecutive CI link-check failures on PR #1201 on the
+        # pre-existing CODEC_LICENSING_RESEARCH.md citations (zero new
+        # links in the PR) — and curl with a browser UA 403s from
+        # independent egress too, while https://x264.org/technology/ loads
+        # fully in a real browser with the licensing page matching the
+        # VENDOR-VERIFIED citation. Bot-block, not a broken link.)
+        # marktechpost.com 403s automated fetchers (bot-block; verified
+        # 2026-10-09: CI link-check failures on PR #1201 on the
+        # pre-existing COMPETITOR_WATCH_2026-09-19_EVENING.md pricing-sweep
+        # citation (zero new links in the PR) — and curl with a browser UA
+        # 403s from independent egress too, while the best-agent-sandboxes
+        # article loads fully in a real browser with the cold-start /
+        # pricing comparison matching the citation. Bot-block, not a
+        # broken link.)
+        # investors.digitalocean.com 403s automated fetchers (bot-block;
+        # verified 2026-10-09: CI link-check failures on PR #1201 on the
+        # pre-existing COMPETITOR_WATCH_2026-09-25_MIDDAY.md citation
+        # (zero new links in the PR) — and curl with a browser UA 403s
+        # from independent egress too, while the Managed Agents launch IR
+        # page loads fully in a real browser with the $0.044/vCPU-hr and
+        # $0.0095/GB-hr billing line matching the VENDOR-VERIFIED
+        # citation. Bot-block, not a broken link.)
         # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' --exclude 'https?://(www\\.)?x264\\.org/.*' --exclude 'https?://(www\\.)?marktechpost\\.com/.*' --exclude 'https?://investors\\.digitalocean\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

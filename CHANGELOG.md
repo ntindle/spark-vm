@@ -77,6 +77,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The approvals page now reads the tailnet owner's identity from the documented field of the `tailscale whois` response instead of the first login-name-shaped value anywhere in it — a schema change on the whois side could otherwise have flipped the owner check and locked out (or mis-identified) the approver. (#1166) (#1169)
 - The approvals daemon's corruption-quarantine directory is now bounded like every other approval store: the newest 200 quarantined filings are kept and the oldest are pruned on the housekeeping cadence, instead of growing without limit. (#1168) (#1169)
 
+- The markdown link check no longer fails on three research-doc citations whose hosts block automated fetchers (x264.org, marktechpost.com, investors.digitalocean.com): the hosts are excluded at the host level, each hand-verified live with its citation. (#1202)
+
 ### Changed
 
 - CONTRIBUTING.md now documents the local story for every CI merge-gate check — the changelog-ritual lint, the docs-index coverage check, the shellcheck gates, and the PNG smoke test (all runnable locally), the sudo form of the install-safety root tests, and an honest note that the markdown link check has no practical local equivalent — so a PR that is green locally no longer surprises its author with CI-only red. (#1193)
