@@ -10,7 +10,7 @@ and red on CI with no way to see why.
 The ruleset JSON (deploy/rulesets/main-branch-protection.json) is the source
 of truth. The doc carries its claimed inventory in a
 <!-- gate-checks:start --> ... <!-- gate-checks:end --> comment block
-(invisible on GitHub) so this pin can compare the two sets exactly. Any
+(invisible in GitHub's rendered view; visible in raw/edit view) so this pin can compare the two sets exactly. Any
 drift fails loudly:
 - a required check the doc doesn't name (stale count, missing local form),
 - a doc-named check the ruleset no longer requires (dead instruction),

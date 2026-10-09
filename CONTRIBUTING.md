@@ -123,7 +123,9 @@ form:
 <!-- The required-check inventory this section claims. The branch-protection
 ruleset (deploy/rulesets/main-branch-protection.json) is the source of
 truth; scripts/test_contributing_ci_gates.py fails if this list and the
-ruleset disagree, so add the new check here the moment the ruleset grows. -->
+ruleset disagree, so add the new check here the moment the ruleset grows.
+(The block is invisible in GitHub's rendered view, visible in raw/edit
+view.) -->
 <!-- gate-checks:start -->
 python tests
 shard plan
@@ -143,16 +145,12 @@ python3 scripts/ci_shard_plan.py --check
 
 # changed-paths gate (a required CI check: skips the python suite on
 # docs-only diffs). Local equivalent — exit 0 means CI would RUN the suite
-# on your diff, exit 1 means CI would skip it as docs-only:
+# on your diff, exit 1 means CI would skip it as docs-only. (A zero-change
+# diff feeds grep empty input → exit 1; CI fails closed the other way and
+# runs the suite — but a real PR never has a zero diff.)
 git diff --no-renames --name-only origin/main...HEAD \
   | grep -qvE '^(docs/|CHANGELOG\.md$)'
-```
 
-The remaining five: two more have a one-liner local form, right here; the
-other three — plus the root tests that live inside the `python tests`
-shard — are covered in the paragraphs below.
-
-```bash
 # changelog ritual lint (a required CI check: CHANGELOG entries must not
 # reference workspace-internal paths; see the ritual at the top of
 # CHANGELOG.md)
@@ -163,6 +161,9 @@ python3 scripts/lint-changelog-ritual.py
 # PR — including docs-only ones, where the python suite is skipped.
 python3 -m pytest scripts/test_docs_index_coverage.py -q
 ```
+
+The remaining three — `shellcheck`, the PNG screenshot smoke test, and the
+markdown link check — are covered in the paragraphs below.
 
 The suite carries two shellcheck gates: the warning gate
 (`cua/test_shell_scripts.py` covers `cua/bin/*.sh`;
@@ -190,24 +191,24 @@ recipe: `pip install playwright`, then the one-time
 escalates internally), then `python3 scripts/pw-test.py` and
 `python3 scripts/png-check.py`.
 
-The install-safety root tests live *inside* the `python tests` job rather
-than as their own job: they self-skip as non-root, so your local pytest
-run never executes them — but CI runs them under sudo as part of the
-python-tests shard. If your PR touches proxy install/deploy code, prove
-it the way the shard does:
-
-```bash
-sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest \
-  proxy/test_safe_install.py \
-  -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
-```
-
 Only the markdown link check has no practical local equivalent: lychee
 runs with a long bot-block exclusion list that lives in
 `.github/workflows/ci.yml`, and its verdict depends on runner-egress IP
 reputation (bot-blocks that don't reproduce from your IP), so the gate's
 result genuinely can't be replicated locally. For that one, read the CI
 run on your PR instead of trying to replicate it.
+
+One more thing that isn't a separate check: the install-safety root tests
+live *inside* the `python tests` shard rather than as their own check. They
+self-skip as non-root, so your local pytest run never executes them — but
+CI runs them under sudo as part of the python-tests shard. If your PR
+touches proxy install/deploy code, prove it the way the shard does:
+
+```bash
+sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest \
+  proxy/test_safe_install.py \
+  -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
+```
 
 ## Secrets: the one hard rule
 
