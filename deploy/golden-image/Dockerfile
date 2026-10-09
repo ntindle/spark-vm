@@ -180,9 +180,11 @@ RUN cp -a /home/agent/. /etc/skel/ && chown -R root:root /etc/skel
 # drop the line.
 COPY deploy/golden-image/sparkvm-sshd-firstboot.sh /usr/local/bin/sparkvm-sshd-firstboot.sh
 COPY deploy/golden-image/identity-seed-hook.sh /usr/local/bin/identity-seed-hook.sh
+COPY deploy/golden-image/data-prep.sh /usr/local/bin/data-prep.sh
 COPY deploy/golden-image/supervisord.conf /etc/supervisor/conf.d/sparkvm.conf
 RUN chmod 0755 /usr/local/bin/sparkvm-sshd-firstboot.sh \
                /usr/local/bin/identity-seed-hook.sh \
+               /usr/local/bin/data-prep.sh \
  && rm -f /etc/ssh/ssh_host_* \
  && printf 'PasswordAuthentication no\nChallengeResponseAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
       > /etc/ssh/sshd_config.d/sparkvm.conf \
