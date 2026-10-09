@@ -92,17 +92,21 @@ silently correct on the DO side (they drop), but a loud box-side bug.
 **D-S53-3: generation lives in the transport, not the producer; the
 producer asks the session for the current generation per frame.**
 
-### F-S53-4 — one socket, one writer, the S5b lock discipline
+### F-S53-4 — one socket, one writer, serialized
 
-S5b's Security round-1 B1 established the `.ingest.lock` serialization
-discipline: socket-ingest paths serialize through a non-blocking lock.
-The producer adds a second writer (pty reader threads → socket). Two
-unsynchronized writers interleave JSON frames on one TLS stream — a
-corruption the DO would read as protocol errors. **D-S53-4: all outbound
-WSS frames (command acks, stream data, input handling, keepalive)
-serialize through the session's single socket writer under the existing
-lock discipline; pty reader threads enqueue to the writer, never write
-the socket.**
+The producer adds a second writer to the session's socket (pty reader
+threads → socket). Two unsynchronized writers interleave JSON frames on
+one TLS stream — a corruption the DO would read as protocol errors. The
+governing discipline is therefore the simplest one: one socket, one
+writer thread; every outbound frame is enqueued to that writer, and the
+writer never blocks on the network while holding the send path.
+(Precision, per review: `.ingest.lock` — the cross-process file lock
+S5b's Security round-1 B1 established for ingest state — is not the
+mechanism here; it is not cited as the governing discipline.)
+**D-S53-4: all outbound WSS frames (command acks, stream data, input
+handling, keepalive) go through the session's single socket writer;
+pty reader threads enqueue to the writer, never write the socket; the
+writer never blocks on the network while holding the send path.**
 
 ### F-S53-5 — the session cap gets a concrete default
 
@@ -110,8 +114,9 @@ D3: "the box's own process limits decide; the control plane documents
 the knob, it does not invent a small number." The producer needs a
 number anyway. Each pty costs ~3 fds (master, reader bookkeeping,
 epoll registration) — the honest default is derived, not invented:
-`cap = min(configured_cap, rlimit_nofile // 8)`, floored at a sane
-minimum (8) so a constrained box still streams. At cap, the box answers
+`cap = min(configured_cap, rlimit_nofile // 8)`, floored at a provisional
+minimum of 8 (a judgment call, not derived — a future slice may retune
+it) so a constrained box still streams. At cap, the box answers
 `stream_close{session_id, code:"cap-reached"}` per #919 §3.1; the DO
 documents the knob per D3. **D-S53-5: cap default derived from
 `RLIMIT_NOFILE`, knob `stream_session_cap` in the box config; the DO
@@ -146,8 +151,9 @@ field to be useful: `command` (argv to exec in the pty; default: login
 shell). This is a #919-contract extension, not an amendment — the frame
 shape is unchanged (`stream_open` gains an optional field), and D41's
 single-minter invariant is untouched. **D-S53-8: initiation carries
-optional `command`; absent → login shell. Recorded here as the
-contract delta #920 ships with.**
+optional `command`; absent → login shell. The box execs argv directly,
+never via a shell, and validates the field types before exec. Recorded
+here as the contract delta #920 ships with.**
 
 ### F-S53-9 — the DO-side stream machinery has no build owner (NEW GAP)
 
@@ -200,9 +206,12 @@ G53.7: upload completions land in the fleet event journal. The
 `phone_home_events` sink is live; an `artifact.completed` name needs the
 same deliberate registry treatment as D44 (the writer is fail-closed).
 Completion rows carry (box_id, key, bytes, sha) — never file contents.
-**D-S53-13: `POST /v1/artifacts/complete` HEAD-verifies the key, records
-the row, journals `artifact.completed`; the journal name is added by the
-same amendment that carries D44.**
+**D-S53-13: `POST /v1/artifacts/complete` verifies the key via the R2
+binding's head-object — not HTTP HEAD on the object URL, which fails
+against a private bucket — matching size (and ETag where meaningful)
+against the pending row, then records the row and journals
+`artifact.completed`; the journal name is added by the same amendment
+that carries D44.**
 
 ### F-S53-14 — retrieval is attachment-only, and stays in #921's scope
 
