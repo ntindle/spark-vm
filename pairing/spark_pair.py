@@ -541,10 +541,26 @@ def cmd_rotate(args):
     # (A rotates → T2, B rotates with graced T1 → T3 killing T2, A's save of
     # T2 lands last).
     lock_path = os.path.join(d, ".rotate.lock")
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    # 0600 at creation is not enough: a pre-existing lock file keeps its
-    # wider mode through the open. Force it every time (#883).
-    os.fchmod(lock_fd, 0o600)
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        print(f"rotate FAILED: cannot open lock file ({e}) — "
+              "check state-dir permissions")
+        return 1
+    try:
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open. Force it every time (#883).
+        os.fchmod(lock_fd, 0o600)
+    except OSError as e:
+        # The open succeeded but the secure failed: close the fd —
+        # returning with it open would leak one fd per rotate attempt,
+        # and the unwrapped failure would kill the phone-home daemon
+        # with a traceback (the daemon calls cmd_rotate in its main
+        # loop). (#1155)
+        os.close(lock_fd)
+        print(f"rotate FAILED: cannot secure lock file ({e}) — "
+              "check state-dir permissions")
+        return 1
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         return _cmd_rotate_locked(args, d, enroll_path, box_id, token,
@@ -831,11 +847,19 @@ def cmd_heartbeat(args):
     lock_path = os.path.join(d, ".heartbeat.lock")
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        _fail(d, f"heartbeat FAILED: cannot open lock file ({e}) — "
+                 "check state-dir permissions")
+        return 1
+    try:
         # 0600 at creation is not enough: a pre-existing lock file keeps
         # its wider mode through the open. Force it every time (#883).
         os.fchmod(lock_fd, 0o600)
     except OSError as e:
-        _fail(d, f"heartbeat FAILED: cannot open lock file ({e}) — "
+        # The open succeeded but the secure failed: close the fd —
+        # returning with it open would leak one fd per cron tick (#1155).
+        os.close(lock_fd)
+        _fail(d, f"heartbeat FAILED: cannot secure lock file ({e}) — "
                  "check state-dir permissions")
         return 1
     try:
@@ -1949,9 +1973,19 @@ def cmd_ingest(args):
     lock_path = os.path.join(d, _INGEST_LOCK_FILE)
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.fchmod(lock_fd, 0o600)
     except OSError as e:
         _ingest_fail(d, f"ingest FAILED: cannot open lock file ({e}) — "
+                        "check state-dir permissions", redact=(token,))
+        return 1
+    try:
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open. Force it every time (#883).
+        os.fchmod(lock_fd, 0o600)
+    except OSError as e:
+        # The open succeeded but the secure failed: close the fd —
+        # returning with it open would leak one fd per cron tick (#1155).
+        os.close(lock_fd)
+        _ingest_fail(d, f"ingest FAILED: cannot secure lock file ({e}) — "
                         "check state-dir permissions", redact=(token,))
         return 1
     try:
@@ -2256,11 +2290,20 @@ def cmd_upload_filings(args):
     lock_path = os.path.join(d, _UPLOAD_FILINGS_LOCK_FILE)
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        _upload_fail(d, f"upload-filings FAILED: cannot open lock file "
+                        f"({e}) — check state-dir permissions",
+                     redact=(token,))
+        return 1
+    try:
         # 0600 at creation is not enough: a pre-existing lock file keeps
         # its wider mode through the open. Force it every time (#883).
         os.fchmod(lock_fd, 0o600)
     except OSError as e:
-        _upload_fail(d, f"upload-filings FAILED: cannot open lock file "
+        # The open succeeded but the secure failed: close the fd —
+        # returning with it open would leak one fd per cron tick (#1155).
+        os.close(lock_fd)
+        _upload_fail(d, f"upload-filings FAILED: cannot secure lock file "
                         f"({e}) — check state-dir permissions",
                      redact=(token,))
         return 1
@@ -2757,13 +2800,24 @@ def _phone_home_bump_epoch(d, token=()):
     try:
         lock_fd = os.open(os.path.join(d, _INGEST_LOCK_FILE),
                           os.O_CREAT | os.O_RDWR, 0o600)
-        # 0600 at creation is not enough: a pre-existing lock file keeps
-        # its wider mode through the open (same as the ingest wrapper).
-        os.fchmod(lock_fd, 0o600)
     except OSError as e:
         _phone_home_say(d, "epoch bump SKIPPED: cannot open ingest lock "
                            f"({e}) — the DO's stale-generation fence is "
                            "the authoritative recovery for the lost "
+                           "incarnation", token)
+        return False
+    try:
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open (same as the ingest wrapper).
+        os.fchmod(lock_fd, 0o600)
+    except OSError as e:
+        # The open succeeded but the secure failed: close the fd —
+        # returning with it open would leak one fd per bump attempt in
+        # a long-lived process (#1155).
+        os.close(lock_fd)
+        _phone_home_say(d, "epoch bump SKIPPED: cannot secure ingest "
+                           f"lock ({e}) — the DO's stale-generation fence "
+                           "is the authoritative recovery for the lost "
                            "incarnation", token)
         return False
     try:

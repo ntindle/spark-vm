@@ -421,3 +421,24 @@ def test_no_enrollment_fails_loud_not_traceback(ctx, capsys):
     assert rc == 1
     assert "Traceback" not in err.err
     assert "request" in err.err and "redeem" in err.err
+
+
+def test_upload_filings_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
+    # #1155: the upload-filings lock acquisition shared the leaky
+    # shape — os.open + os.fchmod in one try, so an fchmod OSError
+    # after a successful open returned 1 with the fd open. The
+    # split-try fix closes the fd and keeps the loud degraded failure.
+    def _raising_fchmod(fd, mode):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _raising_fchmod)
+
+    def _fds():
+        return set(os.listdir("/proc/self/fd"))
+
+    before = _fds()
+    for _ in range(5):
+        assert spark_pair.cmd_upload_filings(ctx) == 1
+    assert _fds() == before, "fd leaked on fchmod failure"
+    err = capsys.readouterr().err
+    assert "cannot secure lock file" in err
