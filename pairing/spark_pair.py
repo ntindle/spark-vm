@@ -351,6 +351,13 @@ def cmd_request(args):
     if not os.path.exists(key_path):
         print("no keypair yet — run `spark-pair.py init` first")
         return 1
+    if not os.path.exists(pub_path):
+        # Orphan box.key (a previous init died between the two writes):
+        # request cannot use it, and init would refuse to replace it
+        # without --force. Loud, no traceback.
+        print("box.pub missing — re-run `spark-pair.py init --force` "
+              "to regenerate the keypair")
+        return 1
     seed = base64.b64decode(open(key_path, "rb").read())
     pub = base64.b64decode(open(pub_path).read())
     if ed25519.publickey_from_seed(seed) != pub:
@@ -360,14 +367,58 @@ def cmd_request(args):
     if control is None:
         print(msg)
         return 1
+    # Attestation-token presentation (#1108 box-side, #1203 hook): argv flag
+    # beats the SPARKVM_ATTESTATION_TOKEN env var, mirroring _resolve_control's
+    # argv > env precedence. The token is never printed, logged, or echoed.
+    # Stripped: base64url has no meaningful whitespace, and a file-sourced
+    # provision value with a trailing newline must not burn the single-use
+    # token on a plane rejection. Whitespace-only degrades to unset.
+    attestation_token = (getattr(args, "attestation_token", None)
+                         or os.environ.get("SPARKVM_ATTESTATION_TOKEN")
+                         or "").strip() or None
+    body = {"name": args.name,
+            "pubkey": base64.b64encode(pub).decode(),
+            "fingerprint": ed25519.fingerprint(pub)}
+    if attestation_token:
+        body["attestation_token"] = attestation_token
     status, resp = _http("POST", control.rstrip("/") + "/v1/pairing/request",
-                         {"name": args.name,
-                          "pubkey": base64.b64encode(pub).decode(),
-                          "fingerprint": ed25519.fingerprint(pub)})
+                         body)
     if status != 201 or not resp.get("ok"):
         print(f"request failed: {_plane_error(resp, status)}")
         return 1
+    if attestation_token and not resp.get("auto_approved"):
+        # The token was presented but the plane did not auto-approve: it
+        # fell through to the human ceremony. Say so loudly — the operator
+        # should know the token was consumed without enrolling the box.
+        print("warning: attestation token presented but the plane did not "
+              "auto-approve — falling through to the human pairing ceremony")
     # The single-use code lives here until redeem: 0600 like the key.
+    if resp.get("auto_approved"):
+        # Attested path: the plane consumed the token and auto-approved
+        # against the provision record (#1108). No human ceremony to print —
+        # and the attested response shape is plane-defined, so read it
+        # defensively; redeem cannot work without pairing_id/expires_at.
+        pairing_id, expires_at = resp.get("pairing_id"), resp.get("expires_at")
+        if not pairing_id or not expires_at:
+            print("attested pairing response is missing pairing_id/expires_at "
+                  "— cannot redeem; run `request` again")
+            return 1
+        pairing_doc = {"pairing_id": pairing_id,
+                       "expires_at": expires_at,
+                       "control": control,
+                       # Inert metadata for operators/debugging only:
+                       # "attested" records which ceremony the
+                       # pairing came from and must NEVER gate an
+                       # authorization decision.
+                       "attested": True}
+        if resp.get("code") is not None:
+            pairing_doc["code"] = resp.get("code")
+        _write_private(os.path.join(d, "pairing.json"),
+                       json.dumps(pairing_doc, indent=2).encode())
+        print("attestation token accepted — pairing auto-approved by the "
+              "provision record")
+        print("Then run: spark-pair.py redeem")
+        return 0
     _write_private(os.path.join(d, "pairing.json"),
                    json.dumps({"pairing_id": resp["pairing_id"],
                                "code": resp["code"],
@@ -3953,6 +4004,11 @@ def main(argv=None):
 
     s = sub.add_parser("request", help="request a pairing code")
     s.add_argument("--name", required=True, help="human box name")
+    s.add_argument("--attestation-token", default=None,
+                   help="provision-time attestation token (else "
+                        "SPARKVM_ATTESTATION_TOKEN env): presents the #1108 "
+                        "attested-pairing path instead of the human ceremony; "
+                        "the human path never sets it")
     s.set_defaults(fn=cmd_request)
 
     s = sub.add_parser("redeem", help="wait for approval, redeem box token")
