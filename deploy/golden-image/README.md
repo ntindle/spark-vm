@@ -15,6 +15,7 @@ consumable by the driver"). The image itself is *gated* per build by
 | `supervisord.conf` | The daemon set. Commands mirror the repo's systemd units (`proxy/swap-proxy.service`, `proxy/swap-inference.service`, `confirm/confirmd.service`, `cred-ui/cred-ui.service`) so the two cannot diverge silently. |
 | `sparkvm-sshd-firstboot.sh` | sshd entrypoint: generates host keys on first boot (per-machine secrets are never baked), then execs `sshd -D`. |
 | `identity-seed-hook.sh` | First-boot identity seeding (#1203): reads the D-D6 provision-time env and presents the attestation token to the pairing client. See below. |
+| `data-prep.sh` | First-boot /data layout (#1205): creates the pinned data-volume subdirs (pairing, approvals, confirmd, ssh) with their contract owners and symlinks the sshd host-key paths onto the volume. No-op without /data. See `docs/DATA_VOLUME_CONTRACT.md`. |
 | `build-image.sh` | Operator build driver. Refuses dirty trees; computes `SPARKVM_SHA`/`SPARKVM_VERSION` from the tree itself (the tree is the pin — no override flags); generates the image manifest into the build context (the recipe COPYs it in — it cannot be generated in-image because the build context excludes `.git`); builds; runs the baked-secrets scan inside the built image (gate Step 0b); preflights the manifest (gate Step 0); emits the gate-record skeleton. Never pushes — registry credentials are operator-owned; it prints the publish command. |
 | `test_golden_image.py` | The test suite for this directory (runs under the repo's `pytest` one-liner via `pytest.ini`). |
 

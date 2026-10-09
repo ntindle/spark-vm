@@ -209,6 +209,7 @@ def test_supervisord_program_set():
     cfg = _supervisord()
     programs = {s.split(":", 1)[1] for s in cfg.sections() if s.startswith("program:")}
     assert programs == {
+        "data-prep",
         "identity-seed",
         "sshd",
         "swap-proxy",
@@ -224,13 +225,16 @@ def test_supervisord_program_set():
 def test_supervisord_privilege_split():
     """The full program→user mapping: sshd is the only root *daemon*; the
     proxy daemons run as swapd (mirroring the systemd units), the UI/CUA
-    stack as agent. identity-seed is the second root program, deliberately:
-    it writes machine-identity state (the pairing enrollment) before any
-    tenant user exists, and it is a one-shot (autorestart=false, exits) —
-    not a persistent root daemon — so a daemon that silently runs as root
-    still fails this pin. Checking only a subset would let one through."""
+    stack as agent. identity-seed and data-prep are the other root
+    programs, deliberately: they write machine-identity state (the pairing
+    enrollment; the /data layout + sshd host-key indirection) before any
+    tenant user exists, and both are one-shots (autorestart=false,
+    exit) — not persistent root daemons — so a daemon that silently runs
+    as root still fails this pin. Checking only a subset would let one
+    through."""
     cfg = _supervisord()
     expected = {
+        "data-prep": "root",
         "identity-seed": "root",
         "sshd": "root",
         "swap-proxy": "swapd",
