@@ -335,8 +335,8 @@ var AGENTID = {
   // Filled in when the app is registered in the AgentID console as a
   // PUBLIC client (redirect URIs = every plane origin that serves this
   // page). A public client_id is not a secret — it ships in this page.
-  // Empty means "not configured": the agent sign-in card says so and
-  // the button stays disabled (see README.md).
+  // Empty means "not configured": the agent sign-in card shows its
+  // "not configured" note instead (see README.md).
   client_id: "",
   scope: "openid owner_email"
 };
@@ -423,14 +423,57 @@ function api(path, opts) {
     });
   });
 }
-function showLogin(msg) {
+/* ---- view modes ----
+   Exactly one mode is visible at a time — the human owner session
+   (app-view) and the agent session (agent-view) are mutually
+   exclusive, and both are exclusive with the sign-in cards. Entering
+   a mode clears the other mode's credentials, timers, and cached
+   data, so no owner-power buttons ever sit on screen next to the
+   "read-only agent" card. */
+function enterOwnerMode() {
+  document.getElementById("login-view").classList.add("hidden");
+  document.getElementById("agent-login-view").classList.add("hidden");
+  document.getElementById("agent-view").classList.add("hidden");
+  document.getElementById("app-view").classList.remove("hidden");
+  document.getElementById("refresh-btn").classList.remove("hidden");
+  document.getElementById("logout-btn").classList.remove("hidden");
+}
+function enterAgentMode() {
+  // Leaving any owner session behind: drop the key, stop the fleet
+  // refresh, and forget cached boxes — the agent mode shows no
+  // owner-power affordances at all.
+  KEY = null;
+  try { sessionStorage.removeItem("svm_owner_key"); } catch (e) {}
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  boxes = []; pairings = [];
+  document.getElementById("login-view").classList.add("hidden");
+  document.getElementById("agent-login-view").classList.add("hidden");
   document.getElementById("app-view").classList.add("hidden");
+  document.getElementById("agent-view").classList.remove("hidden");
   document.getElementById("refresh-btn").classList.add("hidden");
   document.getElementById("logout-btn").classList.add("hidden");
+}
+function enterSignedOutMode(msg) {
+  KEY = null; AGENT = null;
+  try { sessionStorage.removeItem("svm_owner_key"); } catch (e) {}
+  try { sessionStorage.removeItem(AGENTID_SESSION_KEY); } catch (e) {}
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  boxes = []; pairings = [];
+  document.getElementById("app-view").classList.add("hidden");
+  document.getElementById("agent-view").classList.add("hidden");
   document.getElementById("login-view").classList.remove("hidden");
+  document.getElementById("agent-login-view").classList.remove("hidden");
+  var uncfg = document.getElementById("agent-login-unconfigured");
+  if (agentConfigured()) uncfg.classList.add("hidden");
+  else uncfg.classList.remove("hidden");
+  document.getElementById("refresh-btn").classList.add("hidden");
+  document.getElementById("logout-btn").classList.add("hidden");
   var e = document.getElementById("login-err");
   if (msg) { e.textContent = msg; e.classList.remove("hidden"); }
   else e.classList.add("hidden");
+}
+function showLogin(msg) {
+  enterSignedOutMode(msg);
 }
 function login(key) {
   KEY = key;
@@ -441,10 +484,7 @@ function login(key) {
     document.getElementById("key-input").value = "";
     try { sessionStorage.setItem("svm_owner_key", key); } catch (e) { /* private mode */ }
     boxes = r.data.boxes || [];
-    document.getElementById("login-view").classList.add("hidden");
-    document.getElementById("app-view").classList.remove("hidden");
-    document.getElementById("refresh-btn").classList.remove("hidden");
-    document.getElementById("logout-btn").classList.remove("hidden");
+    enterOwnerMode();
     renderFleet();
     loadPairings();
     markUpdated();
@@ -457,11 +497,7 @@ function login(key) {
   });
 }
 function logout(expired) {
-  KEY = null;
-  try { sessionStorage.removeItem("svm_owner_key"); } catch (e) {}
-  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  boxes = []; pairings = [];
-  showLogin(expired ? "Session expired — sign in again." : "");
+  enterSignedOutMode(expired ? "Session expired — sign in again." : "");
 }
 function markUpdated() {
   var lbl = document.getElementById("updated-label");
@@ -693,27 +729,31 @@ var AGENTID_FLOW_KEY = "svm_agentid_flow";
 var AGENTID_SESSION_KEY = "svm_agent_session";
 function agentConfigured() { return !!AGENTID.client_id; }
 function randB64url(n) {
+  // Security-critical values (CSRF state, nonce, PKCE verifier): fail
+  // hard without a real CSPRNG rather than falling back to Math.random.
+  if (!window.crypto || !window.crypto.getRandomValues)
+    throw new Error("secure random unavailable in this browser");
   var b = new Uint8Array(n), i, s = "";
-  (window.crypto || {}).getRandomValues
-    ? window.crypto.getRandomValues(b)
-    : (function () { for (i = 0; i < n; i++) b[i] = Math.floor(Math.random() * 256); })();
+  window.crypto.getRandomValues(b);
   for (i = 0; i < b.length; i++)
     s += "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".charAt(b[i] & 63);
   return s;
 }
 function pkceChallenge(verifier) {
-  // S256 code challenge. Falls back to "plain" only if SubtleCrypto is
-  // unavailable (non-secure context) — the flow still works because the
-  // verifier travels over TLS to the token endpoint.
-  if (window.crypto && window.crypto.subtle) {
-    return window.crypto.subtle.digest(
-      "SHA-256", new TextEncoder().encode(verifier)).then(function (buf) {
-        var bytes = new Uint8Array(buf), s = "", i;
-        for (i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-        return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-      });
-  }
-  return Promise.resolve(verifier);
+  // S256 code challenge. The IdP only advertises S256
+  // (code_challenge_methods_supported: ["S256"]), so there is no
+  // "plain" fallback: without SubtleCrypto (non-secure context) the
+  // flow cannot run — fail with a clear message instead of sending a
+  // challenge the IdP would reject.
+  if (!window.crypto || !window.crypto.subtle)
+    return Promise.reject(new Error(
+      "agent sign-in needs a secure context (https) for PKCE S256"));
+  return window.crypto.subtle.digest(
+    "SHA-256", new TextEncoder().encode(verifier)).then(function (buf) {
+      var bytes = new Uint8Array(buf), s = "", i;
+      for (i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    });
 }
 function agentRedirectUri() {
   // The page calls the plane that served it, so the callback is this
@@ -760,15 +800,48 @@ function startAgentLogin() {
                                        state, nonce));
   });
 }
+function fetchWithTimeout(url, opts, ms) {
+  // The token exchange must not hang the sign-in UI forever (the same
+  // 30s watchdog discipline as decideApproval). AbortController may be
+  // absent on very old browsers — then this is a bare fetch.
+  if (typeof AbortController === "undefined") return fetch(url, opts);
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, ms || 30000);
+  // In node (unit tests) an unref'd timer must not hold the process
+  // open after the suite finishes; browsers ignore this branch.
+  if (timer && typeof timer.unref === "function") timer.unref();
+  opts = opts || {};
+  opts.signal = ctrl.signal;
+  return fetch(url, opts).then(function (resp) {
+    clearTimeout(timer);
+    return resp;
+  }, function (err) {
+    clearTimeout(timer);
+    throw err;
+  });
+}
 function finishAgentLogin() {
   // OIDC callback: validate state, exchange the code (public client —
   // code_verifier instead of a secret), validate the id_token claims.
-  var params = new URLSearchParams(location.search);
+  var params;
+  try {
+    params = new URLSearchParams(location.search);
+  } catch (e) {
+    return Promise.resolve(false); // not a parseable callback; normal init
+  }
+  if (params.get("error")) {
+    agentLoginError("Agent sign-in failed at the identity provider: " +
+      params.get("error") +
+      (params.get("error_description")
+        ? " — " + params.get("error_description") : ""));
+    try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    return Promise.resolve(true);
+  }
   var code = params.get("code"), state = params.get("state");
   if (!code) return Promise.resolve(false);
   // Strip the code from the URL immediately so it is not left in
   // history or shared links.
-  history.replaceState(null, "", location.pathname);
+  try { history.replaceState(null, "", location.pathname); } catch (e) {}
   var flow = loadAgentidFlow();
   clearAgentidFlow();
   if (!flow || flow.state !== state) {
@@ -780,11 +853,19 @@ function finishAgentLogin() {
     "&redirect_uri=" + encodeURIComponent(flow.redirect_uri) +
     "&client_id=" + encodeURIComponent(AGENTID.client_id) +
     "&code_verifier=" + encodeURIComponent(flow.verifier);
-  return fetch(AGENTID.token_endpoint, {
+  return fetchWithTimeout(AGENTID.token_endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body
-  }).then(function (resp) { return resp.json(); }).then(function (tok) {
+  }, 30000).then(function (resp) {
+    return resp.json().catch(function () { return null; }).then(function (tok) {
+      if (!resp.ok || !tok)
+        throw new Error("token endpoint refused the exchange (HTTP " +
+          resp.status + ")" +
+          (tok && tok.error ? ": " + tok.error : ""));
+      return tok;
+    });
+  }).then(function (tok) {
     if (!tok || !tok.id_token) throw new Error("no id_token in token response");
     var claims = parseIdToken(tok.id_token);
     var problem = validateAgentClaims(claims, {
@@ -806,9 +887,7 @@ function finishAgentLogin() {
   });
 }
 function showAgentView() {
-  document.getElementById("login-view").classList.add("hidden");
-  document.getElementById("agent-login-view").classList.add("hidden");
-  document.getElementById("agent-view").classList.remove("hidden");
+  enterAgentMode();
   document.getElementById("agent-dl").innerHTML =
     row("Actor type", '<span class="mono">agent</span>') +
     row("Owner email", esc(AGENT.owner_email || "—")) +
@@ -816,12 +895,7 @@ function showAgentView() {
     row("Session expires", esc(fmtClock(AGENT.exp)));
 }
 function agentLogout() {
-  AGENT = null;
-  try { sessionStorage.removeItem(AGENTID_SESSION_KEY); } catch (e) {}
-  document.getElementById("agent-view").classList.add("hidden");
-  document.getElementById("login-view").classList.remove("hidden");
-  if (agentConfigured())
-    document.getElementById("agent-login-view").classList.remove("hidden");
+  enterSignedOutMode("");
 }
 function restoreAgentSession() {
   var s = loadAgentSession();
@@ -858,28 +932,41 @@ document.getElementById("agent-login-btn").addEventListener("click", function ()
   var btn = this;
   btn.disabled = true;
   document.getElementById("agent-login-err").classList.add("hidden");
-  startAgentLogin().then(function () {
-    // startAgentLogin redirects on success; re-enable only if we are
-    // still here (unconfigured or challenge failure).
+  var failed = function (err) {
     btn.disabled = false;
-  });
+    agentLoginError("Agent sign-in failed: " +
+      (err && err.message ? err.message : err));
+  };
+  var p;
+  try {
+    // startAgentLogin may throw synchronously (no CSPRNG) or reject
+    // (no SubtleCrypto for PKCE S256) — both land on the error path.
+    p = startAgentLogin();
+  } catch (err) { p = Promise.reject(err); }
+  p.then(function () {
+    // startAgentLogin redirects on success; re-enable only if we are
+    // still here (the unconfigured path returns without redirecting).
+    btn.disabled = false;
+  }, failed);
 });
 document.getElementById("agent-logout-btn").addEventListener("click", function () {
   agentLogout();
 });
 (function init() {
-  // AgentID callback (?code=…) is handled before anything else; it
-  // consumes the code and either lands on the agent view or reports.
+  // AgentID callback (?code=… / ?error=…) is handled before anything
+  // else; it consumes the callback and either lands on the agent view
+  // or reports. finishAgentLogin never throws synchronously past the
+  // URL parse — anything later is a rejected promise with a message.
   finishAgentLogin().then(function (handled) {
     if (handled) return;
     var saved = null;
     try { saved = sessionStorage.getItem("svm_owner_key"); } catch (e) {}
     if (saved) { login(saved); return; }
     if (restoreAgentSession()) return;
-    if (!agentConfigured())
-      document.getElementById("agent-login-unconfigured").classList.remove("hidden");
-    else
-      document.getElementById("agent-login-btn").disabled = false;
+    // Signed-out landing: enterSignedOutMode shows the right sign-in
+    // cards for this deployment (the agent card carries its own
+    // "not configured" note when AGENTID.client_id is empty).
+    enterSignedOutMode("");
   });
 })();
 </script>

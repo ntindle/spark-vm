@@ -93,9 +93,11 @@ a short-lived read-only session scoped to the `owner_sub`'s fleet.
    self-hosted plane origin too, or the IdP refuses the redirect.
 3. Request scopes `openid` + `owner_email` (the owner's email arrives as
    the `owner_email` id_token claim).
-4. Paste the issued `client_id` into `AGENTID.client_id` at the top of
-   the dashboard `<script>` (public client ids are not secrets), then
-   run `./sync_dashboard.py` to re-inline the page into the worker.
+4. Paste the issued `client_id` into the `AGENTID` config block in
+   `dashboard.html` (the `client_id: ""` field just below the
+   "AgentID (agent) sign-in" comment — public client ids are not
+   secrets), then run `./sync_dashboard.py` to re-inline the page
+   into the worker.
 
 ## Canonical-copy rule
 

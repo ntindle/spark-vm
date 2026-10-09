@@ -682,7 +682,7 @@ console.log(JSON.stringify({url: url}));
     assert u.startswith("https://auth.agentid.com/v0/authorize?")
     for kv in ("response_type=code", "scope=openid%20owner_email",
                "state=st-1", "nonce=no-1", "code_challenge=ch-al",
-               "code_challenge_method=S256",
+               "code_challenge_method=S256", "client_id=",
                "redirect_uri=https%3A%2F%2Fplane.example%2F"):
         assert kv in u, "missing %r in %r" % (kv, u)
     # No secret material in the authorize redirect, ever.
@@ -762,6 +762,7 @@ function __makeEl() {
     querySelectorAll: function () { return []; },
     getAttribute: function () { return null; },
     scrollIntoView: function () {},
+    contains: function () { return false; },
   };
   el.classList = {
     add: function (c) { el._cls[c] = 1; },
@@ -918,7 +919,7 @@ var tok = b64url({ alg: "ES256", typ: "JWT" }) + "." +
 var fetched = [];
 fetch = function (url, opts) {
   fetched.push({ url: url, body: opts.body });
-  return Promise.resolve({ json: function () {
+  return Promise.resolve({ ok: true, status: 200, json: function () {
     return Promise.resolve({ id_token: tok });
   } });
 };
@@ -972,3 +973,48 @@ location.search = "?code=authcode&state=st-1";
     assert o["flowCleared"] is True
     assert o["sessionSaved"] is True
     assert o["csrfBlocked"] is True
+
+
+def test_view_modes_are_mutually_exclusive():
+    """The owner session (app-view) and the agent session (agent-view)
+    are mutually exclusive: entering one hides the other and clears its
+    credentials/timers, and sign-out restores both sign-in cards."""
+    o = _node_app_eval("""
+var __pendingApi = [];
+api = function (path) {
+  return new Promise(function (res) { __pendingApi.push(res); });
+};
+(async function () {
+  var lp = login("svm_x");
+  __pendingApi[0]({ status: 200, data: { ok: true, boxes: [] } });
+  await lp;
+  var out = {
+    ownerApp: !document.getElementById("app-view").classList.contains("hidden"),
+    ownerAgentCardHidden:
+      document.getElementById("agent-login-view").classList.contains("hidden"),
+  };
+  AGENT = { actor_type: "agent", owner_sub: "o", owner_email: "o@e.com",
+            exp: 9999999999, id_token: "t" };
+  showAgentView();
+  out.agentShown = !document.getElementById("agent-view").classList.contains("hidden");
+  out.appHiddenAfterAgent =
+    document.getElementById("app-view").classList.contains("hidden");
+  out.refreshHiddenAfterAgent =
+    document.getElementById("refresh-btn").classList.contains("hidden");
+  agentLogout();
+  out.backToLogin = !document.getElementById("login-view").classList.contains("hidden");
+  out.agentViewHiddenAfterLogout =
+    document.getElementById("agent-view").classList.contains("hidden");
+  out.agentCardBack =
+    !document.getElementById("agent-login-view").classList.contains("hidden");
+  console.log(JSON.stringify(out));
+})();
+""")
+    assert o["ownerApp"] is True
+    assert o["ownerAgentCardHidden"] is True
+    assert o["agentShown"] is True
+    assert o["appHiddenAfterAgent"] is True
+    assert o["refreshHiddenAfterAgent"] is True
+    assert o["backToLogin"] is True
+    assert o["agentViewHiddenAfterLogout"] is True
+    assert o["agentCardBack"] is True
