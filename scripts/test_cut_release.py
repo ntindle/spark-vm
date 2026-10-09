@@ -557,6 +557,35 @@ def test_poll_rejects_non_numeric_hooks(workrepo, fake_gh):
     assert "CUT_RELEASE_POLL_ATTEMPTS" in r.stderr
 
 
+def test_release_workflow_recovery_path_exposes_tag():
+    # The golden-image gate is wired to run on every published release —
+    # including the tag-pushed/publish-failed recovery path (GitHub #659),
+    # where the release job is red because the cut failed but the recovery
+    # step published the release anyway. A tag step with the default
+    # implicit success() condition would be skipped in that path, so the
+    # gate would silently skip exactly the releases that needed
+    # operator-visible recovery. The tag step must therefore emit on
+    # cut-success OR recovery-success (both-failed = no release = no tag =
+    # gate stays skipped), and the gate job must run whenever the release
+    # job produced that output, even when the release job itself failed.
+    # Pin structurally: a dropped `if:` or a dropped step id here would
+    # pass CI and detonate only on the next real recovery, the one path CI
+    # can never exercise.
+    wf = os.path.join(REPO, ".github", "workflows", "release.yml")
+    text = open(wf, encoding="utf-8").read()
+    # The condition references both steps by id...
+    assert "steps.cut.outcome" in text
+    assert "steps.recover.outcome" in text
+    assert "always() && (steps.cut.outcome == 'success' || steps.recover.outcome == 'success')" in text
+    # ...so both steps need ids.
+    assert "\n      - name: Cut release\n        id: cut\n" in text
+    assert "\n      - name: Recover tag-pushed / publish-failed state\n        id: recover\n" in text
+    # The gate job must not be gated on the release job's verdict alone:
+    # in the recovery path the release job is red (cut failed), and without
+    # always() the gate would skip the recovered release.
+    assert "if: always() && needs.release.outputs.tag != ''" in text
+
+
 def test_release_workflow_calls_golden_image_gate():
     # #1176: the release workflow pushes the v* tag with GITHUB_TOKEN,
     # which never triggers workflow runs, so golden-image.yml's own
