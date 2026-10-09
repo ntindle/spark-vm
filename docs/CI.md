@@ -28,6 +28,7 @@ ascii.dev
 automaid.it.com
 boat.dev
 boxd.sh
+bugs.webkit.org
 businesswire.com
 cdm.link
 cloud.google.com

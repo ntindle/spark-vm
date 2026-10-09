@@ -49,9 +49,9 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 | Generation fence | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `last_generation` lives in DO durable storage: `hello` with `generation > last_generation` binds the new socket and closes the old one `superseded-generation`; `<= last_generation` → `close`/`stale-generation` carrying `last_generation`; every subsequent frame is generation-checked (stale → dropped + `phone_home.generation_fence` journaled). The box side (#959) already bumps a crash-safe durable generation per connect and adopts `last_generation + 1` on a stale-generation close — the plane half of that contract is now built. |
 | Re-drive | **Landed — emit half + consume half both in the deployed worker checkout.** `_phone_home_redrive` emits `command` frames on (re)bind and on the D15 Worker→DO wakeup RPC (`/internal/commands-wakeup`, fired after `_enqueue_command`); leases stamped exactly as the HTTPS path; `phone_home.redrive` journaled; malformed rows skipped-and-logged per D-MAL1. The socket `command_ack` consume-half landed 2026-10-08 (S4b-2b, #1001): the DO consumes `command_ack` frames into the same `state='acked'` watermark the re-drive reads — generation must equal the bound generation (the §3.3 stale-session fence; ahead-of-bound dropped + fenced like stale), malformed seq closes `protocol-error`, unknown seq loud-dropped; the ack UPDATE is the shared module-level `_ack_command_row` (pending/leased-only, idempotent, never rewriting `expired`), with the HTTPS `_commands_ack` refactored onto it behavior-identically. |
 | Socket `command_ack` consume half | **Landed 2026-10-08 (S4b-2b, #1001).** The DO consumes the box's `command_ack` frames (`generation`, `seq`, optional `epoch` — #976 S5b shape) into the same watermark the re-drive reads; the HTTPS `POST /commands/ack` endpoint shares the consume via the hoisted `_ack_command_row` (F-S4b-3 resolved). |
-| Ping / pong | **Pong answered in the deployed worker checkout (wire spec §4 keepalive).** The DO answers the box's `ping` with `pong` (keeps the box's 90 s watchdog from flapping the session). The 90 s pong-timeout → hibernate rule and the alarm-wake + token re-verify are still open (#1002). |
-| Alarm wake + token re-verify | **Nothing.** No alarm is set; a hibernated socket is never re-verified. The revocation-latency ceiling for a silent socket is currently unbounded — the exact hole wire spec §6's bound exists to close. |
-| Hibernation | **Not used.** S4a's `server.accept()` pins the DO in memory. The `BoxDO` docstring already names the move to `self.ctx.acceptWebSocket(server)` as S4b scope. |
+| Ping / pong | **SHIPPED 2026-10-09 (#1002 S4b-3).** The DO runs the Hibernation WebSocket API (`ctx.acceptWebSocket`; `webSocketMessage`/`webSocketClose` replace the S4a listener model). The DO answers the box's `ping` with `pong`; the 90 s pong-timeout → hibernate rule is implemented as designed (silence hibernates, never closes — wake on next box connect or inbound frame); the DO deliberately does not ping on its own schedule (the box's 30 s ping is the §4 keepalive cadence; a DO ping cadence would pin the DO awake). **Live finding:** the socket attachment API (`serializeAttachment`/`deserializeAttachment`) is non-functional in this runtime — socket identity is by object identity (`self._ph_socket` + `ctx.getWebSockets()`), not the attachment. |
+| Alarm wake + token re-verify | **SHIPPED 2026-10-09 (#1002 S4b-3).** `ctx.storage.setAlarm` every 10 min (D17): on wake the DO journals `phone_home.hibernate_wake` (code=`alarm`) and re-classifies the bound token from its stored **hash** (never the plaintext) with the full current/grace/expired/revoked mapping — `revoked` → close `revoked` + journal `revoked_kill`; `expired` → close `expired` + journal `expired_close`; unknown (post-grace-lapse, F-S4b-6) → close `expired` + journal `expired_close`; grace/current → re-arm. Every inbound frame re-classifies **before the frame is accepted** (the ≤ 30 s half of the honest bound); a D1 failure on the re-verify is loud but keeps the session on the last verdict (the alarm retries). **Honest revocation-latency bound this slice ships (while D1 is reachable):** ≤ 30 s for a compliant box (its 30 s ping is re-verified per frame), ≤ 10 min for a silent socket (the alarm wake; the alarm retries on recovery after a D1 outage). |
+| Hibernation | **SHIPPED 2026-10-09 (#1002 S4b-3).** The DO runs the Hibernation WebSocket API (`ctx.acceptWebSocket`; `webSocketMessage`/`webSocketClose`); S4a's `server.accept()` + listener model is retired (it pinned the DO in memory). Pong-timeout hibernates the socket — never closes it — with wake on the next box connect, inbound frame, or the 10-min alarm. |
 | Journal events | **Shipped — #999 (S4b-4), PR #1014, 2026-10-04.** The sink is the D1 table `phone_home_events` (D16's decision implemented, migration `migrate_958_s4b.sql`, re-run safe); owner-only read path `GET /v1/boxes/{box_id}/phone-home/events`; 90-day retention with the daily Worker cron + manual trigger `POST /v1/ops/phone_home/gc` (#1013). Wire spec §9's sink reference was corrected to this table by the same slice. |
 | Liveness writes from the socket | **Correctly absent** — and must stay absent (wire spec §8). The #864 heartbeat remains the only liveness signal; nothing in S4b changes that. |
 
@@ -278,23 +278,43 @@ independently of the DO's ack ingest. Live: box receives a command
 over WSS, acks over the socket, watermark advances; S6 item 3's
 re-drive leg.
 
-**S4b-3 — ping/alarm revocation re-verify + hibernation.**
-D18 verification first. Then: move to `self.ctx.acceptWebSocket(server)`;
-answer `pong` to box `ping`; the DO MAY ping on its own schedule; no
-pong within 90 s of a ping → hibernate (wake on next box connect or
-inbound frame). `ctx.storage.setAlarm` every 10 min (D17): on wake,
-re-classify the bound token (F-S4b-6 — full current/grace/expired/revoked
-mapping); `revoked` → close `revoked` + journal `revoked_kill`;
-`expired` → close `expired` + journal `expired_close`; grace proceeds.
-The honest latency bound (≤ 30 s compliant, ≤ 10 min silent) is recorded
-in the slice's docs.
+**S4b-3 — ping/alarm revocation re-verify + hibernation. SHIPPED
+2026-10-09 (#1002).** D18 verification first (vendor docs' Python
+hibernation + alarms examples). Then: `self.ctx.acceptWebSocket(server)`
+(`webSocketMessage`/`webSocketClose` replace the S4a listener model);
+`pong` answers to box `ping`; the DO MAY ping on its own schedule is
+deliberately unexercised (the box's 30 s ping is the §4 keepalive
+cadence; a DO ping cadence would pin the DO awake); no pong within
+90 s of a ping → hibernate (wake on next box connect or inbound
+frame — silence hibernates, never closes). `ctx.storage.setAlarm`
+every 10 min (D17): on wake, re-classify the bound token from its
+stored hash (F-S4b-6 — full current/grace/expired/revoked mapping);
+`revoked` → close `revoked` + journal `revoked_kill`; `expired` →
+close `expired` + journal `expired_close`; grace proceeds; unknown
+(post-grace-lapse) → close `expired` + journal `expired_close`.
+Every inbound frame re-classifies before the frame is accepted (the
+≤ 30 s half of the honest bound); D1 failure on the re-verify is loud
+but keeps the session (the alarm retries). **Live finding:** the
+socket attachment API is non-functional in this runtime
+(`serializeAttachment` returns without error but
+`deserializeAttachment` always yields `None`) — socket identity is by
+object identity, not the attachment. The honest latency bound
+(≤ 30 s compliant, ≤ 10 min silent) is recorded in the slice's docs
+(wire spec §7 pin + §2 rows above).
 *Acceptance:* harness — alarm wake with revoked fixture → `revoked`
 close + journal; expired → `expired` close; grace → socket stays;
 post-grace-lapse (bound token now classifies `unknown`) → `expired`
 close + journal `expired_close` (F-S4b-6); pong-timeout → hibernate;
-wake re-verifies before accepting further frames. Live:
-revoke-during-socket closes on next inbound/wake (S6
-item 2's plane half).
+wake re-verifies before accepting further frames; per-frame re-verify
+closes `revoked` on the next frame (no alarm wait). Live:
+revoke-during-socket closes on next inbound (S6 item 2's plane half).
+The 10-min alarm fire is harness-verified (upgrade arms the alarm; wake
+journals `hibernate_wake` code=`alarm`; revoked/expired/grace mappings
+green in `harness_958_s4a.py` 201/201) — the live fire was attempted but
+**not observed** (the test socket EOF'd during the 10-min wait; smoke
+v3 records FAIL on the alarm-wait step) and stays an open verification
+item. Harness `harness_958_s4a.py` 201/201 green (36 new S4b-3 checks,
+toggle-verified non-vacuous).
 
 **S4b-4 — journal sink + events. SHIPPED 2026-10-04 (#999, PR #1014).**
 D16's decision implemented as shipped: `phone_home_events` D1 table
@@ -394,3 +414,14 @@ arc (#1143 filed 2026-10-07 → D-GH1 shipped as #1154, merged 2026-10-08):
   longer holds for S4b-2b — it shipped the same day (#1001 closed,
   PR #1188; see §5's amendment). S4b-3 stays open on #1002, S6 on #960;
   the 2b lane's follow-up is #1187 (p1).
+
+- **Superseded, morning 2026-10-09:** the "stays open" claim above no
+  longer holds for S4b-3 either — it shipped (#1002 closed; plane
+  deployed 2026-10-09T10:59:48Z, deployed-bytes SHA-256
+  `0899d9b6d700b7b88732b73e377e8d24fcd27161c6b056911e7472a97190b397`;
+  harness 201/201 green; live smoke v2/v3 PASS hello→welcome and
+  ping→pong through the hibernation handlers with per-frame
+  revoke→close verified live — the 10-min alarm fire was attempted but
+  not observed and stays an open verification item). S6 stays open on
+  #960; the S4b lane is complete (S4b-1 #1000, S4b-2 #1001, S4b-3 #1002,
+  S4b-4 #999 — all closed).

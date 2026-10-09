@@ -216,7 +216,10 @@ never inject bytes into a live session.
 ## 4. Keepalive
 
 - The box sends `ping` every 30 s; the DO MAY send `ping` on its own
-  schedule. Either side answers `pong` promptly.
+  schedule. Either side answers `pong` promptly. (Shipped S4b-3, #1002:
+  the DO deliberately does not exercise this MAY — a DO ping cadence
+  would pin the DO awake and defeat hibernation; the box's 30 s ping is
+  the keepalive cadence.)
 - No `pong` within 90 s of a `ping` → the DO hibernates the socket
   (wake on the next box connect or inbound frame). **Absence of
   keepalive never fabricates liveness** — a silent socket is a dead
@@ -332,6 +335,58 @@ revocation-latency ceiling for a silent socket is that wake interval.
   stale-generation close carrying `last_generation`, connect rows in
   D1; test box + journal rows deleted
   afterwards).
+- **Implemented 2026-10-09 (#1002 S4b-3):** the `BoxDO` now runs the §4
+  keepalive and the §6 revocation re-verify on the Hibernation WebSocket
+  API, deployed live to the hosted control plane. The socket is accepted
+  via `ctx.acceptWebSocket(server)` (replacing S4a's `server.accept()` +
+  `addEventListener` model, which pins the DO in memory); the runtime
+  delivers frames to the class's `webSocketMessage`/`webSocketClose`
+  handlers (verified against the Cloudflare docs' Python hibernation
+  example — the D18 entry ticket; the old `pyodide.ffi.create_proxy`
+  listener-retention discipline is retired with the listener model).
+  **Live finding:** the socket attachment API
+  (`serializeAttachment`/`deserializeAttachment`) is non-functional in
+  this runtime — `serializeAttachment` returns without error but
+  `deserializeAttachment` always yields `None`, even on the same
+  object (verified live 2026-10-09 via staged diagnostics). Socket
+  identity is therefore by **object identity** (`self._ph_socket`,
+  re-derived post-hibernation via `ctx.getWebSockets()` when the
+  durable `phone_home:welcomed` flag is set — the flag is written on
+  hello bind and cleared on unbind, so a new not-yet-hello'd socket is
+  never misidentified as bound), not the attachment — and the
+  comparison MUST use `==` (JS reference equality), never Python `is`:
+  each `webSocketMessage` invocation receives a *new* JsProxy wrapping
+  the same JS socket, so `is` fails across invocations (verified live
+  2026-10-09: pings were dropped as "foreign" until the comparison was
+  fixed); the box id, bound sid, and the bound credential's **hash**
+  (never the plaintext — the bound credential is stored as a hash, per
+  the #846 token-classifier's hash-at-rest rule, extended to DO
+  storage) live
+  in DO durable storage. Every inbound frame on a bound socket
+  re-classifies the bound
+  credential from its stored hash **before the frame is accepted**:
+  `revoked` → `close`/`revoked` + `phone_home.revoked_kill`; `expired`
+  → `close`/`expired` + `phone_home.expired_close`; unknown
+  (post-grace-lapse, F-S4b-6) → `close`/`expired` +
+  `phone_home.expired_close` (the box's §6 expired row — reconnect with
+  the current token, do not rotate again — is the recovery); a D1
+  failure on the re-verify is loud but keeps the session on the last
+  verdict (the alarm retries). A hello may arrive on a not-yet-bound
+  socket (it *is* the bind — newer generation supersedes); every other
+  frame requires the bound socket (object identity). The 10-minute
+  `ctx.storage.setAlarm` wake (D17) journals
+  `phone_home.hibernate_wake` (code=`alarm`) and re-classifies with the
+  same mapping, re-arming while a socket is bound. Pong-timeout (§4, >
+  90 s silence) hibernates the socket instead of closing it — wake on
+  the next box connect or inbound frame; the DO deliberately does not
+  ping on its own schedule (the box's 30 s ping is the §4 keepalive
+  cadence; a DO ping cadence would pin the DO awake and defeat
+  hibernation). **Honest revocation-latency bound (while D1 is
+  reachable):** ≤ 30 s for a
+  compliant box (its 30 s ping is re-verified per frame), ≤ 10 min for
+  a silent socket (the alarm wake; the alarm retries on recovery after
+  a D1 outage). Heartbeat (§8) stays the liveness
+  signal.
 - A DO binds exactly one box: the handshake identity at first connect.
   It never routes a frame to another stub.
 - Defense in depth: every frame's effective identity is the bound
