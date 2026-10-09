@@ -8,6 +8,7 @@ Tailscale calls are mocked; no network or /home/swapd is touched.
 import contextlib
 import io
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
@@ -3752,6 +3753,88 @@ class QuarantinePruneTests(unittest.TestCase):
                 (self.approvals / "pending-quarantine").iterdir())
             self.assertEqual([p.name for p in remaining],
                              ["q2.json", "q3.json"])
+
+    # --- issue #945: cross-process stamp lock ---------------------------
+
+    def test_945_stamp_lock_cross_process_mutual_exclusion(self):
+        """While one process holds an aid's stamp lock, another
+        process's non-blocking LOCK_EX on the same path fails; after
+        the holder releases, it succeeds. This is the mechanism the
+        answer path, the reapers, and the box ingest all serialize on."""
+        aid = "945a1b2c3d4e5f60"
+        approvals = str(self.approvals)
+        ready = multiprocessing.Event()
+        release = multiprocessing.Event()
+        result = multiprocessing.Queue()
+
+        def child():
+            import fcntl as _fcntl
+            with mock.patch.object(cd, "APPROVALS", approvals):
+                path = os.path.join(cd.stamp_lock_dir(), aid + ".lock")
+                self.assertTrue(ready.wait(timeout=30),
+                                "child timed out waiting for the holder")
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                except OSError:
+                    pass  # expected: the parent holds the lock
+                else:
+                    result.put("FAIL: acquired while the holder held it")
+                    return
+                finally:
+                    os.close(fd)
+                self.assertTrue(release.wait(timeout=30),
+                                "child timed out waiting for release")
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                except OSError:
+                    result.put("FAIL: not acquirable after release")
+                    return
+                finally:
+                    os.close(fd)
+                result.put("ok")
+
+        proc = multiprocessing.Process(target=child)
+        with mock.patch.object(cd, "APPROVALS", approvals):
+            proc.start()
+            try:
+                with cd._stamp_lock(aid):
+                    ready.set()
+                    # Hold the lock while the child attempts (and must
+                    # fail) its non-blocking acquisition.
+                    time.sleep(2.0)
+                # Released here; the child's second attempt must succeed.
+                release.set()
+                proc.join(timeout=30)
+                self.assertFalse(proc.is_alive(),
+                                 "stamp-lock child did not finish")
+            finally:
+                if proc.is_alive():
+                    proc.terminate()
+        self.assertEqual(result.get(timeout=30), "ok")
+
+    def test_945_stamp_lock_rejects_hostile_aid(self):
+        """A path-traversal aid is refused outright, never turned into a
+        lock path outside the lock dir."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            for bad in ("../evil", "a/b", "", "a" * 65, "aid with space"):
+                with self.assertRaises(ValueError, msg="aid=%r" % bad):
+                    with cd._stamp_lock(bad):
+                        pass
+            self.assertFalse((self.approvals / "stamp-locks").exists(),
+                             "no lock dir may be created for a bad aid")
+
+    def test_945_stamp_lock_fail_closed_on_broken_store(self):
+        """An unusable lock dir raises instead of degrading to unlocked —
+        callers must never proceed without the exclusion."""
+        # A regular file where the lock dir must be: makedirs fails
+        # deterministically for any user, root or not.
+        (self.approvals / "stamp-locks").write_text("not a dir")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            with self.assertRaises(OSError):
+                with cd._stamp_lock("945a1b2c3d4e5f60"):
+                    pass
 
 
 if __name__ == "__main__":

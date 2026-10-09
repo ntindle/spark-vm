@@ -7,6 +7,7 @@ proof-of-plane-origin binding, idempotent stamping, the acked-watermark
 cursor contract, tenant/aid binding, and fail-closed behavior.
 """
 import io
+import fcntl
 import json
 import os
 import sys
@@ -333,6 +334,68 @@ def test_ingest_approve_mints_grant_via_single_writer(ctx, monkeypatch):
     assert rec["decision_origin"] == "plane"
     assert rec["grant_ttl_hours"] == 1
     assert plane.acked == [12]
+
+
+def test_ingest_approve_holds_stamp_lock_across_mint(ctx, monkeypatch):
+    """Issue #945: while the ingest's approve path runs the grant mint,
+    a second contender for the same aid's stamp lock must block — the
+    critical section really does hold the lock across the subprocess.
+    (Non-vacuous: drop the `with _ingest_stamp_lock(...)` around the
+    approve path and the contender's flock succeeds.)"""
+    _file_pending(ctx)
+    held_during_mint = {}
+
+    def fake_mint(argv):
+        # A different fd for the same path: flock conflicts across fds
+        # even in one process, so this is a true contention probe.
+        path = os.path.join(ctx.approvals, "stamp-locks", AID + ".lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            held_during_mint["held"] = True  # expected: lock is held
+        else:
+            held_during_mint["held"] = False
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        return _MintResult(0)
+
+    plane = FakePlane(commands=[_cmd(12, payload=_decision_payload(
+        decision="approve"))], watermark=11)
+    assert _run(ctx, plane, monkeypatch, mint=fake_mint) == 0
+    assert held_during_mint.get("held") is True, \
+        "the mint ran without holding the aid's stamp lock"
+    # After the run the lock is released again (acquirable).
+    path = os.path.join(ctx.approvals, "stamp-locks", AID + ".lock")
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+    rec = _consumed(ctx)
+    assert rec["decision"] == "approve"
+    assert plane.acked == [12]
+
+
+def test_ingest_approve_stamp_lock_failure_not_acked(ctx, monkeypatch):
+    """Issue #945 fail-closed: when the stamp lock cannot be taken, the
+    approve command is NOT acked (it redelivers next tick), nothing is
+    stamped, and the run exits loud — never silently unstamped."""
+    _file_pending(ctx)
+    # A regular file where the lock dir must be: the lock dir creation
+    # fails deterministically for any user, root or not.
+    with open(os.path.join(ctx.approvals, "stamp-locks"), "w") as f:
+        f.write("not a dir")
+    plane = FakePlane(commands=[_cmd(12, payload=_decision_payload(
+        decision="approve"))], watermark=11)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 1
+    assert plane.acked == [], "a lock failure must never ack"
+    assert _consumed(ctx) is None, "a lock failure must never stamp"
+    assert os.path.exists(os.path.join(ctx.approvals, "pending",
+                                       AID + ".json")), \
+        "the pending item must survive for redelivery"
 
 
 def test_ingest_expire_stamps_terminal_record(ctx, monkeypatch):

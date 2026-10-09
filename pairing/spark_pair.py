@@ -56,6 +56,7 @@ ever printed.
 """
 import argparse
 import base64
+import contextlib
 import fcntl
 import getpass
 import hashlib
@@ -1490,6 +1491,61 @@ def _ingest_write_answered(approvals, aid, rec):
     os.replace(tmp, answered_path)
 
 
+def _ingest_stamp_lock_dir(approvals):
+    """Issue #945: home of the per-aid cross-process stamp locks (box side).
+
+    Same makedirs-on-demand discipline as the ingest's other store dirs:
+    created by whichever party (confirmd or the ingest) needs it first,
+    as the box-service user that owns the approvals store. The lockfiles
+    are never removed (see confirmd._stamp_lock for why).
+    """
+    d = os.path.join(approvals, "stamp-locks")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@contextlib.contextmanager
+def _ingest_stamp_lock(approvals, aid):
+    """Issue #945: the ingest side of the cross-process stamp lock.
+
+    Twin of confirmd._stamp_lock — kept in sync by hand (the two files
+    are standalone deployables with no shared import): an flock(2) on
+    ``stamp-locks/<aid>.lock``, held across the approve path's
+    pre-mint terminal re-check -> grant mint -> post-mint re-checks ->
+    stamp window, so no confirmd answer path or reaper in another
+    process can record a terminal state mid-mint (or mint while this
+    path records one). Lock order: the ingest never takes confirmd's
+    in-process _aid_lock, so no lock-order inversion exists; the
+    whole-pass .ingest.lock is always outermost.
+
+    Fail-closed like the twin: an unopenable or unlockable lockfile
+    raises instead of degrading to unlocked — _ingest_commands catches
+    it, logs loudly, and does NOT ack, so the command redelivers next
+    tick. The aid is validated against _INGEST_AID_RE so a hostile
+    plane payload cannot escape the lock dir via path traversal
+    (defense in depth: _ingest_decision_payload already validated it).
+    """
+    if not _INGEST_AID_RE.match(aid or ""):
+        raise ValueError("bad aid for stamp lock: %r" % (aid,))
+    path = os.path.join(_ingest_stamp_lock_dir(approvals), aid + ".lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        raise RuntimeError("stamp lock: cannot open %s: %s" % (path, e))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as e:
+        os.close(fd)
+        raise RuntimeError("stamp lock: cannot lock %s: %s" % (path, e))
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
                               ingested, attention):
     """Stamp one plane decision into confirmd's store.
@@ -1634,124 +1690,136 @@ def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
 
     # decision == "approve": mirror _answer_locked's mint path (Findings
     # 60/64) — the grant is minted via the single writer BEFORE the
-    # answered record exists.
-    name = item.get("credential")
-    host = item.get("host")
-    method = (item.get("method") or "").upper()
-    if not name or not host or not method:
-        # Finding 64: the tuple is validated before the mint, never after.
-        _ingest_fail(d, f"seq={seq} aid={aid}: cannot mint grant — missing "
-                        "credential/host/method; failing closed, not acked")
-        return False
-    if not _ingest_grant_window_ok(item):
-        # Issue #534: an expiry crossing mid-mint would land an
-        # un-revokable grant — refuse the mint, stamp expired honestly.
-        _stamp_expired()
-        _ingest_say(f"seq={seq} aid={aid}: approve arrived inside the "
-                    "grant-mint window — stamped expired")
-        return True
-    ttl_hours = _INGEST_GRANT_TTL_DEFAULT  # wire v1 carries no TTL choice
-    # Shrink the approve/terminal race window: re-check the terminal
-    # record immediately before the mint (the earlier check at the top of
-    # this function is stale by now). The window cannot be closed — the
-    # mint itself takes up to _INGEST_GRANT_MINT_TIMEOUT seconds — so the
-    # post-mint re-check below is the real backstop.
-    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
-        _ingest_say(f"seq={seq} aid={aid}: terminal record appeared "
-                    "before the mint — not minting (confirmd won the race)")
-        _mark()
-        return True
-    mint_argv = [_grant_writer(), "add",
-                 "--credential", name,
-                 "--host", host,
-                 "--method", method,
-                 "--path-prefix", item.get("path_prefix") or "/",
-                 "--approval-id", aid,
-                 "--scope", item.get("scope") or "",
-                 "--job", item.get("job") or "",
-                 "--ttl-hours", str(ttl_hours)]
-    if item.get("expires"):
-        # Issue #294: the writer fails closed at mint time (exit 3) when
-        # the instant crossed while we were working.
-        mint_argv += ["--approval-expires", str(item["expires"])]
-    try:
-        out = _mint_grant(mint_argv)
-    except Exception as e:
-        _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed ({e}) — "
-                        "not stamped, will retry")
-        return False
-    if out.returncode == 3:
-        # The approval's expiry crossed during the mint: the honest
-        # outcome is expired (#240 routing), not a phantom approval.
-        _stamp_expired()
-        _ingest_say(f"seq={seq} aid={aid}: writer refused (expiry crossed) "
-                    "— stamped expired")
-        return True
-    if out.returncode != 0:
-        _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed "
-                        f"(exit {out.returncode}) — not stamped, will retry")
-        return False
-    # #240-style post-mint terminal re-check (mirrors _answer_locked): the
-    # owner's tap — or a reaper — may have landed during the mint, and the
-    # pending file still existed for all of it (the ingest holds no
-    # per-aid lock against confirmd's answer path — the structural fix
-    # is #945). Cross-process truth:
-    # against confirmd's in-flight answer the local path wins the *record*
-    # (its answered→consumed move is clobbering os.replace, not O_EXCL),
-    # so "first-terminal-wins" describes the write-if-absent race against
-    # the reapers only — never a guarantee against _answer_locked.
-    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
-        # The grant is minted and cannot be un-minted (no per-approval-id
-        # revoke — grant-writer revoke is by job only). Journal the
-        # conflict loudly with the remediation runbook instead of
-        # stamping over the winner: a live grant under a deny/expired
-        # record is a fail-open the proxy would honor.
-        job = item.get("job") or "<job>"
+    # answered record exists. The whole approve window runs under the
+    # cross-process stamp lock (issue #945): the pre-mint terminal
+    # re-check, the grant mint, the post-mint re-checks, and the stamp
+    # serialize against confirmd's answer path and reapers in other
+    # processes, so a terminal record can no longer land mid-mint (or a
+    # mint land after one). Fail-closed: an untakeable lock raises and
+    # _ingest_commands leaves the command unacked for redelivery.
+    with _ingest_stamp_lock(approvals, aid):
+        name = item.get("credential")
+        host = item.get("host")
+        method = (item.get("method") or "").upper()
+        if not name or not host or not method:
+            # Finding 64: the tuple is validated before the mint, never after.
+            _ingest_fail(d, f"seq={seq} aid={aid}: cannot mint grant — missing "
+                            "credential/host/method; failing closed, not acked")
+            return False
+        if not _ingest_grant_window_ok(item):
+            # Issue #534: an expiry crossing mid-mint would land an
+            # un-revokable grant — refuse the mint, stamp expired honestly.
+            _stamp_expired()
+            _ingest_say(f"seq={seq} aid={aid}: approve arrived inside the "
+                        "grant-mint window — stamped expired")
+            return True
+        ttl_hours = _INGEST_GRANT_TTL_DEFAULT  # wire v1 carries no TTL choice
+        # Shrink the approve/terminal race window: re-check the terminal
+        # record immediately before the mint (the earlier check at the top of
+        # this function is stale by now). The window cannot be closed — the
+        # mint itself takes up to _INGEST_GRANT_MINT_TIMEOUT seconds — so the
+        # post-mint re-check below is the real backstop.
+        if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+            _ingest_say(f"seq={seq} aid={aid}: terminal record appeared "
+                        "before the mint — not minting (confirmd won the race)")
+            _mark()
+            return True
+        mint_argv = [_grant_writer(), "add",
+                     "--credential", name,
+                     "--host", host,
+                     "--method", method,
+                     "--path-prefix", item.get("path_prefix") or "/",
+                     "--approval-id", aid,
+                     "--scope", item.get("scope") or "",
+                     "--job", item.get("job") or "",
+                     "--ttl-hours", str(ttl_hours)]
+        if item.get("expires"):
+            # Issue #294: the writer fails closed at mint time (exit 3) when
+            # the instant crossed while we were working.
+            mint_argv += ["--approval-expires", str(item["expires"])]
         try:
-            with open(os.path.join(approvals, "consumed",
-                                   aid + ".json")) as f:
-                winner = json.load(f)
-        except (OSError, ValueError):
-            winner = {}
-        _ingest_fail(d, f"seq={seq} aid={aid}: APPROVE/TERMINAL RACE — "
-                        "grant minted, but a terminal record landed "
-                        "during the mint; NOT stamping. approval_id="
-                        f"{aid} credential={item.get('credential')} "
-                        f"host={item.get('host')} "
-                        f"method={(item.get('method') or '').upper()} "
-                        f"path_prefix={item.get('path_prefix') or '/'} "
-                        f"job={job} winning_decision="
-                        f"{winner.get('decision')!r}. Runbook: the "
-                        "winning terminal state is in "
-                        f"consumed/{aid}.json; the minted grant stays "
-                        "live until its TTL expires — revoke it with "
-                        f"`grant-writer revoke --job {job}` if the "
-                        "winner is deny/expired.", redact=(token,))
+            out = _mint_grant(mint_argv)
+        except Exception as e:
+            _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed ({e}) — "
+                            "not stamped, will retry")
+            return False
+        if out.returncode == 3:
+            # The approval's expiry crossed during the mint: the honest
+            # outcome is expired (#240 routing), not a phantom approval.
+            _stamp_expired()
+            _ingest_say(f"seq={seq} aid={aid}: writer refused (expiry crossed) "
+                        "— stamped expired")
+            return True
+        if out.returncode != 0:
+            _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed "
+                            f"(exit {out.returncode}) — not stamped, will retry")
+            return False
+        # #240-style post-mint terminal re-check (mirrors _answer_locked):
+        # the approve window holds the cross-process stamp lock (issue
+        # #945), so no confirmd answer path or reaper could have
+        # recorded a terminal state during the mint — this re-check is
+        # now a belt-and-braces assertion of the lock's guarantee, kept
+        # because the lock is advisory and the cost of trusting it
+        # blindly is a live grant under a deny/expired record. If it
+        # ever fires, the lock discipline was violated somewhere: the
+        # conflict is journaled loudly with the remediation runbook.
+        # Cross-process truth: against confirmd's in-flight answer the
+        # local path wins the *record* (its answered→consumed move is
+        # clobbering os.replace, not O_EXCL), so "first-terminal-wins"
+        # describes the write-if-absent race against the reapers only —
+        # never a guarantee against _answer_locked.
+        if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+            # The grant is minted and cannot be un-minted (no per-approval-id
+            # revoke — grant-writer revoke is by job only). Journal the
+            # conflict loudly with the remediation runbook instead of
+            # stamping over the winner: a live grant under a deny/expired
+            # record is a fail-open the proxy would honor.
+            job = item.get("job") or "<job>"
+            try:
+                with open(os.path.join(approvals, "consumed",
+                                       aid + ".json")) as f:
+                    winner = json.load(f)
+            except (OSError, ValueError):
+                winner = {}
+            _ingest_fail(d, f"seq={seq} aid={aid}: APPROVE/TERMINAL RACE — "
+                            "grant minted, but a terminal record landed "
+                            "during the mint; NOT stamping. approval_id="
+                            f"{aid} credential={item.get('credential')} "
+                            f"host={item.get('host')} "
+                            f"method={(item.get('method') or '').upper()} "
+                            f"path_prefix={item.get('path_prefix') or '/'} "
+                            f"job={job} winning_decision="
+                            f"{winner.get('decision')!r}. Runbook: the "
+                            "winning terminal state is in "
+                            f"consumed/{aid}.json; the minted grant stays "
+                            "live until its TTL expires — revoke it with "
+                            f"`grant-writer revoke --job {job}` if the "
+                            "winner is deny/expired.", redact=(token,))
+            _mark()
+            return True
+        if _ingest_item_expired(item):
+            # The window lapsed during the mint with no terminal record: the
+            # honest outcome is expired (the #240 outcome), not a phantom
+            # approval for an already-dead window.
+            _stamp_expired()
+            _ingest_say(f"seq={seq} aid={aid}: window lapsed during the mint "
+                        "— stamped expired")
+            _mark()
+            return True
+        rec = _ingest_answer_record(item, aid, "approve", requester, seq, key)
+        rec["grant_ttl_hours"] = ttl_hours
+        _ingest_write_answered(approvals, aid, rec)
+        _remove_pending()
+        # The grant is minted (the writer dedupes on approval_id, so a
+        # redelivery re-mint is a no-op); a failed move retries the *stamp*,
+        # never the mint — the resume path re-attempts the move.
+        if not _ingest_finish_move(d, approvals, aid, rec):
+            return False
+        _ingest_audit(d, aid, "approve", requester, seq, ttl_hours=ttl_hours)
         _mark()
+        _ingest_say(f"seq={seq} aid={aid}: stamped approved and minted grant "
+                    f"(plane_seq={seq})")
         return True
-    if _ingest_item_expired(item):
-        # The window lapsed during the mint with no terminal record: the
-        # honest outcome is expired (the #240 outcome), not a phantom
-        # approval for an already-dead window.
-        _stamp_expired()
-        _ingest_say(f"seq={seq} aid={aid}: window lapsed during the mint "
-                    "— stamped expired")
-        _mark()
-        return True
-    rec = _ingest_answer_record(item, aid, "approve", requester, seq, key)
-    rec["grant_ttl_hours"] = ttl_hours
-    _ingest_write_answered(approvals, aid, rec)
-    _remove_pending()
-    # The grant is minted (the writer dedupes on approval_id, so a
-    # redelivery re-mint is a no-op); a failed move retries the *stamp*,
-    # never the mint — the resume path re-attempts the move.
-    if not _ingest_finish_move(d, approvals, aid, rec):
-        return False
-    _ingest_audit(d, aid, "approve", requester, seq, ttl_hours=ttl_hours)
-    _mark()
-    _ingest_say(f"seq={seq} aid={aid}: stamped approved and minted grant "
-                f"(plane_seq={seq})")
-    return True
 
 
 def _ingest_commands(d, approvals, box_id, token, control):
@@ -1868,10 +1936,12 @@ def _ingest_commands(d, approvals, box_id, token, control):
                 consumed = _ingest_approval_decision(d, approvals, box_id,
                                                      token, seq, payload,
                                                      ingested, attention)
-            except (OSError, ValueError) as e:
-                # A local I/O failure (disk full, torn state) must fail
-                # closed with a loud log — never a traceback, and never
-                # an ack: the command redelivers on the next tick.
+            except (OSError, ValueError, RuntimeError) as e:
+                # A local I/O failure (disk full, torn state) or a
+                # fail-closed internal guard (issue #945: the stamp lock
+                # could not be taken) must fail closed with a loud log —
+                # never a traceback, and never an ack: the command
+                # redelivers on the next tick.
                 _ingest_fail(d, f"seq={seq}: local failure during ingest "
                                 f"({e}) — not acked, will retry",
                              redact=(token,))

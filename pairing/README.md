@@ -217,6 +217,15 @@ the operator mirrors `heartbeat`:
   A 401 names re-pairing; a plane without the commands endpoints says so
   honestly instead of failing opaquely.
 - **Lock file** (`.ingest.lock`) serializes overlapping cron ticks.
+- **Cross-process stamp lock** (#945): the approve path holds an
+  `flock` on `stamp-locks/<aid>.lock` (under the approvals dir) across
+  the pre-mint terminal re-check, the grant mint, the post-mint
+  re-checks, and the stamp — the same lock confirmd's answer path and
+  both expiry reapers hold across their check→mint→stamp windows. The
+  ingest used to mint outside any shared exclusion, so a terminal
+  record landing mid-mint left a live grant under a deny/expired
+  record; the lock closes that window. It is fail-closed: if the lock
+  cannot be taken the command is not acked and redelivers next tick.
 
 `approval_decision` is the only honored command kind today; unknown kinds
 are acked-and-logged so one unknown kind cannot wedge the queue (note

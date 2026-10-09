@@ -42,6 +42,8 @@ single-tenant by confirmd's design; the lineage fields make tenant
 scoping additive later.
 """
 
+import contextlib
+import fcntl
 import grp
 import html
 import json
@@ -323,6 +325,78 @@ def _evict_aid_lock(aid):
     simply re-minted by the next GET if the item is still live.)"""
     _aid_locks.pop(aid, None)
     _csrf_rings.pop(aid, None)
+
+
+def stamp_lock_dir():
+    """Issue #945: home of the per-aid cross-process stamp locks.
+
+    Same makedirs-on-demand discipline as pending_dir(): created by
+    whichever party (confirmd or the box ingest) needs it first, as the
+    box-service user that owns the approvals store. The lockfiles are
+    never removed — one tiny file per approval id, and unlinking a
+    lockfile a peer is about to open would break mutual exclusion, so
+    no pruning (unlike the aid-keyed in-process registry above, which
+    is safe to evict because it is never shared across processes).
+    """
+    d = os.path.join(APPROVALS, "stamp-locks")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@contextlib.contextmanager
+def _stamp_lock(aid):
+    """Issue #945: cross-process mutual exclusion for one approval id.
+
+    confirmd's _aid_lock serializes threads inside this one process, but
+    the box ingest (spark-pair.py, a separate cron process) is outside
+    it. The residual race: the ingest can mint a grant while confirmd's
+    answer path or a reaper records a terminal state (or vice versa),
+    leaving a live grant under a deny/expired record for up to the grant
+    TTL — both decisions owner-authentic, the window tiny, no
+    non-owner injection, but a real fail-open the proxy would honor.
+
+    The lock is an flock(2) on ``stamp-locks/<aid>.lock``, held across
+    the whole check->mint->stamp window by _answer_locked (approve),
+    both reaper stamp sites, and the ingest's approve path (the twin
+    helper there is ``_ingest_stamp_lock`` in pairing/spark_pair.py —
+    same mechanism, same fail-closed contract, kept in sync by hand).
+
+    Deadlock audit: lock order is _aid_lock -> stamp lock at every
+    confirmd site; the ingest never takes _aid_lock, so no inversion
+    exists. The stamp lock is never held while acquiring _aid_lock, and
+    no site re-acquires the same aid's stamp lock while holding it
+    (flock locks are per open-file-description — a second LOCK_EX on a
+    second fd for the same file blocks even in the same process — so
+    _stamp_expired_consumed stays lock-free and every caller takes the
+    lock exactly once). The grant subprocess acquires no locks of its
+    own that any stamp-lock holder waits on. The kernel releases the
+    flock if a holder dies mid-window, so a crashed minter cannot wedge
+    the aid.
+
+    Fail-closed: an unopenable or unlockable lockfile raises instead of
+    degrading to unlocked — silently proceeding would reintroduce the
+    exact race this lock closes. The aid is validated against ID_RE so
+    a hostile aid cannot escape the lock dir via path traversal.
+    """
+    if not ID_RE.match(aid or ""):
+        raise ValueError("bad aid for stamp lock: %r" % (aid,))
+    path = os.path.join(stamp_lock_dir(), aid + ".lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        raise RuntimeError("stamp lock: cannot open %s: %s" % (path, e))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as e:
+        os.close(fd)
+        raise RuntimeError("stamp lock: cannot lock %s: %s" % (path, e))
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 # H20: re-open nonces. A denied approval's answered-history card carries a
@@ -1023,6 +1097,16 @@ def load_pending():
                 # subprocess acquires no locks — no lock-ordering hazard.
                 aid = fn[:-len(".json")]
                 with _aid_lock(aid):
+                    # Issue #945: take the cross-process stamp lock so the
+                    # stamp+delete serializes against the box ingest's
+                    # approve path and the answer path in other processes
+                    # (lock order _aid_lock -> stamp lock, as at /answer).
+                    # A malformed aid skips the lock: every legitimate
+                    # stamper validates the aid before locking, so no peer
+                    # can be stamping it — and _stamp_expired_consumed
+                    # refuses to stamp it below anyway (pre-existing
+                    # malformed-aid path: reap without stamping).
+                    #
                     # S1 (#511): stamp the expired terminal record BEFORE
                     # the pending file is deleted (stamp-then-delete: a
                     # crash between the two self-heals on the next reap —
@@ -1033,12 +1117,24 @@ def load_pending():
                     # terminal record exists and our O_EXCL create fails
                     # -> False: the human answer wins, and we must not
                     # resurrect the pending file.
+                    lock = (_stamp_lock(aid) if ID_RE.match(aid)
+                            else contextlib.nullcontext())
                     try:
-                        _stamp_expired_consumed(aid, it, p, "confirmd")
+                        with lock:
+                            _stamp_expired_consumed(aid, it, p, "confirmd")
                     except ValueError:
                         # Malformed aid: refuse to touch consumed/, but
                         # still reap the expired file below.
                         pass
+                    except RuntimeError:
+                        # Issue #945: fail-closed stamp lock — keep the
+                        # pending file so the next render retries the
+                        # stamp (same as the OSError arm below). The
+                        # breakage is loud elsewhere: the answer path
+                        # 500s with answer-lock-failed and the ingest
+                        # refuses to stamp without the lock.
+                        _evict_aid_lock(aid)
+                        continue
                     except OSError:
                         # Stamp failed (e.g. ENOSPC): keep the pending
                         # file so the next render retries the stamp.
@@ -2179,12 +2275,29 @@ class Handler(BaseHTTPRequestHandler):
                     # while the reverse order could lose the expiry with
                     # no record at all). If the stamp fails (e.g. ENOSPC),
                     # keep the pending file so a later reap retries.
+                    # Issue #945: the expired stamp serializes against the
+                    # ingest's approve path and the answer path in other
+                    # processes (aid is ID_RE-validated above, so the lock
+                    # never sees a hostile aid).
                     try:
-                        _stamp_expired_consumed(aid, it, p, "confirmd")
+                        with _stamp_lock(aid):
+                            _stamp_expired_consumed(aid, it, p, "confirmd")
                     except ValueError:
                         # Malformed aid: refuse to touch consumed/, but
                         # still reap the expired file below.
                         pass
+                    except RuntimeError as e:
+                        # The stamp lock is fail-closed: keep the pending
+                        # file for a later reap and audit the distinct
+                        # event instead of stamping without the lock.
+                        _evict_aid_lock(aid)
+                        audit_log("expired-reap-lock-failed",
+                                  self.client_address[0], login,
+                                  "id=%s err=%s" % (aid, e))
+                        self._err("This approval expired and was removed.",
+                                  410,
+                                  suffix=_expired_record_link_html(aid))
+                        return
                     except OSError:
                         _evict_aid_lock(aid)
                         audit_log("expired-reaped", self.client_address[0],
@@ -2392,12 +2505,32 @@ class Handler(BaseHTTPRequestHandler):
         # delete the pending file out from under _answer_locked, and
         # GET's nonce write-back can no longer resurrect a reaped file.
         with _aid_lock(aid):
-            return self._answer_locked(login, aid, csrf, decision, ttl_hours)
+            # Issue #945: the cross-process stamp lock serializes the
+            # whole check->mint->consume window against the box ingest
+            # (a separate process, outside _aid_lock) and the reapers —
+            # without it the ingest can mint a grant while this path
+            # records a terminal state, leaving a live grant under a
+            # deny/expired record. Lock order _aid_lock -> stamp lock
+            # matches the reaper sites below; _answer_locked documents
+            # the contract. Fail-closed: an untakeable lock is a 500
+            # with a distinct audit event, never a silent proceed —
+            # the pending file stays and the owner retries.
+            try:
+                lock = _stamp_lock(aid)
+            except RuntimeError as e:
+                audit_log("answer-lock-failed", self.client_address[0],
+                          login, "id=%s err=%s" % (aid, e))
+                self._err("Could not record the answer — try again.", 500)
+                return
+            with lock:
+                return self._answer_locked(login, aid, csrf, decision,
+                                           ttl_hours)
 
     def _answer_locked(self, login, aid, csrf, decision,
                        ttl_hours=GRANT_TTL_DEFAULT):
-        """POST /answer body. The caller holds _aid_lock(aid); every
-        early return inside is a normal handler response."""
+        """POST /answer body. The caller holds _aid_lock(aid) and the
+        cross-process stamp lock (issue #945); every early return inside
+        is a normal handler response."""
         src = os.path.join(pending_dir(), aid + ".json")
         if not os.path.exists(src):
             # Issue #231: same evict-on-negative-path as the GET side.
