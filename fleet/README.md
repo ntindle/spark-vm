@@ -208,7 +208,7 @@ python3 fleet/inventory.py prune --store ~/fleet-store          # inventory jour
 
 `fleet/inventory.py api` serves the estate store as read-only JSON
 (`fleet/api.py`, stdlib `http.server` only) — the machine-readable
-surface the G21 S2 console will consume. Every endpoint is
+surface the G21 S2 console consumes. Every endpoint is
 field-equivalent to its CLI counterpart (the CLI renders text tables,
 the API renders the same fields as JSON; display truncations travel
 alongside their full values), pinned by the per-endpoint conformance
@@ -235,6 +235,34 @@ collect first"), never a clean-fleet fiction. One deliberate
 divergence: `/fleet/boxes/<id>` answers from the journal even when
 the snapshot is missing, where the CLI would error on the snapshot
 first — the API is more honest here, and the shape is unchanged.
+
+## Operator console (G21 S2, #795)
+
+`fleet/console.py` is the operator's terminal console over the read
+API above (stdlib only): an **alert board** and a **wave board**. The
+alert board renders pending alerts exactly like `fleet events watch`
+(the conformance test in `fleet/test_console.py` pins this against the
+real CLI — including the ack hint, which now carries the real alert id
+so it is copy-pasteable), then the acknowledged tail under a clear
+`ALREADY ACKNOWLEDGED:` label. The wave board says in plain language
+that wave tracking isn't available yet (expected with G15 S2), with the
+API's own named reason on the line below — an empty list would read as
+"no waves", which is fail-dangerous. Wave drill-down is G21 S3, still
+queued on #795 behind G15 S2's wave assignments.
+
+```bash
+python3 fleet/console.py                                   # one screen; exit 1 on pending alerts, 2 if the API is down, 64 on bad flags
+python3 fleet/console.py --watch 30                        # refresh every 30s until Ctrl-C (each screen carries a render timestamp)
+python3 fleet/console.py --board alerts                    # just the alert board
+python3 fleet/console.py --api http://127.0.0.1:18760      # the API must be loopback (refused otherwise)
+```
+
+Read-only posture inherited from the API: no writes, no new producer,
+no box-side change. The fetch path bypasses any configured HTTP proxy,
+so the loopback-only guarantee does not depend on the operator's
+`no_proxy`. Like the API, the console carries the API's
+multi-user-box caveat — it re-renders whatever the API serves, so it
+only ever runs against the operator's own box.
 
 ## Update events (G17 / #608, S1)
 
