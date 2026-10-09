@@ -195,17 +195,23 @@ never inject bytes into a live session.
   throws. After 3 consecutive `-1` journals the DO closes the bind,
   engaging §8's fetch-path fallback (degrading to fetch-path latency,
   never loss): a queue-read failure is never session-fatal, and the
-  `-1` streak in the journal is the operator-visible signal. The
-  socket `command_ack` consume-half is slice 2b (still open): slice 2b
-  MUST record each consumed socket `command_ack` into the same
-  watermark source the re-drive reads (`state='acked'` on the row, so
-  the derived `MAX(seq)` watermark advances) — §3.3's S5b text ("lands
-  directly in the queue-owning DO instead of traveling through the
-  durable table first") describes the fast path only; durability still
-  flows through the table. Until 2b lands, the watermark advances only
-  via HTTPS acks, so `phone_home.redrive`'s emitted-count overstates
-  *new* deliveries after lease expiry — at-least-once + box-side
-  dedup absorb the re-emissions.
+  `-1` streak in the journal is the operator-visible signal. Slice 2b
+  (SHIPPED 2026-10-08, #1001) closed the consume half: the DO consumes
+  each socket `command_ack` into the same watermark source the re-drive
+  reads (`state='acked'` on the row, so the derived `MAX(seq)`
+  watermark advances) — §3.3's S5b text ("lands directly in the
+  queue-owning DO instead of traveling through the durable table
+  first") describes the fast path; durability still flows through the
+  table. The consume is the shared module-level `_ack_command_row`
+  (pending/leased-only, idempotent, never rewriting an `expired` row),
+  also used by the HTTPS `/commands/ack` path; the ack is valid only
+  for the bound generation (ahead-of-bound is dropped + fenced like a
+  stale generation — the §5 stale-session fence); malformed `seq`
+  closes `protocol-error`; unknown `seq` is logged loudly and never
+  acked (the socket has no response channel; the HTTPS path reports it
+  in `unknown`). With 2b landed, `phone_home.redrive`'s emitted-count
+  is exact for new deliveries again — socket acks advance the watermark
+  identically to HTTPS acks.
 
 ## 4. Keepalive
 

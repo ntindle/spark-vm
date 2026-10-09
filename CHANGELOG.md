@@ -73,6 +73,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Phone-home socket acknowledgements now advance the command queue's delivery watermark on the plane: when a box acks a command over its live socket, the plane records it exactly as if the ack had arrived over the HTTPS fetch path — acks from a stale or future session generation are rejected, malformed acks close the session, and both paths share one idempotent consume so they can never drift. The wire-protocol and socket-lifecycle docs pin the shipped behavior. (#1001) (#TBD)
+
 - The proxy deploy script now tells a `--no-restart` operator exactly what the skipped step owns: daemon-reload, restarts of the swap proxy, inference proxy, approvals daemon, and push worker, and enabling the summons-sweep timer. Until those run, the still-running proxy lacks the new filing group (approval filings demote to a logged refusal, fail-closed, instead of filing), and the push-handoff configuration stays inert. (#1182)
 
 - Credential-vend S3/S4 design-ahead: the vision-vs-state pin for the plane vend endpoint (#890) and box-side fetch path (#891) builds — what moved since the 2026-10-03 contract (box-token rotation with its grace class, the box-authenticated endpoint pattern, the D1 schema discipline, the plane as a durable-command producer, the open tenant-model and audit-retention decisions) — with the two genuinely-new gaps filed (vend-table tenant attribution + audit retention (#1178), the `credential_kill` fast-revocation command kind (#1179)). (#850) (#1180)

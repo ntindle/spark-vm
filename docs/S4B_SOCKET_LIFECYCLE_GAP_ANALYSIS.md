@@ -44,8 +44,8 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 | `hello` frame handling | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `BoxDO.fetch` reads the first frame as `hello`; malformed → `close`/`protocol-error`. The box side (#959 S5a, closed) sends `hello` with `(box_id, generation)` — it is now answered, not left waiting. |
 | Identity binding | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** The DO re-derives the handshake identity from the upgrade request's `Authorization` Bearer <redacted> per D14; the `hello` frame's `box_id` self-assertion must equal it (mismatch → `close`/`identity-mismatch` + journal). |
 | Generation fence | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `last_generation` lives in DO durable storage: `hello` with `generation > last_generation` binds the new socket and closes the old one `superseded-generation`; `<= last_generation` → `close`/`stale-generation` carrying `last_generation`; every subsequent frame is generation-checked (stale → dropped + `phone_home.generation_fence` journaled). The box side (#959) already bumps a crash-safe durable generation per connect and adopts `last_generation + 1` on a stale-generation close — the plane half of that contract is now built. |
-| Re-drive | **Partially landed — the emit half is in the deployed worker checkout (in-flight #1001 S4b-2a work; the sibling feature turn is live, review not yet converged).** `_phone_home_redrive` emits `command` frames on (re)bind and on the D15 Worker→DO wakeup RPC (`/internal/commands-wakeup`, fired after `_enqueue_command`); leases stamped exactly as the HTTPS path; `phone_home.redrive` journaled; malformed rows skipped-and-logged per D-MAL1. The socket `command_ack` consume-half is still open (S4b-2b, #1001). |
-| Socket `command_ack` consume half | **Nothing on the plane.** The box (#976 S5b) sends `command_ack` frames with `(generation, seq, epoch)`; the DO ignores them as unknown frame types (they are never fenced-bypassed — the generation fence already ran). The HTTPS `POST /commands/ack` endpoint is the only ack path that lands; the socket ack UPDATE hoist is S4b-2b, still open (#1001). |
+| Re-drive | **Landed — emit half + consume half both in the deployed worker checkout.** `_phone_home_redrive` emits `command` frames on (re)bind and on the D15 Worker→DO wakeup RPC (`/internal/commands-wakeup`, fired after `_enqueue_command`); leases stamped exactly as the HTTPS path; `phone_home.redrive` journaled; malformed rows skipped-and-logged per D-MAL1. The socket `command_ack` consume-half landed 2026-10-08 (S4b-2b, #1001): the DO consumes `command_ack` frames into the same `state='acked'` watermark the re-drive reads — generation must equal the bound generation (the §3.3 stale-session fence; ahead-of-bound dropped + fenced like stale), malformed seq closes `protocol-error`, unknown seq loud-dropped; the ack UPDATE is the shared module-level `_ack_command_row` (pending/leased-only, idempotent, never rewriting `expired`), with the HTTPS `_commands_ack` refactored onto it behavior-identically. |
+| Socket `command_ack` consume half | **Landed 2026-10-08 (S4b-2b, #1001).** The DO consumes the box's `command_ack` frames (`generation`, `seq`, optional `epoch` — #976 S5b shape) into the same watermark the re-drive reads; the HTTPS `POST /commands/ack` endpoint shares the consume via the hoisted `_ack_command_row` (F-S4b-3 resolved). |
 | Ping / pong | **Pong answered in the deployed worker checkout (wire spec §4 keepalive).** The DO answers the box's `ping` with `pong` (keeps the box's 90 s watchdog from flapping the session). The 90 s pong-timeout → hibernate rule and the alarm-wake + token re-verify are still open (#1002). |
 | Alarm wake + token re-verify | **Nothing.** No alarm is set; a hibernated socket is never re-verified. The revocation-latency ceiling for a silent socket is currently unbounded — the exact hole wire spec §6's bound exists to close. |
 | Hibernation | **Not used.** S4a's `server.accept()` pins the DO in memory. The `BoxDO` docstring already names the move to `self.ctx.acceptWebSocket(server)` as S4b scope. |
@@ -86,6 +86,14 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
   module-level helper and refactor `_commands_ack` onto it
   (behavior-identical), so the two paths cannot drift the way
   `_pairing_row`'s single-row-shape rule was created to prevent.
+  **Status 2026-10-08: RESOLVED.** #1001 S4b-2b shipped: the consume is
+  the module-level `_ack_command_row` (pending/leased-only, idempotent,
+  never rewriting an `expired` row's audit trail), the DO's socket
+  `command_ack` path and the Worker's HTTPS `_commands_ack` both
+  delegate to it (the HTTPS refactor is behavior-identical, verified by
+  the harness parity matrix), and the §2 "Socket `command_ack` consume
+  half" row carries the shipped state. The finding above is historical —
+  it was true when written.
 - **F-S4b-4 — hibernation-API support in workers-py is still assumed,
   not verified.** G47.2 flagged it; S4a committed to the DO class shape
   anyway (accept-and-hold needs no hibernation). S4b-3's entry ticket is
@@ -236,6 +244,12 @@ bounded-degradation caveat, titled with #1143/D-GH1 in the spec and
 dated 2026-10-08). The heal is box-side and independent of the plane's
 consume half — S4b-2b stays open on #1001. The D-GH3 wire-tombstone
 alternative stays deferred.
+**Amendment 2026-10-08 (S4b-2b shipped):** the consume-half note above
+is superseded — S4b-2b landed 2026-10-08 (#1001): the DO consumes
+`command_ack` frames into the shared `_ack_command_row` watermark
+source (F-S4b-3 RESOLVED), deployed live, harness 165/165 + live smoke
+7/7. The §2 table rows and F-S4b-3 carry the shipped state; the §5
+design text below is now the as-built description.
 On (re)bind and on the D15 wakeup RPC, the DO reads the acked watermark
 (the existing `MAX(seq) ... state='acked'` query — no second cursor) and
 emits `command` frames onto **S4b-1's bound socket** (the bound-socket
