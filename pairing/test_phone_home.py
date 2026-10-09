@@ -2135,3 +2135,27 @@ def test_sigterm_during_backoff_resets_persisted_attempt(ctx, monkeypatch):
     assert spark_pair.cmd_phone_home(ctx) == 0
     with open(_backoff_path(ctx)) as f:
         assert json.load(f)["attempt"] == 0
+
+
+def test_epoch_bump_fchmod_failure_closes_fd(ctx, monkeypatch, tmp_path,
+                                             capsys):
+    # #1155: the epoch-bump path shared the pre-#1143 leaky shape —
+    # os.open + os.fchmod in one try, so an fchmod OSError after a
+    # successful open returned False with the fd open (slow fd
+    # exhaustion in a long-lived session). The split-try fix closes
+    # the fd; the bump still skips loudly and stays advisory.
+    def _raising_fchmod(fd, mode):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _raising_fchmod)
+
+    def _fds():
+        return set(os.listdir("/proc/self/fd"))
+
+    before = _fds()
+    for _ in range(5):
+        assert spark_pair._phone_home_bump_epoch(ctx.dir) is False
+    assert _fds() == before, "fd leaked on fchmod failure"
+    out = capsys.readouterr().out
+    assert "epoch bump SKIPPED" in out
+    assert "cannot secure ingest lock" in out

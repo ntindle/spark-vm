@@ -1647,3 +1647,54 @@ def test_fail_second_rotation_replaces_dot1(ctx, monkeypatch):
     assert os.path.getsize(active) <= 200
     assert "tick 11" in open(active).read()
     assert "tick 0" not in open(rotated).read() + open(active).read()
+
+
+def test_heartbeat_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
+    # #1155: the heartbeat lock acquisition shared the leaky shape —
+    # os.open + os.fchmod in one try, so an fchmod OSError after a
+    # successful open returned 1 with the fd open (one per minute on
+    # the cron cadence). The split-try fix closes the fd and keeps
+    # the loud degraded failure.
+    _enroll(ctx)
+
+    def _raising_fchmod(fd, mode):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _raising_fchmod)
+
+    def _fds():
+        return set(os.listdir("/proc/self/fd"))
+
+    before = _fds()
+    for _ in range(5):
+        assert spark_pair.cmd_heartbeat(ctx) == 1
+    assert _fds() == before, "fd leaked on fchmod failure"
+    err = capsys.readouterr().err
+    assert "cannot secure lock file" in err
+
+
+def test_rotate_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
+    # #1155 (Security round-1): the rotate lock shared the leaky shape —
+    # os.open + os.fchmod with NO try at all, so an fchmod OSError after
+    # a successful open escaped as an unhandled traceback — leaking the
+    # fd AND killing the phone-home daemon, which calls cmd_rotate in
+    # its main loop (the 401-upgrade and token-expired paths). The
+    # split-try fix closes the fd and keeps the loud degraded failure.
+    _enroll(ctx)
+    ctx.auto = False
+    ctx.within = spark_pair.AUTO_ROTATE_WITHIN
+
+    def _raising_fchmod(fd, mode):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _raising_fchmod)
+
+    def _fds():
+        return set(os.listdir("/proc/self/fd"))
+
+    before = _fds()
+    for _ in range(5):
+        assert spark_pair.cmd_rotate(ctx) == 1
+    assert _fds() == before, "fd leaked on fchmod failure"
+    out = capsys.readouterr().out
+    assert "cannot secure lock file" in out
