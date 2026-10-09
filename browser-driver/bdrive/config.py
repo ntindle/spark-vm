@@ -52,6 +52,30 @@ def _proxy_url(name, value):
     return value
 
 
+def _uid_list(name, value):
+    """Comma-separated exact uids (#169 req 3: never a range)."""
+    if not isinstance(value, str):
+        raise ConfigError("%s must be a comma-separated uid list, got %r"
+                          % (name, value))
+    if not value.strip():
+        return frozenset()
+    uids = set()
+    for piece in value.split(","):
+        piece = piece.strip()
+        try:
+            number = int(piece)
+        except ValueError:
+            raise ConfigError(
+                "%s must be comma-separated non-negative ints, got %r"
+                % (name, value))
+        if number < 0:
+            raise ConfigError(
+                "%s must be comma-separated non-negative ints, got %r"
+                % (name, value))
+        uids.add(number)
+    return frozenset(uids)
+
+
 def _positive_int(name, value):
     if isinstance(value, bool):
         raise ConfigError("%s must be an int, got %r" % (name, value))
@@ -98,10 +122,26 @@ class BDriveConfig:
         self.client_group = get("BDRIVE_CLIENT_GROUP", "bdrive-clients")
         if not self.client_group:
             raise ConfigError("BDRIVE_CLIENT_GROUP must be non-empty")
+        # #169 req 3: the exact numeric mapped uid(s) the jail's agent
+        # runs as (2000000 + the container uid, resolved at install from
+        # the jail's uid_map). Empty at rest is allowed — the daemon's
+        # serve_preflight() refuses to serve without them, so an
+        # unconfigured install fails closed instead of accepting every
+        # peer.
+        self.client_uids = _uid_list(
+            "BDRIVE_CLIENT_UIDS", get("BDRIVE_CLIENT_UIDS", ""))
+
+    @property
+    def socket_dir(self):
+        """The bind-mount unit for the socket (#169 req 1): its directory."""
+        from . import socket_dir as _sd
+        return _sd.socket_dir_for(self.socket_path)
 
     def as_dict(self):
         return {
             "socket_path": self.socket_path,
+            "socket_dir": self.socket_dir,
+            "client_uids": sorted(self.client_uids),
             "profile_dir": self.profile_dir,
             "proxy_url": self.proxy_url,
             "job_base_dir": self.job_base_dir,

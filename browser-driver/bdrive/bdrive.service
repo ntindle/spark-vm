@@ -1,0 +1,42 @@
+[Unit]
+Description=bdrive — fixed browser-driving daemon (GitHub #169)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bdrive
+Group=bdrive
+# #169 req 1+2: the daemon's socket lives in RuntimeDirectory=bdrive
+# (/run/bdrive), and the jail bind-mounts the DIRECTORY, never the
+# socket file. RuntimeDirectoryPreserve=yes keeps the directory (and
+# the jail's view of it) across daemon restarts; the daemon recreates
+# only the socket file. RuntimeDirectoryMode=0710 matches req 5
+# (traverse, no list); the socket itself is 0770 via prepare_socket_dir
+# (browser-driver/bdrive/socket_dir.py). The jail's agent uid must be a
+# member of the bdrive-clients group to traverse the directory; the
+# jail's OTHER mapped uids (jail root = host 2000000) cannot reach it.
+RuntimeDirectory=bdrive
+RuntimeDirectoryMode=0710
+RuntimeDirectoryPreserve=yes
+# UMask=0007 is belt-and-braces for req 5 (bind() creates the socket
+# mode as 0777&~umask). The group half still needs the daemon to call
+# harden_socket_file() immediately after bind() — without it the
+# socket is group bdrive and the client group cannot connect.
+UMask=0007
+# BDRIVE_CLIENT_UIDS: the exact numeric mapped uid(s) the jail's agent
+# runs as (2000000 + the container uid, resolved at install from the
+# jail's uid_map). serve_preflight() refuses to start without them —
+# never match a uid range, it would admit jail root (#169 req 3).
+Environment=BDRIVE_CLIENT_UIDS=
+ExecStart=/usr/local/bin/bdrive-daemon
+Restart=on-failure
+RestartSec=5
+# Cheap sandboxing for the daemon (same discipline as confirmd.service).
+# NoNewPrivileges is safe here: the daemon never calls sudo.
+PrivateTmp=yes
+ProtectSystem=full
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
