@@ -115,10 +115,42 @@ you get only the subtree's tests. Always run the suite from the root so
 
 ### The merge gate, locally
 
-`python3 -m pytest` is most of what CI checks, but not all of it — five
-more CI jobs gate the merge, and a PR that is green locally can still go
-red on CI if you skip the ones you can run. The five, with their local
+`python3 -m pytest` is most of what CI checks, but not all of it — seven
+more CI checks gate the merge, and a PR that is green locally can still go
+red on CI if you skip the ones you can run. The seven, with their local
 form:
+
+<!-- The required-check inventory this section claims. The branch-protection
+ruleset (deploy/rulesets/main-branch-protection.json) is the source of
+truth; scripts/test_contributing_ci_gates.py fails if this list and the
+ruleset disagree, so add the new check here the moment the ruleset grows. -->
+<!-- gate-checks:start -->
+python tests
+shard plan
+shellcheck
+markdown link check
+PNG screenshot smoke test
+changelog ritual lint
+changed-paths gate
+docs index coverage
+<!-- gate-checks:end -->
+
+```bash
+# shard plan (a required CI check: the plan job emits the shard matrix from
+# scripts/ci_shard_plan.py and enforces the shard<->testpaths bijection —
+# a PR adding a test directory without wiring it into a shard fails here)
+python3 scripts/ci_shard_plan.py --check
+
+# changed-paths gate (a required CI check: skips the python suite on
+# docs-only diffs). Local equivalent — exit 0 means CI would RUN the suite
+# on your diff, exit 1 means CI would skip it as docs-only:
+git diff --no-renames --name-only origin/main...HEAD \
+  | grep -qvE '^(docs/|CHANGELOG\.md$)'
+```
+
+The remaining five: two more have a one-liner local form, right here; the
+other three — plus the root tests that live inside the `python tests`
+shard — are covered in the paragraphs below.
 
 ```bash
 # changelog ritual lint (a required CI check: CHANGELOG entries must not
@@ -126,7 +158,7 @@ form:
 # CHANGELOG.md)
 python3 scripts/lint-changelog-ritual.py
 
-# docs-index coverage: every docs/*.md file needs a row in docs/README.md.
+# `docs index coverage`: every docs/*.md file needs a row in docs/README.md.
 # It runs inside the full suite, and CI also runs it standalone on every
 # PR — including docs-only ones, where the python suite is skipped.
 python3 -m pytest scripts/test_docs_index_coverage.py -q
@@ -152,7 +184,7 @@ approximation for a PR that touches shell scripts:
 git diff --name-only origin/main...HEAD -- '*.sh' | xargs -r shellcheck -S error
 ```
 
-The PNG smoke test is locally runnable too — CI's own steps are the
+The PNG screenshot smoke test is locally runnable too — CI's own steps are the
 recipe: `pip install playwright`, then the one-time
 `python3 -m playwright install --with-deps chromium` (installs OS deps,
 escalates internally), then `python3 scripts/pw-test.py` and
