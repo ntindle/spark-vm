@@ -125,7 +125,11 @@ exit 0 — the same image serves self-hosted/dev use, so fail-closed means
 Idempotency: the token is single-use — `enrollment.json` present means
 already enrolled (skip, token never re-presented); `pairing.json` present
 means a pairing is in flight from a previous boot (skip, never replay the
-consumed token; the plane 403s replays per #1108). Both cases log loudly.
+consumed token; the plane 403s replays per #1108). A keypair counts as
+usable only when both `box.key` and `box.pub` exist — an orphan key (a
+previous `init` that died between the two writes) is regenerated with
+`init --force`, which is safe because such a key could never have completed
+a pairing. All three skip cases log loudly.
 
 Boundaries (honest, still open): redeem completion is #907's box-side half
 (the hook logs the exact `redeem` command and stops — it never polls inside

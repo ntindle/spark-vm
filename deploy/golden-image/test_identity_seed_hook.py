@@ -91,12 +91,58 @@ def test_absent_env_skips_without_invoking_client(harness):
     assert "not enrolling" in r.stderr
 
 
-def test_partial_env_skips_without_invoking_client(harness):
-    r = harness["run"]({"SPARKVM_BOX_ID": BOX_ID,
-                        "SPARKVM_PLANE_URL": PLANE_URL})
+@pytest.mark.parametrize("missing", ["SPARKVM_BOX_ID", "SPARKVM_PLANE_URL",
+                                     "SPARKVM_ATTESTATION_TOKEN"])
+def test_partial_env_skips_without_invoking_client(harness, missing):
+    env = _full_env()
+    del env[missing]
+    r = harness["run"](env)
     assert r.returncode == 0, r.stderr
     assert _argv_lines(harness) == []
     assert "not enrolling" in r.stderr
+
+
+def test_init_failure_exits_nonzero_and_loud(harness):
+    r = harness["run"]({**_full_env(), "STUB_INIT_EXIT": "1"})
+    assert r.returncode != 0
+    assert "init failed" in r.stderr
+    argv = _argv_lines(harness)
+    assert len(argv) == 1 and argv[0].endswith(" init --force")  # request never ran
+
+
+def test_empty_string_token_counts_as_absent(harness):
+    env = _full_env()
+    env["SPARKVM_ATTESTATION_TOKEN"] = ""
+    r = harness["run"](env)
+    assert r.returncode == 0, r.stderr
+    assert _argv_lines(harness) == []
+    assert "not enrolling" in r.stderr
+
+
+def test_whitespace_only_token_counts_as_absent(harness):
+    env = _full_env()
+    env["SPARKVM_ATTESTATION_TOKEN"] = "  \n\t "
+    r = harness["run"](env)
+    assert r.returncode == 0, r.stderr
+    assert _argv_lines(harness) == []
+    assert "not enrolling" in r.stderr
+
+
+def test_state_dir_with_spaces(harness, tmp_path):
+    spaced = tmp_path / "state dir"
+    r = harness["run"]({**_full_env(), "SVM_PAIR_DIR": str(spaced)})
+    assert r.returncode == 0, r.stderr
+    argv = _argv_lines(harness)
+    assert len(argv) == 2, argv
+    assert f"--dir {spaced}" in argv[0]
+
+
+def test_garbage_pairing_json_skips_and_names_redeem(harness):
+    (harness["state"] / "pairing.json").write_text("not json{{{")
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    assert _argv_lines(harness) == []
+    assert "redeem" in r.stderr
 
 
 def test_enrolled_state_skips_and_never_represents(harness):
@@ -122,25 +168,41 @@ def test_first_enroll_runs_init_then_request(harness):
     assert r.returncode == 0, r.stderr
     argv = _argv_lines(harness)
     assert len(argv) == 2, argv
-    assert " init " in f" {argv[0]} " or argv[0].endswith(" init")
+    assert argv[0].endswith(" init --force")
     assert " request " in f" {argv[1]} "
     assert f"--name {BOX_ID}" in argv[1]
     assert f"--control {PLANE_URL}" in argv[1]
     # The token travels in the child env only — never on argv.
     assert TOKEN not in argv[0] and TOKEN not in argv[1]
     env_lines = (harness["logdir"] / "env").read_text().splitlines()
-    # request carries it explicitly; init inherits it from the hook's env.
+    # request carries it explicitly; init must NOT see it (least privilege —
+    # init has no use for the token; inherited by accident before the fix).
     assert "token-env-present:request" in env_lines
+    assert "token-env-present:init" not in env_lines
     assert (harness["logdir"] / "token_value").read_text() == TOKEN
 
 
 def test_init_skipped_when_keypair_exists(harness):
     (harness["state"] / "box.key").write_bytes(b"fake-key")
+    (harness["state"] / "box.pub").write_bytes(b"fake-pub")
     r = harness["run"](_full_env())
     assert r.returncode == 0, r.stderr
     argv = _argv_lines(harness)
     assert len(argv) == 1, argv
     assert " request " in f" {argv[0]} "
+
+
+def test_orphan_key_triggers_forced_reinit(harness):
+    # box.key without box.pub (a previous init died between the two writes):
+    # the hook must regenerate with --force, not skip init and crash in
+    # request on the missing pub.
+    (harness["state"] / "box.key").write_bytes(b"orphan-key")
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    argv = _argv_lines(harness)
+    assert len(argv) == 2, argv
+    assert argv[0].endswith(" init --force")
+    assert " request " in f" {argv[1]} "
 
 
 def test_request_failure_exits_nonzero_and_loud(harness):
@@ -196,7 +258,8 @@ def test_supervisord_identity_seed_is_oneshot_first():
     prog = cfg[section]
     assert prog["command"] == "/usr/local/bin/identity-seed-hook.sh"
     assert prog.get("autorestart", "").lower() == "false"
-    assert int(prog.get("priority", "999")) < 999
+    # Strictly first: the hook seeds identity before any daemon starts.
+    assert int(prog.get("priority", "999")) == 10
     assert int(prog.get("startsecs", "1")) == 0
     assert prog.get("user", "") == "root"
 

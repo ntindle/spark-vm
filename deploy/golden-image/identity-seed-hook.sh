@@ -38,6 +38,12 @@
 # SPARKVM_ATTESTATION_TOKEN environment variable only — never on argv (argv
 # is world-readable via ps; environ is owner-readable). The token is never
 # echoed, logged, or included in diagnostics. No `set -x` anywhere near it.
+#
+# Trust boundary note: SPARKVM_PAIR_CLIENT / SPARKVM_PYTHON override which
+# code runs as root at boot — but only to whoever can already set
+# machine-config env, which is boot-time root-equivalent by itself. The
+# trust boundary is inherited from the provision path, not widened here;
+# do not "harden" this layer while leaving machine-config env writable.
 set -euo pipefail
 
 HOOK="identity-seed-hook"
@@ -50,8 +56,13 @@ PYTHON="${SPARKVM_PYTHON:-/usr/bin/python3}"
 log() { echo "$HOOK: $*" >&2; }
 
 # --- env gate: fail closed on enrollment, not on boot ------------------------
+# A whitespace-only token is as good as absent (base64url has no meaningful
+# whitespace; the client strips anyway). Two-step: ${VAR//…/} on an unset
+# variable trips `set -u`, so default first, then strip.
+_token_stripped="${SPARKVM_ATTESTATION_TOKEN:-}"
+_token_stripped="${_token_stripped//[[:space:]]/}"
 if [ -z "${SPARKVM_BOX_ID:-}" ] || [ -z "${SPARKVM_PLANE_URL:-}" ] \
-    || [ -z "${SPARKVM_ATTESTATION_TOKEN:-}" ]; then
+    || [ -z "$_token_stripped" ]; then
     log "identity env incomplete (need SPARKVM_BOX_ID, SPARKVM_PLANE_URL, SPARKVM_ATTESTATION_TOKEN) — not enrolling; normal for non-provisioned images"
     exit 0
 fi
@@ -62,15 +73,24 @@ if [ -f "$STATE_DIR/enrollment.json" ]; then
     exit 0
 fi
 if [ -f "$STATE_DIR/pairing.json" ]; then
-    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: python3 $PAIR_CLIENT redeem"
+    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" redeem"
     exit 0
 fi
 
 # --- first enroll ------------------------------------------------------------
 log "identity env present — enrolling box via attested pairing"
 
-if [ ! -f "$STATE_DIR/box.key" ]; then
-    "$PYTHON" "$PAIR_CLIENT" --dir "$STATE_DIR" --control "$SPARKVM_PLANE_URL" init \
+# A keypair is usable only when BOTH halves exist: a previous init that died
+# between the two writes leaves an orphan box.key that request cannot use
+# (and init would refuse to replace without --force). --force is safe here:
+# a key without its pub can never have completed a pairing, so nothing was
+# ever presented with it.
+if [ ! -f "$STATE_DIR/box.key" ] || [ ! -f "$STATE_DIR/box.pub" ]; then
+    # Least privilege: init has no use for the attestation token, so scope
+    # it out of the child's environment (a future traceback or diagnostic
+    # dumping environ must not see the single-use token).
+    env -u SPARKVM_ATTESTATION_TOKEN \
+        "$PYTHON" "$PAIR_CLIENT" --dir "$STATE_DIR" --control "$SPARKVM_PLANE_URL" init --force \
         || { log "pairing init failed — not enrolled"; exit 1; }
 fi
 
