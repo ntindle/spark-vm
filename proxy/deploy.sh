@@ -279,6 +279,9 @@ echo "[4e/7] Ensuring confirmd pending/ is a setgid filing dir..."
 # eventually file here too, and putting bdrive in group swapd would hand
 # it far more than filing rights. swapd files today (the proxy refusal
 # path); bdrive joins when its user lands (box hardening).
+# The enrollment itself lives in proxy/ensure-approval-filer.sh so the
+# hardening step can call it at user-creation time (issue #1174); this
+# section stays the caller for swapd and bdrive on deploys.
 # Idempotent: groupadd/usermod are no-ops on repeat runs, and the helper
 # repairs drift with a WARNING instead of failing.
 # Rollback note: pending/ is deliberately NOT in proxy_install_paths —
@@ -291,13 +294,13 @@ echo "[4e/7] Ensuring confirmd pending/ is a setgid filing dir..."
 # Issue #108: CONFIRM_DIR is env-overridable so deploy tests can
 # redirect it at tmp instead of touching the host.
 pending_group="approval-filers"
-if ! getent group "$pending_group" >/dev/null; then
-    sudo groupadd -r "$pending_group"
-fi
-sudo usermod -aG "$pending_group" swapd
-if id -u bdrive >/dev/null 2>&1; then
-    sudo usermod -aG "$pending_group" bdrive
-fi
+# Enrollment helper (issue #1174): idempotent, and shared with the future
+# bdrive-provisioning step — creates the group if missing, enrolls the
+# user only if the user exists (absent user = no-op, exit 0). The
+# bdrive-provisioning step must call this at user-creation time so the
+# future principal is never stranded without filing rights on pending/.
+sudo proxy/ensure-approval-filer.sh "$pending_group" swapd
+sudo proxy/ensure-approval-filer.sh "$pending_group" bdrive
 approvals_dir="${CONFIRM_DIR:-/home/swapd/approvals}"
 # The parent stays swapd-owned (confirmd makedirs answered//consumed as
 # swapd); only the leaf is root-owned setgid.
