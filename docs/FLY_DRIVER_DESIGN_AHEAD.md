@@ -135,9 +135,13 @@ pre-provision cap checks refusing over-budget claims (#1075). Tracked on
   ordering hazard with an exec-API file write) and persists across cold
   stops (verify at build time per #1204 — assumed from the machine-config
   model, unconfirmed against docs.machines.dev), so the fingerprint stays
-  stable across wake (`wake_reprovisions=false` for the Fly shape — the
-  park-style re-query rule never fires); ed25519 is the attested key
-  (smallest, modern, sufficient for the pin). Known exposure:
+  stable across wake. Load-bearing note: the park-style re-query rule never
+  fires for the Fly shape (`wake_reprovisions=false`), so the driver never
+  re-checks the fingerprint after a wake — env persistence across cold stops
+  is the SOLE stability guarantee, and the #1204 build-time verification is
+  not optional: if env does not persist, the fingerprint silently desyncs
+  from the Muse's pin; ed25519 is the attested key (smallest, modern,
+  sufficient for the pin). Known exposure:
   machine-config env is readable via the Machines API under the
   provisioning token — the same trust domain as the provision path itself,
   not a new one — and the Fly dashboard's machine-config view is an
