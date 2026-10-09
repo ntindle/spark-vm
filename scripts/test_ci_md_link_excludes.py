@@ -15,7 +15,14 @@ comment block (one token per line, invisible in GitHub's rendered view; see
 the block's own note for the token scheme). This pin fails loudly on drift
 in either direction:
 - a job `--exclude` the doc doesn't name (stale doc, understated set),
-- a doc-named entry the job no longer excludes (dead inventory).
+- a doc-named entry the job no longer excludes (dead inventory),
+- an unsorted block (regeneration must stay deterministic).
+
+The test rides two CI gates: the sharded python-tests suite (via testpaths)
+for code PRs, and the always-on docs-guard job for docs-only PRs — a
+docs-only inventory edit can't land unwatched. The job's lychee step also
+carries a comment pointing editors at the inventory when they add an
+--exclude.
 
 When the job's exclude list grows, regenerate the doc's block from the job
 (the token scheme is deterministic — see `normalize`) and keep the prose
@@ -97,8 +104,8 @@ def ci_excludes():
     return set(toks)
 
 
-def doc_inventory():
-    """The token set the doc claims in its machine-readable inventory block."""
+def doc_inventory_ordered():
+    """The doc's inventory tokens in block order (for the sortedness pin)."""
     text = DOC.read_text(encoding="utf-8")
     blocks = INVENTORY_RE.findall(text)
     if len(blocks) != 1:
@@ -116,7 +123,12 @@ def doc_inventory():
     dupes = sorted({t for t in toks if toks.count(t) > 1})
     if dupes:
         raise AssertionError(f"duplicate tokens in the doc inventory: {dupes}")
-    return set(toks)
+    return toks
+
+
+def doc_inventory():
+    """The token set the doc claims in its machine-readable inventory block."""
+    return set(doc_inventory_ordered())
 
 
 class TestLinkCheckExcludesInventory(unittest.TestCase):
@@ -141,6 +153,16 @@ class TestLinkCheckExcludesInventory(unittest.TestCase):
                 "(must be a bare hostname or one of "
                 f"{sorted(NON_HOST_TOKENS)})",
             )
+
+    def test_inventory_block_is_sorted(self):
+        toks = doc_inventory_ordered()
+        self.assertEqual(
+            toks,
+            sorted(toks),
+            "the inventory block must stay sorted so regeneration is "
+            "deterministic (the block's own note says 'one token per line, "
+            "sorted')",
+        )
 
 
 if __name__ == "__main__":

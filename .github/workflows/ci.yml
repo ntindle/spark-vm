@@ -255,7 +255,12 @@ jobs:
     # Always runs, even on docs-only diffs where python-tests is skipped
     # (P138): scripts/test_docs_index_coverage.py lives in the python suite,
     # so without this carve-out a new docs/*.md file without an index row
-    # would land with the coverage invariant unwatched.
+    # would land with the coverage invariant unwatched. The doc-inventory
+    # pins ride the same carve-out: test_ci_md_link_excludes.py and
+    # test_contributing_ci_gates.py compare doc claims against CI sources
+    # of truth, and a docs-only PR hand-editing those inventory blocks
+    # would otherwise land with the guard skipped. All three are
+    # stdlib-only, so the pytest-only install below suffices.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -267,8 +272,8 @@ jobs:
       # set, which this test never needs).
       - name: install pytest
         run: pip install pytest
-      - name: docs-index coverage
-        run: python3 -m pytest scripts/test_docs_index_coverage.py -q
+      - name: docs-index coverage + doc-inventory pins
+        run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
 
   markdown-links:
     name: markdown link check
@@ -541,6 +546,11 @@ jobs:
         # citation. Bot-block, not a broken link.)
         # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
         # tag drift can't widen what this step can do.
+        # When adding an --exclude below, regenerate docs/CI.md's
+        # `link-check-excludes` inventory to match (pinned by
+        # scripts/test_ci_md_link_excludes.py, which also rides the
+        # docs-guard gate — a docs-only PR editing the block is checked
+        # there). The pin fails CI on any mismatch.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
           args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' --exclude 'https?://(www\\.)?x264\\.org/.*' --exclude 'https?://(www\\.)?marktechpost\\.com/.*' --exclude 'https?://investors\\.digitalocean\\.com/.*' '**/*.md'"

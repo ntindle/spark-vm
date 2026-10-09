@@ -66,7 +66,10 @@ the exclusion.
    `github-blob-urls` (GitHub file-view pages, rate-limited not broken), and
    `archive-single-url` (one pinned web.archive.org snapshot, per-URL
    throttled). They are not host-level excludes and do not join the host
-   alternation.
+   alternation. If a future `--exclude` is a URL-pattern class rather than
+   a host, add its token to this `grep -vE` skip list (and to
+   `NON_HOST_TOKENS` in the pin test) — the pin test fails loudly on the
+   mismatch, so neither side can drift silently.
    (The `[^] )'\"]` class excludes `]` as well — markdown-link closing
    brackets would otherwise glue onto the URL and inflate dedup counts.
    `]` must come first in the class; escaping it as `\]` silently matches
