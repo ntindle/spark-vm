@@ -114,7 +114,7 @@ material: `docs/HOSTED_GAP_ANALYSIS.md` (signup→box pipeline) and
   Bearer <redacted> exists pre-pairing, and #850 explicitly rejected two
   delivery shapes). Tracked under the driver issue (G51.1), not a separate
   issue; #134's credential-install injector consumes the vend contract, not
-  this seeding channel.
+  this seeding channel. **[2026-10-09 amendment — docs/FLY_DRIVER_DESIGN_AHEAD.md D-D8]:** the golden-image leg of this contract re-tracks to #1203 (the hook is image-side, `deploy/golden-image/`); the exec-install `/data` leg stays deferred with the F1b alternative per that doc's D-D2. The 2026-10-03 "not a separate issue" pin is superseded for the golden-image leg only.
 - **`[PARTIAL]` G51.5 — spend-cap enforcement is a decision, not a
   mechanism.** The $5/run / $25/month caps are loop-provisioned-machine
   policy with loop-side enforcement; the hosted path needs: a pre-provision
