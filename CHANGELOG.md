@@ -57,7 +57,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   out of the agent's reach, the single-source name/entry/host validation
   contract shared with `cred-ui` and the registry writer, and when the
   swap-proxy placeholder path is the right choice over direct secret
-  insertion. (#TBD)
+  insertion. (#1264)
 
 - The multi-tenant plane model is now decided and recorded: each hosted
   signup gets its own control-plane instance (one plane per tenant), so the
