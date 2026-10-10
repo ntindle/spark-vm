@@ -88,6 +88,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   or a documented one the script no longer installs, fails the test
   suite instead of drifting silently. (#1235) (#1244)
 
+- The operator plane — the operator-only service the one-plane-per-tenant
+  decision points at for signup, metering, provisioning, and fleet health —
+  now has a build-path analysis: what the vision asks of it, what exists
+  today (nothing yet — the name is doing triple duty across three docs),
+  and the five genuinely-new build slices it files, from the design spec
+  itself to the tenant-plane envelope authentication. (#1257) (#1262)
+
 ### Fixed
 
 - The golden image's sshd first-boot script no longer risks dying before
