@@ -33,7 +33,8 @@
 #                      to <path> without docker (scan section is marked
 #                      "not-run"; used by tests and by CI's static job)
 #   --tag              override the local image tag (default
-#                      sparkvm-golden:<version>+<sha12>)
+#                      sparkvm-golden:<version>-<sha12>; Docker tags forbid
+#                      '+', so the separator is a dash — see #1271)
 #   --record-pushed-digest
 #                      publish-step mode (#1111): after the operator pushes
 #                      the gated image, resolve the push-produced digest of
@@ -113,7 +114,7 @@ RECIPE_DEFAULT_COUNT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden
 RECIPE_DEFAULT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | head -1)"
 [ "$RECIPE_DEFAULT" = "$VERSION" ] \
     || die "recipe ARG default '$RECIPE_DEFAULT' != tree VERSION '$VERSION' — bump the Dockerfile deliberately (D-P1), never silently"
-[ -z "$TAG" ] && TAG="sparkvm-golden:${VERSION}+${SHA:0:12}"
+[ -z "$TAG" ] && TAG="sparkvm-golden:${VERSION}-${SHA:0:12}"
 
 echo "build-image: tree clean at $SHA (v$VERSION); tag $TAG"
 
@@ -337,7 +338,7 @@ emit_gate_record "$GATE_RECORD" "pass" "$BASE_DIGEST" "0" "/" "0" "built"
 echo "build-image: DONE — image $TAG built, scan clean, manifest + gate record emitted"
 echo "build-image: the image does NOT publish itself. After the interactive gate"
 echo "  (docs/GOLDEN_IMAGE_GATE_PROCEDURE.md), the operator publishes with:"
-echo "    docker tag $TAG <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
-echo "    docker push <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
+echo "    docker tag $TAG <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"
+echo "    docker push <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"
 echo "  then records the push-produced digest into the gate record (#1111):"
-echo "    $0 --record-pushed-digest $GATE_RECORD <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
+echo "    $0 --record-pushed-digest $GATE_RECORD <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"

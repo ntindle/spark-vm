@@ -566,7 +566,7 @@ def _emit_completed_gate(tmp_path):
 
 _DIGEST_A = "sha256:" + "ab" * 32
 _DIGEST_B = "sha256:" + "cd" * 32
-_REF = "registry.fly.io/myapp/sparkvm-golden:0.6.0+deadbeefcafe"
+_REF = "registry.fly.io/myapp/sparkvm-golden:0.6.0-deadbeefcafe"
 
 
 def _image_digest(record_path):
@@ -889,3 +889,65 @@ def test_workflow_runs_gate_subset():
     assert "scan-baked-secrets.sh" in text
     assert "check-image-manifest.sh" in text
     assert "generate-image-manifest.sh" in text
+
+
+# --- image-tag scheme ------------------------------------------------------
+# #1271: the CI workflow rendered IMAGE_TAG as
+# sparkvm-golden:0.8.0+da4036cdfdc5 and the docker build failed — '+' is not
+# in the Docker tag alphabet ([\w][\w.-]{0,127}). The separator is now a
+# dash in both tag-composing sites (the CI workflow and build-image.sh's
+# default --tag); these tests pin the scheme so a reintroduction of the
+# invalid separator fails in CI, not on the release gate.
+
+
+_DOCKER_TAG_RE = re.compile(r"^[\w][\w.-]{0,127}$")
+# The exact values from the #1271 failure: rendering the template with them
+# must produce a valid tag, while the old '+' template with the same values
+# must fail — that pair proves the regex is not vacuous.
+_PIN_VERSION = "0.8.0"
+_PIN_SHA12 = "da4036cdfdc5"
+
+
+def _rendered_workflow_image_tag():
+    """Render the IMAGE_TAG the CI workflow composes with the #1271 values."""
+    text = _workflow_text()
+    m = re.search(r'IMAGE_TAG=(sparkvm-golden:[^"]+)', text)
+    assert m, "IMAGE_TAG composition line missing from the workflow"
+    template = m.group(1)
+    tag = template.replace("$(cat VERSION)", _PIN_VERSION).replace(
+        "$(git rev-parse --short=12 HEAD)", _PIN_SHA12)
+    assert "$(" not in tag, f"unrendered command substitution in template: {template!r}"
+    return tag
+
+
+def _rendered_driver_default_tag():
+    """Render build-image.sh's default --tag with the #1271 values."""
+    with open(BUILD_IMAGE, encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r'^\[ -z "\$TAG" \] && TAG="(sparkvm-golden:[^"]+)"', text, re.M)
+    assert m, "build-image.sh default TAG line missing"
+    return (m.group(1).replace("${VERSION}", _PIN_VERSION)
+            .replace("${SHA:0:12}", _PIN_SHA12))
+
+
+def test_image_tag_templates_render_valid_docker_tags():
+    """Both tag-composing sites must render a valid Docker tag with the
+    #1271 release values (and no '+' anywhere in the rendered tag). The
+    Docker tag alphabet ([\w][\w.-]{0,127}) applies to the tag component
+    after the name: separator, so the repository name is pinned separately."""
+    for source, ref in (("workflow IMAGE_TAG", _rendered_workflow_image_tag()),
+                        ("build-image.sh default TAG", _rendered_driver_default_tag())):
+        name, _, tag = ref.rpartition(":")
+        assert name == "sparkvm-golden", f"{source} names the wrong repository: {ref!r}"
+        assert _DOCKER_TAG_RE.match(tag), f"{source} renders an invalid Docker tag: {ref!r}"
+        assert "+" not in tag, f"{source} uses the banned '+' separator: {ref!r}"
+
+
+def test_image_tag_pin_is_non_vacuous():
+    """The pin above must fail against the pre-#1271 '+' scheme: rendering
+    the old template with the same values proves the regex rejects the
+    separator this fix removes (and passes only with the dash)."""
+    old = f"sparkvm-golden:{_PIN_VERSION}+{_PIN_SHA12}".rpartition(":")[2]
+    assert not _DOCKER_TAG_RE.match(old), "control failed: '+' template rendered valid"
+    new = f"sparkvm-golden:{_PIN_VERSION}-{_PIN_SHA12}".rpartition(":")[2]
+    assert _DOCKER_TAG_RE.match(new), "control failed: '-' template rendered invalid"

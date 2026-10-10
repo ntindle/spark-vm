@@ -71,10 +71,14 @@ jobs:
         # the release tag (for the push trigger the tag push IS the release
         # commit; for workflow_call the step above checked the tag out, and
         # the tag the release job cut always matches the tree's VERSION).
+        # Docker tags allow [\w][\w.-]{0,127} — notably NOT '+'. The
+        # version/SHA separator is a dash so the rendered IMAGE_TAG is
+        # always a valid tag (the '+' form failed the v0.8.0 gate:
+        # invalid tag "sparkvm-golden:0.8.0+da4036cdfdc5"; see #1271).
         run: |
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=sparkvm-golden:$(cat VERSION)+$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=sparkvm-golden:$(cat VERSION)-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
       - name: Generate the image manifest into the build context
         # The recipe COPYs the manifest in — it cannot be generated in-image
         # (the build context excludes .git, and the generator needs git

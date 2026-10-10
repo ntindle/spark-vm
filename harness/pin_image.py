@@ -425,7 +425,7 @@ def main(argv=None):
                      "registry.fly.io/<app>/sparkvm-golden@sha256:<digest>")
     pin.add_argument("--tag-ref", default=None,
                      help="human tag pushed under, e.g. "
-                     "registry.fly.io/<app>/sparkvm-golden:0.6.0+<sha12>")
+                     "registry.fly.io/<app>/sparkvm-golden:0.6.0-<sha12>")
     pin.add_argument("--gate-record", default=None,
                      help="completed gate record (default: "
                      "gate-record-<sha12>.json at the repo root)")
