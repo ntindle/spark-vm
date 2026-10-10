@@ -384,7 +384,11 @@ def cmd_request(args):
     status, resp = _http("POST", control.rstrip("/") + "/v1/pairing/request",
                          body)
     if status != 201 or not resp.get("ok"):
-        print(f"request failed: {_plane_error(resp, status)}")
+        # Surface the numeric status in the failure line: the hook
+        # (deploy/golden-image/identity-seed-hook.sh, #1221) classifies
+        # transient vs permanent from this output, and a JSON error body
+        # would otherwise hide a 5xx/429 behind the plane's own text.
+        print(f"request failed: http={status}: {_plane_error(resp, status)}")
         return 1
     if attestation_token and not resp.get("auto_approved"):
         # The token was presented but the plane did not auto-approve: it

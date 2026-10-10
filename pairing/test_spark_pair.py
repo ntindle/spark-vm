@@ -216,6 +216,28 @@ def test_request_attested_response_missing_pairing_id_fails_loud(
     assert not os.path.exists(os.path.join(ctx.dir, "pairing.json"))
 
 
+def test_request_failure_line_carries_http_status(ctx, monkeypatch, capsys):
+    # The identity-seed hook (#1221) classifies transient vs permanent from
+    # this line; the numeric status must be present even when the plane's
+    # JSON error body carries no http= marker of its own.
+    _run_init(ctx)
+
+    def fake_http_503_json(method, url, body=None, headers=None):
+        return 503, {"ok": False, "error": "upstream timeout"}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http_503_json)
+    assert spark_pair.cmd_request(ctx) == 1
+    assert "request failed: http=503: upstream timeout" in capsys.readouterr().out
+
+    def fake_http_transport(method, url, body=None, headers=None):
+        return 0, {"ok": False, "error": "transport: [Errno 111] Connection refused"}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http_transport)
+    assert spark_pair.cmd_request(ctx) == 1
+    out = capsys.readouterr().out
+    assert "request failed: http=0: transport:" in out
+
+
 def test_request_orphan_key_fails_loud_without_traceback(ctx, capsys):
     # box.key without box.pub (a previous init died between the two writes):
     # request must refuse loudly, not traceback on the missing file.
