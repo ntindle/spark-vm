@@ -103,6 +103,15 @@ VERSION="$(cat "$REPO/VERSION")" || die "cannot read VERSION"
 # downstream (proxy/deploy.sh preflight), so fail here, loudly.
 (cd "$REPO" && python3 scripts/sparkvm_version.py --check >/dev/null) \
     || die "VERSION '$VERSION' is not valid semver"
+# #1271: Docker tags forbid '+', so a VERSION carrying semver build
+# metadata (e.g. 0.8.0+local — accepted by the check above) would compose
+# an invalid image tag and fail the gate at docker build. Refuse loudly
+# here, before any tag is composed. (Semver's remaining characters —
+# alnum, '-', '.' — are all in the Docker tag alphabet, so '+' is the only
+# guard the VERSION half needs.)
+case "$VERSION" in
+  *+*) die "VERSION '$VERSION' contains '+': would compose an invalid Docker tag (see #1271)" ;;
+esac
 # The recipe's own ARG default must agree with the tree: a recipe that
 # defaults to a different version than the tree being baked is a silent
 # pin — refuse (the Dockerfile RUN check is the second line of defense).

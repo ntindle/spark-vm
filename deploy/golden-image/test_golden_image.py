@@ -896,11 +896,16 @@ def test_workflow_runs_gate_subset():
 # sparkvm-golden:0.8.0+da4036cdfdc5 and the docker build failed — '+' is not
 # in the Docker tag alphabet ([\w][\w.-]{0,127}). The separator is now a
 # dash in both tag-composing sites (the CI workflow and build-image.sh's
-# default --tag); these tests pin the scheme so a reintroduction of the
-# invalid separator fails in CI, not on the release gate.
+# default --tag), and both sites guard VERSION against '+' (semver build
+# metadata like 0.8.0+local passes the repo's semver grammar but would
+# compose the same invalid tag). These tests pin the scheme so a
+# reintroduction of the invalid separator — or of an unguarded VERSION —
+# fails in CI, not on the release gate.
 
 
-_DOCKER_TAG_RE = re.compile(r"^[\w][\w.-]{0,127}$")
+# re.ASCII: Docker's real tag alphabet is ASCII; Python's \w is
+# Unicode-aware without it and would bless e.g. '0.8.0-é' as valid.
+_DOCKER_TAG_RE = re.compile(r"^[\w][\w.-]{0,127}$", re.ASCII)
 # The exact values from the #1271 failure: rendering the template with them
 # must produce a valid tag, while the old '+' template with the same values
 # must fail — that pair proves the regex is not vacuous.
@@ -908,13 +913,16 @@ _PIN_VERSION = "0.8.0"
 _PIN_SHA12 = "da4036cdfdc5"
 
 
-def _rendered_workflow_image_tag():
-    """Render the IMAGE_TAG the CI workflow composes with the #1271 values."""
+def _rendered_workflow_image_tag(version=_PIN_VERSION):
+    """Render the IMAGE_TAG the CI workflow composes with the given VERSION."""
     text = _workflow_text()
-    m = re.search(r'IMAGE_TAG=(sparkvm-golden:[^"]+)', text)
+    # Anchored on the full echo line: a plain 'IMAGE_TAG=' search would
+    # also match a hypothetical OLD_IMAGE_TAG=... line and render a stale
+    # template, letting a real regression pass vacuously.
+    m = re.search(r'echo "IMAGE_TAG=(sparkvm-golden:[^"]+)"', text)
     assert m, "IMAGE_TAG composition line missing from the workflow"
     template = m.group(1)
-    tag = template.replace("$(cat VERSION)", _PIN_VERSION).replace(
+    tag = template.replace("$(cat VERSION)", version).replace(
         "$(git rev-parse --short=12 HEAD)", _PIN_SHA12)
     assert "$(" not in tag, f"unrendered command substitution in template: {template!r}"
     return tag
@@ -951,3 +959,56 @@ def test_image_tag_pin_is_non_vacuous():
     assert not _DOCKER_TAG_RE.match(old), "control failed: '+' template rendered valid"
     new = f"sparkvm-golden:{_PIN_VERSION}-{_PIN_SHA12}".rpartition(":")[2]
     assert _DOCKER_TAG_RE.match(new), "control failed: '-' template rendered invalid"
+
+
+def _rendered_driver_default_tag_with(version):
+    """Render build-image.sh's default --tag with a caller-chosen VERSION."""
+    with open(BUILD_IMAGE, encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r'^\[ -z "\$TAG" \] && TAG="(sparkvm-golden:[^"]+)"', text, re.M)
+    assert m, "build-image.sh default TAG line missing"
+    return (m.group(1).replace("${VERSION}", version)
+            .replace("${SHA:0:12}", _PIN_SHA12))
+
+
+def test_image_tag_version_corpus():
+    """Adversarial VERSION values: a prerelease dash (0.9.0-rc.1) must
+    render a valid tag (dash is in the Docker alphabet); semver build
+    metadata (0.8.0+local — accepted by the repo's semver grammar) must
+    render an invalid tag, which is why both composition sites guard
+    VERSION against '+' (see #1271)."""
+    for version, valid in (("0.9.0-rc.1", True), ("0.8.0+local", False)):
+        for source, ref in (("workflow IMAGE_TAG", _rendered_workflow_image_tag(version)),
+                            ("build-image.sh default TAG",
+                             _rendered_driver_default_tag_with(version))):
+            tag = ref.rpartition(":")[2]
+            if valid:
+                assert _DOCKER_TAG_RE.match(tag), f"{source} rejects valid prerelease tag: {ref!r}"
+            else:
+                assert not _DOCKER_TAG_RE.match(tag), \
+                    f"{source} renders an invalid tag for build-metadata VERSION without a guard: {ref!r}"
+                assert "+" in tag, f"expected '+' in the unguarded bad render: {ref!r}"
+
+
+def test_image_tag_guards_exist():
+    """Both composition sites must carry the loud '+' guard on VERSION —
+    the render tests above only prove the templates are currently correct,
+    not that an adversarial VERSION is stopped before composing a tag."""
+    text = _workflow_text()
+    assert '== *"+"' in text or "== *'+'" in text, "workflow VERSION '+' guard missing"
+    assert "#1271" in text, "workflow guard must cite the issue"
+    with open(BUILD_IMAGE, encoding="utf-8") as f:
+        driver = f.read()
+    assert "*+*)" in driver, "build-image.sh VERSION '+' guard missing"
+    assert "#1271" in driver, "build-image.sh guard must cite the issue"
+
+
+def test_driver_refuses_plus_version(tmp_path):
+    """Exercise the real guard: a scratch tree whose VERSION carries build
+    metadata must be refused before any tag is composed (fails loudly,
+    citing #1271). The guard sits before the recipe-default check, so this
+    proves the failure is the guard itself, not a downstream check."""
+    repo, _ = _scratch_repo(tmp_path, version="0.8.0+local")
+    r = _run_driver(repo, "--preflight-only")
+    assert r.returncode != 0, f"driver accepted VERSION with '+': {r.stdout}"
+    assert "#1271" in r.stderr, f"refusal must cite #1271: {r.stderr}"

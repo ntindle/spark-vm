@@ -72,10 +72,19 @@ jobs:
         # commit; for workflow_call the step above checked the tag out, and
         # the tag the release job cut always matches the tree's VERSION).
         # Docker tags allow [\w][\w.-]{0,127} — notably NOT '+'. The
-        # version/SHA separator is a dash so the rendered IMAGE_TAG is
-        # always a valid tag (the '+' form failed the v0.8.0 gate:
-        # invalid tag "sparkvm-golden:0.8.0+da4036cdfdc5"; see #1271).
+        # version/SHA separator is a dash so the separator half of the tag
+        # is always valid; the VERSION half is guarded against '+' below
+        # (semver build metadata like 0.8.0+local would otherwise reproduce
+        # the failure). The '+' form failed the v0.8.0 gate with
+        # invalid tag "sparkvm-golden:0.8.0+da4036cdfdc5" (see #1271).
         run: |
+          # #1271: refuse a VERSION whose '+' would compose an invalid tag —
+          # semver build metadata passes the repo's semver grammar but breaks
+          # the Docker tag alphabet.
+          if [[ "$(cat VERSION)" == *"+"* ]]; then
+            echo "::error::VERSION contains '+', which is not a valid Docker tag character (#1271)"
+            exit 1
+          fi
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=sparkvm-golden:$(cat VERSION)-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
