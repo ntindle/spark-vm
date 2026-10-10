@@ -37,13 +37,18 @@
 # this script unprivileged and against fake roots.
 set -euo pipefail
 
+# Canonical list of test seams (see header). The WARNING loop below is
+# the single consumer: a seam listed here gets a loud warning in a root
+# run; a seam consumed below but not listed here cannot warn.
+_SEAMS=(SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_DATA_PREP_SKIP_CHOWN)
+
 # Loud warning when a test seam is active in a root run: production must
 # never set these. (Deliberate divergence from "ignore seams as root":
 # the contract tests run as root in the loop's own environment, so
 # ignoring them would make the suite untestable where it is actually
 # verified. The warning makes any production use visible.)
 if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    for _seam in SPARKVM_DATA_ROOT SPARKVM_SSH_ETC_DIR SPARKVM_DATA_PREP_SKIP_CHOWN; do
+    for _seam in "${_SEAMS[@]}"; do
         if [ -n "${!_seam:-}" ]; then
             echo "data-prep: WARNING: test seam $_seam is set in a root run" >&2
         fi
