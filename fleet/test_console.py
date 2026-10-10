@@ -452,6 +452,28 @@ def test_watch_zero_is_usage_error_not_silent_once():
     assert out == ""
 
 
+def test_watch_negative_zero_float_is_usage_error():
+    # --watch -0.0 is the float edge of the non-positive gate: argparse
+    # hands run_watch a float, and the explicit-value contract (exit 64,
+    # not a silent one-shot) must hold for -0.0 exactly as for 0 and -5.
+    code, out, err = main_capture_full("--watch", "-0.0")
+    assert code == 64
+    assert "--watch needs a positive finite interval" in err
+    assert "Traceback" not in err
+    assert out == ""
+
+
+def test_once_with_watch_zero_is_usage_error():
+    # An explicit --watch 0 is a usage error even when --once is also
+    # given: the flag's presence is contractual, not the mode. (The
+    # 2026-10-09 explicit-zero hardening — old code silently ran once.)
+    code, out, err = main_capture_full("--once", "--watch", "0")
+    assert code == 64
+    assert "--watch needs a positive finite interval" in err
+    assert "Traceback" not in err
+    assert out == ""
+
+
 def test_watch_omitted_runs_once_not_watch():
     # The default (no --watch flag) must be the one-shot path: against an
     # unreachable API it exits 2 quickly, while watch mode would loop.
