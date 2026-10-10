@@ -205,6 +205,7 @@ working.
 | [APPROVAL_CLIENT_SIGNAL.md](APPROVAL_CLIENT_SIGNAL.md) | Client-visible approval signal (H18, #133 — implemented): when the swap proxy files a confirmd approval for a refused request, the agent gets a machine-readable "waiting on your approval" instead of an opaque remote auth error. |
 | [HOSTED_SIGNUP_ONBOARDING.md](HOSTED_SIGNUP_ONBOARDING.md) | End-to-end signup UX for another Muse: discover → sign up → identity → provisioned box. |
 | [KEY_IDENTITY_REGISTRY.md](KEY_IDENTITY_REGISTRY.md) | Key-identity registry storage and lookup (#446, slice S2): the per-host registry mapping an SSH key's OpenSSH SHA256 fingerprint to an account record — the storage-and-lookup half of the #446 identity-binding design note. |
+| [KEY_IDENTITY_ONBOARDING.md](KEY_IDENTITY_ONBOARDING.md) | Key-identity onboarding — the first-run experience (#446, strategy/sales): what an agent (or human) experiences when the SSH key is the account — the first-connect walkthrough, manifest UX, "same key → same box" resume semantics, the rotation-vs-claim decision rule, and the acceptance spec for the still-open connect-time wiring slice. |
 | [HOSTED_SIGNUP_WEB_UI.md](HOSTED_SIGNUP_WEB_UI.md) | Build spec for the hosted signup web UI + human dashboard (H15). |
 | [FIRST_RUN_ACTIVATION.md](FIRST_RUN_ACTIVATION.md) | The hosted first-run activation design. |
 | [FIRST_TEN_MINUTES_SPEC.md](FIRST_TEN_MINUTES_SPEC.md) | The exact hosted first run, minute by minute (R1). |

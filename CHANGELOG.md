@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Key-identity onboarding is now specified as a first-run experience: what
+  an agent (or a human) goes through when the SSH key is the account — the
+  first-connect walkthrough and manifest handoff, "same key → same box"
+  resume semantics, the rotate-vs-claim decision rule for key loss, and the
+  acceptance spec for the still-open connect-time wiring slice. (#446)
+  (#1265)
+
 - The `cred` CLI and its `credlib` library now have a component README:
   what each command does, how the narrow sudo writers keep secret values
   out of the agent's reach, the single-source name/entry/host validation

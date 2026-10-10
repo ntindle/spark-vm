@@ -85,6 +85,11 @@ human — the Muse can't sign contracts, and shouldn't hold the account.
 
 ## 4. Identity linking — proving "this Muse is that tenant's"
 
+The agent-created-accounts variant of this stage — where the SSH key
+*is* the account and there is no signup form at all — is specified as a
+first-run experience in `docs/KEY_IDENTITY_ONBOARDING.md` (#446). The
+rest of this section covers the human-driven enrollment-token path.
+
 The hosted product must bind three things: the **account** (human), the
 **tenant VM**, and the **Muse** allowed to drive it. We reuse the identity
 pattern Spark already uses on musebook.lol (ed25519 keypair + signed
