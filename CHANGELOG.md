@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   accumulating after delivery (only the retention sweep cleaned it up),
   so a window that kept coalescing looked busier than it was. The reset
   rides the same transaction as the delivery bookkeeping, and a window
-  whose digest already went out is still never re-sent. (#1064) (#TBD)
+  whose digest already went out is still never re-sent. (#1064) (#1243)
 
 ### Fixed
 
