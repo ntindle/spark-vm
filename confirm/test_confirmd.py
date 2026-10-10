@@ -6,8 +6,10 @@ Run with:
 Tailscale calls are mocked; no network or /home/swapd is touched.
 """
 import contextlib
+import fcntl
 import io
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
@@ -3822,6 +3824,121 @@ class QuarantinePruneTests(unittest.TestCase):
                 (self.approvals / "pending-quarantine").iterdir())
             self.assertEqual([p.name for p in remaining],
                              ["q2.json", "q3.json"])
+
+
+def _xlock_holder_child(approvals_dir, aid, ready, hold_secs):
+    """Child body: hold the #945 xlock, then release. Fork-inherits cd."""
+    cd.APPROVALS = approvals_dir
+    with cd._aid_xlock(aid):
+        ready.set()
+        time.sleep(hold_secs)
+
+
+def _xlock_writer_child(approvals_dir, aid, path, tag, delay, ready=None):
+    """Child body: append start/end markers under the xlock.
+
+    ``ready`` (a multiprocessing Event) is set immediately after the
+    lock is acquired, so the test can order the two children
+    deterministically instead of guessing with a sleep.
+    """
+    cd.APPROVALS = approvals_dir
+    with cd._aid_xlock(aid):
+        if ready is not None:
+            ready.set()
+        with open(path, "a") as f:
+            f.write(tag + "-start\n")
+            f.flush()
+            time.sleep(delay)
+            f.write(tag + "-end\n")
+
+
+class AidXlockTests(unittest.TestCase):
+    """Issue #945: the cross-process per-aid stamp lock."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="confirmd-xlock-")
+        self._ctx = multiprocessing.get_context("fork")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_xlock_rejects_bad_aid(self):
+        """A bad aid must never become a path — ValueError, like
+        _stamp_expired_consumed's bar."""
+        with mock.patch.object(cd, "APPROVALS", self.tmp):
+            for bad in ("../evil", "", "a" * 65, "has space", "a/b"):
+                with self.assertRaises(ValueError, msg=bad):
+                    with cd._aid_xlock(bad):
+                        pass
+            # A good aid acquires cleanly and creates the lockfile.
+            with cd._aid_xlock("a1b2c3d4e5f60718"):
+                pass
+            self.assertTrue(os.path.exists(
+                os.path.join(self.tmp, "locks", "a1b2c3d4e5f60718.lock")))
+
+    def test_xlock_blocks_across_processes(self):
+        """A second process cannot take the lock while the first holds
+        it — the flock is genuinely cross-process, not thread-local."""
+        aid = "b2c3d4e5f60718293"
+        ready = self._ctx.Event()
+        p = self._ctx.Process(target=_xlock_holder_child,
+                              args=(self.tmp, aid, ready, 3))
+        p.start()
+        try:
+            self.assertTrue(ready.wait(timeout=10),
+                            "child never acquired the xlock")
+            fd = os.open(os.path.join(self.tmp, "locks", aid + ".lock"),
+                         os.O_WRONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            p.join(timeout=10)
+            self.assertEqual(p.exitcode, 0)
+            # Released with the child: acquirable again.
+            with mock.patch.object(cd, "APPROVALS", self.tmp):
+                with cd._aid_xlock(aid):
+                    pass
+        finally:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+
+    def test_xlock_serializes_two_processes(self):
+        """Two processes' critical sections never interleave — the
+        serialization the #945 race fix depends on. (Neuter check: with
+        the lock body removed, the markers interleave and this fails.)
+        B starts only after A demonstrably holds the lock — no sleep
+        guess, so a loaded box cannot invert the start order."""
+        aid = "c3d4e5f60718293a4"
+        marks = os.path.join(self.tmp, "marks.txt")
+        open(marks, "w").close()
+        a_ready = self._ctx.Event()
+        pa = self._ctx.Process(target=_xlock_writer_child,
+                               args=(self.tmp, aid, marks, "A", 1.0,
+                                     a_ready))
+        pb = self._ctx.Process(target=_xlock_writer_child,
+                               args=(self.tmp, aid, marks, "B", 0.0))
+        pa.start()
+        try:
+            self.assertTrue(a_ready.wait(timeout=10),
+                            "A never acquired the xlock")
+            pb.start()
+            pa.join(timeout=10)
+            pb.join(timeout=10)
+        finally:
+            for p in (pa, pb):
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5)
+        self.assertEqual((pa.exitcode, pb.exitcode), (0, 0))
+        with open(marks) as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        # A entered first and must complete before B starts.
+        self.assertEqual(lines,
+                         ["A-start", "A-end", "B-start", "B-end"])
 
 
 if __name__ == "__main__":

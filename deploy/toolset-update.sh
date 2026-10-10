@@ -302,6 +302,21 @@ log() {
     fi
 }
 
+_refuse() {
+    # _refuse <msg> — fail-closed refusal: loud on the run log AND on
+    # stderr. The version probes (issue #1254.3) capture the identity
+    # helpers' stderr into their errfile and log it at the layer; `log`
+    # alone writes only to the run log, which left the probe's
+    # version-unknown report reason-less on the helper-refusal path
+    # (non-root CI: the helper never reaches runuser/sudo, so its stderr
+    # stayed empty and `[ -s "$errf" ]` was false). Sanitize before the
+    # stderr echo: the message interpolates operator-configured user
+    # names (log forgery bar, see _sanitize_log_line).
+    log "$1"
+    printf '%s\n' "$(_sanitize_log_line "$1")" >&2
+    return 1
+}
+
 audit() {
     # audit <event> <json-fields...>
     # Appends one JSON line: {"ts":..., "event":..., ...}. Best-effort: never
@@ -329,7 +344,11 @@ _sudo() {
     elif [ "$(id -u)" = "0" ]; then
         "$@"
     elif command -v sudo >/dev/null 2>&1; then
-        sudo "$@"
+        # Issue #1254: the `--` matters — without it a future caller
+        # passing a dash-prefixed argv[0] would inject a sudo option.
+        # (All current callers pass a constant argv[0], so this is
+        # defense-in-depth, unreachable today.)
+        sudo -- "$@"
     else
         echo "ERROR: not root and no sudo: cannot run: $*" >&2
         return 77
@@ -736,6 +755,15 @@ _pin_ok() {
 # root, the binary is user-owned, and executing it as root each tick hands
 # any compromise of the managed location instant root code execution).
 # Never PATH — see the comment in _cua_driver_current.
+_probe_errfile() {
+    # Print a fresh temp path for one probe's stderr. The probe call
+    # sites redirect the identity helper's stderr there instead of
+    # /dev/null; when the probe yields nothing usable, the captured
+    # refusal reason is routed into the loud layer-level log (issue
+    # #1254) instead of being swallowed. The caller rm -f's the file.
+    mktemp "${TMPDIR:-/tmp}/toolset-probe-err-XXXXXX"
+}
+
 _as_cua_driver_owner() {
     # _as_cua_driver_owner cmd... — run a command as $CUA_DRIVER_OWNER.
     # Fail-closed when user-switching is impossible. Mirrors
@@ -757,7 +785,9 @@ _as_cua_driver_owner() {
         return
     fi
     if [ "$me" != "0" ]; then
-        log "cua-driver: not $user and not root — refusing (fail-closed)"
+        # Issue #1254.3: _refuse (not bare log) — the refusal reason must
+        # also reach stderr for the probe errfile capture (see _refuse).
+        _refuse "cua-driver: not $user and not root — refusing (fail-closed)"
         return 1
     fi
     # runuser/sudo take a login name, not a bare numeric uid: resolve the
@@ -777,7 +807,8 @@ _as_cua_driver_owner() {
     elif command -v sudo >/dev/null 2>&1; then
         sudo -u "$switch_user" -- "$@"
     else
-        log "cua-driver: cannot switch to $user (no runuser/sudo) — refusing"
+        # Issue #1254.3: _refuse (not bare log) — see the not-root branch.
+        _refuse "cua-driver: cannot switch to $user (no runuser/sudo) — refusing"
         return 1
     fi
 }
@@ -798,17 +829,30 @@ _cua_driver_current() {
     # missing binary only — the execution itself is the authority, and when
     # the owner cannot run it the probe reports version-unknown, which the
     # layer treats as fail-closed upstream.
-    local out ver
+    local out ver errf
     [ -n "${CUA_DRIVER_BIN:-}" ] && [ -x "$CUA_DRIVER_BIN" ] \
         || { printf 'absent'; return 0; }
-    out="$(_as_cua_driver_owner "$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
+    # Issue #1254: capture the helper's stderr instead of swallowing it
+    # — when the probe yields no version, the refusal reason (e.g. an
+    # impossible owner) is routed into the loud layer-level log below
+    # instead of misdirecting debugging toward the binary.
+    errf="$(_probe_errfile 2>/dev/null || true)"
+    [ -n "$errf" ] || errf="/dev/null"
+    out="$(_as_cua_driver_owner "$CUA_DRIVER_BIN" --version 2>"$errf" | head -n 1 || true)"
     ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
     # A bare number is not a version — demand at least one dot so a stray
     # counter can never compare equal to a real pin.
     case "$ver" in
         *.*) printf '%s' "$ver" ;;
-        *) printf 'version-unknown' ;;
+        *)
+            if [ -s "$errf" ]; then
+                log "cua-driver: version probe failed: $(tr '\n' '; ' <"$errf")"
+            fi
+            printf 'version-unknown' ;;
     esac
+    # Guard: when _probe_errfile failed, errf is /dev/null (the
+    # deliberate fallback) — never rm the device node.
+    if [ "$errf" != "/dev/null" ]; then rm -f "$errf"; fi
 }
 
 _cua_driver_arch() {
@@ -1068,15 +1112,29 @@ _as_playwright_user() {
         return
     fi
     if [ "$me" != "root" ]; then
-        log "playwright: not $user and not root — refusing (fail-closed)"
+        # Issue #1254.3: _refuse (not bare log) — the refusal reason must
+        # also reach stderr for the probe errfile capture (see _refuse).
+        _refuse "playwright: not $user and not root — refusing (fail-closed)"
         return 1
     fi
+    # Issue #1254: runuser/sudo take a login name, not a bare numeric
+    # uid — resolve the user to a name so a numeric PLAYWRIGHT_USER
+    # switches instead of failing closed forever with a misleading
+    # posture (mirrors _as_cua_driver_owner). Unresolvable users keep
+    # their raw value; the probe then fails closed at the layer via
+    # version-unknown (runuser accepts numeric UIDs, so the layer — not
+    # the switch — is the fail-closed gate). The `--` matters: a
+    # dash-prefixed PLAYWRIGHT_USER must not inject an id option (the
+    # same fail-open class as issue #1252).
+    local switch_user
+    switch_user="$(id -un -- "$user" 2>/dev/null || printf '%s' "$user")"
     if command -v runuser >/dev/null 2>&1; then
-        runuser -u "$user" -- "$@"
+        runuser -u "$switch_user" -- "$@"
     elif command -v sudo >/dev/null 2>&1; then
-        sudo -u "$user" -- "$@"
+        sudo -u "$switch_user" -- "$@"
     else
-        log "playwright: cannot switch to $user (no runuser/sudo) — refusing"
+        # Issue #1254.3: _refuse (not bare log) — see the not-root branch.
+        _refuse "playwright: cannot switch to $user (no runuser/sudo) — refusing"
         return 1
     fi
 }
@@ -1085,18 +1143,29 @@ _playwright_current() {
     # Print the managed venv's installed playwright version, or:
     # absent | version-unknown. The probe runs as $PLAYWRIGHT_USER — the
     # layer never executes venv code as root.
-    local py ver out
+    local py ver out errf
     py="${PLAYWRIGHT_VENV:-}/bin/python"
     [ -n "${PLAYWRIGHT_VENV:-}" ] && [ -x "$py" ] \
         || { printf 'absent'; return 0; }
-    out="$(_as_playwright_user "$py" -c 'import playwright; print(playwright.__version__)' 2>/dev/null || true)"
+    # Issue #1254: capture the helper's stderr instead of swallowing it
+    # — see _cua_driver_current.
+    errf="$(_probe_errfile 2>/dev/null || true)"
+    [ -n "$errf" ] || errf="/dev/null"
+    out="$(_as_playwright_user "$py" -c 'import playwright; print(playwright.__version__)' 2>"$errf" || true)"
     ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
     # A bare number is not a version — demand at least one dot, mirroring
     # _cua_driver_current.
     case "$ver" in
         *.*) printf '%s' "$ver" ;;
-        *) printf 'version-unknown' ;;
+        *)
+            if [ -s "$errf" ]; then
+                log "playwright: version probe failed: $(tr '\n' '; ' <"$errf")"
+            fi
+            printf 'version-unknown' ;;
     esac
+    # Guard: when _probe_errfile failed, errf is /dev/null (the
+    # deliberate fallback) — never rm the device node.
+    if [ "$errf" != "/dev/null" ]; then rm -f "$errf"; fi
 }
 
 _playwright_dep_names() {
@@ -1110,8 +1179,19 @@ _playwright_dep_names() {
     # validated against the Debian package-name pattern
     # (^[a-z0-9][a-z0-9+.-]*$) before it is printed.
     local cli="$1"
-    local out rc=0
-    out="$(_as_playwright_user "$cli" install-deps --dry-run chromium 2>/dev/null)" || rc=$?
+    local out rc=0 errf
+    # Issue #1254: capture the helper's stderr — on probe failure the
+    # refusal reason is logged below instead of being swallowed, so the
+    # parse-failure logs don't misdirect toward the CLI.
+    errf="$(_probe_errfile 2>/dev/null || true)"
+    [ -n "$errf" ] || errf="/dev/null"
+    out="$(_as_playwright_user "$cli" install-deps --dry-run chromium 2>"$errf")" || rc=$?
+    if [ "$rc" != "0" ] && [ -s "$errf" ]; then
+        log "playwright: install-deps probe failed (exit $rc): $(tr '\n' '; ' <"$errf")"
+    fi
+    # Guard: when _probe_errfile failed, errf is /dev/null (the
+    # deliberate fallback) — never rm the device node.
+    if [ "$errf" != "/dev/null" ]; then rm -f "$errf"; fi
     if [ "$rc" = "0" ]; then
         case "$out" in
             *"All system dependencies are installed."*) return 0 ;;

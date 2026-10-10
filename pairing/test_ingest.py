@@ -6,11 +6,15 @@ Each test proves a security property of the ingest, not just wiring:
 proof-of-plane-origin binding, idempotent stamping, the acked-watermark
 cursor contract, tenant/aid binding, and fail-closed behavior.
 """
+import fcntl
 import io
 import json
+import multiprocessing
 import os
 import stat
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -874,3 +878,96 @@ def test_ingest_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
     assert _fds() == before, "fd leaked on fchmod failure"
     err = capsys.readouterr().err
     assert "cannot secure lock file" in err
+
+
+# ---------------------------------------------------------------------------
+# Issue #945: the ingest's half of the cross-process per-aid stamp lock.
+# ---------------------------------------------------------------------------
+
+def _hold_ingest_xlock_child(state_dir, approvals, aid, ready, hold_secs):
+    """Child body: hold the #945 xlock, then release. Fork-inherits state."""
+    with spark_pair._ingest_aid_xlock(state_dir, approvals, aid):
+        ready.set()
+        time.sleep(hold_secs)
+
+
+def test_ingest_aid_xlock_rejects_bad_aid(ctx):
+    """A bad aid must never become a path — ValueError, mirroring
+    _ingest_decision_payload's bar."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    for bad in ("../evil", "", "a" * 65, "has space"):
+        with pytest.raises(ValueError):
+            with spark_pair._ingest_aid_xlock(ctx.dir, approvals, bad):
+                pass
+    with spark_pair._ingest_aid_xlock(ctx.dir, approvals, AID):
+        pass
+    assert os.path.exists(os.path.join(approvals, "locks", AID + ".lock"))
+
+
+def test_ingest_aid_xlock_blocks_across_processes(ctx):
+    """The ingest's xlock is the same flock the confirmd half takes: a
+    second process cannot acquire it while the first holds it."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    mctx = multiprocessing.get_context("fork")
+    ready = mctx.Event()
+    p = mctx.Process(target=_hold_ingest_xlock_child,
+                     args=(ctx.dir, approvals, AID, ready, 3))
+    p.start()
+    try:
+        assert ready.wait(timeout=10), "child never acquired the xlock"
+        fd = os.open(os.path.join(approvals, "locks", AID + ".lock"),
+                     os.O_WRONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        p.join(timeout=10)
+        assert p.exitcode == 0
+        with spark_pair._ingest_aid_xlock(ctx.dir, approvals, AID):
+            pass  # released with the child: acquirable again
+    finally:
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
+
+
+def test_ingest_decision_holds_xlock(ctx):
+    """_ingest_approval_decision does not proceed while another process
+    holds the aid's xlock — even on the instant already-ingested fast
+    path, proving the wrapper acquires the lock before the guarded
+    body runs."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    aid = "d4e5f60718293a4b5"
+    dseq = 7
+    key = f"approval_decision:{BOX_ID}:{aid}:{dseq}"
+    payload = {"aid": aid, "decision": "deny", "decision_seq": dseq,
+               "idempotency_key": key}
+    ingested = {key: {"seq": 1, "decision": "deny", "ingested_at": "x"}}
+    mctx = multiprocessing.get_context("fork")
+    ready = mctx.Event()
+    p = mctx.Process(target=_hold_ingest_xlock_child,
+                     args=(ctx.dir, approvals, aid, ready, 3))
+    p.start()
+    try:
+        assert ready.wait(timeout=10), "child never acquired the xlock"
+        done = threading.Event()
+        result = {}
+
+        def run():
+            result["v"] = spark_pair._ingest_approval_decision(
+                ctx, approvals, BOX_ID, TOKEN, 99, payload, ingested, {})
+            done.set()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        assert not done.wait(timeout=1.0), \
+            "decision proceeded without holding the xlock"
+        p.join(timeout=10)
+        assert done.wait(timeout=10), \
+            "decision never completed after the lock released"
+        assert result["v"] is True
+    finally:
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)

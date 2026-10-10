@@ -56,6 +56,7 @@ ever printed.
 """
 import argparse
 import base64
+import contextlib
 import fcntl
 import getpass
 import hashlib
@@ -1134,10 +1135,13 @@ def cmd_approve(args):
 #     mint and stamp cannot double-mint on redelivery;
 #   - the consumed/ write is write-if-absent (O_EXCL, like the proxy's
 #     _stamp_expired_consumed): first writer wins among O_EXCL stampers
-#     (the reapers, earlier ingests). confirmd's in-flight answer path is
-#     clobbering, not O_EXCL, so it wins the *record* regardless — the
-#     approve path re-checks for its terminal record after the mint
-#     instead of relying on this race.
+#     (the reapers, earlier ingests). Issue #945: the whole decision
+#     also runs under the cross-process per-aid stamp lock shared with
+#     confirmd's answer path and reapers, so the mint and the terminal
+#     check serialize across the two surfaces — the post-mint
+#     terminal re-check below is the backstop for the paths outside
+#     the lock (the proxy's filing-scan stamper), not the primary
+#     mechanism anymore.
 # ---------------------------------------------------------------------------
 
 _INGEST_FETCH_LIMIT = 200  # mirrors the plane's per-fetch clamp (#848)
@@ -1158,6 +1162,63 @@ _GRANT_WRITER_DEFAULT = "/home/swapd/grant-writer"
 # across the pairing/confirmd component boundary, like _AID_RE.
 _INGEST_AUDIT_DEFAULT = "/home/swapd/confirmd/audit.log"
 _INGEST_AUDIT_FIELD_RE = re.compile(r"[^!-~]")
+
+
+@contextlib.contextmanager
+def _ingest_aid_xlock(d, approvals, aid):
+    """Issue #945: the ingest's half of the cross-process per-aid stamp lock.
+
+    The mirror of confirmd's ``_aid_xlock`` (confirm/confirmd.py) —
+    deliberately duplicated rather than imported across the
+    pairing/confirmd component boundary, like ``_INGEST_AID_RE``. Same
+    lockfile (``$APPROVALS/locks/<aid>.lock``), same blocking
+    ``fcntl.flock`` discipline, same lock-order rule (the xlock is the
+    only lock the ingest takes per aid; the grant-writer subprocess's
+    own mint lock is always taken after it).
+
+    ``d`` is the ingest state dir (for the loud-failure log); the lock
+    itself lives under ``approvals`` so both processes rendezvous on
+    the same path.
+
+    ``_INGEST_AID_RE`` is deliberately kept equivalent to confirmd's
+    ``ID_RE`` (both admit exactly ``[A-Za-z0-9_-]{1,64}`` — no ``/`` or
+    ``.``, so no aid can ever escape ``locks/``). The only edge
+    difference (confirmd's ``$`` admits a trailing newline, ``\\A…\\Z``
+    does not) is path-safe either way; do not "harmonize" one without
+    the other.
+
+    On lockfile creation/open failure the failure is logged loudly and
+    the caller proceeds WITHOUT the lock — the same deliberate
+    loud-degrade as confirmd's half: the pre-#945 mitigations (O_EXCL
+    write-if-absent, the pre/post-mint terminal re-checks, the loud
+    APPROVE/TERMINAL RACE journal) still apply. Lockfiles are never
+    unlinked (aids are never reused); a future turn may prune ``locks/``
+    alongside confirmd's ``_prune_consumed``. A bad aid raises
+    ValueError (it must never become a path); the decision entry point
+    already validated it via ``_ingest_decision_payload``, so that is
+    unreachable — but the bar is enforced here too.
+    """
+    if not _INGEST_AID_RE.match(aid):
+        raise ValueError("refusing to lock for bad aid %r" % (aid,))
+    locks_dir = os.path.join(approvals, "locks")
+    try:
+        os.makedirs(locks_dir, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(locks_dir, aid + ".lock"),
+                     os.O_CREAT | os.O_WRONLY, 0o600)
+    except OSError as e:
+        _ingest_fail(d, f"aid={aid}: cross-process stamp lock unavailable "
+                        f"({e}) — proceeding without it; pre-#945 "
+                        "mitigations still apply")
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _ingest_audit_field(value):
@@ -1629,7 +1690,19 @@ def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
                         "written)")
         return True
     aid, decision, dseq, key = shaped
+    # Issue #945: the whole stamp runs under the cross-process per-aid
+    # lock shared with confirmd's answer path and reapers — the grant
+    # mint and the terminal check serialize across the two surfaces.
+    with _ingest_aid_xlock(d, approvals, aid):
+        return _ingest_approval_decision_guarded(
+            d, approvals, box_id, token, seq, aid, decision, dseq, key,
+            ingested, attention)
 
+
+def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
+                                      aid, decision, dseq, key, ingested,
+                                      attention):
+    """The #945-guarded stamp body; the caller holds the per-aid xlock."""
     def _mark():
         ingested[key] = {"seq": seq, "decision": decision,
                          "ingested_at": _utcnow_iso()}
@@ -1814,13 +1887,19 @@ def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
         return False
     # #240-style post-mint terminal re-check (mirrors _answer_locked): the
     # owner's tap — or a reaper — may have landed during the mint, and the
-    # pending file still existed for all of it (the ingest holds no
-    # per-aid lock against confirmd's answer path — the structural fix
-    # is #945). Cross-process truth:
-    # against confirmd's in-flight answer the local path wins the *record*
-    # (its answered→consumed move is clobbering os.replace, not O_EXCL),
-    # so "first-terminal-wins" describes the write-if-absent race against
-    # the reapers only — never a guarantee against _answer_locked.
+    # pending file still existed for all of it. Issue #945: the whole
+    # decision now runs under the cross-process per-aid lock shared with
+    # confirmd's answer path and reapers, so the mint and the terminal
+    # check serialize — a terminal record can no longer land mid-mint
+    # from those paths. This re-check stays as the backstop for the
+    # paths outside the lock (the proxy's filing-scan stamper) and for
+    # the lock-unavailable degrade path.
+    # Cross-process truth, post-#945: against the lock-holding paths,
+    # "first-terminal-wins" is now a guarantee, not a race description —
+    # the winner holds the xlock for its whole critical section, so the
+    # loser sees the terminal record (or the gone pending file) before
+    # it mints. The loud-journal branch below survives for the residual
+    # legs only.
     if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
         # The grant is minted and cannot be un-minted (no per-approval-id
         # revoke — grant-writer revoke is by job only). Journal the
@@ -3458,10 +3537,14 @@ class _PhoneHomeSession:
                 # never adopted (the next fetch asserts a stale ?epoch=).
                 # Same non-blocking .ingest.lock discipline as the
                 # approval_decision branch below: contention defers to the
-                # DO's re-drive rather than stalling the frame loop. A
-                # lock-file open failure fails closed like contention
-                # (loud log, no ack) — never a traceback out of the
-                # frame loop.
+                # DO's re-drive rather than stalling the frame loop.
+                # Issue #945 caveat: _ingest_approval_decision below takes
+                # the BLOCKING per-aid xlock while the .ingest.lock is
+                # held — bounded by the 15s grant-mint timeout, so no
+                # indefinite stall, but the frame loop can block that
+                # long. A lock-file open failure fails closed like
+                # contention (loud log, no ack) — never a traceback out
+                # of the frame loop.
                 try:
                     lock_fd = os.open(os.path.join(self.d, _INGEST_LOCK_FILE),
                                       os.O_CREAT | os.O_RDWR, 0o600)
