@@ -137,6 +137,11 @@ def test_validate_tag_ref_ok():
     "registry.fly.io/sparkvm-prod:0.6.0",  # single path component
     "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0+abcdef123456",
     # retired '+' separator (#1271: not in the Docker tag alphabet)
+    "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0-ßcd123456",
+    # non-ASCII word char: Docker rejects at push, so the pin must reject
+    # (re.ASCII pins \w; without it this passes the validator)
+    "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0-中cd123456",
+    # CJK word char: same non-ASCII class, second representative
 ])
 def test_validate_tag_ref_rejects(bad):
     with pytest.raises(PinnedImageError):

@@ -71,7 +71,10 @@ _NAME_COMPONENT_RE = re.compile(r"\A[a-z0-9]+(?:[._-][a-z0-9]+)*\Z")
 # Docker's strict tag grammar ([\w][\w.-]{0,127}); the repo's D-P1 tag
 # convention uses the dash separator (<version>-<sha12>, build-image.sh /
 # CI — see #1271, where '+' failed the v0.8.0 release gate).
-_TAG_RE = re.compile(r"\A[\w][\w.-]{0,127}\Z")
+# re.ASCII pins \w to [A-Za-z0-9_]: without it, Unicode word characters
+# (e.g. 'ß', '中') pass this validator and fail loudly at `docker push`,
+# far downstream of the pin step. Fail-loud-at-pin instead.
+_TAG_RE = re.compile(r"\A[\w][\w.-]{0,127}\Z", re.ASCII)
 
 
 class PinnedImageError(Exception):
