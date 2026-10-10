@@ -1052,6 +1052,8 @@ def test_digest_completion_zeroes_state_count(conn, owner, vapid):
     row = _digest_state_row(conn, owner, window)
     assert row is not None and row[0] == 0  # reset, not deleted
     assert row[1] is not None  # enqueued_at fired-marker survives
+    # The consumed count rides the operator-visible completed note.
+    assert any("digest count 3 consumed" in a for a in summary.anomalies)
     assert "queued" not in outcomes(conn)
     assert budget(conn, "owner", owner, WINDOW) == 1  # buzzed -> kept
 
