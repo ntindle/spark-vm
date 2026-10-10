@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   revoked credential from memory within one command-fetch cycle instead of
   waiting out its time-to-live — once the box-side executor ships. Executors that don't understand the kind
   must stop loudly rather than skip it, so a revocation can never silently
-  go missing. (#850) (#1179) (#TBD)
+  go missing. (#850) (#1179) (#1269)
 
 - The `cred` CLI and its `credlib` library now have a component README:
   what each command does, how the narrow sudo writers keep secret values
