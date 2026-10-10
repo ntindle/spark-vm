@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The multi-tenant plane model is now decided and recorded: each hosted
+  signup gets its own control-plane instance (one plane per tenant), so the
+  shipped single-owner auth model stays exactly as it is — no tenant layer,
+  no super-owner keys. The decision record explains the trade (deployment
+  isolation over code-level tenant scoping, with H11's per-tenant-box
+  verdict as the precedent), what it means for the tenant-record,
+  approval-attribution, status-endpoint, and fleet-stream work still in the
+  queue, and the exact scale trigger that would reopen the shared-plane
+  option. (#1159) (#TBD)
+
 - Provisioned boxes now serve the driver-attested SSH host key: the golden
   image installs the `SPARKVM_SSH_HOST_KEYS` machine-config env key with
   precedence over self-generated keys and refuses to boot on invalid key
