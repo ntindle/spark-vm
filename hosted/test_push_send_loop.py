@@ -165,7 +165,7 @@ def seed_subscription(conn, owner, box, device, vapid_key_id="v1",
 
 
 def make_list_subscriptions(conn):
-    """Harness fanout: D3 for boxes, D78 (owner-wide) for the digest."""
+    """Harness fanout: D3 for boxes, D89 (owner-wide) for the digest."""
 
     def list_subscriptions(owner_principal, box_id):
         if box_id is None:
@@ -655,7 +655,7 @@ def test_gate2_vacuous_for_point_in_time_kinds(conn, owner, vapid):
 
 
 # ---------------------------------------------------------------------------
-# D78/D79/D81/D84
+# D89/D79/D81/D84
 # ---------------------------------------------------------------------------
 
 def test_digest_fans_out_owner_wide(conn, owner, vapid):
@@ -672,7 +672,7 @@ def test_digest_fans_out_owner_wide(conn, owner, vapid):
     summary = make_tick(conn, owner, vapid)()
 
     got = sorted((r[3], r[6]) for r in rows(conn))
-    # D78: the digest reaches every live subscription under (owner, *),
+    # D89: the digest reaches every live subscription under (owner, *),
     # not just one box's devices.
     assert got == [("laptop", "accepted"), ("phone", "accepted")]
     assert summary.dispositions["completed"] == 1

@@ -83,7 +83,7 @@ this module reads without it):
 
 New pins this slice (continuing the global D-series):
 
-- **D78 — digest fanout.** A ``digest`` page (``box_id`` NULL at enqueue,
+- **D89 — digest fanout.** A ``digest`` page (``box_id`` NULL at enqueue,
   ``''`` in the row) fans out to every ``live`` subscription under
   ``(owner_principal, *)``. The digest is owner-scoped (its D13 key is
   owner + window); ``push_digest_state`` carries no per-box contribution,
@@ -193,9 +193,10 @@ New pins this slice (continuing the global D-series):
   a schema migration. #1064's acceptance still names per-box
   enumeration — the decline is the loop's position, surfaced on the
   issue for owner adjudication; only the owner can waive his own
-  acceptance criterion. (D78 is the sender-loop digest-*fanout* pin —
-  and the number already collides with the sweep lane's per-candidate
-  isolation pin — so the content-scope position gets its own number.)
+  acceptance criterion. (D89 is the sender-loop digest-*fanout* pin —
+  renumbered from D78 when the number collided with the sweep lane's
+  per-candidate isolation pin (docs/PUSH_SWEEP_SCHEDULER_DESIGN.md) —
+  so the content-scope position got its own number.)
 
 Plane seams (injected — the module never sees a Worker secret, a data
 key, or a box token):
@@ -207,7 +208,7 @@ key, or a box token):
   key just before calling; the harness stores plaintext rows and
   documents the difference per ``docs/PRODUCTION_DEPLOY_CONTRACT.md``)
   / ``vapid_key_id`` / ``status``. ``box_id`` is None for the digest
-  (D78: fanout over ``(owner_principal, *)``).
+  (D89: fanout over ``(owner_principal, *)``).
 - ``vapid_keys(vapid_key_id)`` -> ``(private_key, public_key)`` bytes
   (the plane's Worker-secret lookup, D48c rotation discriminator).
 - ``vapid_subject`` — the operator ``mailto:`` (D48e; the enqueue
@@ -815,7 +816,7 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
     plaintext = serialize_plaintext(
         push_payload.build_push_payload(aid, ttl_s, text))
 
-    # -- D3/D78 fanout --
+    # -- D3/D89 fanout --
     subscriptions = list_subscriptions(owner_principal, box_id)
     if not isinstance(subscriptions, list):
         raise ValueError("list_subscriptions must return a list")
