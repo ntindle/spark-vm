@@ -67,7 +67,7 @@ python3 harness/pin_image.py pin \
   --gate-record gate-record-<sha12>.json \
   --pinned-by "<your principal>"
 git add deploy/golden-image/pinned-image.json
-git commit -m "distribution: pin golden image <version>+<sha12> (#1087)"
+git commit -m "distribution: pin golden image <version>-<sha12> (#1087)"
 ```
 
 The tool refuses anything but a completed gate pass for the exact baked

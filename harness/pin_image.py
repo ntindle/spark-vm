@@ -68,9 +68,10 @@ _SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # Docker repository name component: lowercase alnum, separators [._-] singly.
 _NAME_COMPONENT_RE = re.compile(r"\A[a-z0-9]+(?:[._-][a-z0-9]+)*\Z")
-# Docker's strict tag grammar ([\w][\w.-]{0,127}) plus "+", which the repo's
-# own D-P1 tag convention uses (<version>+<sha12>, build-image.sh / CI).
-_TAG_RE = re.compile(r"\A[\w][\w.+-]{0,127}\Z")
+# Docker's strict tag grammar ([\w][\w.-]{0,127}); the repo's D-P1 tag
+# convention uses the dash separator (<version>-<sha12>, build-image.sh /
+# CI — see #1271, where '+' failed the v0.8.0 release gate).
+_TAG_RE = re.compile(r"\A[\w][\w.-]{0,127}\Z")
 
 
 class PinnedImageError(Exception):
@@ -425,7 +426,7 @@ def main(argv=None):
                      "registry.fly.io/<app>/sparkvm-golden@sha256:<digest>")
     pin.add_argument("--tag-ref", default=None,
                      help="human tag pushed under, e.g. "
-                     "registry.fly.io/<app>/sparkvm-golden:0.6.0+<sha12>")
+                     "registry.fly.io/<app>/sparkvm-golden:0.6.0-<sha12>")
     pin.add_argument("--gate-record", default=None,
                      help="completed gate record (default: "
                      "gate-record-<sha12>.json at the repo root)")

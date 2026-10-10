@@ -50,6 +50,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Fixed
+
+- The golden-image build gate no longer tags images with an invalid Docker
+  tag: the version/sha separator changed from `+` (not in the Docker tag
+  alphabet) to `-`, so release gates stop failing at the `docker buildx`
+  step the way the v0.8.0 gate did. (#1271)
+
 ## [0.8.0] - 2026-10-10
 
 ### Added

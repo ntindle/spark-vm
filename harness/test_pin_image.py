@@ -22,7 +22,7 @@ HARNESS = os.path.dirname(os.path.abspath(__file__))
 DIGEST = "sha256:" + "ab" * 32
 DIGEST2 = "sha256:" + "cd" * 32
 IMAGE_REF = f"registry.fly.io/sparkvm-prod/sparkvm-golden@{DIGEST}"
-TAG_REF = "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0+abcdef123456"
+TAG_REF = "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0-abcdef123456"
 
 
 def make_repo(tmp_path):
@@ -125,7 +125,7 @@ def test_split_digest_ref_rejects(bad, why):
 def test_validate_tag_ref_ok():
     repo_path, tag = validate_tag_ref(TAG_REF, IMAGE_REF)
     assert repo_path == "sparkvm-prod/sparkvm-golden"
-    assert tag == "0.6.0+abcdef123456"
+    assert tag == "0.6.0-abcdef123456"
 
 
 @pytest.mark.parametrize("bad", [
@@ -135,6 +135,8 @@ def test_validate_tag_ref_ok():
     "registry.fly.io/other-app/sparkvm-golden:0.6.0",  # mismatched app
     "registry.fly.io/sparkvm-prod/other-image:0.6.0",  # mismatched image
     "registry.fly.io/sparkvm-prod:0.6.0",  # single path component
+    "registry.fly.io/sparkvm-prod/sparkvm-golden:0.6.0+abcdef123456",
+    # retired '+' separator (#1271: not in the Docker tag alphabet)
 ])
 def test_validate_tag_ref_rejects(bad):
     with pytest.raises(PinnedImageError):

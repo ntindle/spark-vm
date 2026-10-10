@@ -33,7 +33,8 @@
 #                      to <path> without docker (scan section is marked
 #                      "not-run"; used by tests and by CI's static job)
 #   --tag              override the local image tag (default
-#                      sparkvm-golden:<version>+<sha12>)
+#                      sparkvm-golden:<version>-<sha12>; Docker tags forbid
+#                      '+', so the separator is a dash — see #1271)
 #   --record-pushed-digest
 #                      publish-step mode (#1111): after the operator pushes
 #                      the gated image, resolve the push-produced digest of
@@ -102,6 +103,15 @@ VERSION="$(cat "$REPO/VERSION")" || die "cannot read VERSION"
 # downstream (proxy/deploy.sh preflight), so fail here, loudly.
 (cd "$REPO" && python3 scripts/sparkvm_version.py --check >/dev/null) \
     || die "VERSION '$VERSION' is not valid semver"
+# #1271: Docker tags forbid '+', so a VERSION carrying semver build
+# metadata (e.g. 0.8.0+local — accepted by the check above) would compose
+# an invalid image tag and fail the gate at docker build. Refuse loudly
+# here, before any tag is composed. (Semver's remaining characters —
+# alnum, '-', '.' — are all in the Docker tag alphabet, so '+' is the only
+# guard the VERSION half needs.)
+case "$VERSION" in
+  *+*) die "VERSION '$VERSION' contains '+': would compose an invalid Docker tag (see #1271)" ;;
+esac
 # The recipe's own ARG default must agree with the tree: a recipe that
 # defaults to a different version than the tree being baked is a silent
 # pin — refuse (the Dockerfile RUN check is the second line of defense).
@@ -113,7 +123,7 @@ RECIPE_DEFAULT_COUNT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden
 RECIPE_DEFAULT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | head -1)"
 [ "$RECIPE_DEFAULT" = "$VERSION" ] \
     || die "recipe ARG default '$RECIPE_DEFAULT' != tree VERSION '$VERSION' — bump the Dockerfile deliberately (D-P1), never silently"
-[ -z "$TAG" ] && TAG="sparkvm-golden:${VERSION}+${SHA:0:12}"
+[ -z "$TAG" ] && TAG="sparkvm-golden:${VERSION}-${SHA:0:12}"
 
 echo "build-image: tree clean at $SHA (v$VERSION); tag $TAG"
 
@@ -337,7 +347,7 @@ emit_gate_record "$GATE_RECORD" "pass" "$BASE_DIGEST" "0" "/" "0" "built"
 echo "build-image: DONE — image $TAG built, scan clean, manifest + gate record emitted"
 echo "build-image: the image does NOT publish itself. After the interactive gate"
 echo "  (docs/GOLDEN_IMAGE_GATE_PROCEDURE.md), the operator publishes with:"
-echo "    docker tag $TAG <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
-echo "    docker push <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
+echo "    docker tag $TAG <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"
+echo "    docker push <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"
 echo "  then records the push-produced digest into the gate record (#1111):"
-echo "    $0 --record-pushed-digest $GATE_RECORD <registry>/sparkvm-golden:${VERSION}+${SHA:0:12}"
+echo "    $0 --record-pushed-digest $GATE_RECORD <registry>/sparkvm-golden:${VERSION}-${SHA:0:12}"
