@@ -55,7 +55,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Provisioned boxes now serve the driver-attested SSH host key: the golden
   image installs the `SPARKVM_SSH_HOST_KEYS` machine-config env key with
   precedence over self-generated keys and refuses to boot on invalid key
-  material, so `ssh_info()` pinning holds across cold stops (#1204, #TBD).
+  material, so `ssh_info()` pinning holds across cold stops (#1204, #1239).
 
 ### Fixed
 

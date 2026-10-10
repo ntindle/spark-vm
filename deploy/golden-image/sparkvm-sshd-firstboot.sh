@@ -202,8 +202,10 @@ install_attested_host_key() {
         rm -f "$tmp"
         return 1
     fi
-    # </dev/null: a passphrase-protected key fails here instead of prompting.
-    if ! pub="$(ssh-keygen -y -f "$tmp" </dev/null 2>/dev/null)"; then
+    # setsid + </dev/null: a passphrase-protected key fails here instead of
+    # prompting — readpassphrase(3) would otherwise open /dev/tty directly
+    # when one exists, bypassing the stdin redirect.
+    if ! pub="$(setsid ssh-keygen -y -f "$tmp" </dev/null 2>/dev/null)"; then
         echo "sparkvm-sshd-firstboot: FATAL: SPARKVM_SSH_HOST_KEYS is not a usable private key (corrupt or passphrase-protected) — refusing to start sshd with an unattested host identity" >&2
         rm -f "$tmp"
         return 1
@@ -217,6 +219,11 @@ install_attested_host_key() {
             ;;
     esac
     fp="$(ssh-keygen -lf "$tmp" -E sha256 2>/dev/null | awk '{print $2}')"
+    if [ -z "$fp" ]; then
+        echo "sparkvm-sshd-firstboot: FATAL: SPARKVM_SSH_HOST_KEYS has no fingerprintable key — refusing to start sshd with an unattested host identity" >&2
+        rm -f "$tmp"
+        return 1
+    fi
     dest="$SSH_ETC/ssh_host_ed25519_key"
     # Idempotent: the attested key is already the serving identity.
     if [ -f "$dest" ]; then
@@ -230,8 +237,9 @@ install_attested_host_key() {
     fi
     # Env-provided keys win over pre-existing self-generated keys: drop
     # every non-attested host key pair so no unattested identity stays
-    # served. Symlinks into the data volume (D-V3) are kept — only their
-    # key material is removed, so the new key still lands on the volume.
+    # served. The ed25519 pair is skipped above and handled below; for the
+    # other types both the link and its volume target are removed (a
+    # provisioned box serves the attested ed25519 key only).
     for t in "${KEYTYPES[@]}"; do
         for f in "$SSH_ETC/ssh_host_${t}_key" "$SSH_ETC/ssh_host_${t}_key.pub"; do
             if [ "$f" = "$dest" ] || [ "$f" = "${dest}.pub" ]; then
@@ -247,18 +255,50 @@ install_attested_host_key() {
             rm -f "$f"
         done
     done
-    cp "$tmp" "$dest"
-    chmod 0600 "$dest"
-    printf '%s\n' "$pub" > "${dest}.pub"
-    chmod 0644 "${dest}.pub"
+    # Install through the D-V3 volume layout: $dest may be a DANGLING
+    # symlink (ensure_volume_keys links /etc/ssh -> /data/ssh before the
+    # targets exist) and GNU cp refuses to write through one, while shell
+    # redirection follows it. Resolve both paths first so the key lands
+    # on the volume either way.
+    # NOTE on set -e: this function runs in an OR-list call context
+    # (install_attested_host_key ... || exit 1), which disables set -e
+    # for the whole body — so every mutating step below checks its own
+    # failure explicitly. An unchecked failure here would print success
+    # and exit 0 with no key installed.
+    dest_real="$(readlink -f "$dest" 2>/dev/null || true)"
+    dest_pub_real="$(readlink -f "${dest}.pub" 2>/dev/null || true)"
+    install_fail() {
+        echo "sparkvm-sshd-firstboot: FATAL: $1 — refusing to start sshd with an unattested host identity" >&2
+        rm -f "$tmp"
+        return 1
+    }
+    [ -n "$dest_real" ] && [ -n "$dest_pub_real" ] \
+        || { install_fail "could not resolve the host key install path"; return 1; }
+    cp "$tmp" "$dest_real" \
+        || { install_fail "could not install attested host key to $dest"; return 1; }
+    chmod 0600 "$dest_real" \
+        || { install_fail "could not set permissions on $dest"; return 1; }
+    printf '%s\n' "$pub" > "$dest_pub_real" \
+        || { install_fail "could not install attested host key public half"; return 1; }
+    chmod 0644 "$dest_pub_real" \
+        || { install_fail "could not set permissions on ${dest}.pub"; return 1; }
     rm -f "$tmp"
+    # Post-install verification: the served identity must BE the attested
+    # key — the receipt below is only written when this comparison holds.
+    installed_fp="$(ssh-keygen -lf "$dest" -E sha256 2>/dev/null | awk '{print $2}')"
+    if [ -z "$installed_fp" ] || [ "$installed_fp" != "$fp" ]; then
+        echo "sparkvm-sshd-firstboot: FATAL: installed host key fingerprint mismatch ($installed_fp != $fp) — refusing to start sshd" >&2
+        return 1
+    fi
     echo "sparkvm-sshd-firstboot: installed attested ed25519 host key (fingerprint $fp)" >&2
     write_key_status env "$fp"
 }
 
-if [ -n "${SPARKVM_SSH_HOST_KEYS:-}" ]; then
+if [ -n "${SPARKVM_SSH_HOST_KEYS+set}" ]; then
     # Hosted path: the driver claims an attested identity for this machine.
-    install_attested_host_key "$SPARKVM_SSH_HOST_KEYS" || exit 1
+    # ${VAR+set} (not -n): a set-but-empty var is present-but-invalid and
+    # must fail closed, never fall back to self-generation.
+    install_attested_host_key "${SPARKVM_SSH_HOST_KEYS:-}" || exit 1
 else
     # Self-hosted/dev path: unchanged legacy behavior.
     missing=0

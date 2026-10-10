@@ -10,6 +10,7 @@ env-key validation path runs against real crypto.
 """
 import base64
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -112,6 +113,8 @@ def test_env_key_installed_with_precedence(harness):
     (etc / "ssh_host_ed25519_key.pub").write_text("stale-self-generated-public\n")
     (etc / "ssh_host_rsa_key").write_text("stale-rsa\n")
     (etc / "ssh_host_rsa_key.pub").write_text("stale-rsa-pub\n")
+    (etc / "ssh_host_ecdsa_key").write_text("stale-ecdsa\n")
+    (etc / "ssh_host_ecdsa_key.pub").write_text("stale-ecdsa-pub\n")
     keypath = _gen_key(tmp_path, "ed25519")
     b64 = _b64_of_private(keypath)
     fp = _fingerprint(keypath)
@@ -131,7 +134,9 @@ def test_env_key_installed_with_precedence(harness):
     assert pub.read_text().strip() == out.stdout.strip()
     # Non-attested key pairs are gone; ssh-keygen -A must not have run.
     assert not (etc / "ssh_host_rsa_key").exists()
+    assert not (etc / "ssh_host_rsa_key.pub").exists()
     assert not (etc / "ssh_host_ecdsa_key").exists()
+    assert not (etc / "ssh_host_ecdsa_key.pub").exists()
     assert "installed attested ed25519 host key" in proc.stderr
     assert fp in proc.stderr
     kv = _read_status(status)
@@ -200,6 +205,71 @@ def test_env_passphrase_key_rejected_without_prompt(harness):
 
 
 @NEEDS_SSH_KEYGEN
+def test_env_empty_string_fails_closed(harness):
+    # Set-but-empty is present-but-invalid: it must fail closed, never
+    # silently fall back to self-generation.
+    run, etc, status, tmp_path = harness
+    proc = run({"SPARKVM_SSH_HOST_KEYS": ""})
+    assert proc.returncode != 0
+    assert "FATAL" in proc.stderr
+    assert "generating missing" not in proc.stderr
+    assert list(etc.iterdir()) == [], "no keys may be generated on this path"
+    assert not (status / "ssh_host_key.status").exists()
+
+
+@NEEDS_SSH_KEYGEN
+def test_env_install_through_dangling_volume_symlinks(harness):
+    # The fresh-provisioned D-V3 layout: /etc/ssh holds DANGLING symlinks
+    # into /data/ssh (targets don't exist yet). GNU cp refuses to write
+    # through a dangling symlink — the install must resolve the real path.
+    run, etc, status, tmp_path = harness
+    data_ssh = tmp_path / "data-ssh"
+    data_ssh.mkdir()
+    for t in ("rsa", "ecdsa", "ed25519"):
+        (etc / f"ssh_host_{t}_key").symlink_to(data_ssh / f"ssh_host_{t}_key")
+        (etc / f"ssh_host_{t}_key.pub").symlink_to(
+            data_ssh / f"ssh_host_{t}_key.pub")
+    keypath = _gen_key(tmp_path, "ed25519")
+    b64 = _b64_of_private(keypath)
+    fp = _fingerprint(keypath)
+    proc = run({"SPARKVM_SSH_HOST_KEYS": b64})
+    assert proc.returncode == 0, proc.stderr
+    assert "installed attested ed25519 host key" in proc.stderr
+    # The key material landed at the symlink TARGET (on the "volume").
+    target = data_ssh / "ssh_host_ed25519_key"
+    assert target.exists(), "attested key never reached the volume"
+    with open(keypath, "rb") as f:
+        assert target.read_bytes() == f.read()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert (data_ssh / "ssh_host_ed25519_key.pub").exists()
+    kv = _read_status(status)
+    assert kv["source"] == "env"
+    assert kv["fingerprint_sha256"] == fp
+    # The other pairs' links are gone (attested ed25519 is the whole
+    # serving identity on this path).
+    assert not (etc / "ssh_host_rsa_key").exists()
+    assert not (etc / "ssh_host_rsa_key").is_symlink()
+
+
+@NEEDS_SSH_KEYGEN
+def test_env_install_failure_is_fatal(harness):
+    # The install tail runs with set -e disabled (OR-list call context):
+    # an operational failure must still be loud and nonzero, never a
+    # false "installed" claim with a lying receipt.
+    run, etc, status, tmp_path = harness
+    bad = tmp_path / "no-such-dir"  # dangling target, unresolvable parent
+    (etc / "ssh_host_ed25519_key").symlink_to(bad / "ssh_host_ed25519_key")
+    (etc / "ssh_host_ed25519_key.pub").symlink_to(
+        bad / "ssh_host_ed25519_key.pub")
+    keypath = _gen_key(tmp_path, "ed25519")
+    proc = run({"SPARKVM_SSH_HOST_KEYS": _b64_of_private(keypath)})
+    assert proc.returncode != 0
+    assert "FATAL" in proc.stderr
+    assert "installed attested" not in proc.stderr
+    assert not (status / "ssh_host_key.status").exists()
+
+
+@NEEDS_SSH_KEYGEN
 def test_env_key_material_never_logged(harness):
     run, etc, status, tmp_path = harness
     keypath = _gen_key(tmp_path, "ed25519")
@@ -239,7 +309,7 @@ def test_absent_env_existing_keys_untouched(harness):
 
 def test_status_dir_is_a_seam_and_host_keys_is_not():
     text = open(SCRIPT).read()
-    m = __import__("re").search(r"_SEAMS=\(([^)]*)\)", text)
+    m = re.search(r"_SEAMS=\(([^)]*)\)", text)
     assert m, "_SEAMS declaration not found"
     seams = m.group(1).split()
     assert "SPARKVM_SSH_STATUS_DIR" in seams
@@ -247,6 +317,6 @@ def test_status_dir_is_a_seam_and_host_keys_is_not():
     # as a seam would fire the loud root-run WARNING on every provisioned box.
     assert "SPARKVM_SSH_HOST_KEYS" not in seams
     # ...but it must be classified in _PROD_ENV (never unclassified).
-    pm = __import__("re").search(r"_PROD_ENV=\(([^)]*)\)", text)
+    pm = re.search(r"_PROD_ENV=\(([^)]*)\)", text)
     assert pm, "_PROD_ENV declaration not found"
     assert "SPARKVM_SSH_HOST_KEYS" in pm.group(1).split()
