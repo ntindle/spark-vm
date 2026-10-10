@@ -302,6 +302,21 @@ log() {
     fi
 }
 
+_refuse() {
+    # _refuse <msg> — fail-closed refusal: loud on the run log AND on
+    # stderr. The version probes (issue #1254.3) capture the identity
+    # helpers' stderr into their errfile and log it at the layer; `log`
+    # alone writes only to the run log, which left the probe's
+    # version-unknown report reason-less on the helper-refusal path
+    # (non-root CI: the helper never reaches runuser/sudo, so its stderr
+    # stayed empty and `[ -s "$errf" ]` was false). Sanitize before the
+    # stderr echo: the message interpolates operator-configured user
+    # names (log forgery bar, see _sanitize_log_line).
+    log "$1"
+    printf '%s\n' "$(_sanitize_log_line "$1")" >&2
+    return 1
+}
+
 audit() {
     # audit <event> <json-fields...>
     # Appends one JSON line: {"ts":..., "event":..., ...}. Best-effort: never
@@ -770,7 +785,9 @@ _as_cua_driver_owner() {
         return
     fi
     if [ "$me" != "0" ]; then
-        log "cua-driver: not $user and not root — refusing (fail-closed)"
+        # Issue #1254.3: _refuse (not bare log) — the refusal reason must
+        # also reach stderr for the probe errfile capture (see _refuse).
+        _refuse "cua-driver: not $user and not root — refusing (fail-closed)"
         return 1
     fi
     # runuser/sudo take a login name, not a bare numeric uid: resolve the
@@ -790,7 +807,8 @@ _as_cua_driver_owner() {
     elif command -v sudo >/dev/null 2>&1; then
         sudo -u "$switch_user" -- "$@"
     else
-        log "cua-driver: cannot switch to $user (no runuser/sudo) — refusing"
+        # Issue #1254.3: _refuse (not bare log) — see the not-root branch.
+        _refuse "cua-driver: cannot switch to $user (no runuser/sudo) — refusing"
         return 1
     fi
 }
@@ -1094,7 +1112,9 @@ _as_playwright_user() {
         return
     fi
     if [ "$me" != "root" ]; then
-        log "playwright: not $user and not root — refusing (fail-closed)"
+        # Issue #1254.3: _refuse (not bare log) — the refusal reason must
+        # also reach stderr for the probe errfile capture (see _refuse).
+        _refuse "playwright: not $user and not root — refusing (fail-closed)"
         return 1
     fi
     # Issue #1254: runuser/sudo take a login name, not a bare numeric
@@ -1113,7 +1133,8 @@ _as_playwright_user() {
     elif command -v sudo >/dev/null 2>&1; then
         sudo -u "$switch_user" -- "$@"
     else
-        log "playwright: cannot switch to $user (no runuser/sudo) — refusing"
+        # Issue #1254.3: _refuse (not bare log) — see the not-root branch.
+        _refuse "playwright: cannot switch to $user (no runuser/sudo) — refusing"
         return 1
     fi
 }
