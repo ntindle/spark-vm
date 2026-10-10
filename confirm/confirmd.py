@@ -2038,8 +2038,13 @@ class Handler(BaseHTTPRequestHandler):
         # so a content-type confusion cannot turn an approval page into
         # an executed script; same-origin referrer so pending-approval
         # URLs never leak to third parties via the Referer header.
+        # Issue #1227: X-Frame-Options: DENY — the approval pages carry
+        # approve/deny clicks, and nothing legitimately frames them, so
+        # a same-box page cannot clickjack an operator into approving a
+        # credential use they did not intend.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
