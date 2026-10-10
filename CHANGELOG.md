@@ -168,14 +168,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   page, its expiry reapers, and the box-side plane-decision ingest now
   serialize on a cross-process per-approval lock, closing the race that
   could leave a live grant under a deny/expired record for up to the
-  grant's lifetime. (#945) (#TBD)
+  grant's lifetime. (#945) (#1281)
 
 - The toolset updater hardens three small privilege-boundary details:
   the sudo wrapper now passes `--` before its arguments, the Playwright
   user-switch helper resolves numeric user ids to login names like the
   CUA-driver helper already does, and a refused version probe now logs
   the real refusal reason instead of reporting only "version
-  unparseable". (#1254) (#TBD)
+  unparseable". (#1254) (#1281)
 
 - The golden image's sshd first-boot script no longer risks dying before
   sshd starts when its defensive host-key setup hits a failure: a wedged
