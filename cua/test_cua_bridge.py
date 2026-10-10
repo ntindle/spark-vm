@@ -1767,3 +1767,51 @@ class TestInputLiveness:
             "state": "unknown",
             "detail": "driver down — input probe skipped",
             "checked_at": None, "driver": "cua-driver 0.28.2"}
+
+
+# ---------------------------------------------------------------- hardening response headers (#1228)
+
+
+class TestHardeningHeaders:
+    """Issue #1228: the bridge is API-only (JSON through the _json choke
+    point plus the one /api/screenshot PNG), so X-Content-Type-Options:
+    nosniff is the hardening header that matters here — nothing is
+    framed, so X-Frame-Options is not needed. Every wire response must
+    carry nosniff; deleting it must fail."""
+
+    def _raw(self, port, method, path):
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request(method, path, headers={"X-CUA": "1"})
+        resp = conn.getresponse()
+        data = resp.read()
+        headers = {k.lower(): v for k, v in resp.getheaders()}
+        conn.close()
+        return resp.status, headers, data
+
+    def test_json_responses_carry_nosniff(self, live):
+        bridge, driver, port = live
+        # GET success, GET 404, and a POST 404 — all leave through _json.
+        cases = [("GET", "/api/liveness", 200),
+                 ("GET", "/api/windows", 200),
+                 ("GET", "/no/such/route", 404),
+                 ("POST", "/no/such/route", 404)]
+        for method, path, want in cases:
+            status, headers, _ = self._raw(port, method, path)
+            assert status == want, (method, path)
+            assert headers.get("x-content-type-options") == "nosniff", \
+                (method, path)
+
+    def test_screenshot_png_carries_nosniff(self, live, monkeypatch):
+        bridge, driver, port = live
+
+        def fake_call(tool, args):
+            if tool == "get_desktop_state":
+                with open(args["screenshot_out_file"], "wb") as f:
+                    f.write(b"\x89PNG-fake")
+                return {"ok": True}
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", fake_call)
+        status, headers, _ = self._raw(port, "GET", "/api/screenshot")
+        assert status == 200
+        assert headers.get("x-content-type-options") == "nosniff"

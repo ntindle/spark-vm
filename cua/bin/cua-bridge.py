@@ -967,6 +967,10 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        # Issue #1228: nosniff — the bridge is API-only (JSON + one PNG),
+        # so content-type confusion is the only sniffing risk; nothing
+        # here is framed, so X-Frame-Options is not needed.
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1072,6 +1076,8 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
+                # Issue #1228: nosniff — same rationale as _json above.
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(png)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()

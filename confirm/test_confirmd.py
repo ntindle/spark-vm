@@ -941,7 +941,9 @@ class ConfirmdTests(unittest.TestCase):
 
     def test_1_send_html_hardening_headers(self):
         """Issue #77 (L3): every HTML response carries nosniff and a
-        same-origin referrer policy. Deleting either header must fail."""
+        same-origin referrer policy. Issue #1227: X-Frame-Options: DENY —
+        the approval pages carry approve/deny clicks and nothing frames
+        them. Deleting any of the three headers must fail."""
         import io
         h = cd.Handler.__new__(cd.Handler)
         headers = {}
@@ -952,6 +954,26 @@ class ConfirmdTests(unittest.TestCase):
         h._send_html("<p>x</p>")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["Referrer-Policy"], "same-origin")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+    def test_1_root_page_carries_x_frame_options_on_wire(self):
+        """Issue #1227: the DENY header must reach the wire on the real
+        approval-page route, not just the _send_html choke point."""
+        import io
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/"
+        headers = {}
+        h.send_response = lambda code: headers.setdefault("code", code)
+        h.send_header = lambda k, v: headers.__setitem__(k, v)
+        h.end_headers = lambda: None
+        h.wfile = io.BytesIO()
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd, "load_pending", return_value=[]):
+            h.do_GET()
+        self.assertEqual(headers["code"], 200)
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
 
     def test_1_swjs_hardening_headers(self):
         """Issue #77 (L3): /sw.js is served inline in do_GET, not through
