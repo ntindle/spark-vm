@@ -151,6 +151,7 @@ plane-produced kind needs a row here before the plane may enqueue it.
 | `kind` | Producer | Payload | Owner | Unknown-client behavior |
 |---|---|---|---|---|
 | `approval_decision` | plane (#873) | `aid`, `decision`, `decision_seq`, `idempotency_key` | #849 | n/a (honored kind) |
+| `credential_kill` | plane (#1179, vend mode) | `name`, `revoked_at`, `idempotency_key` | #850 | fail-closed (not acked, run stops loudly) |
 
 ### `approval_decision` (#873, #849)
 
@@ -197,6 +198,81 @@ gate — only the winning decider enqueues; idempotent replays find the
 existing command and enqueue nothing. Server-side expiry uses a
 per-aid conditional UPDATE for the same guarantee: a raced expiry
 transitions the row once, so at most one `expire` command per aid.
+
+### `credential_kill` (#1179, #850)
+
+The revocation fast path for vend-mode boxes (#850, #891) — the
+symmetric kind to `approval_decision`: plane-produced,
+owner-originated, box-executed. Without it the kill bound is the
+contract's TTL cap (`docs/CREDENTIAL_VEND_CONTRACT.md` §4); with it a
+live box wipes the revoked credential from its RAM cache within one
+command-fetch cycle.
+
+Enqueued when an **owner-issued revoke** lands: the plane's owner-auth
+vend-revoke endpoint (the S3 build, #890 — this row names the trigger,
+that issue owns the endpoint) sets the `revoked_at` tombstone on the
+credential's vend record and enqueues one command for the box. The
+The S3 build should not enable the enqueue path until the #891 executor honors the kind (absent plane-side capability gating) — otherwise the first revoke would fail-close every live box by design, which is the declared behavior but not a useful rollout order. The
+owner endpoint is owner-key-authenticated like every other vend
+management surface; a box bearer never enqueues this kind.
+
+Payload (all required):
+
+```json
+{
+  "name": "<credential name>",
+  "revoked_at": "2026-10-10T15:59:00Z",
+  "idempotency_key": "credential_kill:<box_id>:<name>:2026-10-10T15:59:00Z"
+}
+```
+
+- `name`: the vend-manifest credential name, exactly as minted. The
+  command carries the name only — **no secret material** ever rides a
+  durable command.
+- `revoked_at`: the plane-assigned revocation instant, canonical
+  second-precision UTC (`YYYY-MM-DDTHH:MM:SSZ`). The idempotency key
+  embeds it verbatim, so the canonical form is part of the wire
+  contract: two revokes of the same name at different instants are
+  different commands; the same instant re-enqueued is the same
+  command.
+- `idempotency_key`:
+  `credential_kill:<box_id>:<name>:<revoked_at>`. The box dedupes on
+  this key, and the plane checks for an existing command with this
+  key before enqueueing (sequential replays of the same revoke
+  enqueue nothing). Two *concurrent* revokes of one name both race to
+  the `revoked_at` tombstone; the S3 build (#890) must make the `revoked_at` stamp conditional (write-if-absent) so only one instant wins — producer obligation, owned by the endpoint build. The plane also checks for an existing command with the key before enqueueing, which guards sequential replays; the check is not atomic, so two racing same-key enqueues can both land — harmless, since a duplicate kill is an idempotent no-op wipe+ack.
+- `box_id` is not in the payload, same as `approval_decision`: it
+  rides the command row and is embedded in the key.
+
+Box executor semantics (land in #891):
+
+- On receipt the box **hard-deletes the name from the RAM cache**
+  (wipe, never just expiry) and acks. A redelivered kill for an
+  already-wiped name is a no-op success — still acked.
+- The kill wins over the refresh path: after `revoked_at` the plane
+  never re-mints the name (the tombstone is a gate on the mint
+  endpoint too), and a refresh response in flight when the kill
+  lands must not resurrect the credential — the fetcher checks the
+  kill journal (its acked kills) before installing any refresh
+  response. This is a build rule for #891, stated here so the
+  semantics survive the implementation.
+- Honest kill bounds: a **live** box (fetching) is killed within one
+  command-fetch cycle; a box that is **offline** learns nothing until
+  it fetches again, so the TTL cap remains the kill bound for
+  unreachable boxes. Shipping this kind does not silently upgrade
+  the contract's outage rule. A kill expired by an epoch transition is safe too: the vend-mode cache is RAM-only and dies with the incarnation bump, and the mint tombstone plus refresh-miss eviction bound the residual to one refresh cadence — the same bound an offline box already carries.
+
+**Unknown-client behavior: fail-closed.** This kind has security
+effects (grant revocation), so it declares "not acked, run stops
+loudly" — an executor that does not know `credential_kill` must
+never silently skip it, or a revoked credential would keep swapping
+under a TTL-bound lease while the operator believes it is dead. Ack integrity itself assumes a non-hostile executor: a compromised box could ack the kill without wiping its RAM, and the plane has no independent confirmation the wipe happened — a kill-receipt/attestation mechanism is future work, not claimed here. The
+registry's own mitigations apply: the plane must not enqueue this
+kind for an executor that does not list it (plane-side capability
+gating — future hook, named here; until it lands, the dead-letter
+hook is the designed backpressure; and there is no legacy vend population to wedge on the fail-closed kind — vend mode itself is new in #891, which ships the executor that knows `credential_kill`), and the reference
+implementation's ack-and-log stays a liveness choice for kinds with
+no security effects, never the default for this one.
 
 **Mode split (self-hosted vs vend):** the reference executor's approve
 path shells to `proxy/grant-writer`, which records a grant against the
