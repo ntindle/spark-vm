@@ -115,9 +115,10 @@ New pins this slice (continuing the global D-series):
                     ("N pages coalesced this hour"). A missing digest-state
                     row is corruption: the page dead-letters (fail-closed,
                     operator-visible) rather than sending a count the loop
-                    cannot prove. #1064's content half is closed by D78/D87
-                    (count-scoped body per contract §1.4; per-box breakdown
-                    declined-by-design on the frozen #988 schema).
+                    cannot prove. #1064's content half is D88's design
+                    position (count-scoped body per contract §1.4;
+                    per-box breakdown not built on the frozen #988
+                    schema; owner adjudication open on the issue).
   ================  =====================================================
 
 - **D80 — gate-2 fail-safe.** If the approval record is missing at send
@@ -179,12 +180,22 @@ New pins this slice (continuing the global D-series):
   whose digest already fired is never refired — the D67 accepted drift
   for post-fire coalescing stands (late arrivals increment from zero on
   a row the sweep will not pick up). The digest body itself stays
-  count-scoped per D78/contract §1.4 — per-box breakdown is
-  declined-by-design (the frozen #988 schema carries no per-box
-  contribution), so D87 closes #1064's reset half and D78 closes its
-  content-assembly half. The parked path (no live subscriptions) does NOT
-  reset: an undelivered digest's row must survive until a device
-  subscribes.
+  count-scoped per contract §1.4 (see D88 for the content-scope
+  position), so D87 closes #1064's reset half; the content half is
+  D88's design position, with owner adjudication open on #1064. The parked
+  path (no live subscriptions) does NOT reset: an undelivered digest's
+  row must survive until a device subscribes.
+
+- **D88 — digest content scope (design position, not a build).** The
+  digest body stays count-scoped per contract §1.4 ("N pages coalesced
+  this hour — open the dashboard"). Per-box breakdown is not built: the
+  frozen #988 schema carries no per-box contribution, so it would need
+  a schema migration. #1064's acceptance still names per-box
+  enumeration — the decline is the loop's position, surfaced on the
+  issue for owner adjudication; only the owner can waive his own
+  acceptance criterion. (D78 is the sender-loop digest-*fanout* pin —
+  and the number already collides with the sweep lane's per-candidate
+  isolation pin — so the content-scope position gets its own number.)
 
 Plane seams (injected — the module never sees a Worker secret, a data
 key, or a box token):
@@ -637,6 +648,13 @@ def _complete_page(conn, summary, item, row_id, box_id, owner_principal,
         # late arrivals increment from zero on a row the sweep will not
         # pick up). DELETEing the row instead would re-create it with
         # enqueued_at NULL on post-fire coalescing and refire.
+        # The pre-reset count rides the completed note so an operator
+        # diagnosing a dead-lettered digest can see what it consumed.
+        row = conn.execute(
+            "SELECT count FROM push_digest_state"
+            " WHERE owner_principal = ? AND window_start = ?",
+            (owner_principal, key_material)).fetchone()
+        consumed = row[0] if row else 0
         conn.execute(
             "UPDATE push_digest_state SET count = 0"
             " WHERE owner_principal = ? AND window_start = ?",
@@ -644,10 +662,12 @@ def _complete_page(conn, summary, item, row_id, box_id, owner_principal,
     _terminal_transaction(conn, release=release, box_id=box_id,
                           owner_principal=owner_principal,
                           window_start=window_start)
-    summary.note("completed",
-                 "%s (%d/%d devices terminal; reservation %s)"
-                 % (item, len(terminal), live_count,
-                    "released" if release else "kept"))
+    detail = ("%s (%d/%d devices terminal; reservation %s)"
+              % (item, len(terminal), live_count,
+                 "released" if release else "kept"))
+    if event_kind == "digest":
+        detail += "; digest count %d consumed" % consumed
+    summary.note("completed", detail)
 
 
 def _maybe_complete(conn, summary, item, row_id, box_id, owner_principal,
