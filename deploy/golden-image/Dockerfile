@@ -35,7 +35,7 @@
 #  - sshd host keys: generated on first boot by sparkvm-sshd-firstboot.sh —
 #    baking one keypair into every tenant's image would be a leak.
 
-ARG SPARKVM_VERSION=0.7.0
+ARG SPARKVM_VERSION=0.8.0
 ARG SPARKVM_SHA=""
 # cua-driver pin mirrors scripts/self_update_pins.conf; bump deliberately
 # with a changelog note, exactly like the toolset updater's pin.
