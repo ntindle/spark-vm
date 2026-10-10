@@ -104,6 +104,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- A provisioned box whose first-boot enrollment hits a transient control-plane
+  outage (DNS failure, connection refused, timeout, HTTP 5xx/429) no longer
+  wedges permanently: the identity-seeding hook now retries the pairing
+  request in-process with bounded exponential backoff (5 attempts, 1s–8s)
+  instead of requiring a reboot to retry. Permanent failures (a consumed
+  attestation token's 403, other 4xx, malformed plane responses) still exit
+  immediately — retrying a single-use token is wrong. (#1221)
+
 - The golden image's sshd first-boot script no longer risks dying before
   sshd starts when its defensive host-key setup hits a failure: a wedged
   file lock, an unmovable key file, or a directory-creation failure now

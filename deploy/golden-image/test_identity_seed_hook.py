@@ -37,9 +37,18 @@ if tok:
         f.write("token-env-present:%s\\n" % sub)
     with open(os.path.join(logdir, "token_value"), "w") as f:
         f.write(tok)
-sys.exit(int(os.environ.get("STUB_INIT_EXIT" if sub == "init"
-                            else "STUB_REQUEST_EXIT", "0"))
-         if sub else 99)
+if sub == "request":
+    # 1-based invocation count (argv already appended above).
+    n = sum(1 for line in open(os.path.join(logdir, "argv"))
+            if " request " in " " + line + " ")
+    out = os.environ.get("STUB_REQUEST_OUTPUT", "")
+    if out:
+        sys.stdout.write(out + "\\n")
+    fail_until = int(os.environ.get("STUB_REQUEST_FAIL_UNTIL", "0"))
+    if n <= fail_until:
+        sys.exit(1)
+    sys.exit(int(os.environ.get("STUB_REQUEST_EXIT", "0")))
+sys.exit(int(os.environ.get("STUB_INIT_EXIT", "0")) if sub == "init" else 99)
 """
 
 
@@ -209,6 +218,99 @@ def test_request_failure_exits_nonzero_and_loud(harness):
     r = harness["run"]({**_full_env(), "STUB_REQUEST_EXIT": "1"})
     assert r.returncode != 0
     assert "not enrolled" in r.stderr
+
+
+def _request_invocations(harness):
+    return [a for a in _argv_lines(harness) if " request " in f" {a} "]
+
+
+def test_request_transient_failure_retries_then_gives_up(harness):
+    # The stub emits the fixed client's exact transport-failure line
+    # ("http=0: transport: ...").
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_EXIT": "1",
+                        "STUB_REQUEST_OUTPUT":
+                            "request failed: http=0: transport: [Errno 111] "
+                            "Connection refused"})
+    assert r.returncode != 0
+    assert len(_request_invocations(harness)) == 5
+    assert r.stderr.count("retrying in") == 4
+    assert re.findall(r"retrying in (\d+)s", r.stderr) == ["1", "2", "4", "8"]
+    assert "transient, attempts exhausted" in r.stderr
+    assert "not enrolled" in r.stderr
+
+
+def test_request_json_body_503_is_transient(harness):
+    # A 503 with a JSON error body: the plane's own text carries no
+    # http= marker — the fixed client prefixes http={status}, so the hook
+    # must still classify it transient (the pre-fix gap).
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_EXIT": "1",
+                        "STUB_REQUEST_OUTPUT":
+                            "request failed: http=503: upstream timeout"})
+    assert r.returncode != 0
+    assert len(_request_invocations(harness)) == 5
+    assert "transient, attempts exhausted" in r.stderr
+
+
+def test_request_transient_failure_recovers(harness):
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_FAIL_UNTIL": "2",
+                        "STUB_REQUEST_OUTPUT":
+                            "request failed: http=503: upstream timeout"})
+    assert r.returncode == 0, r.stderr
+    assert len(_request_invocations(harness)) == 3
+    assert r.stderr.count("retrying in") == 2
+    assert re.findall(r"retrying in (\d+)s", r.stderr) == ["1", "2"]
+    assert "attestation token presented" in r.stderr
+
+
+def test_request_permanent_failure_does_not_retry(harness):
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_EXIT": "1",
+                        "STUB_REQUEST_OUTPUT":
+                            "request failed: http=403: attestation token "
+                            "already consumed"})
+    assert r.returncode != 0
+    assert len(_request_invocations(harness)) == 1
+    assert "permanent" in r.stderr
+    assert "retrying in" not in r.stderr
+    assert "not enrolled" in r.stderr
+
+
+def test_request_429_is_transient(harness):
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_EXIT": "1",
+                        "STUB_REQUEST_OUTPUT":
+                            "request failed: http=429: rate limited"})
+    assert r.returncode != 0
+    assert len(_request_invocations(harness)) == 5
+    assert "transient, attempts exhausted" in r.stderr
+
+
+def test_non_base64url_token_refuses_without_retry(harness):
+    # The retry path's client-output scrub is a glob-pattern substitution,
+    # exact only for a base64url token — an off-spec token must fail closed
+    # before the client is ever invoked, never reaching the scrub.
+    bad = "tok[en]*with?glob"
+    r = harness["run"]({**_full_env(), "SPARKVM_ATTESTATION_TOKEN": bad})
+    assert r.returncode != 0
+    assert _request_invocations(harness) == []
+    assert bad not in r.stderr
+    assert "not base64url" in r.stderr
+    assert "not enrolled" in r.stderr
+
+
+def test_retry_scrubs_reflected_token_from_output(harness):
+    # A hostile plane reflecting the token in its error payload must not
+    # land the token in the hook log (supervisord persists stderr to disk).
+    r = harness["run"]({**_full_env(),
+                        "STUB_REQUEST_EXIT": "1",
+                        "STUB_REQUEST_OUTPUT":
+                            f"request failed: http=500: token was {TOKEN}"})
+    assert r.returncode != 0
+    assert TOKEN not in r.stderr
+    assert "<redacted>" in r.stderr
 
 
 def test_token_never_in_hook_output(harness):
