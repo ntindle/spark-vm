@@ -3066,3 +3066,93 @@ def test_update_deferred_when_lock_held_never_runs_body(env):
 
 
 
+
+
+# --- issue #1254: non-blocking hardenings from the #1252 review rounds ---
+
+def test_sudo_passes_double_dash(env, tmp_path):
+    # Issue #1254.1: _sudo's `sudo "$@"` had no `--` — a future caller
+    # passing a dash-prefixed argv[0] could inject a sudo option. The
+    # recording sudo stub proves `--` precedes the caller's argv. The
+    # `id` stub reports non-root so the test exercises the sudo branch
+    # even when pytest itself runs as root.
+    rec = tmp_path / "sudo-argv"
+    bindir = make_stub_bin(tmp_path, {
+        "sudo": f'printf "%s\\n" "$@" > "{rec}"; exit 0',
+        "id": "echo 1000",
+    })
+    e = dict(env["env"])
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    e["SKIP_SUDO"] = ""
+    r = source_and('_sudo echo hello', e)
+    assert r.returncode == 0, r.stderr
+    assert rec.read_text().splitlines() == ["--", "echo", "hello"]
+
+
+def test_playwright_user_switches_numeric_user(env, tmp_path):
+    # Issue #1254.2: runuser/sudo take a login name, not a bare numeric
+    # uid — a numeric PLAYWRIGHT_USER must still switch (mirrors
+    # _as_cua_driver_owner's #1252 fix) instead of failing closed
+    # forever with a misleading posture. Root-only, like the cua twin:
+    # non-root CI cannot exercise the runuser/sudo switch leg.
+    if os.getuid() != 0:
+        pytest.skip("needs root to exercise the runuser/sudo switch leg")
+    try:
+        other = pwd.getpwnam("nobody")
+    except KeyError:
+        pytest.skip("no 'nobody' user on this box")
+    if other.pw_uid == 0:
+        pytest.skip("'nobody' resolves to uid 0")
+    e = dict(env["env"])
+    e["PLAYWRIGHT_USER"] = str(other.pw_uid)
+    r = source_and('_as_playwright_user id -un', e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "nobody", (r.stdout, r.stderr)
+
+
+def test_cua_driver_probe_refusal_reason_logged(env, tmp_path):
+    # Issue #1254.3: the identity helper's refusal reason was swallowed
+    # by 2>/dev/null at the probe call sites, so the layer reported only
+    # "installed but version unparseable" — misdirecting debugging toward
+    # the binary instead of the owner config. The reason must reach the
+    # loud layer-level log (the state run log in tests).
+    stub = tmp_path / "owner-guard" / "cua-driver"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text('#!/bin/sh\necho "cua-driver 0.28.2 (abc123)"\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+               | stat.S_IXOTH)
+    e = dict(env["env"])
+    e["CUA_DRIVER_BIN"] = str(stub)
+    e["CUA_DRIVER_OWNER"] = "no-such-user-pw-qa-1254"
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "version probe failed" in runlog, runlog
+    assert "no-such-user-pw-qa-1254" in runlog, runlog
+
+
+def test_playwright_probe_refusal_reason_logged(env, tmp_path):
+    # Issue #1254.3, playwright twin: same routing for _playwright_current.
+    e = dict(env["env"])
+    e["PLAYWRIGHT_USER"] = "no-such-user-pw-qa-1254"
+    r = source_and("_playwright_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "version probe failed" in runlog, runlog
+    assert "no-such-user-pw-qa-1254" in runlog, runlog
+
+
+def test_probe_mktemp_failure_never_rms_dev_null(env, tmp_path):
+    # Engineering round-1 blocker: when _probe_errfile fails, errf falls
+    # back to /dev/null and the cleanup must skip it — an unconditional
+    # `rm -f "$errf"` would delete the /dev/null device node as root,
+    # breaking every later 2>/dev/null in the updater (and system-wide).
+    assert stat.S_ISCHR(os.stat("/dev/null").st_mode)
+    bindir = make_stub_bin(tmp_path, {"mktemp": "exit 1"})
+    e = dict(env["env"])
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    e["PLAYWRIGHT_USER"] = "no-such-user-pw-qa-1254"
+    r = source_and("_playwright_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+    assert stat.S_ISCHR(os.stat("/dev/null").st_mode), \
+        "/dev/null was removed by the probe cleanup"

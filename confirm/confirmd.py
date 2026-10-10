@@ -42,6 +42,8 @@ single-tenant by confirmd's design; the lineage fields make tenant
 scoping additive later.
 """
 
+import contextlib
+import fcntl
 import grp
 import html
 import json
@@ -328,6 +330,79 @@ def _evict_aid_lock(aid):
     simply re-minted by the next GET if the item is still live.)"""
     _aid_locks.pop(aid, None)
     _csrf_rings.pop(aid, None)
+
+
+@contextlib.contextmanager
+def _aid_xlock(aid):
+    """Issue #945: cross-process per-aid stamp lock.
+
+    ``_aid_lock(aid)`` is a ``threading.Lock`` — it serializes confirmd's
+    own threads but not the box ingest, which is a separate process
+    stamping the same approvals store (``pairing/spark_pair.py`` ingest).
+    The residual #945 fixes: near-simultaneous contradictory owner taps
+    on both surfaces could leave a live grant under a deny/expired
+    record, because the grant mint was unguarded against a concurrent
+    terminal state.
+
+    The lock is an ``fcntl.flock`` (LOCK_EX) on
+    ``$APPROVALS/locks/<aid>.lock`` — blocking, so the mint and the
+    terminal check serialize across processes. Held by:
+
+    - the ``/answer`` entry around ``_answer_locked`` (the whole
+      check -> mint -> consume window, grant subprocess included);
+    - both confirmd reapers (render reap, GET detail reap) around the
+      ``_stamp_expired_consumed`` + pending-removal window;
+    - the ingest's ``_ingest_approval_decision`` around the whole
+      plane-decision stamp (the approve path's pre-mint terminal check,
+      the mint, the post-mint re-check, and the stamp).
+
+    Lock-order discipline (deadlock audit): the in-process
+    ``_aid_lock(aid)`` is always taken BEFORE the xlock, and the
+    grant-writer's own mint lock (inside the writer subprocess) is
+    always taken AFTER the xlock — the same order on every path, so no
+    inversion. The xlock is never nested for the same aid (flock on two
+    fds for the same file from one process would self-deadlock):
+    ``_stamp_expired_consumed`` itself never takes it; only the entry
+    points above do.
+
+    The aid must pass ``ID_RE`` before it becomes a path (same bar as
+    ``_stamp_expired_consumed``); ``ValueError`` otherwise. Lockfiles are
+    never unlinked — aids are never reused, so one small empty file per
+    approval accumulates in ``locks/`` (unlike ``consumed/``, which
+    ``_prune_consumed`` caps at ``_CONSUMED_KEEP`` — a future turn may
+    prune ``locks/`` alongside). A crash can never wedge the lock: flock
+    releases with the open file description, so a dead holder frees it.
+
+    If the lockfile cannot be created or opened (a broken approvals
+    dir), the failure is audited loudly and the caller proceeds WITHOUT
+    the lock — a deliberate loud-degrade, not fail-closed: the
+    pre-#945 mitigations (O_EXCL write-if-absent, the pre/post-mint
+    terminal re-checks, the loud APPROVE/TERMINAL RACE journal) still
+    apply, and refusing every answer would turn a filesystem hiccup
+    into a full approval outage. Unreachable whenever the approvals
+    dir is healthy (every component already creates files under it).
+    """
+    if not ID_RE.match(aid):
+        raise ValueError("refusing to lock for bad aid %r" % (aid,))
+    locks_dir = os.path.join(APPROVALS, "locks")
+    try:
+        os.makedirs(locks_dir, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(locks_dir, aid + ".lock"),
+                     os.O_CREAT | os.O_WRONLY, 0o600)
+    except OSError as e:
+        audit_log("aid-xlock-unavailable", "-", "-",
+                  "id=%s err=%s (proceeding without the cross-process "
+                  "lock; pre-#945 mitigations still apply)" % (aid, e))
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 # H20: re-open nonces. A denied approval's answered-history card carries a
@@ -1027,7 +1102,19 @@ def load_pending():
                 # never nests; GET/POST each hold exactly one; the grant
                 # subprocess acquires no locks — no lock-ordering hazard.
                 aid = fn[:-len(".json")]
-                with _aid_lock(aid):
+                # Issue #945: the cross-process stamp lock needs a
+                # validated aid before it becomes a path (same bar as
+                # _stamp_expired_consumed). A malformed aid keeps the
+                # old behavior: refuse to touch consumed/, but still
+                # reap the expired file below.
+                if not ID_RE.match(aid):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                    _evict_aid_lock(aid)
+                    continue
+                with _aid_lock(aid), _aid_xlock(aid):
                     # S1 (#511): stamp the expired terminal record BEFORE
                     # the pending file is deleted (stamp-then-delete: a
                     # crash between the two self-heals on the next reap —
@@ -2209,8 +2296,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Arch review B3: the load->mint->write-back sequence runs under
             # the per-aid lock — concurrent GETs must not lose each other's
-            # minted nonce (last-writer-wins).
-            with _aid_lock(aid):
+            # minted nonce (last-writer-wins). Issue #945: the expiry
+            # reap half also takes the cross-process stamp lock, so the
+            # stamp + pending-removal window serializes against the
+            # ingest's approve path.
+            with _aid_lock(aid), _aid_xlock(aid):
                 p = os.path.join(pending_dir(), aid + ".json")
                 if not os.path.exists(p):
                     # Issue #231: the item left pending (or never
@@ -2454,13 +2544,19 @@ class Handler(BaseHTTPRequestHandler):
         # serializes on this same lock, so a mid-mint reap can no longer
         # delete the pending file out from under _answer_locked, and
         # GET's nonce write-back can no longer resurrect a reaped file.
-        with _aid_lock(aid):
+        # Issue #945: the cross-process stamp lock extends the same
+        # critical section across processes — the ingest's approve path
+        # (a separate process) serializes on it too, so the grant mint
+        # and the terminal check can no longer interleave across the
+        # two surfaces.
+        with _aid_lock(aid), _aid_xlock(aid):
             return self._answer_locked(login, aid, csrf, decision, ttl_hours)
 
     def _answer_locked(self, login, aid, csrf, decision,
                        ttl_hours=GRANT_TTL_DEFAULT):
-        """POST /answer body. The caller holds _aid_lock(aid); every
-        early return inside is a normal handler response."""
+        """POST /answer body. The caller holds _aid_lock(aid) and the #945
+        cross-process _aid_xlock(aid); every early return inside is a
+        normal handler response."""
         src = os.path.join(pending_dir(), aid + ".json")
         if not os.path.exists(src):
             # Issue #231: same evict-on-negative-path as the GET side.

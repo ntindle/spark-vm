@@ -6,8 +6,10 @@ Run with:
 Tailscale calls are mocked; no network or /home/swapd is touched.
 """
 import contextlib
+import fcntl
 import io
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
@@ -3826,3 +3828,100 @@ class QuarantinePruneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _xlock_holder_child(approvals_dir, aid, ready, hold_secs):
+    """Child body: hold the #945 xlock, then release. Fork-inherits cd."""
+    cd.APPROVALS = approvals_dir
+    with cd._aid_xlock(aid):
+        ready.set()
+        time.sleep(hold_secs)
+
+
+def _xlock_writer_child(approvals_dir, aid, path, tag, delay):
+    """Child body: append start/end markers under the xlock."""
+    cd.APPROVALS = approvals_dir
+    with cd._aid_xlock(aid):
+        with open(path, "a") as f:
+            f.write(tag + "-start\n")
+            f.flush()
+            time.sleep(delay)
+            f.write(tag + "-end\n")
+
+
+class AidXlockTests(unittest.TestCase):
+    """Issue #945: the cross-process per-aid stamp lock."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="confirmd-xlock-")
+        self._ctx = multiprocessing.get_context("fork")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_xlock_rejects_bad_aid(self):
+        """A bad aid must never become a path — ValueError, like
+        _stamp_expired_consumed's bar."""
+        with mock.patch.object(cd, "APPROVALS", self.tmp):
+            for bad in ("../evil", "", "a" * 65, "has space", "a/b"):
+                with self.assertRaises(ValueError, msg=bad):
+                    with cd._aid_xlock(bad):
+                        pass
+            # A good aid acquires cleanly and creates the lockfile.
+            with cd._aid_xlock("a1b2c3d4e5f60718"):
+                pass
+            self.assertTrue(os.path.exists(
+                os.path.join(self.tmp, "locks", "a1b2c3d4e5f60718.lock")))
+
+    def test_xlock_blocks_across_processes(self):
+        """A second process cannot take the lock while the first holds
+        it — the flock is genuinely cross-process, not thread-local."""
+        aid = "b2c3d4e5f60718293"
+        ready = self._ctx.Event()
+        p = self._ctx.Process(target=_xlock_holder_child,
+                              args=(self.tmp, aid, ready, 3))
+        p.start()
+        try:
+            self.assertTrue(ready.wait(timeout=10),
+                            "child never acquired the xlock")
+            fd = os.open(os.path.join(self.tmp, "locks", aid + ".lock"),
+                         os.O_WRONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            p.join(timeout=10)
+            self.assertEqual(p.exitcode, 0)
+            # Released with the child: acquirable again.
+            with mock.patch.object(cd, "APPROVALS", self.tmp):
+                with cd._aid_xlock(aid):
+                    pass
+        finally:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+
+    def test_xlock_serializes_two_processes(self):
+        """Two processes' critical sections never interleave — the
+        serialization the #945 race fix depends on. (Neuter check: with
+        the lock body removed, the markers interleave and this fails.)"""
+        aid = "c3d4e5f60718293a4"
+        marks = os.path.join(self.tmp, "marks.txt")
+        open(marks, "w").close()
+        pa = self._ctx.Process(target=_xlock_writer_child,
+                               args=(self.tmp, aid, marks, "A", 1.0))
+        pb = self._ctx.Process(target=_xlock_writer_child,
+                               args=(self.tmp, aid, marks, "B", 0.0))
+        pa.start()
+        time.sleep(0.4)  # A holds the lock, mid-critical-section
+        pb.start()
+        pa.join(timeout=10)
+        pb.join(timeout=10)
+        self.assertEqual((pa.exitcode, pb.exitcode), (0, 0))
+        with open(marks) as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        # A entered first and must complete before B starts.
+        self.assertEqual(lines,
+                         ["A-start", "A-end", "B-start", "B-end"])
