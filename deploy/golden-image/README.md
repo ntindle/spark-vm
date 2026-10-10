@@ -139,6 +139,61 @@ the boot sequence); cold-stop state persistence is #1205's `/data` contract
 boot presents the token again — the plane 403s the consumed-token replay
 and the hook logs loudly instead of retry-looping).
 
+## Host-key attestation (#1204, D-D3)
+
+`sparkvm-sshd-firstboot.sh` installs the sshd host keys with a precedence
+rule, not just a generate-if-missing rule:
+
+1. **`SPARKVM_SSH_HOST_KEYS` set (provisioned boxes):** the driver-minted
+   per-machine ed25519 host key, as **base64 of the OpenSSH private key**
+   (the exact bytes of `ssh_host_ed25519_key`; standard base64 alphabet —
+   single-line or wrapped both validate). The attested key **wins over any
+   pre-existing self-generated keys** — they are removed, loudly — so a
+   reimaged rootfs can never keep the wrong identity. No other host key
+   types are generated on this path: the attested ed25519 key is the whole
+   serving identity. **Present-but-invalid is fatal** (nonzero exit, sshd
+   never starts): silently falling back to self-generated keys would
+   present an unattested host identity. Set-but-empty counts as
+   present-but-invalid. Validation is strict — base64 alphabet, OpenSSH
+   PEM shape, `ssh-keygen`-readable, ed25519 type, no passphrase (checked
+   under `setsid` so a passphrase-protected key fails even with a
+   controlling tty). Every mutating install step checks its own failure
+   explicitly, and the installed key's fingerprint is re-verified against
+   the attested fingerprint before the receipt is written.
+2. **Env absent (self-hosted/dev):** unchanged — existing keys kept,
+   missing keys generated with `ssh-keygen -A`.
+
+A machine-readable receipt of the serving identity is written to
+`/run/sparkvm/ssh_host_key.status` (`source=env|self-generated`,
+`key_type=ed25519`, `fingerprint_sha256=SHA256:…`, `installed_at=…` —
+per-boot, tmpfs). It is written when this boot installed the attested
+key (or confirmed the installed key still matches — the fingerprint is
+already in hand from validation) or generated keys; the self-generated
+path writes nothing when keys pre-existed, so a skip stays a skip. Only
+the fingerprint is ever logged; key material never
+appears in logs, argv, or the receipt.
+
+Why the attestation holds: the machine-config env persists across cold
+stops (server-side per-machine state — verified 2026-10-09 against the Fly
+stop/start model; the #905 driver build re-confirms), and the keys live
+on the `/data` volume (D-V3), so the fingerprint the driver minted is the
+fingerprint the box serves after every wake.
+
+**Driver contract (for the #905 build) — read-back is mandatory:** the
+image cannot distinguish "the driver never minted" from "self-hosted",
+so an env dropped in delivery would let the box silently self-generate
+while the driver reports the *minted* fingerprint. The driver MUST read
+`/run/sparkvm/ssh_host_key.status` (over whatever box exec/SSH channel
+is available at provision/claim time) and fail the provision — or mark
+the box unhealthy and never hand its `ssh_info()` to a tenant — unless
+`source=env` **and** `fingerprint_sha256` equals the fingerprint of the
+key it minted. Without this read-back the receipt is decorative.
+
+The driver half — minting the keypair, injecting the env, reporting the
+fingerprint via `ssh_info()`, and failing the provision closed when it
+cannot mint — is #905 build scope; this hook is the image half. Host-key
+rotation is still an open question (carried on #1204).
+
 ## Deliberately not baked (provision/first-boot scope)
 
 - **muse CLI + muse-job plugin approval** — the install is
@@ -148,8 +203,10 @@ and the hook logs loudly instead of retry-looping).
 - **Tenant agent users** — the recipe bakes `/etc/skel` (snapshotted
   from the locked `agent` build user); first boot instantiates real
   tenant users from it.
-- **sshd host keys** — generated on first boot by
-  `sparkvm-sshd-firstboot.sh`.
+- **sshd host keys** — installed on first boot by
+  `sparkvm-sshd-firstboot.sh`: the driver-attested key from
+  `SPARKVM_SSH_HOST_KEYS` on provisioned boxes (#1204), self-generated
+  with `ssh-keygen -A` otherwise.
 
 ## Both-supported framing
 
