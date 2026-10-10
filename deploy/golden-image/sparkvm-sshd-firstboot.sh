@@ -179,7 +179,7 @@ write_key_status() { # $1 = source (env|self-generated), $2 = sha256 fingerprint
 # ed25519 private key). Returns nonzero on any validation failure — the
 # caller exits without starting sshd (fail closed per D-D3).
 install_attested_host_key() {
-    local b64="$1" tmp pub fp dest t f target cur
+    local b64="$1" tmp pub fp dest dest_real dest_pub_real installed_fp t f target cur
     if ! printf '%s' "$b64" | grep -Eq '^[A-Za-z0-9+/]+={0,2}$'; then
         echo "sparkvm-sshd-firstboot: FATAL: SPARKVM_SSH_HOST_KEYS is not valid base64 — refusing to start sshd with an unattested host identity" >&2
         return 1
