@@ -1117,3 +1117,19 @@ def test_digest_post_fire_coalescing_does_not_refire(conn, owner, vapid):
     assert row[0] == 1 and row[1] is not None  # drift, not a refire
     assert push_sweep.sweep_digests(conn, now=NOW) == {}
     assert len(tick.service.calls) == 1  # still exactly one buzz
+
+
+def test_digest_parked_does_not_reset_count(conn, owner, vapid):
+    # D87: the parked path (no live subscriptions) must NOT reset — an
+    # undelivered digest's row survives until a device subscribes.
+    window = "2026-10-06T15"
+    _seed_digest_state(conn, owner, window)
+    enqueue(conn, "digest", owner, None, window)  # no subscription seeded
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["parked"] == 1
+    assert "queued" in outcomes(conn)  # parked, not dropped (D81)
+    row = _digest_state_row(conn, owner, window)
+    assert row is not None and row[0] == 3  # not reset
+    assert row[1] == NOW.isoformat()  # fired-marker untouched
