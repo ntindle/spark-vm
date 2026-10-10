@@ -114,16 +114,91 @@ the environment, or any log.
 
 [`deploy.sh`](deploy.sh) is the rebuild documentation — the repo is the
 only source. It deploys the swap proxy, the inference proxy, `confirmd`,
-and the push worker. Besides the narrow writers above, `deploy.sh` also
-installs `confirm-request` to `/usr/local/bin` (the CLI that files a pending
-approval for the `confirmd` page) and
-the shared `credvalidate.py` validation module `cred-registry-set` imports
-(`/usr/local/bin`, root-owned 0644 — imported, never executed). Run it
+and the push worker. Run it
 from the repo root, as the operator (not from the jail):
 
 ```bash
 ./proxy/deploy.sh [--no-restart]
 ```
+
+The machine-readable inventory of every `sudo install` target in
+`deploy.sh` — each target's destination, repo source, deployed
+owner:group:mode, and any conditional — is the block below, pinned in
+both directions by `test_deploy_inventory.py`. A new `install` target
+added to `deploy.sh` (or a changed owner/mode, or a rename) must update
+this block, and a block entry with no matching install fails the pin —
+so the `install` surface can never drift silently again.
+
+<!-- deploy-inventory:start -->
+# dest | src | owner:group:mode | notes. Pinned both directions by
+# proxy/test_deploy_inventory.py — do not reorder without reason (the
+# rows are grouped by destination prefix) and do not add rows deploy.sh
+# does not have.
+/home/swapd/swap_addon.py | proxy/swap_addon.py | swapd:swapd:0644 |
+/home/swapd/host_match.py | proxy/host_match.py | swapd:swapd:0644 |
+/home/swapd/grant-writer | proxy/grant-writer | swapd:swapd:0755 |
+/home/swapd/VERSION | VERSION | swapd:swapd:0644 |
+/home/swapd/sparkvm_version.py | scripts/sparkvm_version.py | swapd:swapd:0644 |
+/home/swapd/confirmd.py | confirm/confirmd.py | swapd:swapd:0644 |
+/home/swapd/bounded_http.py | scripts/bounded_http.py | swapd:swapd:0644 |
+/home/swapd/push.py | confirm/push.py | swapd:swapd:0644 |
+/home/swapd/inference-ssrf.allow | /dev/null | swapd:swapd:0644 | conditional: installed only when absent
+/usr/local/bin/cred-grant-revoke | proxy/cred-grant-revoke | root:root:0755 |
+/usr/local/bin/cred-registry-set | proxy/cred-registry-set | root:root:0755 |
+/usr/local/bin/cred-registry-set-inference | proxy/cred-registry-set-inference | root:root:0755 |
+/usr/local/bin/cred-store-set | proxy/cred-store-set | root:root:0755 |
+/usr/local/bin/cred-store-set-inference | proxy/cred-store-set-inference | root:root:0755 |
+/usr/local/bin/cred-store-verify-inference | proxy/cred-store-verify-inference | root:root:0755 |
+/usr/local/bin/cred-store-get | proxy/cred-store-get | root:root:0755 |
+/usr/local/bin/cred-store-delete | proxy/cred-store-delete | root:root:0755 |
+/usr/local/bin/cred-ui-token-set | proxy/cred-ui-token-set | root:root:0755 |
+/usr/local/bin/credvalidate.py | credlib/credvalidate.py | root:root:0644 |
+/usr/local/bin/confirm-request | confirm/confirm-request | root:root:0755 |
+/usr/local/bin/with-proxy | proxy/with-proxy | root:root:0755 |
+/etc/systemd/system/swap-proxy.service | proxy/swap-proxy.service | root:root:0644 |
+/etc/systemd/system/swap-inference.service | proxy/swap-inference.service | root:root:0644 |
+/etc/systemd/system/confirmd.service | confirm/confirmd.service | root:root:0644 |
+/etc/systemd/system/push-worker.service | confirm/push-worker.service | root:root:0644 |
+/etc/systemd/system/summons-sweep.service | proxy/summons-sweep.service | root:root:0644 |
+/etc/systemd/system/summons-sweep.timer | proxy/summons-sweep.timer | root:root:0644 |
+/etc/sudoers.d/swapd | proxy/sudoers-swapd | root:root:0440 | installed via mktemp then moved
+/etc/systemd/system/swap-proxy.service.d | (none) | root:root:0755 | install -d; conditional: plane-enrolled
+/etc/systemd/system/push-worker.service.d | (none) | root:root:0755 | install -d; conditional: plane-enrolled
+<!-- deploy-inventory:end -->
+
+Deliberately out of the pin's scope, named so a future reader knows it
+was a choice and not an oversight — `deploy.sh` also puts down:
+
+- the plane-push `SPARKVM_PLANE_PUSH=1` drop-in file contents (written
+  inline via `sudo tee`, not `install`);
+- the CA bundle (built by `proxy/build_ca_bundle.py --dest`, whose
+  destination is operator-overridable via `WITH_PROXY_CA_BUNDLE`);
+- the `safe_install.py` targets: `/home/swapd/ssrf.deny` (generated
+  content), `/home/swapd/grants.json` (`--create-only` seed),
+  `/home/swapd/swap.log` (0600 mode tighten, only if already present),
+  `/etc/logrotate.d/swap-proxy` (from `proxy/swap-logrotate.conf`);
+- the `mkdir` + enforce-helper targets: `/home/swapd/secrets` and
+  `/home/swapd/inference-secrets` (`enforce_secrets_dir.py`), and the
+  confirmd approvals `pending/` dir (`enforce_pending_dir.py`,
+  root:approval-filers 2770 — its parent path is dynamic).
+
+Those are generated, conditional, or mode-enforcement writes, not static
+file installs, so the src/owner/mode pin does not cover them — but they
+are not unguarded either: the `test_no_undocumented_non_install_writes`
+tripwire in the same test file allowlists every literal-absolute-path
+non-`install` file write by path (`sudo tee` dests, `cp`/`rsync`/`mv`/`ln`
+dests, `safe_install.py` dests, the CA-bundle `--dest`, absolute-path
+redirects — spaced and no-space forms — and `dd of=`), and fails loud on
+any write primitive the scanners cannot see (bare `install` without sudo,
+`/usr/bin/install`, env-prefixed installs, `sudo sh -c` subshells,
+`python3 -c` bodies that open files for writing). The scanners see
+literal absolute paths only: writes to dynamic paths (`exec
+9>"$UPDATER_STATE_DIR/…"`, `mkdir -p "$approvals_dir"`) and the
+sudo-invoked helper scripts (`proxy/ensure-approval-filer.sh`, which
+writes `/etc/group` and `/etc/gshadow`; `proxy/enforce_pending_dir.py`
+and `proxy/enforce_secrets_dir.py`, which create and own dirs) are
+deliberately outside the tripwire's vocabulary — named here so a future
+reader knows it was a choice and not an oversight.
 
 `--no-restart` installs everything without restarting services (used by
 the fleet auto-deploy); a manual `--no-restart` caller owns the restart
@@ -145,4 +220,5 @@ Other services in this directory:
 The `test_*.py` files here run with the rest of the suite from the repo
 root (`python3 -m pytest`; see `pytest.ini`). They cover the addon's swap
 semantics, the placement fail-closed rules, the host matcher, the narrow
-writers' path guards, the CA-bundle builder, and the outbox sweep.
+writers' path guards, the CA-bundle builder, the outbox sweep, and the
+deploy.sh install inventory pin.

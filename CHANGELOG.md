@@ -82,6 +82,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rides the same transaction as the delivery bookkeeping, and a window
   whose digest already went out is still never re-sent. (#1064) (#1243)
 
+- The proxy deploy script's install-target inventory — every `sudo
+  install` destination, its source, and its deployed ownership — is now
+  pinned by a machine check: a new install target that isn't documented,
+  or a documented one the script no longer installs, fails the test
+  suite instead of drifting silently. (#1235) (#1244)
+
 ### Fixed
 
 - The fleet console's refresh-interval validation is now pinned at its float
