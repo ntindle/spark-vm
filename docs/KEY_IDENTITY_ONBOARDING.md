@@ -25,14 +25,19 @@ where key-identity sits in the accounts plan.
 ## 1. The agent first-connect walkthrough
 
 The agent-native onboarding story is "no signup form, no password, no API
-key" — the SSH key *is* the account, the way `ssh railway.new` works:
+key" — the SSH key *is* the account (Railway's free-VM flow,
+`ssh railway.new`, is #446's stated inspiration):
 
 1. **The agent generates its own keypair** (e.g. `ssh-keygen -t ed25519`)
    and keeps the private key. The public key is the identity; nothing
    secret is ever transmitted.
 2. **First SSH connect with that public key** implicitly creates the
-   account bound to the key's OpenSSH `SHA256:` fingerprint. There is no
-   form to fill and no token to paste — first connect *is* registration.
+   account bound to the key's OpenSSH `SHA256:` fingerprint — on the
+   self-hosted / agent-created surface there is no form to fill and no
+   token to paste: first connect *is* registration. (On hosted
+   per-tenant planes key binding is gated by the enrollment-token +
+   human-approval flow in `HOSTED_SIGNUP_ONBOARDING.md` §4 — see §8; the
+   wiring slice must never self-register unknown keys there.)
 3. **The wiring slice hands back the first-connect manifest** (JSON):
    the account id, the key fingerprint, the claim-link escape hatch, and
    the policy the agent must report back to its operator (§2).
@@ -63,17 +68,17 @@ code:
     hosted policy TBD"
 
 On reconnect the registry issues the **resume manifest** — the same field
-vocabulary, distinguished by `"registry_issued": True` (verified against
-`harness/key_registry.py`'s `_resume_manifest`): the `box_id` slot is
-filled from the registry's box binding (the slot S1's README promised
-this slice would fill); `vm_endpoint` and `claim_url` stay null — the
-endpoint is connect-time knowledge for a later wiring slice, and the
-claim protocol is S3. An agent can tell a resume from a fresh
-registration by the presence of `registry_issued`.
+vocabulary minus `policy`, distinguished by `"registry_issued": True`
+(verified against `harness/key_registry.py`'s `_resume_manifest`): the
+`box_id` slot is filled from the registry's box binding (the slot S1's
+README promised this slice would fill); `vm_endpoint` and `claim_url`
+stay null — the endpoint is connect-time knowledge for a later wiring
+slice, and the claim protocol is S3. An agent can tell a resume from a
+fresh registration by the presence of `registry_issued`.
 
 ## 3. Manifest UX: the claim_url bookmark rule
 
-The manifest's `claim_url` is the agent's **only lifeline to a full
+The manifest's `claim_url` is the agent's **only lifeline to a claimed
 account** — and the claim codes behind it are deliberately
 unrecoverable: the registry stores only the SHA-256 hash, and the
 plaintext is shown once at issue time (`issue_claim`: "the plaintext is
@@ -90,10 +95,18 @@ no password reset, nothing to fall back on. Losing the bookmark turns a
 routine key-loss into a dead account.
 
 Until the wiring slice fills it, `claim_url` may be `null` (the resume
-manifest carries it null by construction). The agent must distinguish
-"no claim path yet — the slice hasn't wired it" from "claim path exists
-— I have it bookmarked", and never treat a null `claim_url` as
-"no upgrade path exists".
+manifest carries it null by construction). A `null` alone is not a
+decision procedure — key the read on manifest type plus local state:
+
+- **first-connect manifest, `claim_url` null** → the wiring slice has
+  not wired the claim path yet; flag to the operator, do not treat the
+  account as unclaimable.
+- **resume manifest, `claim_url` null, URL stored locally** → fine, use
+  the stored bookmark.
+- **resume manifest, `claim_url` null, no stored URL** → the lifeline is
+  lost. The fail posture is operational, not mystical: generate a new
+  keypair — first connect registers a *fresh* account. The old account's
+  state is inaccessible and orphaned; there is no migration.
 
 ## 4. "Same key -> same box": resume semantics
 
@@ -123,6 +136,11 @@ The self-hosted story is one command -> working box, matching the
 ssh <box>          # first connect: key registers, manifest is printed
 ```
 
+**Status:** the one-command story above is the wiring slice's target
+(§7). Today the manifests are emitted via the registry CLI
+(`key_registry.py manifest <fingerprint>`); the connect-time print
+arrives with the wiring slice.
+
 Everything after that is the registry CLI (`key_registry.py`, JSON-first
 — the registry is an agent-operations tool, and JSON is the contract):
 
@@ -130,10 +148,12 @@ Everything after that is the registry CLI (`key_registry.py`, JSON-first
 - `lookup` / `status` — inspect; `touch` — mark seen;
 - `manifest` — emit the resume manifest for a fingerprint;
 - `rotate` — rotate to a new key (§6);
-- `claim-issue` / `claim-redeem` — the S3 claim flow (§6).
+- `claim-issue` / `claim-redeem` — the S3 claim flow (§6);
+- `bind` / `remove` — explicit box rebind, and account removal.
   `claim-redeem` takes the code positionally or via `--code-stdin` —
-  the code is a Bearer <redacted>: argv exposes it in the process list and
-  shell history, so stdin is the safe path on multi-user hosts.
+  the code is a single-use credential, so keep it out of argv and shell
+  history (both leak via the process list); `--code-stdin` is the safe
+  path on multi-user hosts.
 
 The human sees the same manifest the agent does — the operator is the
 agent's persistence layer for the bookmark rule in §3.
@@ -153,29 +173,75 @@ by whether the agent still holds the old key:
   the store); `claim-redeem` stamps the account `claimed_at` /
   `claimed_by`. A claimed account is still the key's account — **claim
   is the upgrade path, not a re-registration**.
+- **Key held, but you want claimed status → claim now (pre-loss).**
+  `claim-issue` is allowed on a held key — this is the *intended*
+  upgrade path: issue the code while you still hold the key, so both
+  issuance and redemption are operator-controlled. Do not wait for key
+  loss to claim; key loss is the failure case, not the workflow.
 - **Never implicitly.** Issuing a claim code requires a *registered*
   fingerprint — a typo must not mint an account. Registration happens on
   first connect, never as a side effect of claim or rotate.
+
+One unstated consequence of "one key = one identity": keys do not roam.
+An agent on two machines holds two accounts — each machine's key is its
+own account, resumable only from that machine. Plan key distribution
+(the §3 bookmark) per machine.
 
 ## 7. The wiring slice acceptance spec
 
 The connect-time wiring — registering on first connect, resuming on
 reconnect, handing the manifests to the agent — is the unbuilt slice.
-This doc is its acceptance spec. A wiring implementation is done when:
+This doc is its acceptance spec. **Scope:** the self-hosted /
+agent-created surface. Every criterion below is wiring-specific and
+slice-verifiable; agent behavior (§1/§3) and already-shipped registry
+semantics are preconditions, not criteria.
+
+### Open decisions the slice must take (implied settled nowhere)
+
+- **D-W1 — the delivery channel.** How the manifest reaches an SSH
+  client before work starts is the slice's hardest decision:
+  login-banner text, a forced-command wrapper's first output, a
+  well-known file drop, an `AuthorizedKeysCommand`/`ForceCommand` hook,
+  or something else. The slice must name its channel and justify the
+  choice — this spec does not presume one.
+- **D-W2 — the claim-redemption endpoint.** `claim_url` filling awaits
+  the claim-redemption endpoint slice: the registry design note records
+  it as a *future* on-box/control-plane redemption endpoint
+  (`KEY_IDENTITY_REGISTRY.md`), and no such endpoint exists today. The
+  wiring slice must not invent one. If the wiring ships first, it emits
+  `claim_url: null` and the §3 distinguishability rule governs; the
+  endpoint slice owns filling it later. (Filing that endpoint as a
+  tracked slice is follow-up work, not this doc's.)
+
+### Acceptance criteria
 
 1. **First connect with an unknown key** registers it and emits the
-   first-connect manifest (§2) — no form, no token, first connect is
-   registration.
-2. **Reconnect with a known key** refreshes `last_seen_at` and emits the
-   registry-issued resume manifest (`registry_issued: True`, `box_id`
-   filled from the binding) — reconnects never fork accounts.
-3. **Explicit `box_ref` rebinds; absent `box_ref` preserves** the stored
-   binding (§4); empty `box_ref` is refused.
-4. **The manifest reaches the agent before any work starts**, and the
-   agent's report-back includes the `claim_url` bookmark per §3.
-5. **`expires_at` stays null** — key-identity accounts do not expire;
-   claim-link validity is the claim/upgrade slice's business.
-6. **Sybil posture is stated honestly**: multiple keys = multiple
+   first-connect manifest (§2) through the D-W1 channel — no form, no
+   token; on this surface, first connect is registration.
+2. **On hosted per-tenant planes, first-connect registration is NOT
+   implicit.** Key binding there is gated by the enrollment-token +
+   human-approval flow (`HOSTED_SIGNUP_ONBOARDING.md` §4). The wiring
+   slice must not self-register unknown keys on hosted planes — the §8
+   complement would otherwise become a bypass of the approval gate.
+3. **Reconnect with a known key** emits the registry-issued resume
+   manifest (`registry_issued: True`, `box_id` filled from the binding;
+   preconditions, already shipped: `last_seen_at` refresh, `box_ref`
+   explicit-rebind / absent-preserve / empty-refuse — §4). Reconnects
+   never fork accounts.
+4. **The manifest is emitted machine-parseably before the session
+   proceeds to any other command** — the D-W1 channel's first structured
+   payload. (The agent's report-back and bookmark, §1/§3, are the agent
+   contract: the slice delivers; the agent persists.)
+5. **`vm_endpoint`** is filled from the connection context — it is
+   connect-time knowledge per the registry note — or, if the slice
+   defers it, recorded as still-null with the owning slice named
+   explicitly. It may not stay null by omission.
+6. **`claim_url` accountability:** emit `claim_url` when the claim slice
+   provides one (D-W2), keep it null otherwise, and never present null
+   as "no upgrade path" — the §3 decision procedure applies.
+7. **`expires_at` stays null** (per §2 — key-identity accounts do not
+   expire).
+8. **Sybil posture is stated honestly**: multiple keys = multiple
    identities is accepted on self-hosted; the hosted sybil policy is
    still TBD (#446 open question) and must not be presented as settled.
 
