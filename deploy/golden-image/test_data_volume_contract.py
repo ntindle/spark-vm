@@ -251,22 +251,34 @@ def test_firstboot_seam_warning_covers_all_documented_seams():
     assert m.group(1).split() == [
         "SPARKVM_DATA_ROOT", "SPARKVM_SSH_ETC_DIR",
         "SPARKVM_FIRSTBOOT_NO_EXEC", "SPARKVM_SSH_RUN_DIR",
+        "SPARKVM_SSH_STATUS_DIR",
     ]
     assert re.search(r'^\s*for _seam in "\$\{_SEAMS\[@\]\}"; do$', src,
                      re.MULTILINE), \
         "the WARNING loop must iterate _SEAMS, not a duplicated list"
-    # Every name in the canonical list must also be documented in the
-    # header's test-seam block (a seam nobody documented is undiscoverable).
+    # Production driver-injected vars have their own canonical list:
+    # consumed in the body and header-documented like seams, but they
+    # must NEVER be in _SEAMS (the WARNING loop must not fire on a var
+    # that is legitimately set in production).
+    pm = re.search(r'^_PROD_ENV=\(([^)]*)\)$', src, re.MULTILINE)
+    assert pm, "the canonical _PROD_ENV list must exist in the script"
+    assert pm.group(1).split() == ["SPARKVM_SSH_HOST_KEYS"]
+    assert not (set(pm.group(1).split()) & set(m.group(1).split())), \
+        "a var cannot be both a test seam and a production env var"
+    # Every name in either canonical list must also be documented in the
+    # header (an undocumented var is undiscoverable).
     header = src.split("set -euo pipefail")[0]
     seams = m.group(1).split()
-    for name in seams:
+    for name in seams + pm.group(1).split():
         assert re.search(r'^#.*\b%s\b' % name, header, re.MULTILINE), name
-    # Reverse: every seam the header documents must be in the canonical
-    # list — a header-documented seam forgotten in _SEAMS would never
-    # warn in a root run, silently.
+    # Reverse: every SPARKVM_* var the header documents must be
+    # classified in exactly one canonical list — a header-documented var
+    # forgotten in both would never warn in a root run (seams) or would
+    # drift unclassified (production).
     header_seams = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', header))
     assert header_seams, "the header's seam block must name the seams"
-    assert header_seams <= set(seams), header_seams - set(seams)
+    classified = set(seams) | set(pm.group(1).split())
+    assert header_seams <= classified, header_seams - classified
 
 
 def test_firstboot_body_consumed_seams_are_all_canonical():
@@ -277,14 +289,17 @@ def test_firstboot_body_consumed_seams_are_all_canonical():
     header doc and _SEAMS would warn nowhere in a root run and stay
     green, despite the comment claiming _SEAMS as the canonical list.
     Scan the body (everything after `set -euo pipefail`) for
-    SPARKVM_[A-Z_]+ references and require every one to be in _SEAMS,
-    so the WARNING loop cannot silently miss a test seam.
+    SPARKVM_[A-Z_]+ references and require every one to be in _SEAMS or
+    _PROD_ENV, so the WARNING loop cannot silently miss a test seam —
+    and no production var can hide unclassified in the body.
     """
     src = open(FIRSTBOOT).read()
     body = src.split("set -euo pipefail", 1)[1]
     m = re.search(r'^_SEAMS=\(([^)]*)\)$', src, re.MULTILINE)
     assert m, "the canonical _SEAMS list must exist in the script"
-    canonical = set(m.group(1).split())
+    pm = re.search(r'^_PROD_ENV=\(([^)]*)\)$', src, re.MULTILINE)
+    assert pm, "the canonical _PROD_ENV list must exist in the script"
+    canonical = set(m.group(1).split()) | set(pm.group(1).split())
     # A seam *mentioned* in a body comment is not consumed by the script:
     # strip full-line comments so a comment moved below the split anchor
     # cannot fail the pin for the wrong reason. (Residual, documented:
@@ -295,12 +310,12 @@ def test_firstboot_body_consumed_seams_are_all_canonical():
         if not re.match(r"^\s*#", line)
     )
     consumed = set(re.findall(r'\b(SPARKVM_[A-Z_]+)\b', code))
-    # The _SEAMS=(...) definition line itself lives in the body and names
-    # the four seams as plain tokens — harmless, since the assertion is
-    # that every consumed name IS in the canonical list.
+    # The _SEAMS=(...) and _PROD_ENV=(...) definition lines themselves live
+    # in the body and name their vars as plain tokens — harmless, since
+    # the assertion is that every consumed name IS in a canonical list.
     assert consumed <= canonical, \
-        "seams consumed in the script body but missing from _SEAMS: %s" % \
-        ", ".join(sorted(consumed - canonical))
+        "SPARKVM_* vars consumed in the script body but missing from " \
+        "_SEAMS/_PROD_ENV: %s" % ", ".join(sorted(consumed - canonical))
 
 
 def test_data_prep_seam_list_is_canonical_and_complete():

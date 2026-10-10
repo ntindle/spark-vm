@@ -193,6 +193,19 @@ pre-provision cap checks refusing over-budget claims (#1075). Tracked on
   env-injects ed25519 host key; firstboot prefers env keys; hosted
   provision fails closed without them. Filed as #1204 (p2,
   track:hosted-product, #851). #905 build scope (ssh_info contract).
+  **Build note 2026-10-09:** the golden-image half shipped (PR #TBD) —
+  `sparkvm-sshd-firstboot.sh` installs `SPARKVM_SSH_HOST_KEYS` (base64 of
+  the OpenSSH ed25519 private key) with precedence over pre-existing
+  self-generated keys, fail-closed on present-but-invalid (nonzero exit,
+  no `ssh-keygen -A` fallback), idempotent on fingerprint match, and
+  writes a per-boot `/run/sparkvm/ssh_host_key.status` receipt
+  (source/key_type/fingerprint_sha256). Machine-config env persistence
+  across cold stops verified against the Fly stop/start model (config is
+  server-side per-machine state — machines are stopped and restarted with
+  env intact; the #905 driver build re-confirms the load-bearing case).
+  The driver half — minting, env injection, `ssh_info()` reporting the
+  minted fingerprint, fail-closed provision without mint — stays #905
+  build scope; host-key rotation stays the open question.
 - **G-D3** — /data volume-mount contract: inventory of box state that
   must persist on /data across cold stops vs the ephemeral rootfs;
   provision-time write targeting. Filed as #1205 (p2,
