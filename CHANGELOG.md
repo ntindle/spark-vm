@@ -68,6 +68,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tag: the version/sha separator changed from `+` (not in the Docker tag
   alphabet) to `-`, so release gates stop failing at the `docker buildx`
   step the way the v0.8.0 gate did. (#1271)
+- The phone-home socket path now advances the shared ingest cursor when it
+  ack-and-logs an unknown command kind, exactly like the HTTPS path does:
+  the per-minute command poll no longer re-fetches, re-acks, and re-logs
+  the same command, and a moved epoch on such a frame is adopted for the
+  next poll. (#TBD)
 
 ## [0.8.0] - 2026-10-10
 
