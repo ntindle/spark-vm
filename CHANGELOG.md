@@ -61,6 +61,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Vision-vs-state analysis of the provisioned box's runtime environment:
+  `docs/BOX_RUNTIME_WIRING_GAP_ANALYSIS.md` pins the five-entrypoint
+  operational ensemble (`pairing/README.md`) against the golden image's
+  supervisord-only reality (no systemd, no cron package, none of the five
+  wired; identity-seed enrolls as root) — findings F-RW1–F-RW8 and
+  decisions D-RW1–D-RW7 (supervisord loop programs, dedicated pairing-state
+  service user as a rebuttable recommendation, phone-home
+  `autorestart=unexpected` + `exitcodes=0,1`, deadline-anchored tick loops
+  with `autorestart=true` + supervisord-owned outer logs,
+  unenrolled-skip policy, supervisord-shaped verification contract);
+  files #1273 (healthy-box contract) + #1274 (unenrolled-skip) and feeds
+  #1219/#1220 via pointer comments.
+
 - The golden image now runs the push-notification retry worker: approvals
   filed while the push service is unreachable are retried with exponential
   backoff instead of sitting in the queue journal undelivered. (#74) (#1267)
