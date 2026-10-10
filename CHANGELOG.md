@@ -57,6 +57,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   precedence over self-generated keys and refuses to boot on invalid key
   material, so `ssh_info()` pinning holds across cold stops (#1204, #1239).
 
+- The hourly digest for coalesced push notifications now resets its
+  per-hour count when the digest is delivered: previously the count kept
+  accumulating after delivery (only the retention sweep cleaned it up),
+  so a window that kept coalescing looked busier than it was. The reset
+  rides the same transaction as the delivery bookkeeping, and a window
+  whose digest already went out is still never re-sent. (#1064) (#TBD)
+
 ### Fixed
 
 - The README inventories that describe the proxy's narrow writers, the merge gate's step names, and the pin-test suite are now kept honest by machine checks: the narrow-writer list is pinned against the deploy install loop in both directions (a writer that's installed but undocumented, or documented but not installed, fails the suite), the gate's six step names are pinned against the script that prints them, and every pin test must appear in the scripts README's new test-file inventory table. The golden-image first-boot scripts' test-seam pins now also scan the script bodies, closing the one direction the doc↔list pin didn't cover (a seam consumed in the body but listed nowhere would never warn), and `data-prep.sh`'s root-run warning loop now iterates the same canonical seam list instead of an inline copy. The proxy README also names the approval-filing CLI the deploy installs, which had no mention anywhere. (#TBD)

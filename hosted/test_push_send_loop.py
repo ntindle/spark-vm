@@ -982,3 +982,136 @@ def test_neuter_no_completion_leaves_the_work_item(conn, owner, vapid,
     # neuter is caught. (The assertion used to contradict this premise;
     # fixed per the 20261006-1659 repair.)
     assert "queued" in outcomes(conn)
+
+
+# ---------------------------------------------------------------------------
+# D87 — digest reset on delivery
+# ---------------------------------------------------------------------------
+
+def _seed_digest_state(conn, owner, window, count=3):
+    conn.execute(
+        "INSERT INTO push_digest_state (owner_principal, window_start,"
+        " count, enqueued_at) VALUES (?, ?, ?, ?)",
+        (owner, window, count, NOW.isoformat()))
+    conn.commit()
+
+
+def _digest_state_row(conn, owner, window):
+    return conn.execute(
+        "SELECT count, enqueued_at FROM push_digest_state"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner, window)).fetchone()
+
+
+def _burn_digest_retry_budget(conn, owner, device_box="box-a",
+                              device="phone"):
+    # Burn one device's retry budget directly, the way the loop writes
+    # digest attempt rows (per-box, never box_id='') — the next tick
+    # dead-letters that device without sending.
+    queued_key = conn.execute(
+        "SELECT event_key FROM push_send_results"
+        " WHERE outcome = 'queued'").fetchone()[0]
+    for _ in range(6):
+        conn.execute(
+            "INSERT INTO push_send_results (at, owner_principal, box_id,"
+            " device, event_kind, event_key, outcome, http_status,"
+            " latency_ms, sent_at, vapid_key_id)"
+            " VALUES (?, ?, ?, ?, 'digest', ?, 'retry', 500,"
+            " 10.0, NULL, 'v1')",
+            (NOW.isoformat(), owner, device_box, device, queued_key))
+    conn.commit()
+
+
+def _coalesce_one(conn, owner, window):
+    # The exact two statements the enqueue path runs when a page
+    # coalesces into the digest (D54): INSERT OR IGNORE then count+1.
+    conn.execute(
+        "INSERT OR IGNORE INTO push_digest_state"
+        " (owner_principal, window_start, count) VALUES (?, ?, 0)",
+        (owner, window))
+    conn.execute(
+        "UPDATE push_digest_state SET count = count + 1"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner, window))
+    conn.commit()
+
+
+def test_digest_completion_zeroes_state_count(conn, owner, vapid):
+    # D87: the digest's delivery consumes the window's coalescing — the
+    # count zeroes in the terminal transaction. The row (and its
+    # enqueued_at fired-marker) survives so the sweep's never-refired
+    # pin holds.
+    seed_subscription(conn, owner, "box-a", "phone")
+    window = "2026-10-06T15"
+    _seed_digest_state(conn, owner, window)
+    enqueue(conn, "digest", owner, None, window)
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["completed"] == 1
+    row = _digest_state_row(conn, owner, window)
+    assert row is not None and row[0] == 0  # reset, not deleted
+    assert row[1] is not None  # enqueued_at fired-marker survives
+    assert "queued" not in outcomes(conn)
+    assert budget(conn, "owner", owner, WINDOW) == 1  # buzzed -> kept
+
+
+def test_digest_dead_letter_completion_zeroes_state_count(conn, owner,
+                                                          vapid):
+    # D87 covers every terminal outcome, not just accepts: an exhausted
+    # retry budget still consumes the window's coalescing.
+    seed_subscription(conn, owner, "box-a", "phone")
+    window = "2026-10-06T15"
+    _seed_digest_state(conn, owner, window)
+    enqueue(conn, "digest", owner, None, window)
+    _burn_digest_retry_budget(conn, owner)
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["completed"] == 1
+    assert summary.dispositions["dead-letter"] == 1
+    row = _digest_state_row(conn, owner, window)
+    assert row is not None and row[0] == 0
+    assert row[1] is not None
+    assert budget(conn, "owner", owner, WINDOW) == 0  # nothing buzzed
+
+
+def test_digest_completion_is_idempotent_no_double_digest(conn, owner,
+                                                          vapid):
+    # D87 + D57 page-once: after a completed digest, a second tick sends
+    # nothing and cannot resurrect the count.
+    seed_subscription(conn, owner, "box-a", "phone")
+    window = "2026-10-06T15"
+    _seed_digest_state(conn, owner, window)
+    enqueue(conn, "digest", owner, None, window)
+    tick = make_tick(conn, owner, vapid)
+
+    summary1 = tick()
+    summary2 = tick(now=NOW + timedelta(minutes=5))
+
+    assert summary1.dispositions["completed"] == 1
+    assert len(tick.service.calls) == 1  # exactly one buzz, ever
+    assert summary2.dispositions.get("completed", 0) == 0
+    row = _digest_state_row(conn, owner, window)
+    assert row is not None and row[0] == 0
+
+
+def test_digest_post_fire_coalescing_does_not_refire(conn, owner, vapid):
+    # The D67 accepted drift: coalescing that lands after the digest
+    # fired increments the count from zero on the fired row, and the
+    # sweep's pending scan (count>0 AND enqueued_at NULL) still skips
+    # the window — the digest is never refired.
+    from hosted import push_sweep
+    seed_subscription(conn, owner, "box-a", "phone")
+    window = "2026-10-06T15"
+    _seed_digest_state(conn, owner, window)
+    enqueue(conn, "digest", owner, None, window)
+    tick = make_tick(conn, owner, vapid)
+    assert tick().dispositions["completed"] == 1
+
+    _coalesce_one(conn, owner, window)  # a late page coalesces post-fire
+
+    row = _digest_state_row(conn, owner, window)
+    assert row[0] == 1 and row[1] is not None  # drift, not a refire
+    assert push_sweep.sweep_digests(conn, now=NOW) == {}
+    assert len(tick.service.calls) == 1  # still exactly one buzz
