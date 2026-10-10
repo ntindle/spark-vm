@@ -75,9 +75,11 @@ a wrong or damaged artifact, it does not prove the release wasn't tampered
 with at the source. A future slice can pin Sigstore signatures or
 releases.attestation records. The tarball itself is never executed — but
 note the installed artifact *is* executed by later runs' version probes
-(`$CUA_DRIVER_BIN --version`, as the update user — root on the timer); that
-exec lives inside the same accepted release-trust envelope as the install,
-not outside it.
+(`$CUA_DRIVER_BIN --version`); that exec runs as `$CUA_DRIVER_OWNER`
+(issue #1252), never as root: the binary is user-owned, so root
+executing it would hand any compromise of the managed location instant
+root code execution. When the owner switch is impossible the probe
+refuses to guess instead of probing as root (fail-closed).
 
 Overrides (environment): `PINS_FILE` (installed pins path),
 `CUA_DRIVER_BIN` (default `/home/ntindle/cua/bin/cua-driver`),
