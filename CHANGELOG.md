@@ -98,6 +98,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   honor under `set -e` — instead of aborting the boot and leaving the
   box without SSH. (#1240)
 
+- The same script's volume-key setup can no longer silently swallow a
+  symlink-creation failure: the per-key-type failure accounting now counts
+  a failed link, so the "key setup failed partway" warning fires and the
+  log never falsely claims a link was created. (#1251)
+
 - The fleet console's refresh-interval validation is now pinned at its float
   edges: `--watch -0.0` and `--once --watch 0` both fail loudly as usage
   errors (exit 64) instead of silently degrading, closing the last two gaps
