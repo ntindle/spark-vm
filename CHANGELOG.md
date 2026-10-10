@@ -79,7 +79,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The fleet console's refresh-interval validation is now pinned at its float
   edges: `--watch -0.0` and `--once --watch 0` both fail loudly as usage
   errors (exit 64) instead of silently degrading, closing the last two gaps
-  from the earlier explicit-zero hardening. (#1233) (#TBD)
+  from the earlier explicit-zero hardening. (#1233) (#1246)
 
 - The README inventories that describe the proxy's narrow writers, the merge gate's step names, and the pin-test suite are now kept honest by machine checks: the narrow-writer list is pinned against the deploy install loop in both directions (a writer that's installed but undocumented, or documented but not installed, fails the suite), the gate's six step names are pinned against the script that prints them, and every pin test must appear in the scripts README's new test-file inventory table. The golden-image first-boot scripts' test-seam pins now also scan the script bodies, closing the one direction the doc↔list pin didn't cover (a seam consumed in the body but listed nowhere would never warn), and `data-prep.sh`'s root-run warning loop now iterates the same canonical seam list instead of an inline copy. The proxy README also names the approval-filing CLI the deploy installs, which had no mention anywhere. (#TBD)
 
