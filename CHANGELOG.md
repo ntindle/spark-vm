@@ -55,7 +55,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The golden-image tag-ref validator now pins its tag grammar to ASCII:
   non-ASCII tag references (e.g. a `ß` or CJK character in the tag) are
   rejected at pin time instead of passing validation and failing loudly
-  at `docker push`. (#TBD)
+  at `docker push`. (#1276)
 - The golden-image build gate no longer tags images with an invalid Docker
   tag: the version/sha separator changed from `+` (not in the Docker tag
   alphabet) to `-`, so release gates stop failing at the `docker buildx`
