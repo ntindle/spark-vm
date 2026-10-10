@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   key-identity accounts — the first-connect walkthrough, the manifest
   vocabulary with the claim-link bookmark rule, the "same key -> same
   box" resume semantics, the rotate-vs-claim decision rule, and the
-  connect-time wiring acceptance spec. (#TBD)
+  connect-time wiring acceptance spec. (#1277)
 
 ### Fixed
 
