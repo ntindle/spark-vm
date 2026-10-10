@@ -475,6 +475,35 @@ def test_firstboot_unmovable_conflict_continues_other_keytypes(box):
         assert (data / "ssh" / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
 
 
+def test_firstboot_ln_failure_degrades_partway(box):
+    """#1251: a failing `ln -sfn` inside ensure_link must propagate
+    (return 1) into the call site's $failed aggregation — the boot
+    degrades to rootfs keys with the partway WARNING, never aborts, and
+    the log must NOT contain the false "linked ..." claim for any key
+    type. Without the guard, the echo's status masks the ln failure."""
+    data, ssh_etc, env, logdir = box
+    bindir = _bindir_of(env)
+    (bindir / "ln").write_text("#!/bin/bash\nexit 1\n")
+    (bindir / "ln").chmod(0o755)
+    # Pass-through flock stub: this test is about ln failure, not the
+    # lock path — don't depend on the real flock binary being present
+    # (its absence would take the lock-timeout branch and pass the
+    # assertions for the wrong reason).
+    (bindir / "flock").write_text("#!/bin/bash\nexit 0\n")
+    (bindir / "flock").chmod(0o755)
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert "volume-key ensure failed partway" in r.stderr
+    # No false "linked ..." claim may appear for any key type:
+    assert "linked" not in r.stderr
+    assert (logdir / "invoked").exists()  # sshd still gets keys
+    # No symlinks were created; the keygen stub wrote real rootfs files
+    # instead (degraded, exactly like the unmounted-/data path):
+    for t in KEYTYPES:
+        assert not (ssh_etc / f"ssh_host_{t}_key").is_symlink()
+        assert (ssh_etc / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+
+
 def test_firstboot_keys_present_skips_generation(box):
     """Idempotency: existing keys (on the volume) skip ssh-keygen."""
     data, ssh_etc, env, logdir = box

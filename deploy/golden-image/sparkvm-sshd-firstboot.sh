@@ -122,10 +122,17 @@ ensure_link() { # link target mode tag
         cur="$(readlink "$link")"
         if [ "$cur" != "$target" ]; then
             echo "$tag: WARNING: repairing mispointed symlink $link ($cur -> $target)" >&2
-            ln -sfn "$target" "$link"
+            # #1251: this function runs under ensure_volume_keys's
+            # if-condition (errexit disabled), so a failing ln must
+            # propagate explicitly — otherwise the call site's $failed
+            # aggregation misses it and the log falsely claims the link
+            # was created.
+            ln -sfn "$target" "$link" || return 1
         fi
     else
-        ln -sfn "$target" "$link"
+        # Same #1251 guard on the create path: the "linked" echo below
+        # must not fire when the ln itself failed.
+        ln -sfn "$target" "$link" || return 1
         echo "$tag: linked $link -> $target" >&2
     fi
 }
