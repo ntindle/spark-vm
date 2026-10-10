@@ -52,6 +52,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The golden image now runs the push-notification retry worker: approvals
+  filed while the push service is unreachable are retried with exponential
+  backoff instead of sitting in the queue journal undelivered. (#74) (#1267)
+
 - The `cred` CLI and its `credlib` library now have a component README:
   what each command does, how the narrow sudo writers keep secret values
   out of the agent's reach, the single-source name/entry/host validation

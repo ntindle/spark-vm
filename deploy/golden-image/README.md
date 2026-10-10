@@ -12,7 +12,7 @@ consumable by the driver"). The image itself is *gated* per build by
 | File | What it is |
 |---|---|
 | `Dockerfile` | The recipe. Bakes the swap proxy stack, confirmd, cred-ui, the CUA desktop stack, the gate fixture, and the image manifest from the clean repo tree. No systemd: tini + supervisord. |
-| `supervisord.conf` | The daemon set. Commands mirror the repo's systemd units (`proxy/swap-proxy.service`, `proxy/swap-inference.service`, `confirm/confirmd.service`, `cred-ui/cred-ui.service`) so the two cannot diverge silently. |
+| `supervisord.conf` | The daemon set. Commands mirror the repo's systemd units (`proxy/swap-proxy.service`, `proxy/swap-inference.service`, `confirm/confirmd.service`, `confirm/push-worker.service`, `cred-ui/cred-ui.service`) so the two cannot diverge silently. |
 | `sparkvm-sshd-firstboot.sh` | sshd entrypoint: generates host keys on first boot (per-machine secrets are never baked), then execs `sshd -D`. |
 | `identity-seed-hook.sh` | First-boot identity seeding (#1203): reads the D-D6 provision-time env and presents the attestation token to the pairing client. See below. |
 | `data-prep.sh` | First-boot /data layout (#1205): creates the pinned data-volume subdirs (pairing, approvals, confirmd, ssh) with their contract owners and symlinks the sshd host-key paths onto the volume. No-op without /data. See `docs/DATA_VOLUME_CONTRACT.md`. |

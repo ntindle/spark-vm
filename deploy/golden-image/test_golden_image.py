@@ -215,6 +215,7 @@ def test_supervisord_program_set():
         "swap-proxy",
         "swap-inference",
         "confirmd",
+        "push-worker",
         "cred-ui",
         "cua-stack",
         "cua-bridge",
@@ -240,6 +241,7 @@ def test_supervisord_privilege_split():
         "swap-proxy": "swapd",
         "swap-inference": "swapd",
         "confirmd": "swapd",
+        "push-worker": "swapd",
         "cred-ui": "agent",
         "cua-stack": "agent",
         "cua-bridge": "agent",
@@ -280,10 +282,30 @@ def test_supervisord_commands_mirror_units():
         ("swap-proxy", "proxy/swap-proxy.service"),
         ("swap-inference", "proxy/swap-inference.service"),
         ("confirmd", "confirm/confirmd.service"),
+        ("push-worker", "confirm/push-worker.service"),
     ):
         exec_start = _unit_exec_start(unit)
         cmd = cfg[f"program:{prog}"]["command"]
         assert exec_start in cmd, f"{prog}: unit ExecStart not mirrored in supervisord command"
+
+
+def test_supervisord_log_rotation_uniform():
+    """Every program section carries the same log-rotation quartet — a
+    section missing one line (e.g. stderr_logfile_backups) silently gets
+    supervisord's default instead, which is exactly the kind of
+    copy-paste drift this file's uniform convention exists to prevent."""
+    cfg = _supervisord()
+    for s in cfg.sections():
+        if not s.startswith("program:"):
+            continue
+        for key, want in (
+            ("stdout_logfile_maxbytes", "10MB"),
+            ("stdout_logfile_backups", "5"),
+            ("stderr_logfile_maxbytes", "10MB"),
+            ("stderr_logfile_backups", "5"),
+        ):
+            got = cfg[s].get(key)
+            assert got == want, f"{s}: {key}={got!r}, want {want!r}"
 
 
 # --- build driver (build-image.sh) ----------------------------------------------
