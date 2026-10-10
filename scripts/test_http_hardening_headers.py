@@ -16,8 +16,11 @@ Deliberate deltas (asserted here, not drift):
 - JSON/PNG-only API surfaces (cua-bridge _json/_send_png, fleet/api _send,
   tenant_status _send_json, confirmd _send_json/_deny/_send_sw_js) carry no
   X-Frame-Options: nothing there is framed.
-- waitlistd (public landing page) carries no X-Frame-Options: the page is
-  public and may be legitimately embedded. nosniff + no-referrer still apply.
+- waitlistd (public landing page + invite-claim) carries no X-Frame-Options:
+  the claim flow is token-Bearer <redacted> with no ambient session — framing the page
+  grants an attacker no capability beyond what the single-use invite token
+  already confers, and a claim only affects the token holder's own row.
+  nosniff + no-referrer still apply (asserted; XFO absence pinned too).
 
 Documented exclusions (not required, not asserted):
 - stdlib send_error HTML pages: reachable only via malformed requests, no
@@ -149,7 +152,7 @@ _PINNED = [
     ("pin_waitlistd", "_Handler", "_send",
      lambda c: c.h._send(200, "<html></html>"),
      BASE_HEADERS,
-     "public landing page; framing permitted (X-Robots-Tag covers crawlers)"),
+     "invite-claim is token-Bearer <redacted>, no ambient session — framing grants no new capability"),
 ]
 
 
@@ -181,13 +184,15 @@ def test_html_emitters_send_x_frame_options_deny():
 
 
 def test_waitlistd_deliberately_sends_no_x_frame_options():
-    """The waitlistd 'framing permitted' delta is machine-checked in both
-    directions: the public landing page must NOT gain X-Frame-Options
-    (legitimate embedding would silently break)."""
+    """The waitlistd 'no X-Frame-Options' delta is machine-checked in both
+    directions: the invite-claim flow is token-Bearer <redacted> with no ambient
+    session, so framing grants no new capability — but if XFO ever appears
+    here the suite must say so loudly rather than silently changing the
+    page's framing posture."""
     cap = _Capture(_MODS["pin_waitlistd"]._Handler)
     cap.h._send(200, "<html></html>")
     assert "X-Frame-Options" not in cap.headers, \
-        "waitlistd must stay framable — the public page may be embedded"
+        "waitlistd framing posture changed — deliberate, re-justify or revert"
 
 
 # ---------------------------------------------------------------------------
