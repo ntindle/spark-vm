@@ -2955,7 +2955,9 @@ def _phone_home_bump_epoch(d, token=()):
 # -- Close-code reconnect policy (spec §6) ----------------------------------------
 
 # Each entry: (action, param). Actions:
-#   "reconnect" — open a new session (param: delay seconds, None = backoff)
+#   "reconnect" — open a new session (param is honored only for
+#                 "going-away" (the ≥60 s wait); every other reconnect
+#                 uses the generic backoff — param is ignored there)
 #   "adopt"     — persist param as the generation, bump epoch, reconnect now
 #   "exit"      — leave the daemon (param: exit code)
 def _phone_home_close_action(code, frame):
@@ -3445,9 +3447,48 @@ class _PhoneHomeSession:
                 _phone_home_say(
                     self.d,
                     f"seq={seq}: unknown command kind "
-                    f"{_plane_text(kind)!r} — acked without execution",
+                    f"{_plane_text(kind)!r} — ack-and-log policy "
+                    "(no execution)",
                     self.token)
-                consumed = True
+                # #1279: the socket is a carrier for the same durable
+                # queue the HTTPS cron ingest serves, so ack-and-log must
+                # advance the shared cursor exactly like _ingest_commands
+                # does — otherwise every cron tick re-fetches, re-acks,
+                # and re-logs this seq, and a moved epoch on the frame is
+                # never adopted (the next fetch asserts a stale ?epoch=).
+                # Same non-blocking .ingest.lock discipline as the
+                # approval_decision branch below: contention defers to the
+                # DO's re-drive rather than stalling the frame loop. A
+                # lock-file open failure fails closed like contention
+                # (loud log, no ack) — never a traceback out of the
+                # frame loop.
+                try:
+                    lock_fd = os.open(os.path.join(self.d, _INGEST_LOCK_FILE),
+                                      os.O_CREAT | os.O_RDWR, 0o600)
+                except OSError as e:
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: cannot open ingest lock "
+                                    f"({e}) — not acked, will re-drive",
+                                    self.token)
+                    return "ok"
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(lock_fd)
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: ingest lock contended — "
+                                    "not acked, will re-drive", self.token)
+                    return "ok"
+                try:
+                    if self._save_socket_ingest_state(seq, epoch):
+                        consumed = True
+                    else:
+                        # State saves failed loudly: withhold the ack so
+                        # the DO re-drives; redelivery is idempotent.
+                        consumed = False
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
             elif kind == "approval_decision":
                 # Join the .ingest.lock discipline (see the
                 # _ingest_commands wrapper): the idempotency log covers

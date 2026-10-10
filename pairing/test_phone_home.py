@@ -1651,6 +1651,44 @@ def test_socket_command_unknown_kind_acked_not_executed(ctx, monkeypatch,
     assert rc == 1
     assert os.listdir(os.path.join(approvals, "consumed")) == []
     assert "unknown command kind" in capsys.readouterr().out
+    # #1279: the socket carrier advances the shared cursor exactly like
+    # the HTTPS carrier (_ingest_commands) — the cron must not
+    # re-fetch, re-ack, and re-log this seq on its next tick, and the
+    # frame's epoch is adopted for the next ?epoch= claim.
+    with open(os.path.join(ctx.dir, "commands_cursor.json")) as f:
+        cursor_doc = json.load(f)
+    assert cursor_doc["cursor"] == 1
+    assert cursor_doc["epoch"] == 0
+
+
+def test_socket_command_unknown_kind_lock_contention_defers(ctx, monkeypatch,
+                                                           tmp_path, capsys):
+    # #1279: the unknown-kind cursor advance joins the .ingest.lock
+    # discipline — while the lock is contended the ack is withheld (the
+    # DO's re-drive heals it) and the shared cursor stays put.
+    import fcntl
+    _s5b_setup(ctx, monkeypatch, tmp_path)
+    lock_fd = os.open(os.path.join(ctx.dir, spark_pair._INGEST_LOCK_FILE),
+                      os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        stub = StubDO([[("welcome",),
+                        ("send-command", 1, 0,
+                         {"kind": "future_kind", "payload": {}}),
+                        ("drain", 1.0),
+                        ("close", "revoked", {})]])
+        rc = _run_client(ctx, stub)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert rc == 1
+    # Contended: nothing acked (drain-based proof), the cursor never
+    # advanced, and the log says so loudly.
+    assert _s5b_drained_acks(stub) == []
+    assert not os.path.exists(
+        os.path.join(ctx.dir, "commands_cursor.json")), \
+        "contended unknown-kind command must not advance the cursor"
+    assert "ingest lock contended" in capsys.readouterr().out
 
 
 def test_socket_command_oversize_payload_rejected(ctx, monkeypatch,
