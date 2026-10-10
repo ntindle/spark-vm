@@ -970,10 +970,27 @@ class Handler(BaseHTTPRequestHandler):
         # Issue #1228: nosniff — the bridge is API-only (JSON + one PNG),
         # so content-type confusion is the only sniffing risk; nothing
         # here is framed, so X-Frame-Options is not needed.
+        # Issue #1237: Referrer-Policy settled to no-referrer across all
+        # localhost HTTP surfaces.
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_png(self, png):
+        # Issue #1237: the screenshot response goes through a named
+        # choke point (like _json) so the header pin test can assert it
+        # directly instead of parsing the inline do_GET block.
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        # Issue #1228: nosniff — same rationale as _json above.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", str(len(png)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(png)
 
     def _body(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
@@ -1074,14 +1091,7 @@ class Handler(BaseHTTPRequestHandler):
                         os.unlink(out)
                     except OSError:
                         pass
-                self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                # Issue #1228: nosniff — same rationale as _json above.
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Length", str(len(png)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(png)
+                self._send_png(png)
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:

@@ -146,6 +146,7 @@ never drift from what's on disk.
 | `test_docs_index_coverage.py` | `docs/` index coverage |
 | `test_frontdoor_deploy.py` | sparkvm.dev front-door deploy (H28) |
 | `test_funnel_metrics.py` | `funnel_metrics.py` waitlist funnel queries |
+| `test_http_hardening_headers.py` | localhost HTTP hardening-header pin test (issue #1237) |
 | `test_lint_changelog_ritual.py` | changelog ritual linter |
 | `test_local_gate.py` | `local-gate.sh` merge-gate runner |
 | `test_pytest_ini_covers_all.py` | `pytest.ini` testpaths reachability |

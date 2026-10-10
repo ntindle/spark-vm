@@ -2009,8 +2009,31 @@ class Handler(BaseHTTPRequestHandler):
         audit_log("403", peer, login, reason)
         self.send_response(403)
         self.send_header("Content-Type", "text/plain")
+        # Issue #1237: the 403 text/plain refusal is a real response
+        # path too — pin the same base hardening headers as every other
+        # localhost HTTP surface.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(("forbidden: %s\n" % reason).encode())
+
+    def _send_sw_js(self):
+        # Issue #77 (L3): same hardening headers as the HTML pages —
+        # nosniff for the fetched worker, no-store (a stale worker would
+        # show stale copy). Issue #1237: Referrer-Policy settled to
+        # no-referrer across all localhost HTTP surfaces. Extracted from
+        # do_GET so the header pin test (scripts/test_http_hardening_
+        # headers.py) can assert the path through a named choke point
+        # instead of an inline block.
+        data = _SW_JS.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _auth(self):
         """Finding 47: the peer must be a remote tailnet node whose
@@ -2036,14 +2059,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         # Issue #77 (L3): hardening headers on HTML responses — nosniff
         # so a content-type confusion cannot turn an approval page into
-        # an executed script; same-origin referrer so pending-approval
-        # URLs never leak to third parties via the Referer header.
+        # an executed script. Issue #1237: Referrer-Policy settled to
+        # no-referrer across all localhost HTTP surfaces (stricter than
+        # the previous same-origin; pending-approval URLs never leak to
+        # third parties via the Referer header).
         # Issue #1227: X-Frame-Options: DENY — the approval pages carry
         # approve/deny clicks, and nothing legitimately frames them, so
         # a same-box page cannot clickjack an operator into approving a
         # credential use they did not intend.
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -2061,10 +2086,15 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, code=200):
         """Issue #1: JSON surface for the list pollers. Authenticated
         exactly like the pages (the caller runs _auth first); no
-        caching — approval state is live."""
+        caching — approval state is live. Issue #1237: the base
+        hardening headers (nosniff + no-referrer) pinned across all
+        localhost HTTP surfaces.
+        """
         data = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -2138,17 +2168,7 @@ class Handler(BaseHTTPRequestHandler):
             # The service worker is fetched by the owner's browser from
             # the same origin, so _auth (already run) passes. Served
             # with no-store: a stale worker would show stale copy.
-            data = _SW_JS.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/javascript")
-            # Issue #77 (L3): same hardening headers as the HTML pages —
-            # nosniff for the fetched worker, same-origin referrer.
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "same-origin")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self._send_sw_js()
             return
         if self.path == "/":
             body = ('<h1>Pending approvals</h1>'
