@@ -422,6 +422,59 @@ def test_firstboot_unmounted_data_falls_back_to_rootfs(box):
     assert not (data / "ssh").exists()
 
 
+def _bindir_of(env):
+    import pathlib
+    return pathlib.Path(env["PATH"].split(os.pathsep)[0])
+
+
+def test_firstboot_flock_failure_degrades_to_rootfs(box):
+    """#1240: a flock timeout (data-prep's identical loop wedged) must
+    degrade to rootfs keys with a loud WARNING — never abort the boot
+    under set -e before sshd starts."""
+    data, ssh_etc, env, logdir = box
+    bindir = _bindir_of(env)
+    (bindir / "flock").write_text("#!/bin/bash\nexit 1\n")
+    (bindir / "flock").chmod(0o755)
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert "timed out waiting for the sshkey ensure lock" in r.stderr
+    assert "volume-key ensure failed partway" in r.stderr
+    assert (logdir / "invoked").exists()  # sshd still gets keys
+    for t in KEYTYPES:
+        assert not (ssh_etc / f"ssh_host_{t}_key").is_symlink()
+        assert (ssh_etc / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+
+
+def test_firstboot_unmovable_conflict_continues_other_keytypes(box):
+    """#1240: ensure_link returning 1 (a rootfs key that cannot be moved
+    onto the volume) degrades per key type — the loop continues with the
+    remaining types and the call-site WARNING fires; the boot proceeds."""
+    data, ssh_etc, env, logdir = box
+    bindir = _bindir_of(env)
+    (bindir / "mv").write_text("#!/bin/bash\nexit 1\n")
+    (bindir / "mv").chmod(0o755)
+    # Pass-through flock stub: this test is about per-type mv failure,
+    # not the lock path — don't depend on the real flock binary being
+    # present (its absence would take the lock-timeout branch and fail
+    # the symlink assertions for the wrong reason).
+    (bindir / "flock").write_text("#!/bin/bash\nexit 0\n")
+    (bindir / "flock").chmod(0o755)
+    (ssh_etc / "ssh_host_rsa_key").write_text("ROOTFS-RSA")
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert "could not be moved onto the volume" in r.stderr
+    assert "volume-key ensure failed partway" in r.stderr
+    # The unmovable type stays a rootfs real file, untouched:
+    assert not (ssh_etc / "ssh_host_rsa_key").is_symlink()
+    assert (ssh_etc / "ssh_host_rsa_key").read_text() == "ROOTFS-RSA"
+    # The other types still landed on the volume through the ensure:
+    for t in ("ecdsa", "ed25519"):
+        assert (ssh_etc / f"ssh_host_{t}_key").is_symlink()
+        assert os.readlink(ssh_etc / f"ssh_host_{t}_key") == \
+            str(data / "ssh" / f"ssh_host_{t}_key")
+        assert (data / "ssh" / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+
+
 def test_firstboot_keys_present_skips_generation(box):
     """Idempotency: existing keys (on the volume) skip ssh-keygen."""
     data, ssh_etc, env, logdir = box

@@ -30,7 +30,10 @@
 # start-ordering, not a completion barrier — so this script DEFENSIVELY
 # ensures its own precondition (D-V4) instead of trusting data-prep's
 # timing. Without /data (self-hosted / dev) behavior is exactly as
-# before: keys generate into /etc/ssh.
+# before: keys generate into /etc/ssh. The ensure is failure-tolerant
+# by design (#1240): any ensure failure (lock timeout, unmovable
+# conflict file, mkdir failure) degrades to rootfs keys with a loud
+# warning — the ensure must never prevent sshd from starting.
 #
 # Idempotent: a machine that already serves the attested key (same
 # fingerprint as SPARKVM_SSH_HOST_KEYS, on the volume or the rootfs)
@@ -130,6 +133,20 @@ ensure_link() { # link target mode tag
 ensure_volume_keys() {
     # D-V4 defensive ensure: /data/ssh exists and the /etc/ssh symlinks
     # point at it. Idempotent — a no-op when data-prep.sh already ran.
+    #
+    # FAILURE POSTURE (deliberate, #1240): this function must never
+    # abort the script — losing SSH is worse than rotating keys. The
+    # call site runs it in an if-condition, which disables errexit for
+    # the WHOLE body, so every failure inside degrades to rootfs keys
+    # with a loud WARNING (same as the unmounted-/data path below)
+    # instead of killing sshd before it starts: a flock timeout against
+    # data-prep's identical loop, a lock-file creation failure, an
+    # mkdir/chmod failure, and an unmovable conflict file in
+    # ensure_link — the last returns 1 per key type, and the loop
+    # continues with the remaining types rather than aborting the
+    # whole ensure. The attested-key path below is NOT weakened by
+    # this: present-but-invalid SPARKVM_SSH_HOST_KEYS still refuses to
+    # start sshd (fail closed per D-D3) regardless of the ensure.
     [ -d "$DATA_ROOT" ] || return 0
     # Security B1: not a mount, not durable. Loud warning and fall back
     # to today's rootfs key behavior so sshd still starts — unlike
@@ -140,24 +157,52 @@ ensure_volume_keys() {
         return 0
     fi
     if [ ! -d "$DATA_ROOT/ssh" ]; then
-        mkdir -p "$DATA_ROOT/ssh"
-        chmod 0700 "$DATA_ROOT/ssh"
-        echo "sparkvm-sshd-firstboot: created $DATA_ROOT/ssh" >&2
+        if mkdir -p "$DATA_ROOT/ssh" && chmod 0700 "$DATA_ROOT/ssh"; then
+            echo "sparkvm-sshd-firstboot: created $DATA_ROOT/ssh" >&2
+        else
+            echo "sparkvm-sshd-firstboot: WARNING: could not create $DATA_ROOT/ssh — continuing with rootfs keys (cold stops will rotate them)" >&2
+            return 1
+        fi
     fi
     # Serialize against data-prep.sh's identical loop (QA B1 / D-V4).
-    exec 9>"/tmp/sparkvm-sshkey-ensure.lock"
-    flock -w 120 9
+    # Lock failures degrade (loud WARNING + rootfs keys), never abort
+    # the boot — but the loop below NEVER runs without the lock held: a
+    # timeout means data-prep is mid-move, and racing it unserialized
+    # would be worse than degrading. Per-type ensure_link failures
+    # aggregate into $failed (never abort the loop): the call site's
+    # WARNING fires on ANY partial failure.
+    if ! exec 9>"/tmp/sparkvm-sshkey-ensure.lock"; then
+        echo "sparkvm-sshd-firstboot: WARNING: could not open the sshkey ensure lock — continuing with rootfs keys (cold stops will rotate them)" >&2
+        return 1
+    fi
+    if ! flock -w 120 9; then
+        echo "sparkvm-sshd-firstboot: WARNING: timed out waiting for the sshkey ensure lock (data-prep may be mid-move) — continuing with rootfs keys (cold stops will rotate them)" >&2
+        # NOTE: no 2>/dev/null here — on a bare exec (no command) that
+        # redirect would permanently send the SCRIPT's stderr to
+        # /dev/null, swallowing every later warning.
+        exec 9>&- || true
+        return 1
+    fi
+    local failed=0
     for t in "${KEYTYPES[@]}"; do
         link="$SSH_ETC/ssh_host_${t}_key"
         target="$DATA_ROOT/ssh/ssh_host_${t}_key"
-        ensure_link "$link" "$target" 0600 "sparkvm-sshd-firstboot"
-        ensure_link "${link}.pub" "${target}.pub" 0644 "sparkvm-sshd-firstboot"
+        ensure_link "$link" "$target" 0600 "sparkvm-sshd-firstboot" || failed=1
+        ensure_link "${link}.pub" "${target}.pub" 0644 "sparkvm-sshd-firstboot" || failed=1
     done
-    flock -u 9
-    exec 9>&-
+    flock -u 9 || true
+    exec 9>&- || true
+    return "$failed"
 }
 
-ensure_volume_keys
+# #1240: deliberate failure posture — the ensure must never abort the
+# boot. An if-condition disables errexit for the whole function body,
+# so any ensure failure (flock timeout, lock-file or mkdir failure,
+# unmovable conflict file) degrades to rootfs keys with a loud WARNING
+# instead of killing sshd before it starts.
+if ! ensure_volume_keys; then
+    echo "sparkvm-sshd-firstboot: WARNING: volume-key ensure failed partway — continuing with rootfs keys (cold stops will rotate them)" >&2
+fi
 
 # --- D-D3 host-key attestation (#1204) --------------------------------------
 # Machine-readable receipt of the serving host identity (per-boot; the
