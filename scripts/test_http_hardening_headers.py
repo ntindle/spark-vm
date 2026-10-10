@@ -17,7 +17,7 @@ Deliberate deltas (asserted here, not drift):
   tenant_status _send_json, confirmd _send_json/_deny/_send_sw_js) carry no
   X-Frame-Options: nothing there is framed.
 - waitlistd (public landing page + invite-claim) carries no X-Frame-Options:
-  the claim flow is token-Bearer <redacted> with no ambient session — framing the page
+  the claim flow carries its credential in the single-use invite token — no ambient session, so framing the page
   grants an attacker no capability beyond what the single-use invite token
   already confers, and a claim only affects the token holder's own row.
   nosniff + no-referrer still apply (asserted; XFO absence pinned too).
@@ -152,7 +152,7 @@ _PINNED = [
     ("pin_waitlistd", "_Handler", "_send",
      lambda c: c.h._send(200, "<html></html>"),
      BASE_HEADERS,
-     "invite-claim is token-Bearer <redacted>, no ambient session — framing grants no new capability"),
+     "invite-claim carries its credential in the single-use token, no ambient session — framing grants no new capability"),
 ]
 
 
@@ -185,7 +185,8 @@ def test_html_emitters_send_x_frame_options_deny():
 
 def test_waitlistd_deliberately_sends_no_x_frame_options():
     """The waitlistd 'no X-Frame-Options' delta is machine-checked in both
-    directions: the invite-claim flow is token-Bearer <redacted> with no ambient
+    directions: the invite-claim flow carries its credential in the single-use
+    invite token, with no ambient
     session, so framing grants no new capability — but if XFO ever appears
     here the suite must say so loudly rather than silently changing the
     page's framing posture."""
