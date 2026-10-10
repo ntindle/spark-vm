@@ -107,7 +107,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The same script's volume-key setup can no longer silently swallow a
   symlink-creation failure: the per-key-type failure accounting now counts
-  a failed link, so the "key setup failed partway" warning fires and the
+  a failed link, so the "volume-key ensure failed partway" warning fires and the
   log never falsely claims a link was created. (#1251)
 
 - The fleet console's refresh-interval validation is now pinned at its float

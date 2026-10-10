@@ -125,8 +125,11 @@ ensure_link() { # link target mode tag
             # #1251: this function runs under ensure_volume_keys's
             # if-condition (errexit disabled), so a failing ln must
             # propagate explicitly — otherwise the call site's $failed
-            # aggregation misses it and the log falsely claims the link
-            # was created.
+            # aggregation misses it. (The create path below adds the
+            # extra reason that its "linked" echo must not fire on a
+            # failed ln; the repair path has no such echo — the guard
+            # here makes the propagation explicit and robust against
+            # future edits.)
             ln -sfn "$target" "$link" || return 1
         fi
     else

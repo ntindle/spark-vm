@@ -498,10 +498,109 @@ def test_firstboot_ln_failure_degrades_partway(box):
     assert "linked" not in r.stderr
     assert (logdir / "invoked").exists()  # sshd still gets keys
     # No symlinks were created; the keygen stub wrote real rootfs files
-    # instead (degraded, exactly like the unmounted-/data path):
+    # instead (degraded, exactly like the unmounted-/data path). Pin both
+    # the private key and its .pub (the stub writes PUBLIC-<t> alongside
+    # PRIVATE-<t>; the .pub is implied by the stub, now stated):
     for t in KEYTYPES:
         assert not (ssh_etc / f"ssh_host_{t}_key").is_symlink()
         assert (ssh_etc / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+        assert not (ssh_etc / f"ssh_host_{t}_key.pub").is_symlink()
+        assert (ssh_etc / f"ssh_host_{t}_key.pub").read_text() == f"PUBLIC-{t}"
+
+
+def test_firstboot_repair_path_ln_failure_degrades_partway(box):
+    """#1255 (repair-path test pin from the #1251 review rounds): a failing
+    `ln -sfn` in ensure_link's mispointed-symlink REPAIR branch must
+    propagate (return 1) into the call site's $failed aggregation — the
+    partway WARNING fires and the boot degrades, never aborts. This pin is
+    documentation, not a regression test: pre-#1251 the repair branch's
+    failure already propagated via the inner if-status (identical
+    hardening), so the `|| return 1` guard pins the contract rather than
+    changing behavior — the test stays non-vacuous by neutering the guard
+    to `|| true` (see the neuter check in the run log)."""
+    data, ssh_etc, env, logdir = box
+    bindir = _bindir_of(env)
+    # Fail ln only for the rsa key's REPAIR call: argv ending in the bare
+    # ssh_host_rsa_key link (no .pub suffix) — the rsa .pub create call and
+    # every other key type pass through to the real ln, isolating the
+    # repair branch's propagation.
+    (bindir / "ln").write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        "  *ssh_host_rsa_key) exit 1 ;;\n"
+        "esac\n"
+        'exec /bin/ln "$@"\n'
+    )
+    (bindir / "ln").chmod(0o755)
+    # Pass-through flock stub: this test is about ln failure, not the
+    # lock path — don't depend on the real flock binary being present
+    # (its absence would take the lock-timeout branch and fail the
+    # assertions for the wrong reason).
+    (bindir / "flock").write_text("#!/bin/bash\nexit 0\n")
+    (bindir / "flock").chmod(0o755)
+    # Mispointed rsa symlink (points at a REAL wrong file, so the keygen
+    # stub cleanly skips rsa instead of failing a redirect through a
+    # dangling link): the repair branch is taken, ln fails, and the
+    # guard must propagate the failure.
+    wrong = data.parent / "wrong-target"
+    wrong.write_text("WRONG")
+    (ssh_etc / "ssh_host_rsa_key").symlink_to(wrong)
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert "repairing mispointed symlink" in r.stderr
+    assert "volume-key ensure failed partway" in r.stderr
+    # The mispointed rsa link was never repaired (still points at the
+    # wrong target); the other types landed on the volume through the
+    # ensure, per-type continuation intact:
+    assert os.readlink(ssh_etc / "ssh_host_rsa_key") == str(wrong)
+    for t in ("ecdsa", "ed25519"):
+        assert (ssh_etc / f"ssh_host_{t}_key").is_symlink()
+        assert os.readlink(ssh_etc / f"ssh_host_{t}_key") == \
+            str(data / "ssh" / f"ssh_host_{t}_key")
+        assert (data / "ssh" / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+        assert (ssh_etc / f"ssh_host_{t}_key.pub").is_symlink()
+
+
+def test_firstboot_partial_ln_failure_continues_other_keytypes(box):
+    """#1255 (partial-failure ln pin from the #1251 review rounds): one
+    key type's ln fails while the others succeed — the ensure continues
+    with the remaining types through a failing ln (the mv-based
+    unmovable-conflict test covers per-type continuation but not the ln
+    variant), and the call-site WARNING fires."""
+    data, ssh_etc, env, logdir = box
+    bindir = _bindir_of(env)
+    # Fail ln for the rsa key type (key + .pub — both argv contain
+    # ssh_host_rsa_key), pass everything else through to the real ln.
+    (bindir / "ln").write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        "  *ssh_host_rsa_key*) exit 1 ;;\n"
+        "esac\n"
+        'exec /bin/ln "$@"\n'
+    )
+    (bindir / "ln").chmod(0o755)
+    # Pass-through flock stub: this test is about ln failure, not the
+    # lock path — don't depend on the real flock binary being present
+    # (its absence would take the lock-timeout branch and fail the
+    # assertions for the wrong reason).
+    (bindir / "flock").write_text("#!/bin/bash\nexit 0\n")
+    (bindir / "flock").chmod(0o755)
+    r = run_script(FIRSTBOOT, env)
+    assert r.returncode == 0, r.stderr
+    assert "volume-key ensure failed partway" in r.stderr
+    # The failed type degraded to rootfs real files (no link was ever
+    # created; the keygen stub wrote them directly):
+    assert not (ssh_etc / "ssh_host_rsa_key").is_symlink()
+    assert (ssh_etc / "ssh_host_rsa_key").read_text() == "PRIVATE-rsa"
+    assert not (ssh_etc / "ssh_host_rsa_key.pub").is_symlink()
+    assert (ssh_etc / "ssh_host_rsa_key.pub").read_text() == "PUBLIC-rsa"
+    # The other types still landed on the volume through the ensure:
+    for t in ("ecdsa", "ed25519"):
+        assert (ssh_etc / f"ssh_host_{t}_key").is_symlink()
+        assert os.readlink(ssh_etc / f"ssh_host_{t}_key") == \
+            str(data / "ssh" / f"ssh_host_{t}_key")
+        assert (data / "ssh" / f"ssh_host_{t}_key").read_text() == f"PRIVATE-{t}"
+        assert (ssh_etc / f"ssh_host_{t}_key.pub").is_symlink()
 
 
 def test_firstboot_keys_present_skips_generation(box):
