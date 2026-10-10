@@ -93,7 +93,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   now has a build-path analysis: what the vision asks of it, what exists
   today (nothing yet — the name is doing triple duty across three docs),
   and the five genuinely-new build slices it files, from the design spec
-  itself to the tenant-plane envelope authentication. (#1257)
+  itself to the tenant-plane envelope authentication. (#1257) (#1262)
 
 ### Fixed
 
