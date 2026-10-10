@@ -3838,10 +3838,17 @@ def _xlock_holder_child(approvals_dir, aid, ready, hold_secs):
         time.sleep(hold_secs)
 
 
-def _xlock_writer_child(approvals_dir, aid, path, tag, delay):
-    """Child body: append start/end markers under the xlock."""
+def _xlock_writer_child(approvals_dir, aid, path, tag, delay, ready=None):
+    """Child body: append start/end markers under the xlock.
+
+    ``ready`` (a multiprocessing Event) is set immediately after the
+    lock is acquired, so the test can order the two children
+    deterministically instead of guessing with a sleep.
+    """
     cd.APPROVALS = approvals_dir
     with cd._aid_xlock(aid):
+        if ready is not None:
+            ready.set()
         with open(path, "a") as f:
             f.write(tag + "-start\n")
             f.flush()
@@ -3906,19 +3913,30 @@ class AidXlockTests(unittest.TestCase):
     def test_xlock_serializes_two_processes(self):
         """Two processes' critical sections never interleave — the
         serialization the #945 race fix depends on. (Neuter check: with
-        the lock body removed, the markers interleave and this fails.)"""
+        the lock body removed, the markers interleave and this fails.)
+        B starts only after A demonstrably holds the lock — no sleep
+        guess, so a loaded box cannot invert the start order."""
         aid = "c3d4e5f60718293a4"
         marks = os.path.join(self.tmp, "marks.txt")
         open(marks, "w").close()
+        a_ready = self._ctx.Event()
         pa = self._ctx.Process(target=_xlock_writer_child,
-                               args=(self.tmp, aid, marks, "A", 1.0))
+                               args=(self.tmp, aid, marks, "A", 1.0,
+                                     a_ready))
         pb = self._ctx.Process(target=_xlock_writer_child,
                                args=(self.tmp, aid, marks, "B", 0.0))
         pa.start()
-        time.sleep(0.4)  # A holds the lock, mid-critical-section
-        pb.start()
-        pa.join(timeout=10)
-        pb.join(timeout=10)
+        try:
+            self.assertTrue(a_ready.wait(timeout=10),
+                            "A never acquired the xlock")
+            pb.start()
+            pa.join(timeout=10)
+            pb.join(timeout=10)
+        finally:
+            for p in (pa, pb):
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5)
         self.assertEqual((pa.exitcode, pb.exitcode), (0, 0))
         with open(marks) as f:
             lines = [ln.strip() for ln in f if ln.strip()]
