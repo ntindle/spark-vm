@@ -941,7 +941,9 @@ class ConfirmdTests(unittest.TestCase):
 
     def test_1_send_html_hardening_headers(self):
         """Issue #77 (L3): every HTML response carries nosniff and a
-        same-origin referrer policy. Issue #1227: X-Frame-Options: DENY —
+        no-referrer policy (issue #1237 settled the referrer policy to
+        no-referrer across all localhost HTTP surfaces; the previous
+        same-origin value is retired). Issue #1227: X-Frame-Options: DENY —
         the approval pages carry approve/deny clicks and nothing frames
         them. Deleting any of the three headers must fail."""
         import io
@@ -953,7 +955,7 @@ class ConfirmdTests(unittest.TestCase):
         h.wfile = io.BytesIO()
         h._send_html("<p>x</p>")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(headers["Referrer-Policy"], "same-origin")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
 
     def test_1_root_page_carries_x_frame_options_on_wire(self):
@@ -976,9 +978,11 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(headers["X-Frame-Options"], "DENY")
 
     def test_1_swjs_hardening_headers(self):
-        """Issue #77 (L3): /sw.js is served inline in do_GET, not through
-        _send_html — drive the real route and assert the same two headers
-        reach the wire. Deleting either header must fail."""
+        """Issue #77 (L3): /sw.js is served through _send_sw_js (extracted
+        from the do_GET inline block by #1237 so the header pin test can
+        assert the choke point) — drive the real route and assert the two
+        headers reach the wire. Issue #1237 settled Referrer-Policy to
+        no-referrer. Deleting either header must fail."""
         import io
         h = cd.Handler.__new__(cd.Handler)
         h.path = "/sw.js"
@@ -992,7 +996,7 @@ class ConfirmdTests(unittest.TestCase):
             h.do_GET()
         self.assertEqual(headers["code"], 200)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(headers["Referrer-Policy"], "same-origin")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
 
     def test_1_routes_carry_poller(self):
         """/ and /answered wire the live poller (engineering #3)."""

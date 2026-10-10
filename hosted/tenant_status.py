@@ -937,6 +937,13 @@ class TenantStatusHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        # Issue #1237: base hardening headers pinned across all
+        # localhost HTTP surfaces — nosniff stops MIME sniffing of the
+        # JSON API; no-referrer keeps the origin from leaking on any
+        # future outbound navigation. (X-Frame-Options is deliberately
+        # absent: this endpoint serves JSON only and is never framed.)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         # §1: both pollers must see the flip within one poll interval.
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

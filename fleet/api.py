@@ -711,6 +711,10 @@ class FleetAPIHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # Issue #1237: Referrer-Policy settled to no-referrer across all
+        # localhost HTTP surfaces (X-Frame-Options deliberately absent:
+        # this API serves JSON only and is never framed).
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
