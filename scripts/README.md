@@ -150,6 +150,7 @@ never drift from what's on disk.
 | `test_lint_changelog_ritual.py` | changelog ritual linter |
 | `test_local_gate.py` | `local-gate.sh` merge-gate runner |
 | `test_pytest_ini_covers_all.py` | `pytest.ini` testpaths reachability |
+| `test_push_lane_decision_numbers.py` | push-lane D-series decision-number uniqueness |
 | `test_readme_inventories.py` | this README's gate-steps + test inventory (this table) |
 | `test_self_update.py` | `self_update.py` read-only toolset inventory |
 | `test_site_branding.py` | `site/` brand-logo assets + wiring (issue #852) |

@@ -90,7 +90,7 @@ from datetime import datetime, timezone
 from hosted import push_enqueue
 from hosted import push_events
 
-# D8/D68 — approvals with a shorter TTL never qualify for a reminder.
+# D8 — approvals with a shorter TTL never qualify for a reminder.
 REMINDER_MIN_TTL_SECONDS = 300
 
 # D69 — bounded work per sweep: the candidate query pages instead of
