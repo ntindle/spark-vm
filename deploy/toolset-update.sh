@@ -188,8 +188,9 @@
 #     runs as the user, root validates each reported package name against
 #     the Debian package-name pattern, and root installs the validated
 #     names itself from the box's configured, signature-verified apt
-#     sources — the same pipeline as the `apt` layer. The version probe
-#     (`_playwright_current`) also runs as the user, never as root. The
+#     sources — the same pipeline as the `apt` layer. The version probes
+#     (`_playwright_current`, `_cua_driver_current`) also run as their
+#     owner user, never as root. The
 #     one-time `apt-get install -y
 #     unattended-upgrades` bootstrap uses the box's configured,
 #     signature-verified apt sources.
@@ -379,7 +380,9 @@ _as_user() {
     [ "${1:-}" = "--" ] && shift
     local me target rc=0
     me="$(id -u 2>/dev/null || true)"
-    target="$(id -u "$user" 2>/dev/null || true)"
+    # `--`: a dash-prefixed user must not inject an id option (same
+    # fail-open class as the cua-driver probe boundary, issue #1252).
+    target="$(id -u -- "$user" 2>/dev/null || true)"
     if [ -n "$me" ] && [ -n "$target" ] && [ "$me" = "$target" ]; then
         "$@" || rc=$?
         [ "$rc" = "2" ] && rc=3
@@ -689,10 +692,11 @@ _os_security_repair() {
 
 # --- component: cua-driver (pinned binary reinstall) ---------------------------
 # Holds the cua-driver binary on the pins.conf pin (#532): compare the
-# MANAGED binary's `$CUA_DRIVER_BIN --version` against the pin (PATH is
-# never consulted — the timer runs as root, and the layer converges
-# $CUA_DRIVER_BIN, so only the managed binary is a meaningful probe);
-# reinstall the pinned release when drifted or absent. Never restarts the CUA
+# MANAGED binary's `$CUA_DRIVER_BIN --version` (probed as $CUA_DRIVER_OWNER
+# via _as_cua_driver_owner — never as root, issue #1252) against the pin
+# (PATH is never consulted — the timer runs as root, and the layer
+# converges $CUA_DRIVER_BIN, so only the managed binary is a meaningful
+# probe); reinstall the pinned release when drifted or absent. Never restarts the CUA
 # daemon — the new binary takes effect at the next daemon restart, which the
 # updater does not perform.
 _read_pin() {
@@ -727,6 +731,57 @@ _pin_ok() {
     return 0
 }
 
+# Probe the MANAGED cua-driver binary as its owner, never as root — for
+# the same reason as the playwright venv (issue #1252: the timer runs as
+# root, the binary is user-owned, and executing it as root each tick hands
+# any compromise of the managed location instant root code execution).
+# Never PATH — see the comment in _cua_driver_current.
+_as_cua_driver_owner() {
+    # _as_cua_driver_owner cmd... — run a command as $CUA_DRIVER_OWNER.
+    # Fail-closed when user-switching is impossible. Mirrors
+    # _as_playwright_user: this helper is the only path that executes the
+    # managed binary — _cua_driver_current and the cmd_status inventory
+    # both go through it. Uids are compared numerically so a numeric
+    # CUA_DRIVER_OWNER (as the test fixtures use) matches too.
+    # CUA_DRIVER_BIN must stay absolute: runuser/sudo would PATH-resolve
+    # a relative path under the target user's PATH.
+    local user="${CUA_DRIVER_OWNER:-ntindle}"
+    local me target
+    me="$(id -u 2>/dev/null || true)"
+    # The `--` matters: without it a dash-prefixed owner (e.g. `-u`)
+    # injects an id option and the fast path below would match the
+    # invoker's own uid — a fail-open on this boundary (issue #1252).
+    target="$(id -u -- "$user" 2>/dev/null || true)"
+    if [ -n "$me" ] && [ -n "$target" ] && [ "$me" = "$target" ]; then
+        "$@"
+        return
+    fi
+    if [ "$me" != "0" ]; then
+        log "cua-driver: not $user and not root — refusing (fail-closed)"
+        return 1
+    fi
+    # runuser/sudo take a login name, not a bare numeric uid: resolve the
+    # owner to a name so a numeric CUA_DRIVER_OWNER switches instead of
+    # failing closed forever (the install half already accepts numeric
+    # uids via install -o). Unresolvable owners keep their raw value and
+    # fail in runuser/sudo, preserving the fail-closed posture.
+    local switch_user
+    # `--` on BOTH lookups: a dash-prefixed owner (e.g. `-u`) must not
+    # inject an id option. The first lookup (id -u --) is already
+    # fail-closed by `--`; without it here, `id -un -u` prints the
+    # INVOKER's login name and runuser would execute as the invoker
+    # (root on the timer) — the same fail-open class, issue #1252.
+    switch_user="$(id -un -- "$user" 2>/dev/null || printf '%s' "$user")"
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$switch_user" -- "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -u "$switch_user" -- "$@"
+    else
+        log "cua-driver: cannot switch to $user (no runuser/sudo) — refusing"
+        return 1
+    fi
+}
+
 _cua_driver_current() {
     # Print the installed version, or: absent | version-unknown.
     # Probe the MANAGED binary only — never PATH. The timer runs as root,
@@ -735,10 +790,18 @@ _cua_driver_current() {
     # a stray PATH copy mask drift of the managed binary (or substitute for
     # it when the managed binary is absent). Operators point the layer at a
     # different location with CUA_DRIVER_BIN itself.
+    #
+    # The probe itself runs as $CUA_DRIVER_OWNER via _as_cua_driver_owner
+    # (issue #1252): the binary is user-owned, so root executing it would
+    # hand any compromise of the managed location instant root code
+    # execution. The pre-flight -x check is a fast path to `absent` for a
+    # missing binary only — the execution itself is the authority, and when
+    # the owner cannot run it the probe reports version-unknown, which the
+    # layer treats as fail-closed upstream.
     local out ver
     [ -n "${CUA_DRIVER_BIN:-}" ] && [ -x "$CUA_DRIVER_BIN" ] \
         || { printf 'absent'; return 0; }
-    out="$("$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
+    out="$(_as_cua_driver_owner "$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
     ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
     # A bare number is not a version — demand at least one dot so a stray
     # counter can never compare equal to a real pin.
@@ -1619,7 +1682,20 @@ cmd_status() {
     else
         printf 'playwright\tabsent\t-\n'
     fi
-    _probe_version "cua-driver" cua-driver --version
+    # Probe the MANAGED binary ($CUA_DRIVER_BIN), never PATH — same reason
+    # as _cua_driver_current (issue #1252): status may run as root, and a
+    # PATH-resolved `cua-driver` would execute user-influenced code as the
+    # invoker. Runs as $CUA_DRIVER_OWNER via _as_cua_driver_owner. Output
+    # shape mirrors _probe_version (present + `-` on empty output; absent
+    # when the managed binary is not executable).
+    local _cdver=""
+    if [ -n "${CUA_DRIVER_BIN:-}" ] && [ -x "$CUA_DRIVER_BIN" ]; then
+        _cdver="$(_as_cua_driver_owner "$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
+        [ -z "$_cdver" ] && _cdver="-"
+        printf 'cua-driver\tpresent\t%s\n' "$(printf '%s' "$_cdver" | tr '\t' ' ' | cut -c1-120)"
+    else
+        printf 'cua-driver\tabsent\t-\n'
+    fi
     # Failure-freeze state (#532 Recovery): the single machine-readable
     # "box needs attention" signal. STATE is `frozen` | `ok`; DETAIL is the
     # freeze since/reason, or the current consecutive-failure count when

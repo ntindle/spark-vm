@@ -1178,7 +1178,9 @@ def test_pin_ok_rejects_unsafe(env):
 
 def test_cua_driver_current_parsing(env, tmp_path):
     # Every subcase points CUA_DRIVER_BIN at an explicit managed stub: the
-    # probe senses the managed binary only, never PATH.
+    # probe senses the managed binary only, never PATH. CUA_DRIVER_OWNER is
+    # the invoking uid so the probe's owner fast path applies (issue #1252:
+    # the probe drops to the owner instead of executing as the invoker).
     def managed_case(body):
         e = dict(env["env"])
         stub = tmp_path / f"managed-{abs(hash(body)) % 100000}" / "cua-driver"
@@ -1187,6 +1189,7 @@ def test_cua_driver_current_parsing(env, tmp_path):
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
                    | stat.S_IXOTH)
         e["CUA_DRIVER_BIN"] = str(stub)
+        e["CUA_DRIVER_OWNER"] = str(os.getuid())
         return e
 
     e = managed_case('echo "cua-driver 0.28.2 (abc123)"')
@@ -1202,6 +1205,104 @@ def test_cua_driver_current_parsing(env, tmp_path):
     e3["CUA_DRIVER_BIN"] = str(tmp_path / "no-such-dir" / "cua-driver")
     r = source_and("_cua_driver_current", e3)
     assert r.stdout == "absent"
+
+
+def test_cua_driver_probe_drops_to_owner(env, tmp_path):
+    # Issue #1252: the probe must execute the managed binary as
+    # CUA_DRIVER_OWNER, never as the invoking user. With an impossible
+    # owner the switch fails and the probe must report version-unknown
+    # (fail-closed) rather than running the binary as the invoker.
+    stub = tmp_path / "owner-guard" / "cua-driver"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text('#!/bin/sh\necho "cua-driver 0.28.2 (abc123)"\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+               | stat.S_IXOTH)
+    e = dict(env["env"])
+    e["CUA_DRIVER_BIN"] = str(stub)
+    e["CUA_DRIVER_OWNER"] = "no-such-user-pw-qa-1252"
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "version-unknown", r.stderr
+    # The absent fast path is untouched by the owner switch.
+    e["CUA_DRIVER_BIN"] = str(tmp_path / "no-such-dir" / "cua-driver")
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "absent"
+
+
+def test_cua_driver_probe_never_executes_as_invoker(env):
+    # Anti-vacuity pin for #1252: every non-comment line that executes
+    # cua-driver --version must do it through _as_cua_driver_owner. A bare
+    # `"$CUA_DRIVER_BIN" --version` or a PATH-resolved `cua-driver
+    # --version` anywhere else would run user-owned code as the script's
+    # invoker (root on the timer). Belt-and-braces only: the pin is
+    # syntactic (a variable-indirection form could evade it); the
+    # recording-stub tests are the behavioral guard.
+    src = os.path.join(REPO, "deploy", "toolset-update.sh")
+    code = [ln for ln in open(src).read().splitlines()
+            if not ln.lstrip().startswith("#")]
+    execs = [ln for ln in code
+             if "--version" in ln and ("cua-driver" in ln or "CUA_DRIVER_BIN" in ln)]
+    assert execs, "expected at least the _as_cua_driver_owner probe call"
+    for ln in execs:
+        assert "_as_cua_driver_owner" in ln, \
+            f"cua-driver executed without the owner drop: {ln!r}"
+
+
+def test_cua_driver_owner_dash_prefix_fails_closed(env, tmp_path):
+    # Issue #1252, Security round-1: without `--` on the id lookup, a
+    # dash-prefixed CUA_DRIVER_OWNER (e.g. `-u`) injects an id option,
+    # the fast path matches the invoker's own uid, and the binary would
+    # execute as the invoker (root on the timer) — a fail-open. It must
+    # report version-unknown instead.
+    stub = tmp_path / "dash-owner" / "cua-driver"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text('#!/bin/sh\necho "cua-driver 0.28.2 (abc123)"\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+               | stat.S_IXOTH)
+    e = dict(env["env"])
+    e["CUA_DRIVER_BIN"] = str(stub)
+    e["CUA_DRIVER_OWNER"] = "-u"
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+
+
+def test_cua_driver_probe_switches_numeric_owner(env, tmp_path):
+    # Issue #1252, Engineering round-1: runuser/sudo take a login name,
+    # not a bare numeric uid. A numeric CUA_DRIVER_OWNER must still switch
+    # (the install half accepts numeric uids via install -o) — the probe
+    # must return the parsed version, not version-unknown. The stub
+    # records its own execution (sentinel in a world-writable dir, since
+    # the probe runs it as another uid) to prove the binary itself ran
+    # through the switch leg, not a fast path. Root-only: non-root CI
+    # cannot exercise runuser/sudo.
+    if os.getuid() != 0:
+        pytest.skip("needs root to exercise the runuser/sudo switch leg")
+    try:
+        other = pwd.getpwnam("nobody")
+    except KeyError:
+        pytest.skip("no 'nobody' user on this box")
+    if other.pw_uid == 0:
+        pytest.skip("'nobody' resolves to uid 0")
+    wdir = tmp_path / "recording"
+    wdir.mkdir()
+    wdir.chmod(0o777)
+    # nobody must be able to traverse the whole chain from /tmp down:
+    # pytest's tmp parents can be 0700.
+    p = wdir
+    while p != p.parent and str(p).startswith("/tmp"):
+        p.chmod(p.stat().st_mode | stat.S_IXOTH | stat.S_IROTH)
+        p = p.parent
+    sentinel = wdir / "executed"
+    stub = wdir / "cua-driver"
+    stub.write_text("#!/bin/sh\n"
+                    f'touch "{sentinel}"\n'
+                    'echo "cua-driver 0.28.2 (abc123)"\n')
+    stub.chmod(0o755)
+    e = dict(env["env"])
+    e["CUA_DRIVER_BIN"] = str(stub)
+    e["CUA_DRIVER_OWNER"] = str(other.pw_uid)  # numeric on purpose
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "0.28.2", r.stderr
+    assert sentinel.exists(), "stub never executed through the switch leg"
 
 
 def test_cua_driver_noop_when_at_pin(env, tmp_path):

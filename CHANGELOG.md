@@ -201,6 +201,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The credential manager's web UI now sends anti-framing and anti-sniffing response headers on every page and API response: no other page on the box (or anywhere else) can embed the management UI in a frame to clickjack an operator's unlock or delete flows, browsers will not MIME-sniff API responses, and the page no longer sends referrer information. (#1229)
 
+- The toolset updater no longer runs the cua-driver binary as root when
+  checking its installed version: the version check executes as the
+  driver's owner account, so a compromised or replaced driver binary can
+  no longer inherit the updater timer's root privilege. When the owner
+  switch is impossible the updater refuses to guess instead of probing as
+  root, and new tests pin the owner drop: a probe test records the
+  binary's own execution through the identity switch (numeric owners
+  included), and a source-text pin fails the suite if any other call
+  site ever invokes the binary. (#1252)
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
