@@ -72,7 +72,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   ack-and-logs an unknown command kind, exactly like the HTTPS path does:
   the per-minute command poll no longer re-fetches, re-acks, and re-logs
   the same command, and a moved epoch on such a frame is adopted for the
-  next poll. (#TBD)
+  next poll. (#1280)
 
 ## [0.8.0] - 2026-10-10
 
