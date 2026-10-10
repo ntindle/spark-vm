@@ -67,6 +67,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   precedence over self-generated keys and refuses to boot on invalid key
   material, so `ssh_info()` pinning holds across cold stops (#1204, #1239).
 
+- The phone-approval push-lane state doc is refreshed: since the 2026-10-05
+  pin, the in-repo push sender loop, the reminder/digest sweep, and the
+  digest-delivery reset have all landed, and the one-plane-per-tenant
+  decision has reframed push subscriptions (they stay owner-keyed on each
+  tenant's plane). What still stands between here and a phone buzz is the
+  live per-minute trigger, the sender-claiming mechanism, the subscription
+  surface, retention, and the digest-content decision. (#849) (#1247)
+
 - The hourly digest for coalesced push notifications now resets its
   per-hour count when the digest is delivered: previously the count kept
   accumulating after delivery (only the retention sweep cleaned it up),
