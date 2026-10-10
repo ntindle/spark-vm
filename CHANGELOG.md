@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The `cred` CLI and its `credlib` library now have a component README:
+  what each command does, how the narrow sudo writers keep secret values
+  out of the agent's reach, the single-source name/entry/host validation
+  contract shared with `cred-ui` and the registry writer, and when the
+  swap-proxy placeholder path is the right choice over direct secret
+  insertion. (#1264)
+
 - The multi-tenant plane model is now decided and recorded: each hosted
   signup gets its own control-plane instance (one plane per tenant), so the
   shipped single-owner auth model stays exactly as it is — no tenant layer,

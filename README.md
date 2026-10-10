@@ -275,7 +275,7 @@ put it to work.
 | `docs/` ([index](docs/README.md)) | Long-form docs: positioning, hosted-product specs, research corpus, competitor corpus, loop governance |
 | `ENVIRONMENT.md` / `SETUP.md` | Environment notes and the credential-system writeup |
 | `proxy/` ([README](proxy/README.md)) | Transparent-swapping egress proxy (`deploy.sh` installs it + the inference proxy + `confirmd` + the push worker) |
-| `cred/` / `credlib/` | The `cred` CLI and its library: `hsurr:<name>` placeholders, narrow sudo writers, audit trail |
+| `cred/` ([README](credlib/README.md)) / `credlib/` | The `cred` CLI and its library: `hsurr:<name>` placeholders, narrow sudo writers, audit trail |
 | `cred-ui/` | Phone-friendly web UI for the credential store (localhost-only, systemd user service) |
 | `cua/` | Whole-desktop automation: Xvfb + XFCE + official CUA driver + localhost-only HTTP bridge |
 | `cua/PANEL_SPEC.md` | Spec for building your own control panel against the CUA bridge |
