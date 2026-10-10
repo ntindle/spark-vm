@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   verdict as the precedent), what it means for the tenant-record,
   approval-attribution, status-endpoint, and fleet-stream work still in the
   queue, and the exact scale trigger that would reopen the shared-plane
-  option. (#1159) (#TBD)
+  option. (#1159) (#1245)
 
 - Provisioned boxes now serve the driver-attested SSH host key: the golden
   image installs the `SPARKVM_SSH_HOST_KEYS` machine-config env key with
