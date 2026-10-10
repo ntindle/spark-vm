@@ -50,6 +50,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+
+- The SSH-key-as-account onboarding doc: the first-run experience for
+  key-identity accounts — the first-connect walkthrough, the manifest
+  vocabulary with the claim-link bookmark rule, the "same key -> same
+  box" resume semantics, the rotate-vs-claim decision rule, and the
+  connect-time wiring acceptance spec. (#TBD)
+
 ### Fixed
 
 - The golden-image tag-ref validator now pins its tag grammar to ASCII:

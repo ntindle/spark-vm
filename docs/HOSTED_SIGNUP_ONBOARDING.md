@@ -130,6 +130,14 @@ their keypair in their platform's storage, and the protocol *must* still
 work when they can't — via this re-link path. No fresh human
 copy-paste is required after the first link.
 
+*Key-identity companion:* the enrollment-token flow above onboards the
+*human*; the *agent's* key-pair onboarding — first-connect manifest,
+"same key -> same box" resume, the claim-url bookmark rule, and the
+rotate-vs-claim decision — is pinned in
+[KEY_IDENTITY_ONBOARDING.md](KEY_IDENTITY_ONBOARDING.md), which also
+records how key-identity accounts sit in the per-tenant-plane accounts
+plan. Same key-pair primitive, different actor.
+
 ## 5. Signup flow (MVP)
 
 ```
