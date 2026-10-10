@@ -180,6 +180,16 @@ def test_html_emitters_send_x_frame_options_deny():
             "%s.%s must send X-Frame-Options: DENY" % (mod_name, cls_name)
 
 
+def test_waitlistd_deliberately_sends_no_x_frame_options():
+    """The waitlistd 'framing permitted' delta is machine-checked in both
+    directions: the public landing page must NOT gain X-Frame-Options
+    (legitimate embedding would silently break)."""
+    cap = _Capture(_MODS["pin_waitlistd"]._Handler)
+    cap.h._send(200, "<html></html>")
+    assert "X-Frame-Options" not in cap.headers, \
+        "waitlistd must stay framable — the public page may be embedded"
+
+
 # ---------------------------------------------------------------------------
 # Completeness: every send_response owner is pinned or excluded, exactly.
 
@@ -246,6 +256,18 @@ def test_no_unpinned_send_response_owner():
             % (path, sorted(stale))
 
 
+def _handler_base_names(tree):
+    """Names that can refer to BaseHTTPRequestHandler in this module:
+    the bare name plus any `as`-aliases from from-imports."""
+    names = {"BaseHTTPRequestHandler"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "BaseHTTPRequestHandler" and alias.asname:
+                    names.add(alias.asname)
+    return names
+
+
 def test_every_handler_surface_is_registered():
     """No new BaseHTTPRequestHandler surface outside the known lists."""
     found = set()
@@ -260,10 +282,10 @@ def test_every_handler_surface_is_registered():
             tree = ast.parse(path.read_text())
         except (OSError, SyntaxError):
             continue
+        names = _handler_base_names(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and any(
-                    (isinstance(b, ast.Name)
-                     and b.id == "BaseHTTPRequestHandler")
+                    (isinstance(b, ast.Name) and b.id in names)
                     or (isinstance(b, ast.Attribute)
                         and b.attr == "BaseHTTPRequestHandler")
                     for b in node.bases):
