@@ -115,8 +115,10 @@ New pins this slice (continuing the global D-series):
                     ("N pages coalesced this hour"). A missing digest-state
                     row is corruption: the page dead-letters (fail-closed,
                     operator-visible) rather than sending a count the loop
-                    cannot prove. #1064 owns digest content assembly and
-                    may refine this body.
+                    cannot prove. #1064's content half is D88's design
+                    position (count-scoped body per contract §1.4;
+                    per-box breakdown not built on the frozen #988
+                    schema; owner adjudication open on the issue).
   ================  =====================================================
 
 - **D80 — gate-2 fail-safe.** If the approval record is missing at send
@@ -168,6 +170,32 @@ New pins this slice (continuing the global D-series):
   check used to do both, so a gate-2 neuter crashed in the plaintext
   builder instead of paging — the predicate split is the load-bearing
   seam the neuter tests pin.
+
+- **D87 — digest reset on delivery.** A ``digest`` page's completion (all
+  devices terminal, any outcomes) zeroes the ``push_digest_state`` count
+  for ``(owner_principal, window)`` in the same D56b terminal transaction
+  as the queued-row DELETE and the D10 reservation resolution. The row
+  (and its ``enqueued_at`` fired-marker) survives: the sweep's pending
+  scan only fires ``count > 0 AND enqueued_at IS NULL``, so a window
+  whose digest already fired is never refired — the D67 accepted drift
+  for post-fire coalescing stands (late arrivals increment from zero on
+  a row the sweep will not pick up). The digest body itself stays
+  count-scoped per contract §1.4 (see D88 for the content-scope
+  position), so D87 closes #1064's reset half; the content half is
+  D88's design position, with owner adjudication open on #1064. The parked
+  path (no live subscriptions) does NOT reset: an undelivered digest's
+  row must survive until a device subscribes.
+
+- **D88 — digest content scope (design position, not a build).** The
+  digest body stays count-scoped per contract §1.4 ("N pages coalesced
+  this hour — open the dashboard"). Per-box breakdown is not built: the
+  frozen #988 schema carries no per-box contribution, so it would need
+  a schema migration. #1064's acceptance still names per-box
+  enumeration — the decline is the loop's position, surfaced on the
+  issue for owner adjudication; only the owner can waive his own
+  acceptance criterion. (D78 is the sender-loop digest-*fanout* pin —
+  and the number already collides with the sweep lane's per-candidate
+  isolation pin — so the content-scope position gets its own number.)
 
 Plane seams (injected — the module never sees a Worker secret, a data
 key, or a box token):
@@ -582,7 +610,7 @@ def _device_terminal_outcome(conn, box_key, event_kind, event_key, device):
 
 def _complete_page(conn, summary, item, row_id, box_id, owner_principal,
                    event_kind, event_key, window_start, terminal,
-                   live_count):
+                   live_count, key_material=None):
     """DELETE the queued work item and resolve the D10 reservation.
 
     The reservation is released iff no device accepted — D10 bounds
@@ -593,6 +621,12 @@ def _complete_page(conn, summary, item, row_id, box_id, owner_principal,
     unsubscribed before the last device terminated must still count —
     otherwise the unit would be released for a page that buzzed. One
     transaction (D56b): the caller's attempt rows are already INSERTed.
+
+    D87 — digest reset: for ``digest`` kinds, the ``push_digest_state``
+    row for ``(owner_principal, key_material)`` has its count zeroed in
+    the same transaction. ``key_material`` is the validated digest window
+    (the caller's ``_split_event_key`` already proved scope == owner); a
+    ``None`` window here is a contract violation and fails closed.
     """
     accepted = conn.execute(
         "SELECT 1 FROM push_send_results"
@@ -601,23 +635,50 @@ def _complete_page(conn, summary, item, row_id, box_id, owner_principal,
         (owner_principal, event_kind, event_key)).fetchone()
     release = accepted is None
     _delete_queued(conn, row_id)
+    if event_kind == "digest":
+        if key_material is None:
+            raise ValueError(
+                "digest completion requires key_material (the window)")
+        # D87 — digest reset: the window's coalescing is consumed by
+        # this delivery, so the count zeroes in the same transaction.
+        # The row (and its enqueued_at fired-marker) survives: the
+        # sweep's pending scan only fires count>0 AND enqueued_at NULL,
+        # so a window whose digest already fired is never refired
+        # (the D67 accepted drift for post-fire coalescing stands —
+        # late arrivals increment from zero on a row the sweep will not
+        # pick up). DELETEing the row instead would re-create it with
+        # enqueued_at NULL on post-fire coalescing and refire.
+        # The pre-reset count rides the completed note so an operator
+        # diagnosing a dead-lettered digest can see what it consumed.
+        row = conn.execute(
+            "SELECT count FROM push_digest_state"
+            " WHERE owner_principal = ? AND window_start = ?",
+            (owner_principal, key_material)).fetchone()
+        consumed = row[0] if row else 0
+        conn.execute(
+            "UPDATE push_digest_state SET count = 0"
+            " WHERE owner_principal = ? AND window_start = ?",
+            (owner_principal, key_material))
     _terminal_transaction(conn, release=release, box_id=box_id,
                           owner_principal=owner_principal,
                           window_start=window_start)
-    summary.note("completed",
-                 "%s (%d/%d devices terminal; reservation %s)"
-                 % (item, len(terminal), live_count,
-                    "released" if release else "kept"))
+    detail = ("%s (%d/%d devices terminal; reservation %s)"
+              % (item, len(terminal), live_count,
+                 "released" if release else "kept"))
+    if event_kind == "digest":
+        detail += "; digest count %d consumed" % consumed
+    summary.note("completed", detail)
 
 
 def _maybe_complete(conn, summary, item, row_id, box_id, owner_principal,
                     event_kind, event_key, window_start, terminal,
-                    live_count):
+                    live_count, key_material=None):
     """Complete the page if every live device is terminal; True if so."""
     if len(terminal) == live_count:
         _complete_page(conn, summary, item, row_id, box_id,
                        owner_principal, event_kind, event_key,
-                       window_start, terminal, live_count)
+                       window_start, terminal, live_count,
+                       key_material=key_material)
         return True
     return False
 
@@ -813,7 +874,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
     if not pending:
         _complete_page(conn, summary, item, row_id, box_id,
                        owner_principal, event_kind, event_key,
-                       window_start, terminal, len(live))
+                       window_start, terminal, len(live),
+                       key_material=key_material)
         return
 
     for sub in pending:
@@ -846,7 +908,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             terminal[(box_key, device)] = "dead-letter"
             if _maybe_complete(conn, summary, item, row_id, box_id,
                                owner_principal, event_kind, event_key,
-                               window_start, terminal, len(live)):
+                               window_start, terminal, len(live),
+                               key_material=key_material):
                 return
             conn.commit()
             continue
@@ -893,7 +956,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
                 (at, owner_principal, sub["box_id"], device))
             if _maybe_complete(conn, summary, item, row_id, box_id,
                                owner_principal, event_kind, event_key,
-                               window_start, terminal, len(live)):
+                               window_start, terminal, len(live),
+                               key_material=key_material):
                 return
             conn.commit()
             continue
@@ -907,7 +971,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             terminal[(box_key, device)] = "tombstone"
             if _maybe_complete(conn, summary, item, row_id, box_id,
                                owner_principal, event_kind, event_key,
-                               window_start, terminal, len(live)):
+                               window_start, terminal, len(live),
+                               key_material=key_material):
                 return
             conn.commit()
             continue
@@ -918,7 +983,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             terminal[(box_key, device)] = "dead-letter"
             if _maybe_complete(conn, summary, item, row_id, box_id,
                                owner_principal, event_kind, event_key,
-                               window_start, terminal, len(live)):
+                               window_start, terminal, len(live),
+                               key_material=key_material):
                 return
             conn.commit()
             continue
