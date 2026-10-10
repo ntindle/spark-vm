@@ -3826,10 +3826,6 @@ class QuarantinePruneTests(unittest.TestCase):
                              ["q2.json", "q3.json"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _xlock_holder_child(approvals_dir, aid, ready, hold_secs):
     """Child body: hold the #945 xlock, then release. Fork-inherits cd."""
     cd.APPROVALS = approvals_dir
@@ -3943,3 +3939,7 @@ class AidXlockTests(unittest.TestCase):
         # A entered first and must complete before B starts.
         self.assertEqual(lines,
                          ["A-start", "A-end", "B-start", "B-end"])
+
+
+if __name__ == "__main__":
+    unittest.main()
