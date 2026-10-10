@@ -73,7 +73,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   decision has reframed push subscriptions (they stay owner-keyed on each
   tenant's plane). What still stands between here and a phone buzz is the
   live per-minute trigger, the sender-claiming mechanism, the subscription
-  surface, retention, and the digest-content decision. (#849) (#TBD)
+  surface, retention, and the digest-content decision. (#849) (#1247)
 
 - The hourly digest for coalesced push notifications now resets its
   per-hour count when the digest is delivered: previously the count kept
