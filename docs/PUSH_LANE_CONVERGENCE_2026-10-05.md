@@ -1,7 +1,8 @@
 # Push-lane convergence: the #849 phone-approval loop, vision vs state
 
-**Status: analysis, not a commitment.** Code-state claims below were
-verified against the repo tree at main `0edb0eb` (2026-10-05 ~19:0x CDT,
+**Status: §2 state superseded by `docs/PUSH_LANE_CONVERGENCE_2026-10-10.md`
+(2026-10-10 refresh).** Analysis, not a commitment. Code-state claims below
+were verified against the repo tree at main `0edb0eb` (2026-10-05 ~19:0x CDT,
 post-#1060 merge) and the #1062 branch tip `62fdd982` (rebased); #1062 has
 since merged as `a366aba` (2026-10-05 ~19:0x CDT). Issue/PR numbers are GitHub references as of 2026-10-05 (not
 code-verifiable from the tree). Honesty rules apply (`docs/POSITIONING.md`):

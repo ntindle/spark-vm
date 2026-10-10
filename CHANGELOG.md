@@ -52,10 +52,28 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The multi-tenant plane model is now decided and recorded: each hosted
+  signup gets its own control-plane instance (one plane per tenant), so the
+  shipped single-owner auth model stays exactly as it is — no tenant layer,
+  no super-owner keys. The decision record explains the trade (deployment
+  isolation over code-level tenant scoping, with H11's per-tenant-box
+  verdict as the precedent), what it means for the tenant-record,
+  approval-attribution, status-endpoint, and fleet-stream work still in the
+  queue, and the exact scale trigger that would reopen the shared-plane
+  option. (#1159) (#1245)
+
 - Provisioned boxes now serve the driver-attested SSH host key: the golden
   image installs the `SPARKVM_SSH_HOST_KEYS` machine-config env key with
   precedence over self-generated keys and refuses to boot on invalid key
   material, so `ssh_info()` pinning holds across cold stops (#1204, #1239).
+
+- The phone-approval push-lane state doc is refreshed: since the 2026-10-05
+  pin, the in-repo push sender loop, the reminder/digest sweep, and the
+  digest-delivery reset have all landed, and the one-plane-per-tenant
+  decision has reframed push subscriptions (they stay owner-keyed on each
+  tenant's plane). What still stands between here and a phone buzz is the
+  live per-minute trigger, the sender-claiming mechanism, the subscription
+  surface, retention, and the digest-content decision. (#849) (#1247)
 
 - The hourly digest for coalesced push notifications now resets its
   per-hour count when the digest is delivered: previously the count kept
@@ -71,6 +89,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   suite instead of drifting silently. (#1235) (#1244)
 
 ### Fixed
+
+- The fleet console's refresh-interval validation is now pinned at its float
+  edges: `--watch -0.0` and `--once --watch 0` both fail loudly as usage
+  errors (exit 64) instead of silently degrading, closing the last two gaps
+  from the earlier explicit-zero hardening. (#1233) (#1246)
 
 - The README inventories that describe the proxy's narrow writers, the merge gate's step names, and the pin-test suite are now kept honest by machine checks: the narrow-writer list is pinned against the deploy install loop in both directions (a writer that's installed but undocumented, or documented but not installed, fails the suite), the gate's six step names are pinned against the script that prints them, and every pin test must appear in the scripts README's new test-file inventory table. The golden-image first-boot scripts' test-seam pins now also scan the script bodies, closing the one direction the doc↔list pin didn't cover (a seam consumed in the body but listed nowhere would never warn), and `data-prep.sh`'s root-run warning loop now iterates the same canonical seam list instead of an inline copy. The proxy README also names the approval-filing CLI the deploy installs, which had no mention anywhere. (#TBD)
 
