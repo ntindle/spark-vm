@@ -1342,8 +1342,35 @@ cmd_deploy() {
     # 1. gates BEFORE any mutation
     for c in "${COMPS[@]}"; do
         run_gates "$c" || {
-            alert "pre-deploy gate failed for component $c ($old -> $new)"
-            audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
+            # Issue #1295: a deterministically-failing gate on a version
+            # deploy would otherwise alert + retry on every 10-minute tick
+            # forever (~144/day). Mark the commit blocked so the timer
+            # waits for a newer commit — the #325 machinery (pending_range
+            # returns rc=1 on the blocked head, auto-clears the mark when a
+            # newer commit supersedes; the operator can `rm` the mark for
+            # the re-deploy-the-same-tree case). A same-commit
+            # (extra-inputs-forced) deploy never marks: the commit itself
+            # is fine, so it retries next tick instead of wedging the box
+            # until the next code change.
+            #
+            # Security review round 1: the mark, the honest
+            # alert, and the honest audit line are one unit — a silent
+            # mark would let a transient flake wedge the box with no
+            # signal. If the mark write fails, blocked_sha stays empty,
+            # the alert says nothing about a block, and the tick retries
+            # loudly as before (fail-safe). The write is the `if`
+            # condition so both printf and mv failures are set-e-exempt —
+            # a bare `&&` chain would set blocked_sha even when the write
+            # failed (Engineering review round 2).
+            local blocked_sha=""
+            if [ -z "$rb_no_block" ]; then
+                if printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"; then
+                    blocked_sha="$new"
+                    log "marked $new blocked (next tick will not retry it)"
+                fi
+            fi
+            alert "pre-deploy gate failed for component $c ($old -> $new)${blocked_sha:+; marked $blocked_sha blocked — no retry until a newer commit lands (clear with: rm \"$BLOCKED_COMMIT\")}"
+            audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'","blocked":"'"$blocked_sha"'"'"$trig"
             return 1
         }
     done

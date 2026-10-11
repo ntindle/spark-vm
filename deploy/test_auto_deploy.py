@@ -2126,6 +2126,70 @@ def test_cmd_deploy_forced_gate_fail_audit_has_trigger(tmp_path):
     assert '"result":"gate-fail"' in audit, audit
     assert '"trigger":"extra-inputs"' in audit, audit
     assert not (state / "blocked-commit").exists()
+    # The forced path is honestly unblocked: the audit line says so and
+    # the alert must not claim a block it did not mark.
+    assert '"blocked":""' in audit, audit
+    assert "marked" not in (state / "last-failure").read_text(), out
+
+
+def test_cmd_deploy_version_gate_fail_marks_head_blocked(tmp_path):
+    """Issue #1295: a deterministically-failing pre-deploy gate on a
+    version deploy must mark the head blocked, so the timer waits for a
+    newer commit instead of alerting + retrying every 10-minute tick
+    forever. The #325 machinery: pending_range sees the blocked head
+    and reports nothing-to-do on the next tick (rc=1 -> quiet rc=0),
+    auto-clears the mark when a newer commit supersedes."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    # No set -e: the expected gate-fail rc must not abort before the echo.
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out  # gate-fail, not a quiet noop
+    audit = (state / "audit.log").read_text()
+    assert '"result":"gate-fail"' in audit, audit
+    assert (state / "blocked-commit").read_text().strip() == docs_only, out
+    # Security review: the mark must not be silent — the audit line and
+    # the persistent alert must both say the commit is blocked.
+    assert '"blocked":"%s"' % docs_only in audit, audit
+    last_failure = (state / "last-failure").read_text()
+    assert "marked %s blocked" % docs_only in last_failure, last_failure
+    # The next tick stays quiet: one alert per bad commit, not ~144/day.
+    gate_fails_before = audit.count('"result":"gate-fail"')
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert audit.count('"result":"gate-fail"') == gate_fails_before, \
+        "blocked head must not be retried on the next tick: " + audit
+
+
+def test_cmd_deploy_version_gate_fail_mark_write_failure_stays_honest(tmp_path):
+    """Engineering review round 2: if the BLOCKED_COMMIT mark write fails
+    (unwritable state dir), the gate-fail handler must not claim a block
+    it never wrote — the audit line reports "blocked":"" and the alert
+    says nothing about a block, and the tick stays loud (rc=1, retries
+    next tick) instead of wedging the box silently."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    # Force the mark write to fail: the atomic write goes through a .tmp
+    # file, and the redirect cannot create it when a directory squats the
+    # path.
+    (state / "blocked-commit.tmp").mkdir()
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out  # loud, retries next tick
+    audit = (state / "audit.log").read_text()
+    assert '"result":"gate-fail"' in audit, audit
+    assert '"blocked":""' in audit, audit
+    assert not (state / "blocked-commit").exists()
+    last_failure = (state / "last-failure").read_text()
+    assert "marked" not in last_failure, last_failure
 
 
 def test_cmd_check_reports_extra_inputs_on_quiet_tick(tmp_path):

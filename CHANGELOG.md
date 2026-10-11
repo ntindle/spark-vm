@@ -121,6 +121,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
   production callers do. The toolset updater's version-probe refusal tests
   now also cover the non-root invoker path, so a root-only dev box catches
   the refusal-reason gap that broke CI. (#1283)
+- The unattended updater now marks a release blocked when its pre-deploy
+  gates fail, instead of alerting and retrying the same commit on every
+  tick: a commit whose gates fail deterministically waits for a newer
+  commit (the mark auto-clears when one supersedes, or the operator can
+  clear it for a re-deploy-the-same-tree attempt), so one alert goes out
+  per bad commit rather than every ten minutes. Same-commit forced
+  redeploys (host-side input rotations) never mark the commit blocked —
+  the commit is fine, so those still retry next tick. (#1295) (#TBD)
+- Hardened the phone-home fd-leak regression test against CI flake: the
+  /proc/self/fd snapshot now runs with garbage cycles drained on both
+  sides and asserts no new fds rather than full set equality, so an
+  external GC pass can no longer fake a failure while a genuine leak on
+  the fchmod-failure path still fails the test. (#1290) (#TBD)
 
 ## [0.8.0] - 2026-10-10
 
