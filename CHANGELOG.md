@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The tenant-plane rollout controller's build path: a vision-vs-state
+  analysis of what the staged-rollout controller still needs after the
+  version-inventory slice shipped — the template artifact has no repo
+  home, no deploy driver exists, and the freeze has no enforcement point
+  on request-driven planes — with six pinning decisions and four
+  dependency-ordered build slices (wave/promotion state machine, template
+  artifact + versioning + last-known-good, deploy driver + rollback +
+  freeze refusal + cost emission, plane update-event reporting).
+  (#TBD)
 - The operator's per-tenant-plane version inventory: a fleet-side store
   recording which template version each tenant plane runs, with a
   convergence check that gates rollout-wave promotion and a cost ledger
