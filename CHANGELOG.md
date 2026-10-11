@@ -267,6 +267,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   corrupt the 90-day retention window (premature deletion of the send
   audit trail, or retention silently stopping). (#1301)
 
+- Non-UTF-8 proxy config files now fail closed instead of raising out of
+  the proxy's reload path: a byte-corrupt hosts allowlist, stream opt-in
+  list, SSRF allow/deny list, smoke-hosts file, or credential file
+  degrades to the same deny-by-default posture as a missing or unreadable
+  file, with a warning in the proxy log. The approval summons journal
+  sweep likewise skips a single undecodable line loudly instead of
+  abandoning the whole sweep. (#TBD)
+
 ## [0.8.0] - 2026-10-10
 
 ### Added

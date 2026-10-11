@@ -4819,5 +4819,151 @@ class ApprovalSignalTests(unittest.TestCase):
 
 
 
+class DecodeFailureTests(unittest.TestCase):
+    """Issue #1328: a non-UTF-8 allowlist/secret file is a read failure,
+    not a hook-path exception. The loader must degrade exactly like it
+    does for a missing/unreadable file — UnicodeDecodeError never leaves
+    _load()."""
+
+    _BAD = b"good.example\n\xff\xfe-not-utf8\n"
+    _GOOD = b"good.example\n# comment\nsub.example\n"
+
+    def _addon_for(self, d, files=(), secrets=()):
+        """Real SwapAddon constructor with every loader path pointed at
+        tmp files. `files`: (name, bytes) at the tmp root;
+        `secrets`: (name, bytes) inside the secrets dir. Returns
+        (addon, captured warnings)."""
+        dp = Path(d)
+        (dp / "secrets").mkdir()
+        for name, data in files:
+            (dp / name).write_bytes(data)
+        for name, data in secrets:
+            (dp / "secrets" / name).write_bytes(data)
+        patches = [
+            mock.patch.object(sa, "SECRETS_DIR", dp / "secrets"),
+            mock.patch.object(sa, "HOSTS_FILE", dp / "hosts"),
+            mock.patch.object(sa, "REGISTRY_FILE", dp / "registry"),
+            mock.patch.object(sa, "SSRF_ALLOW_FILE", dp / "ssrf.allow"),
+            mock.patch.object(sa, "SSRF_DENY_FILE", dp / "ssrf.deny"),
+            mock.patch.object(sa, "SMOKE_HOSTS_FILE", dp / "smoke"),
+            mock.patch.object(sa, "STREAM_HOSTS_FILE", dp / "stream"),
+            mock.patch.object(sa, "GRANTS_FILE", dp / "grants.json"),
+            mock.patch.object(sa, "LOG_FILE", dp / "swap.log"),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [x.stop() for x in patches])
+        with self.assertLogs(sa.log, level="WARNING") as cm:
+            a = sa.SwapAddon()
+        return a, "\n".join(cm.output)
+
+    def test_hosts_allow_nonutf8_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(d, files=[("hosts", self._BAD)])
+            self.assertEqual(a.hosts, [])  # no raise; default deny
+            self.assertIn("cannot read hosts.allow", msgs)
+
+    def test_hosts_allow_valid_still_loads(self):
+        # Differential: the same harness with valid bytes loads the
+        # hosts — the gate, not the fixture, fails closed.
+        with tempfile.TemporaryDirectory() as d:
+            a, _ = self._addon_for(d, files=[("hosts", self._GOOD)])
+            self.assertIn("good.example", a.hosts)
+            self.assertIn("sub.example", a.hosts)
+
+    def test_stream_hosts_nonutf8_disables_optin(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(d, files=[("stream", self._BAD)])
+            self.assertEqual(a.stream_hosts, [])
+            self.assertIn("cannot read stream-hosts", msgs)
+            self.assertFalse(a._host_allows_stream("good.example"))
+
+    def test_smoke_hosts_nonutf8_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(d, files=[("smoke", self._BAD)])
+            self.assertEqual(a.smoke_hosts, [])
+            self.assertIn("cannot read smoke-hosts", msgs)
+
+    def test_ssrf_allow_nonutf8_default_deny(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(
+                d, files=[("ssrf.allow", self._BAD)])
+            self.assertEqual(a.ssrf_hosts, [])
+            self.assertEqual(a.ssrf_nets, [])
+            self.assertIn("cannot read ssrf.allow", msgs)
+
+    def test_ssrf_deny_nonutf8_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(
+                d, files=[("ssrf.deny", self._BAD)])
+            self.assertEqual(a.deny_hosts, [])
+            self.assertEqual(a.deny_nets, [])
+            self.assertIn("cannot read ssrf.deny", msgs)
+
+    def test_secret_file_nonutf8_skipped_not_raised(self):
+        # #1328 follow-up: _load_secret_file catches only OSError, so a
+        # non-UTF-8 secret file raised out of _load() into the hook.
+        # Like any unreadable credential it is skipped (fail-closed).
+        with tempfile.TemporaryDirectory() as d:
+            a, msgs = self._addon_for(
+                d, secrets=[("tok", b"\xff\xfe-bad")])
+            self.assertNotIn("tok", a.secrets)
+            self.assertIn("cannot read secret", msgs)
+
+
+class SummonsSweepDecodeTests(unittest.TestCase):
+    """Issue #1331: a byte-corrupt summons-journal line used to raise
+    UnicodeDecodeError out of the journal-read block into the sweep-wide
+    `except Exception`, aborting recovery of ALL pending rows. The fix
+    keeps the per-line loud-not-fatal corrupt-line path."""
+
+    def _sweep(self, d, journal_bytes, pending=()):
+        dp = Path(d)
+        outbox = dp / "outbox.log"
+        outbox.write_bytes(journal_bytes)
+        pending_d = dp / "pending"
+        pending_d.mkdir()
+        for i, aid in enumerate(pending):
+            (pending_d / ("row%d.json" % i)).write_text(json.dumps({
+                "id": aid, "created": "2026-10-11T00:00:00+00:00",
+                "summary": "s", "credential": "c", "host": "h",
+                "method": "m"}))
+        with self.assertLogs(sa.log, level="INFO") as cm:
+            n = sa._summons_sweep(outbox=str(outbox),
+                                  pending_d=str(pending_d))
+        return n, "\n".join(cm.output)
+
+    def test_undecodable_journal_line_skipped_loud(self):
+        with tempfile.TemporaryDirectory() as d:
+            n, msgs = self._sweep(d, b"\xff\xfe-not-utf8\n")
+            self.assertEqual(n, 0)  # no pending rows; no raise
+            self.assertIn("undecodable journal line", msgs)
+
+    def test_corrupt_line_no_longer_aborts_recovery(self):
+        # Differential: a pending row the sweep must recover sits next
+        # to a byte-corrupt journal line. Pre-fix the sweep aborted and
+        # returned 0; post-fix the row is recovered (n == 1) and the
+        # corrupt line is only warned about.
+        pending_aid = "aid-decode-1"
+        journal = (b'{"aid": "other-aid"}\n'
+                   b"\xff\xfe-not-utf8\n")
+        with tempfile.TemporaryDirectory() as d:
+            n, msgs = self._sweep(d, journal, pending=[pending_aid])
+            self.assertEqual(n, 1)
+            self.assertIn("undecodable journal line", msgs)
+            self.assertIn("recovered approval %s" % pending_aid, msgs)
+
+    def test_valid_journal_still_reads(self):
+        # Control: a fully valid journal recovers the pending row, so
+        # the recovery above is the sweep doing its job, not a harness
+        # artifact.
+        pending_aid = "aid-decode-2"
+        journal = b'{"aid": "other-aid"}\n'
+        with tempfile.TemporaryDirectory() as d:
+            n, msgs = self._sweep(d, journal, pending=[pending_aid])
+            self.assertEqual(n, 1)
+            self.assertNotIn("undecodable", msgs)
+
+
 if __name__ == "__main__":
     unittest.main()
