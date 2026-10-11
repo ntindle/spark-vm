@@ -26,9 +26,9 @@ estates the "operator" is the human running the repo CLI — that half
 is shipped and documented here. The hosted product's consumption is
 the S2+ design intent: the future operator plane reuses this same
 CLI and exit-code contract as its wave source, but the operator plane
-itself is not built yet (F-RC-8) — today the hosted operator runs
-this tool the same way the self-hosted human does. Same binary, same
-contract.
+itself is not built yet (zero code — see the operator-plane build-path
+gap analysis) — today the hosted operator runs this tool the same way
+the self-hosted human does. Same binary, same contract.
 
 All examples run from the repo root (`python3 fleet/plane_inventory.py`).
 A missing `--store` directory is created automatically as an empty
