@@ -447,7 +447,7 @@ def maybe_enqueue_reminder(conn, *, box_id, owner_principal, aid,
             (box_id, audit_key)).fetchone()
         if dup is None:
             _write_suppressed_terminal(
-                conn, moment.isoformat(), owner_principal, box_id,
+                conn, push_enqueue.utc_iso(moment), owner_principal, box_id,
                 "reminder", audit_key)
         return MapResult("superseded_terminal", None)
 

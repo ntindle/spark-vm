@@ -142,11 +142,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
-- Pinned the push notification retention sweeper's timestamp contract and
-  added a regression test enforcing it, so a future timestamp-format
-  change can't silently corrupt the 90-day retention window in either
-  direction (premature deletion of the send audit trail, or retention
-  silently stopping). (#TBD)
+- Centralized the push notification retention sweeper's timestamp
+  rendering in one tested helper used by every send-result writer, so a
+  future timestamp-format change on any writer path can't silently
+  corrupt the 90-day retention window (premature deletion of the send
+  audit trail, or retention silently stopping). (#TBD)
 
 ## [0.8.0] - 2026-10-10
 

@@ -282,9 +282,10 @@ def test_gc_writer_at_shape_matches_cutoff(conn):
     row must also actually be collected at 91 days, tying the shape pin
     to the retention behavior."""
     t = NOW - timedelta(days=91)
-    push_enqueue.enqueue_page(
+    r = push_enqueue.enqueue_page(
         conn, event_kind="approval_filed", owner_principal="owner-1",
         box_id="box-1", key_material="aid-shape", now=t)
+    assert r.disposition == "queued"
     conn.commit()
     stored = conn.execute(
         "SELECT at FROM push_send_results WHERE event_key = ?",
