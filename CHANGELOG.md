@@ -87,7 +87,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   traceback), and the lock-guard test passes the state directory the way
   production callers do. The toolset updater's version-probe refusal tests
   now also cover the non-root invoker path, so a root-only dev box catches
-  the refusal-reason gap that broke CI. (#TBD)
+  the refusal-reason gap that broke CI. (#1283)
 
 ## [0.8.0] - 2026-10-10
 
