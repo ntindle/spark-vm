@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the live run can prove, and a concrete runbook for the executing turn
   (harness-first, then live E2E with test-row cleanup). Highest-uncertainty
   item named: the epoch-expiry half of the command contract has never been
-  live-proven. (#TBD)
+  live-proven. (#1321)
 
 - Cycle-67 competitor watch (2026-10-11): a full pass over the
   tracked agent-sandbox vendors — Microsandbox shipped v0.7.8 (secret
