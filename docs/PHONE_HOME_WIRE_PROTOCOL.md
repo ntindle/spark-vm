@@ -169,8 +169,8 @@ never inject bytes into a live session.
   DO's re-drive (on every (re)bind, and on the D15 Worker→DO wakeup
   RPC after each enqueue) reads the acked watermark (`MAX(seq)` over
   `state='acked'` — no second cursor) and emits `command` frames in
-  seq order for current-epoch rows (`epoch` equal to the session's
-  accepted generation, §5) with `seq > watermark`, stamping
+  seq order for current-epoch rows (`epoch` equal to the box's
+  current command epoch — the incarnation fence, §5) with `seq > watermark`, stamping
   leases exactly as the HTTPS fetch path does (per-row conditional
   UPDATE, `MAX_PENDING_FETCH` cap per pass; see
   `docs/DURABLE_COMMANDS.md`'s lease-stamping contract). A (re)bind never expires
@@ -212,6 +212,18 @@ never inject bytes into a live session.
   in `unknown`). With 2b landed, `phone_home.redrive`'s emitted-count
   is exact for new deliveries again — socket acks advance the watermark
   identically to HTTPS acks.
+
+  **Amendment 2026-10-11 (#1320):** the pin originally worded the scope
+  as "`epoch` equal to the session's accepted generation" — that
+  contradicted §5's two-counter decision (generation ≠ epoch; the hello
+  carries no epoch). The corrected scope is the true one: the DO learns
+  the box's current command epoch from `?epoch=` claims (#947) and the
+  socket `command_ack`'s optional `epoch` (#976 S5b), adopted
+  monotonically (#848); the re-drive's SELECT shape is
+  `epoch = ? AND seq > ? AND (state='pending' OR (state='leased' AND
+  lease_until <= ?))` (see `docs/S4B_SOCKET_LIFECYCLE_GAP_ANALYSIS.md`
+  §S4b-2). A reboot bumps both counters; a plain reconnect bumps
+  generation only (§5) and never narrows the re-drive's epoch.
 
 ## 4. Keepalive
 
@@ -266,7 +278,7 @@ The `close` control frame's `code`:
 
 | `code` | Meaning | Box behavior |
 |---|---|---|
-| `revoked` | box token revoked mid-socket (#846 `revoked_at`) | Fall back to HTTPS (§8); MUST NOT reconnect-loop — HTTPS will 401 → print re-pair guidance and exit (re-pair is the human path) |
+| `revoked` | box token revoked mid-socket (#846 `revoked_at`) | Exit the daemon immediately (exit 1) — MUST NOT reconnect-loop, and the §8 fetch-path fallback does not engage (the revoked token 401s on every HTTPS path). The separate #864 heartbeat cron's 401 prints the re-pair guidance (re-pair is the human path). |
 | `expired` | box token expired mid-socket | Reconnect with the box's current token (a post-rotation socket riding the previous token lands here once the 15-min grace lapses — do NOT rotate again, just use the current token); if the box holds no live token, attempt one rotate; rotate-`401` → follow the `revoked` row; rotate-`403` → check clock skew (±300 s), do NOT re-pair |
 | `superseded-generation` | a newer generation bound this DO | Normal: the old socket is dead by design; the box keeps the new one and MUST NOT reconnect the old one |
 | `stale-generation` | `hello` arrived with `generation <= last_generation`; carries `last_generation` | Adopt `last_generation + 1`, treat as counter loss (bump epoch, §5), reconnect |
@@ -482,8 +494,9 @@ endpoint returns the deleted-row counts. (#1013)
   session reset it to 0.
   The DO MAY shed with `going-away` if connects exceed ~1 per 5 s per
   box; the box MUST then wait ≥ 60 s.
-- The box MUST NOT auto-reconnect on `revoked` (fall back to HTTPS;
-  re-pair is the human path).
+- The box MUST NOT auto-reconnect on `revoked` (exit the daemon;
+  the heartbeat cron's 401 carries the re-pair guidance; re-pair is
+  the human path).
 
 ## 11. S6 acceptance checklist
 
