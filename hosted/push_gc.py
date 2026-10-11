@@ -63,10 +63,12 @@ Decisions (continuing the push lane's D-series; D89 was the last pin):
   of ``push_send_results.at`` emits the same string shape —
   ``moment.astimezone(timezone.utc).isoformat()`` (``+00:00``-suffixed).
   The render step is single-sourced in ``push_enqueue.utc_iso``: every
-  in-repo ``at`` writer (``push_enqueue.enqueue_page``, ``push_events``
-  reminder/suppressed-terminal writes, ``push_send_loop`` attempt rows)
-  and this module's own cutoff render go through it, so the shape can
-  never drift by independent edits; ``push_events._quiet_window_start``
+  in-repo ``at`` writer (``push_enqueue.enqueue_page``; ``push_events``
+  reminder/suppressed-terminal writes; ``push_send_loop`` attempt rows
+  (``_insert_attempt_row``) and suppressed_terminal/dead-letter audit
+  rows (``_insert_audit_row``), both sharing the one helper-rendered
+  ``at``) and this module's own cutoff render go through it, so the
+  shape can never drift by independent edits; ``push_events._quiet_window_start``
   pins the same assumption for its ``MAX(at)``. A writer bypassing the
   helper with a different shape (naive ISO, ``Z`` suffix, epoch) silently
   corrupts retention in either direction: premature deletion of the
