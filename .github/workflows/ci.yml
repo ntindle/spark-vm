@@ -43,7 +43,7 @@ jobs:
     outputs:
       code_changed: ${{ steps.diff.outputs.code_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
           fetch-depth: 0
       - name: compute changed paths
@@ -92,8 +92,8 @@ jobs:
     outputs:
       matrix: ${{ steps.shards.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
       - name: check shard inventory
@@ -136,8 +136,8 @@ jobs:
       # non-empty JSON, so the fallback never fires on a code PR.)
       matrix: ${{ fromJson(needs.plan.outputs.matrix || '{"include":[]}') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
       # The merge gate proves exactly what a contributor runs locally
@@ -226,12 +226,12 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - name: Run shellcheck on all shell scripts
         # pinned SHA: action unmaintained since 2024, SHA protects against
         # branch drift (00b27aa7cb85167568cb48a3838b75f4265f2bca, 2024-06-20)
         # severity=error gates on real breakage (syntax/misuse), not style notes
-        uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
+        uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca # SHA-pinned
         with:
           severity: error
 
@@ -239,8 +239,8 @@ jobs:
     name: changelog ritual lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
       # Enforces CHANGELOG.md's own ritual (rules 1 + 4): entries must not
@@ -263,8 +263,8 @@ jobs:
     # stdlib-only, so the pytest-only install below suffices.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
       # The test imports only stdlib (os, re), but pytest itself is not on
@@ -279,7 +279,7 @@ jobs:
     name: markdown link check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - name: Check links in all markdown docs
         # --exclude-mail was removed upstream (lychee >= 0.20 excludes mail by
         # default); passing it fails the step with "unexpected argument".
@@ -558,7 +558,7 @@ jobs:
         # scripts/test_ci_md_link_excludes.py, which also rides the
         # docs-guard gate — a docs-only PR editing the block is checked
         # there). The pin fails CI on any mismatch.
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0, SHA-pinned
         with:
           args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' --exclude 'https?://(www\\.)?x264\\.org/.*' --exclude 'https?://(www\\.)?marktechpost\\.com/.*' --exclude 'https?://investors\\.digitalocean\\.com/.*' --exclude 'https?://bugs\\.webkit\\.org/.*' '**/*.md'"
         env:
@@ -568,8 +568,8 @@ jobs:
     name: PNG screenshot smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
       - run: |
