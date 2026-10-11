@@ -75,6 +75,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- `local-gate.sh --help` now prints the usage text even when the script is
+  run from a subdirectory (it previously died on a stale relative path),
+  and the local shellcheck check now scans the same shell scripts CI's
+  standalone job does — including extension-less executable tools like the
+  proxy utilities — so `local-gate.sh` surfaces shell issues before CI
+  does. (#1291)
+
 - On the golden image, the push worker now stands the box-local push queue
   down quietly on plane-enrolled boxes: the first-boot hook writes a
   root-owned enrollment signal the worker (which runs as a different user
