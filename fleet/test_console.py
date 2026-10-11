@@ -100,6 +100,32 @@ def main_capture_full(*argv):
     return code, out_buf.getvalue(), err_buf.getvalue()
 
 
+# The --watch usage-error pins must fail fast, never hang the suite: if
+# the run_watch guard is ever neutered (removed or weakened), the loop's
+# time.sleep(0) spins forever in-process and a plain main() call never
+# returns (QA hit exactly this at a 45s shell timeout on the pre-guard
+# code). Running the guard pins through a subprocess with a timeout turns
+# that failure mode into a loud test failure (TimeoutExpired) instead of
+# a hung suite. 20s is generous: the guard path performs no network I/O.
+WATCH_GUARD_TIMEOUT_S = 20
+
+
+def run_watch_guard(*argv):
+    """Run the console CLI as a subprocess with a hang-proof timeout.
+
+    Returns (returncode, stdout, stderr) with the same contract as
+    main_capture_full, but the child is bounded by
+    WATCH_GUARD_TIMEOUT_S: if the --watch guard fails to fire, the
+    TimeoutExpired exception fails the test in seconds instead of
+    hanging pytest forever.
+    """
+    proc = subprocess.run(
+        [sys.executable, CONSOLE, *argv],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=WATCH_GUARD_TIMEOUT_S)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 # --- alert board -------------------------------------------------------
 
 
@@ -368,7 +394,7 @@ def test_watch_nonfinite_interval_is_usage_error():
     # ("-inf" is rejected by argparse itself as a flag-like token, before
     # our code runs — also a clean usage error, just not ours to test.)
     for bad in ("nan", "inf"):
-        code, out, err = main_capture_full("--watch", bad)
+        code, out, err = run_watch_guard("--watch", bad)
         assert code == 64, bad
         assert "positive finite interval" in err, bad
         assert "Traceback" not in err, bad
@@ -435,7 +461,7 @@ def test_board_alerts_subset(store):
 
 def test_watch_negative_interval_is_usage_error():
     # A usage error must never dump a traceback in an operator tool.
-    code, out, err = main_capture_full("--watch", "-5")
+    code, out, err = run_watch_guard("--watch", "-5")
     assert code == 64
     assert "--watch needs a positive finite interval" in err
     assert "Traceback" not in err
@@ -445,7 +471,7 @@ def test_watch_negative_interval_is_usage_error():
 def test_watch_zero_is_usage_error_not_silent_once():
     # --watch 0 must fail loudly (exit 64): silently degrading to the
     # one-shot path is a fail-dangerous misread of the operator's intent.
-    code, out, err = main_capture_full("--watch", "0")
+    code, out, err = run_watch_guard("--watch", "0")
     assert code == 64
     assert "--watch needs a positive finite interval" in err
     assert "Traceback" not in err
@@ -456,7 +482,7 @@ def test_watch_negative_zero_float_is_usage_error():
     # --watch -0.0 is the float edge of the non-positive gate: argparse
     # hands run_watch a float, and the explicit-value contract (exit 64,
     # not a silent one-shot) must hold for -0.0 exactly as for 0 and -5.
-    code, out, err = main_capture_full("--watch", "-0.0")
+    code, out, err = run_watch_guard("--watch", "-0.0")
     assert code == 64
     assert "--watch needs a positive finite interval" in err
     assert "Traceback" not in err
@@ -467,7 +493,7 @@ def test_once_with_watch_zero_is_usage_error():
     # An explicit --watch 0 is a usage error even when --once is also
     # given: the flag's presence is contractual, not the mode. (The
     # 2026-10-09 explicit-zero hardening — old code silently ran once.)
-    code, out, err = main_capture_full("--once", "--watch", "0")
+    code, out, err = run_watch_guard("--once", "--watch", "0")
     assert code == 64
     assert "--watch needs a positive finite interval" in err
     assert "Traceback" not in err
