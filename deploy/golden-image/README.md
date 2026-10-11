@@ -156,8 +156,9 @@ or tokenless record writes nothing (fail-open to box-local, never a
 planted kill of the paging channel), and `/run` is tmpfs so a stale value
 cannot survive a reboot. The signal is bidirectional: any non-enrolled
 hook path (unreadable/tokenless record, pairing in flight, absent
-identity env) clears a stale signal, so a box de-enrolled without a
-reboot restores its box-local channel instead of standing down forever. The worker re-reads the file on every pass, so
+identity env) clears a stale signal, so re-running the hook after
+de-enrollment (or a reboot, which wipes /run's tmpfs) restores the
+box-local channel instead of standing down forever. The worker re-reads the file on every pass, so
 an operator who runs `redeem` after boot only needs to re-run this hook
 as root — no worker restart — for the stand-down to take effect. The
 explicit `SPARKVM_PLANE_PUSH` env knob remains the documented override
