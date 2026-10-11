@@ -81,6 +81,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the per-minute command poll no longer re-fetches, re-acks, and re-logs
   the same command, and a moved epoch on such a frame is adopted for the
   next poll. (#1280)
+- The approval-stamping lock's "proceed loudly without the lock" fallback
+  is now pinned by tests: when the cross-process stamp lock cannot be
+  created, the ingest is proven to log loudly and stamp anyway (never a
+  traceback), and the lock-guard test passes the state directory the way
+  production callers do. The toolset updater's version-probe refusal tests
+  now also cover the non-root invoker path, so a root-only dev box catches
+  the refusal-reason gap that broke CI. (#TBD)
 
 ## [0.8.0] - 2026-10-10
 

@@ -3142,6 +3142,58 @@ def test_playwright_probe_refusal_reason_logged(env, tmp_path):
     assert "no-such-user-pw-qa-1254" in runlog, runlog
 
 
+def _stub_id_nonroot(tmp_path):
+    # A stubbed `id` reporting a non-root uid: exercises the identity
+    # helpers' fail-closed non-root refusal branch even when pytest
+    # itself runs as root (the class the 20261010-1659 slot proved only
+    # non-root CI could catch). A bare `id -u` answers 1000; any user
+    # lookup fails like the real id on an unknown user — an
+    # unconditional echo would make the bogus owner "resolve" to the
+    # invoker and take the fast path instead of the refusal branch.
+    return make_stub_bin(tmp_path, {
+        "id": 'if [ $# -eq 1 ] && [ "$1" = "-u" ]; then echo 1000; '
+              "exit 0; fi; exit 1",
+    })
+
+
+def test_cua_driver_probe_refusal_reason_logged_nonroot(env, tmp_path):
+    # Issue #1254.3, stubbed-id non-root twin of
+    # test_cua_driver_probe_refusal_reason_logged: as a non-root
+    # invoker, _as_cua_driver_owner takes the "not $user and not root"
+    # refusal branch — the refusal reason must still reach the probe's
+    # errfile and the loud layer-level log (before the #1659 _refuse
+    # fix it reached only the run log, so [ -s "$errf" ] was false and
+    # the reported reason vanished).
+    stub = tmp_path / "owner-guard" / "cua-driver"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text('#!/bin/sh\necho "cua-driver 0.28.2 (abc123)"\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+               | stat.S_IXOTH)
+    e = dict(env["env"])
+    e["PATH"] = _stub_id_nonroot(tmp_path) + os.pathsep + e["PATH"]
+    e["CUA_DRIVER_BIN"] = str(stub)
+    e["CUA_DRIVER_OWNER"] = "no-such-user-pw-qa-1254"
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "version probe failed" in runlog, runlog
+    assert "not no-such-user-pw-qa-1254 and not root" in runlog, runlog
+
+
+def test_playwright_probe_refusal_reason_logged_nonroot(env, tmp_path):
+    # Issue #1254.3, stubbed-id non-root twin of
+    # test_playwright_probe_refusal_reason_logged: same routing for
+    # _playwright_current's helper-refusal path.
+    e = dict(env["env"])
+    e["PATH"] = _stub_id_nonroot(tmp_path) + os.pathsep + e["PATH"]
+    e["PLAYWRIGHT_USER"] = "no-such-user-pw-qa-1254"
+    r = source_and("_playwright_current", e)
+    assert r.stdout == "version-unknown", (r.stdout, r.stderr)
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "version probe failed" in runlog, runlog
+    assert "not no-such-user-pw-qa-1254 and not root" in runlog, runlog
+
+
 def test_probe_mktemp_failure_never_rms_dev_null(env, tmp_path):
     # Engineering round-1 blocker: when _probe_errfile fails, errf falls
     # back to /dev/null and the cleanup must skip it — an unconditional
