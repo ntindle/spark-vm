@@ -128,12 +128,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   clear it for a re-deploy-the-same-tree attempt), so one alert goes out
   per bad commit rather than every ten minutes. Same-commit forced
   redeploys (host-side input rotations) never mark the commit blocked —
-  the commit is fine, so those still retry next tick. (#1295) (#TBD)
+  the commit is fine, so those still retry next tick. (#1295) (#1297)
 - Hardened the phone-home fd-leak regression test against CI flake: the
   /proc/self/fd snapshot now runs with garbage cycles drained on both
   sides and asserts no new fds rather than full set equality, so an
   external GC pass can no longer fake a failure while a genuine leak on
-  the fchmod-failure path still fails the test. (#1290) (#TBD)
+  the fchmod-failure path still fails the test. (#1290) (#1297)
 
 ## [0.8.0] - 2026-10-10
 
