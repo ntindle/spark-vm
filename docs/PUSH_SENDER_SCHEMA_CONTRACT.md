@@ -426,11 +426,23 @@ decisions here, not follow-ups.
   deploying before its migration writes to missing tables. The
   migration file lives in the control-plane workspace next to
   `migrate_958_s4b.sql`; this doc is its contract.
-- 90-day retention + GC for all four tables is filed follow-up #1058
-  (the #999 precedent filed #1013 for `phone_home_events`), not
-  part of this migration. Budget buckets older than the current
-  hour are never read; digest rows older than 90 days are never
-  read.
+- 90-day retention + GC is shipped in-repo as `hosted/push_gc.py`
+  (#1058; the #999 precedent filed #1013 for `phone_home_events`,
+  whose plane-workspace cron + manual-trigger pattern the deploy half
+  of this slice follows — see the follow-up). `gc_push_tables`
+  deletes `push_budget_counters` / `push_digest_state` rows whose
+  `window_start` is older than 90 days and `push_send_results` rows
+  whose `at` is older than 90 days, in LIMIT-batched idempotent
+  rounds, returning per-table counts for the ops log. Two exclusions
+  are pinned: `outcome='queued'` outbox rows are immortal under the
+  GC (the work item's lifetime is the sender loop's and #968's —
+  deleting one would silently drop a page the owner never got), and
+  `push_subscriptions` is never GC'd — the only accumulating rows
+  are `dead_410` tombstones (bounded by device churn, not page
+  volume), and the tombstone's whole purpose is the dashboard's
+  died-vs-never-subscribed distinction. Budget buckets older than the
+  current hour are never read; digest rows older than 90 days are
+  never read.
 
 ## 5. Open product question (carried, not settled)
 
