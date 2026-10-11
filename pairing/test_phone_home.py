@@ -13,6 +13,7 @@ command frames are logged and never executed.
 """
 import base64
 import errno
+import gc
 import hashlib
 import io
 import json
@@ -1506,6 +1507,15 @@ def test_fast_forward_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
     # file), the fd must be closed — a leak here would exhaust fds one
     # per held frame in a long-lived session. The hold stands and the
     # failure is loud.
+    #
+    # Issue #1290 flake hardening: the old assertion compared the full
+    # /proc/self/fd set before/after, which cannot distinguish "leaked"
+    # (grew) from "externally collected" (shrank) — a generational GC
+    # pass mid-test can retire fds opened by earlier tests in the same
+    # shard. gc.collect() before both snapshots drains pending cycles
+    # so the comparison measures only the code under test, and the
+    # directional assertion tolerates shrinkage while a genuine leak
+    # (the 5 fds this loop would leave open un-fixed) still fails.
     with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
         json.dump({"cursor": 3, "epoch": 0}, f)
 
@@ -1520,10 +1530,13 @@ def test_fast_forward_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
     def _fds():
         return set(os.listdir("/proc/self/fd"))
 
+    gc.collect()
     before = _fds()
     for _ in range(5):
         assert sess._fast_forward_to_shared_cursor(0) is False
-    assert _fds() == before, "fd leaked on fchmod failure"
+    gc.collect()
+    after = _fds()
+    assert after - before == set(), "fd leaked on fchmod failure"
     out = capsys.readouterr().out
     assert "cannot secure ingest lock" in out
 
