@@ -223,6 +223,7 @@ working.
 | [PRICING_THINKING.md](PRICING_THINKING.md) | Pricing design thinking, explicitly not a commitment. |
 | [ICP.md](ICP.md) | Ideal customer profiles for the three segments (self-hosters, hosted signups, sandbox harness builders) and the trust split between them — design thinking, not a commitment. |
 | [WAITLIST_OPERATIONS.md](WAITLIST_OPERATIONS.md) | Waitlist ops spec: confirm flows, reminder/drop jobs, funnel events. |
+| [WAITLISTD_DURABILITY_GAP_ANALYSIS.md](WAITLISTD_DURABILITY_GAP_ANALYSIS.md) | waitlistd durability gap analysis (2026-10-11, #386–#406): the crash-recovery / persistence / erasure story vs the vision, pinned to main `f4c7c74` — every one of the ten arch findings re-verified against the pinned tree: #387 closed (answered by the #896/#900 trusted-proxy contract), #397 re-scoped to the four still-unrepairable commit→emit kinds (invite_sent + claimed now have reconcile tools), the remaining eight kept with pinned decisions D-WL-1–D-WL-8 (read-under-exclusive-lock stays with store-size as the stated lever; whole-wave lock stays; forget scope = the pre-claim live set; per-flow token orderings stand; triage + spool asymmetry as small fixes). |
 | [PUSH_NOTIFICATIONS.md](PUSH_NOTIFICATIONS.md) | Push notifications for confirmd approvals (H2 / GitHub #2). |
 | [HOSTED_UNBLOCK_PASS.md](HOSTED_UNBLOCK_PASS.md) | One pass over everything blocking the hosted launch (2026-09-19). |
 | [MULTI_AGENT_ORCHESTRATION.md](MULTI_AGENT_ORCHESTRATION.md) | Multi-agent orchestration design. |
