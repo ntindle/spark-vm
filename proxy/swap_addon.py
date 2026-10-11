@@ -583,9 +583,20 @@ def _summons_sweep(outbox=None, pending_d=None):
         with _summons_locked(outbox):
             journaled = set()
             try:
-                with open(outbox, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
+                # Issue #1331: the journal is read as bytes and decoded
+                # per line. A byte-corrupt line used to raise
+                # UnicodeDecodeError out of the for-iterator (the text
+                # decode happens in the iterator, not in the per-line
+                # try), killing the whole sweep instead of hitting the
+                # loud-not-fatal corrupt-line path below.
+                with open(outbox, "rb") as f:
+                    for raw in f:
+                        try:
+                            line = raw.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            log.warning("swap: summons sweep skipping "
+                                        "undecodable journal line")
+                            continue
                         if not line:
                             continue
                         try:
@@ -1139,7 +1150,10 @@ class SwapAddon:
         """
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
+            # #1328: non-UTF-8 bytes are a read failure like any other --
+            # the credential is skipped (fail-closed), never raised out
+            # of _load() into the hook.
             log.warning("swap: cannot read secret %s: %s", path.name, e)
             return None
         lines = [l for l in text.splitlines() if l.strip()]
@@ -1248,6 +1262,13 @@ class SwapAddon:
                     "swap: secret %r has a value shorter than %d chars; "
                     "response scrubbing is disabled for it", name,
                     _MIN_SCRUB_LEN)
+        # Issue #1328: decoding errors are read failures. UnicodeDecodeError
+        # is not an OSError, so without the UnicodeError disjunct a
+        # non-UTF-8 file would raise out of _load() (inside _maybe_reload's
+        # hook-path try) instead of degrading fail-closed like a
+        # missing/unreadable file does. Applies to every line-format
+        # allowlist read in this method; the JSON reads (registry, grants)
+        # already catch (OSError, ValueError), which covers decode errors.
         hosts = []
         try:
             if HOSTS_FILE.is_file():
@@ -1255,7 +1276,7 @@ class SwapAddon:
                     line = line.strip()
                     if line and not line.startswith("#"):
                         hosts.append(line.lower())
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             log.warning("swap: cannot read hosts.allow: %s", e)
         # §3a smoke echo hosts: same line format as hosts.allow.
         # ORDERED CONTRACT with the injector (harness/
@@ -1278,7 +1299,7 @@ class SwapAddon:
                     line = line.strip()
                     if line and not line.startswith("#"):
                         stream_hosts.append(line.lower())
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             log.warning("swap: cannot read stream-hosts: %s "
                         "(stream opt-in disabled)", e)
         ssrf_hosts, ssrf_nets = [], []
@@ -1286,7 +1307,7 @@ class SwapAddon:
             if SSRF_ALLOW_FILE.is_file():
                 ssrf_hosts, ssrf_nets = _parse_ssrf_allow(
                     SSRF_ALLOW_FILE.read_text(encoding="utf-8"))
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             log.warning("swap: cannot read ssrf.allow: %s (default deny)",
                         e)
         # Finding 47: the deny list beats the allow list. Same format
@@ -1302,7 +1323,7 @@ class SwapAddon:
                 log.warning(
                     "swap: ssrf.deny MISSING at %s - the jail can "
                     "impersonate the owner (finding 47/61)", SSRF_DENY_FILE)
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             log.warning("swap: cannot read ssrf.deny: %s", e)
         self.secrets = secrets
         self.hosts = hosts
@@ -1408,7 +1429,10 @@ class SwapAddon:
                     if line and not line.startswith("#"):
                         smoke_hosts.append(line.lower())
                 smoke_load_ok = True
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
+            # #1328: non-UTF-8 bytes land here, not out of the hook --
+            # the fail-closed poison path below treats them like any
+            # unreadable file.
             log.warning("swap: cannot read smoke-hosts: %s", e)
         # A readable-but-empty file is not a valid scoping list (the
         # injector always writes at least one entry); treat it like a
