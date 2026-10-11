@@ -46,6 +46,25 @@ binding never swaps: fail closed. Everything else passes through untouched.
 - **Host matching** lives in [host_match.py](host_match.py), the single
   source of truth (exact names or leading-dot subdomain entries), shared
   with the provision-time injector so the two can never drift.
+- **Message streams:** server-sent events and protocol upgrades (101)
+  from allowlisted hosts are killed at headers time — a stream's body
+  never finishes, so the response scrubber can never see it (issue
+  #92). The one explicit exception is the operator-owned `stream-hosts`
+  file (`/home/swapd/stream-hosts`, one hostname per line, same
+  format as `hosts.allow`): a listed host is opted in — the kill is
+  skipped (audited as `stream-optin` in `swap.log`), WebSocket text
+  frames get placeholder insertion again, and SSE bodies are scrubbed
+  when the stream completes, within the 5 MB response-scrub cap — a
+  completed stream over the cap is delivered unscrubbed, like any other
+  oversize body. Fail closed: no file, no opt-in. Opting a
+  host in re-admits the stated residual that a *never-ending* stream
+  buffers unboundedly — use it for streaming LLM providers, not for
+  arbitrary endpoints.
+  Create it over SSH as root, root-owned mode 0644 (`install -o root
+  -g root -m 0644`); the proxy only reads it — never swapd-writable,
+  so the proxy's own user cannot widen its own opt-in. Reloads are
+  mtime-triggered: after a permission-only fix, `touch` the file, since
+  `chmod` alone does not bump mtime and the proxy will not re-read it.
 
 The addon's own audit log (`swap.log`) is the intended observability —
 mitmdump's default per-flow request lines print full URLs, so the service

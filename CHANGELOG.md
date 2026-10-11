@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Per-host opt-in for the message-stream refusal (2026-10-11, #629): the
+  proxy killed every server-sent-events stream and protocol upgrade from
+  allowlisted hosts at headers time, because a stream's body never
+  finishes and can never be scrubbed. Operators can now list specific
+  hosts in an operator-owned `stream-hosts` file (one hostname per line)
+  to opt them in — the kill is skipped and recorded in the audit log,
+  WebSocket text frames get credential insertion again, and stream
+  bodies are scrubbed when they complete. Fail closed: no file, no
+  opt-in; opting a host in accepts the stated residual that a
+  never-ending stream buffers unboundedly. (#TBD)
+
 - Phone-home S6 readiness pin (2026-10-11, #960): the #847 lane's six-item
   live-acceptance checklist mapped against the shipped tree — what the
   box-side tests and the deployed plane already prove per item, what only

@@ -190,11 +190,14 @@ REGISTRY = {
 
 
 def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
-               smoke_hosts=()):
+               smoke_hosts=(), stream_hosts=()):
     a = sa.SwapAddon.__new__(sa.SwapAddon)
     a.secrets = dict(secrets)
     a.hosts = list(hosts)
     a.smoke_hosts = list(smoke_hosts)
+    # Issue #629 piece 3: the stream opt-in is a constructor-level list
+    # like the other host lists; empty = no opt-in (fail closed).
+    a.stream_hosts = list(stream_hosts)
     # §3a fail-closed state mirrors the loader: the seen-set is what
     # _host_is_smoke_only enforces (monotonic), poison starts clear.
     a.smoke_hosts_seen = set(smoke_hosts)
@@ -772,7 +775,8 @@ class SwapAddonTests(unittest.TestCase):
         def llm(inference):
             a = make_addon(hosts=["api.llm.example"],
                            registry={"llm": {"allowed_hosts": ["api.llm.example"]}},
-                           secrets={"llm": "sk-LLM"})
+                           secrets={"llm": "sk-LLM"},
+                           stream_hosts=["api.llm.example"])
             a.inference_mode = inference
             return a
 
@@ -2311,8 +2315,9 @@ class ProxyHardeningRoundTests(unittest.TestCase):
 
     def test_71_oversize_websocket_message_passes_through(self):
         """Finding 71: the same cap applies to websocket text frames,
-        with the same durable audit note."""
-        a = make_addon()
+        with the same durable audit note. (The insertion path is the
+        #629 stream opt-in's re-enabled path, so the host is opted in.)"""
+        a = make_addon(stream_hosts=["api.github.com"])
         big = b"hsurr:github" + b"x" * (sa._MAX_SWAP_BODY_BYTES + 1)
         flow = Flow(Request("api.github.com", "/ws"))
         flow.websocket = FakeWebSocket([FakeWSMessage(big)])
@@ -2720,6 +2725,99 @@ class StreamRefusalTests(unittest.TestCase):
                          "protocol-upgrade")
         r4 = FakeResponse(b"", "application/json")
         self.assertIsNone(sa.SwapAddon._stream_refusal_reason(r4))
+
+
+class StreamOptInTests(unittest.TestCase):
+    """Issue #629 piece 3: per-host opt-in for the finding-40e stream
+    refusal. A host listed in the stream-hosts file is explicitly opted
+    in by the operator — the responseheaders kill is skipped (audited
+    as stream-optin instead) and the `websocket_message` insertion path
+    is re-enabled for that host only. Every other host keeps the
+    default refusal."""
+
+    def test_optin_host_sse_not_killed(self):
+        a = make_addon(stream_hosts=["github.com"])
+        resp = FakeResponse(b'data: {"x": 1}\n\n', "text/event-stream")
+        flow = Flow(Request("github.com", "/stream"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)  # passes: operator opted in
+        self.assertEqual(resp.status_code, 200)
+        # the pass is audited like a refusal is, with its own token
+        self.assertIn(("github.com", "stream-optin", "sse"),
+                      a.audit_notes)
+
+    def test_optin_host_101_upgrade_not_killed(self):
+        a = make_addon(stream_hosts=["github.com"])
+        resp = FakeResponse(b"", "application/octet-stream",
+                            status_code=101)
+        resp.headers["upgrade"] = "websocket"
+        resp.headers["connection"] = "Upgrade"
+        flow = Flow(Request("github.com", "/ws"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "stream-optin", "protocol-upgrade"),
+                      a.audit_notes)
+
+    def test_nonoptin_host_still_killed(self):
+        # Same addon, host not in the opt-in list: default refusal.
+        a = make_addon(stream_hosts=["api.openai.com"])
+        resp = FakeResponse(b'data: 1\n\n', "text/event-stream")
+        flow = Flow(Request("github.com", "/stream"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+
+    def test_optin_uses_host_allow_matching_semantics(self):
+        # A leading-dot entry matches subdomains, never the bare
+        # domain — the same semantics as hosts.allow (host_match).
+        a = make_addon(stream_hosts=[".github.com"])
+        self.assertTrue(a._host_allows_stream("api.github.com"))
+        self.assertFalse(a._host_allows_stream("github.com"))
+        self.assertFalse(a._host_allows_stream("evil.example"))
+        # empty/unloaded list never opts anyone in (fail closed)
+        self.assertFalse(make_addon()._host_allows_stream("github.com"))
+
+    def test_websocket_insertion_reenabled_for_optin_host(self):
+        a = make_addon(hosts=["api.llm.example"],
+                       registry={"llm": {"allowed_hosts":
+                                         ["api.llm.example"]}},
+                       secrets={"llm": "sk-LLM"},
+                       stream_hosts=["api.llm.example"])
+        flow = Flow(Request("api.llm.example", "/ws"))
+        flow.websocket = FakeWebSocket([FakeWSMessage(b"key=hsurr:llm")])
+        a.websocket_message(flow)
+        self.assertEqual(flow.websocket.messages[0].content, b"key=sk-LLM")
+
+    def test_websocket_insertion_stays_off_without_optin(self):
+        # Allowlisted but not opted in: the frame passes through
+        # unswapped (the 101 for this host is killed in
+        # responseheaders; the gate is defense in depth).
+        a = make_addon(hosts=["api.llm.example"],
+                       registry={"llm": {"allowed_hosts":
+                                         ["api.llm.example"]}},
+                       secrets={"llm": "sk-LLM"})
+        flow = Flow(Request("api.llm.example", "/ws"))
+        flow.websocket = FakeWebSocket([FakeWSMessage(b"key=hsurr:llm")])
+        a.websocket_message(flow)
+        self.assertEqual(flow.websocket.messages[0].content,
+                         b"key=hsurr:llm")
+        self.assertEqual(a.audit_notes, [])
+
+    def test_optin_gate_is_not_vacuous(self):
+        # The same flow is killed when the host leaves the opt-in
+        # list: the gate, not the fixture, decides.
+        for hosts, killed in ((["github.com"], False), ([], True)):
+            a = make_addon(stream_hosts=hosts)
+            resp = FakeResponse(b'data: 1\n\n', "text/event-stream")
+            flow = Flow(Request("github.com", "/stream"))
+            flow.response = resp
+            a.responseheaders(flow)
+            self.assertEqual(flow.error is not None, killed,
+                             "stream_hosts=%r" % (hosts,))
 
 
 class RedirectSecretTests(unittest.TestCase):
