@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Phone-home S6 readiness pin (2026-10-11, #960): the #847 lane's six-item
+  live-acceptance checklist mapped against the shipped tree — what the
+  box-side tests and the deployed plane already prove per item, what only
+  the live run can prove, and a concrete runbook for the executing turn
+  (harness-first, then live E2E with test-row cleanup). Highest-uncertainty
+  item named: the epoch-expiry half of the command contract has never been
+  live-proven. (#1321)
+
 - Cycle-67 competitor watch (2026-10-11): a full pass over the
   tracked agent-sandbox vendors — Microsandbox shipped v0.7.8 (secret
   substitution scoping, `msb restore --mount-disk`, runtime-owned
