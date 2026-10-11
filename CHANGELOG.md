@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- An operator guide for the push-sender retention sweeper: which rows the
+  90-day sweep deletes, what it never touches (outbox work items,
+  subscription tombstones), the timestamp-shape contract every table
+  writer must honor, verification probes, and the failure catalog.
+  (#1306)
+
 - Rollout-controller convergence pin (2026-10-11, #1261): the template
   artifact question is now answered — pinned deployment-ID + SHA-256
   manifests, not a floating "latest" — so the wave/promotion slices' ship
