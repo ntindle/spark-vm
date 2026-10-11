@@ -41,11 +41,12 @@ Structural fact for the S6 executor (F-S6-1): the plane worker source is
 not in the public repo — the public tree holds the contract, the box
 client (`pairing/spark_pair.py`), and the box-side tests. The S6 method's
 "harness-first" step therefore runs the *real* `worker.py` from the
-operator's checkout against a sqlite-backed D1 stub (the
-`hidden_files/harness_958_s4a.py` pattern from #846/#848/#952) — that
-harness is the only pre-live verification of plane behavior. In-tree
-`pairing/test_phone_home.py` (54 tests) covers the box half against a
-contract-faithful plane stub.
+operator's checkout against a sqlite-backed D1 stub (the archived
+`hidden_files/harness_958_s4a.py.bak-pre-1001-s4b2-20261007-1259`
+pattern from #846/#848/#952 — the latest incarnation of that harness
+in the loop workspace) — that harness is the only pre-live verification
+of plane behavior. In-tree `pairing/test_phone_home.py` (86 tests) covers
+the box half against a contract-faithful plane stub.
 
 ## 2. Per-item readiness (§11 checklist)
 
@@ -169,10 +170,12 @@ contract-faithful plane stub.
 - **F-S6-1** — Plane source is operator-side, not in the public repo
   (verified: no `worker.py` anywhere in the tree at main `2cd2c4d`).
   Consequence: the harness-first step (real worker.py + sqlite D1 stub,
-  the `harness_958_s4a.py` pattern) is load-bearing, not optional — it
-  is the only pre-live check of plane behavior. Not a product gap; the
-  deployment model is deliberate (deployed-bytes SHA pinned at deploy
-  time).
+  the archived `hidden_files/harness_958_s4a.py.bak-pre-1001-s4b2-20261007-1259`
+  pattern) is load-bearing, not optional — it is the only pre-live check
+  of plane behavior. Whether that opacity is acceptable long-term is the
+  operator's call (an OSS contributor cannot audit the plane half of any
+  contract); this analysis takes the deployment model as given — the
+  deployed-bytes SHA is pinned at deploy time.
 - **F-S6-2** — Item 6's plane half (epoch expiry + 409) is the least-
   verified slice of the lane. Contract-documented, never live-proven.
 - **F-S6-3** — No in-repo way to block WSS egress alone (ws URL derives
@@ -194,9 +197,32 @@ contract-faithful plane stub.
 
 ## 4. Decisions for the S6 executor
 
-- **D-S6-1** — Harness-first, then live. Extend the `harness_958_s4a.py`
-  pattern (real worker.py, sqlite D1 stub) with per-item plane-logic
-  checks before touching `api.sparkvm.dev`.
+### Executor prerequisites (owner-provisioned, not self-provisionable)
+
+The S6 run cannot start until the operator confirms these — the loop can
+provision none of them itself:
+
+1. **Owner key** — for the revoke endpoint (item 2), the journal read
+   path (items 1, 3, 4), owner-decide command enqueue (items 1, 3, 5),
+   and test-row cleanup. Per the standing secrets boundary the loop never
+   sees key values; the executor uses the established operator-side path
+   (as prior live runs did).
+2. **Owner approval of two pairing requests** — the test boxes enroll via
+   the normal pairing flow (`request` + `redeem`); approval is a human
+   action on the dashboard/CLI.
+3. **Two disposable test boxes with root + the pairing/phone-home tooling
+   installed** — item 5 needs root for the iptables owner-match rule;
+   items 3/6 need process control (`kill -9`, generation-file deletion).
+   These must NOT be the user's real tower/hosted box (D-S6-2 hygiene).
+   **No candidates identified — mark explicitly before the run; if none
+   exist, that is the S6 turn's NEEDS_USER item, not a silent skip.**
+
+### Run decisions
+
+- **D-S6-1** — Harness-first, then live. Extend the archived
+  `hidden_files/harness_958_s4a.py.bak-pre-1001-s4b2-20261007-1259`
+  pattern (real worker.py from the operator's checkout, sqlite D1 stub)
+  with per-item plane-logic checks before touching `api.sparkvm.dev`.
 - **D-S6-2** — Two disposable test boxes, enrolled via the pairing flow
   (owner approves `request` + `redeem`). Every test row — boxes, tokens,
   journal rows, commands — is deleted afterwards; real boxes' heartbeats
