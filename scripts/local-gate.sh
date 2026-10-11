@@ -27,8 +27,11 @@
 #                             any step that writes to the tree, so the gate's
 #                             own pytest __pycache__ can never trip the
 #                             --worktree guard into a false "code")
-#   4. docs index coverage   (pytest scripts/test_docs_index_coverage.py —
-#                             runs on every PR like CI, docs-only included)
+#   4. docs index coverage   (pytest scripts/test_docs_index_coverage.py
+#                             scripts/test_ci_md_link_excludes.py
+#                             scripts/test_contributing_ci_gates.py — the
+#                             CI job's exact three-file invocation; runs on
+#                             every PR like CI, docs-only included)
 #   5. shellcheck            (severity=error on changed *.sh — approximates
 #                             the standalone shellcheck CI job; the suite's
 #                             own shellcheck gates live inside the python suite)
@@ -140,8 +143,9 @@ local-gate plan (nothing executed):
   3. changed-paths gate    — docs-only diffs skip step 6, exactly like CI
                              (evaluated before any step that writes to the
                              tree)
-  4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py -q
-                             (runs on every PR like CI, docs-only included)
+  4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
+                             (CI's exact three-file invocation; runs on every
+                             PR like CI, docs-only included)
   5. shellcheck            — severity=error on *.sh files changed vs origin/main
                              (skipped loudly if shellcheck is not installed)
   6. python tests          — python3 -m pytest (skipped on --quick or docs-only)
@@ -175,7 +179,16 @@ gate_verdict="$(bash "$SCRIPT_DIR/local-gate.sh" --eval-changed-paths --worktree
 echo "local-gate: diff is $gate_verdict"
 
 step "docs index coverage"
-python3 -m pytest scripts/test_docs_index_coverage.py -q
+# CI's `docs index coverage` job runs three test files on every PR
+# (docs-only included): the docs-index coverage test plus the two
+# doc-inventory pins (link-exclude inventory vs ci.yml; CONTRIBUTING's
+# gate inventory vs ci.yml and the branch-protection ruleset). Running
+# the job's exact three-file invocation here keeps the docs-only local
+# path honest — a docs-only PR hand-editing one of those inventory
+# blocks would otherwise pass this step locally while CI fails it.
+# (dx 20261011-0429: this step used to run only the index-coverage file.)
+python3 -m pytest scripts/test_docs_index_coverage.py \
+  scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
 
 step "shellcheck (severity=error, changed *.sh)"
 if ! command -v shellcheck >/dev/null 2>&1; then
