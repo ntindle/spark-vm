@@ -316,6 +316,25 @@ def test_rollback_retired_plane_refused(store):
     assert "retired" in p.stderr
 
 
+def test_retired_refusal_precedes_freeze_gate(store):
+    # Refusal precedence: on a retired plane in a frozen store, the
+    # operator must hear "retired" (the actual blocker), not "frozen".
+    # Neuter: moving the retired check after _gates flips this to
+    # "frozen".
+    _register_release(store)
+    assert _inv(store, "retire", "--plane-id", "plane-1").returncode == 0
+    assert _cli(store, "freeze", "--on").returncode == 0
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "retired" in p.stderr, p.stderr
+    assert "frozen" not in p.stderr
+    p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
+    assert p.returncode == 2
+    assert "retired" in p.stderr, p.stderr
+    assert "frozen" not in p.stderr
+
+
 def test_rollback_snapshot_divergence_fails_closed(store):
     # The advisory's threat model: a tampered last_known_good in the
     # snapshot must fail closed via the journal-as-truth discipline the

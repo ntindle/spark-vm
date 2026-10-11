@@ -325,8 +325,9 @@ def cmd_deploy(args):
         _fail(f"plane {plane_id!r} is retired — the driver never pushes to "
               "retired planes (record the rejoin with the inventory "
               "`deploy` command first)")
-    # D-RC-5 gates are outermost: a frozen store refuses ALL deploys,
-    # before the request's own validity is even examined.
+    # Refusal precedence: registration, then retirement, then the D-RC-5
+    # gates, then the release read — the operator always hears the actual
+    # blocker first.
     live_wave = _gates(store_dir, plane_id)
     # D-RC-2(b): the ONLY deploy target is the pinned manifest — read
     # through the fail-closed release reader, never a floating "latest".
@@ -401,16 +402,18 @@ def cmd_rollback(args):
     if status not in ("healthy", "degraded"):
         _fail("--status must be healthy or degraded, got %r" % (args.status,))
 
-    # D-RC-5 gates are outermost here too: a frozen store refuses the
-    # rollback before the pin is even examined.
-    if plane_id not in plane_inventory.read_planes(store_dir):
+    # Refusal precedence: registration, then retirement, then the D-RC-5
+    # gates, then the pin read — the operator always hears the actual
+    # blocker first (same ordering as cmd_deploy).
+    prev = plane_inventory.read_planes(store_dir).get(plane_id)
+    if prev is None:
         _fail(f"plane {plane_id!r} is not registered (register first)")
-    live_wave = _gates(store_dir, plane_id)
-    prev, release = _rollback_target(store_dir, plane_id)
     if prev.get("status") == "retired":
         _fail(f"plane {plane_id!r} is retired — the driver never pushes to "
               "retired planes (record the rejoin with the inventory "
               "`deploy` command first)")
+    live_wave = _gates(store_dir, plane_id)
+    prev, release = _rollback_target(store_dir, plane_id)
     template = release["template_version"]
     deployment_id = release["deployment_id"]
     worker_sha256 = release["worker_sha256"]
