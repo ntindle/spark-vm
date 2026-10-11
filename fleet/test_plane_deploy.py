@@ -280,6 +280,59 @@ def test_waves_boolean_assignment_fails_closed_not_wave_one(store):
     assert "refusing deploys" in p.stderr
 
 
+def test_waves_live_wave_bool_fails_closed(store):
+    # The bool-is-int-subclass trap on live_wave itself: dedicated guard,
+    # so it gets its own pin. The assignment is a clean int on purpose —
+    # without the live_wave guard, `1 == True` would admit the plane.
+    # Neuter: deleting the bool guard in _read_waves must flip this.
+    _register_release(store)
+    _plant_waves(store, True, {"plane-1": 1})
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "refusing deploys" in p.stderr
+
+
+def test_deploy_retired_plane_refused(store):
+    # The controller must not promote into retired planes: the driver
+    # refuses the push (S1's inventory `deploy` keeps the intentional
+    # resurrect semantics — the operator records the rejoin there first).
+    # Neuter: deleting the retired check must flip this (silent resurrect
+    # + push, rc 0).
+    _register_release(store)
+    assert _inv(store, "retire", "--plane-id", "plane-1").returncode == 0
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "retired" in p.stderr
+
+
+def test_rollback_retired_plane_refused(store):
+    _register_release(store)
+    _plant_plane_record(store, "plane-1", last_known_good=_lkg())
+    assert _inv(store, "retire", "--plane-id", "plane-1").returncode == 0
+    p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
+    assert p.returncode == 2
+    assert "retired" in p.stderr
+
+
+def test_rollback_snapshot_divergence_fails_closed(store):
+    # The advisory's threat model: a tampered last_known_good in the
+    # snapshot must fail closed via the journal-as-truth discipline the
+    # driver inherits — never become a rollback target.
+    _register_release(store)
+    _plant_plane_record(store, "plane-1", last_known_good=_lkg())
+    snap_path = os.path.join(store, "planes.json")
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        snap = json.load(fh)
+    snap["planes"]["plane-1"]["last_known_good"]["worker_sha256"] = "dd" * 32
+    with open(snap_path, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh, sort_keys=True)
+    p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+
+
 def test_rollback_no_pin_fails_closed(store):
     _register_release(store)
     p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
@@ -437,12 +490,16 @@ def test_deployer_exception_fails_closed_no_writes(store, monkeypatch):
     assert _cost_events(store) == []
 
 
-def test_deployer_garbage_duration_fails_closed(store, monkeypatch):
-    # A deployer-reported duration that is not a non-negative number must
-    # not enter the D-MT5 ledger — fail closed, nothing recorded.
+@pytest.mark.parametrize("bad_duration", ["garbage", float("inf"), -5])
+def test_deployer_bad_duration_fails_closed(store, monkeypatch,
+                                             bad_duration):
+    # A deployer-reported duration that is not a finite non-negative
+    # number must not enter the D-MT5 ledger — fail closed, nothing
+    # recorded. (check_nonneg_number rejects non-numeric, non-finite,
+    # and negative alike.)
     _register_release(store)
     monkeypatch.setattr(plane_deploy, "DEPLOYER",
-                        _fake_deployer_factory(duration_s="soon"))
+                        _fake_deployer_factory(duration_s=bad_duration))
     with pytest.raises(SystemExit) as ei:
         plane_deploy.main(["--store", store, "deploy",
                            "--plane-id", "plane-1", "--template", "w@v1"])
@@ -479,3 +536,15 @@ def test_rollback_happy_path(store, monkeypatch):
     assert len(costs) == 1
     assert costs[0]["event"] == "rollback"
     assert costs[0]["cost_usd"] == 0.01
+
+
+def test_deploy_status_degraded_recorded(store, monkeypatch):
+    # --status is user-facing CLI surface on deploy: the recorded status
+    # must be the operator's claim, not the default.
+    _register_release(store)
+    monkeypatch.setattr(plane_deploy, "DEPLOYER", _fake_deployer_factory())
+    rc = plane_deploy.main(["--store", store, "deploy",
+                            "--plane-id", "plane-1", "--template", "w@v1",
+                            "--status", "degraded"])
+    assert rc == 0
+    assert _plane_record(store)["status"] == "degraded"

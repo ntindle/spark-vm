@@ -35,6 +35,11 @@ Design pins (docs/TENANT_PLANE_ROLLOUT_CONTROLLER_GAP_ANALYSIS.md §4):
   D-MT5 ledger's first writer. Missing events do not block promotion;
   cost-summary reports coverage (cost_usd_reported vs count) so the
   D-MT5 revisit query stays honest about its inputs.
+- Retired planes are never pushed to: deploy/rollback refuse a plane
+  whose status is retired (the fleet invariant is "the controller must
+  not promote into" retired planes). The S1 inventory `deploy` command
+  keeps its intentional resurrect semantics — the operator records the
+  rejoin there first, then the driver can push.
 - F-RC-10: the driver writes the artifact join — the plane's deploy
   record carries (deployment_id, worker_sha256), so "which bytes landed
   on plane #k" is answerable, not just "which template" (record schema
@@ -316,6 +321,10 @@ def cmd_deploy(args):
     prev = plane_inventory.read_planes(store_dir).get(plane_id)
     if prev is None:
         _fail(f"plane {plane_id!r} is not registered (register first)")
+    if prev.get("status") == "retired":
+        _fail(f"plane {plane_id!r} is retired — the driver never pushes to "
+              "retired planes (record the rejoin with the inventory "
+              "`deploy` command first)")
     # D-RC-5 gates are outermost: a frozen store refuses ALL deploys,
     # before the request's own validity is even examined.
     live_wave = _gates(store_dir, plane_id)
@@ -398,6 +407,10 @@ def cmd_rollback(args):
         _fail(f"plane {plane_id!r} is not registered (register first)")
     live_wave = _gates(store_dir, plane_id)
     prev, release = _rollback_target(store_dir, plane_id)
+    if prev.get("status") == "retired":
+        _fail(f"plane {plane_id!r} is retired — the driver never pushes to "
+              "retired planes (record the rejoin with the inventory "
+              "`deploy` command first)")
     template = release["template_version"]
     deployment_id = release["deployment_id"]
     worker_sha256 = release["worker_sha256"]
