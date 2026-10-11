@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Rollout-controller deploy driver (#1287): per-plane template deploys
+  land through the pinned release manifest (deployment ID + SHA-256,
+  never a floating "latest", verified against the deployed bytes),
+  with rollback to the plane's last-known-good pin (refused when the pin
+  has no matching release), freeze/out-of-wave refusal, a dry-run plan
+  mode, and automatic per-deploy cost events for the operational-cost
+  ledger. (#TBD)
+
 - An operator guide for the push-sender retention sweeper: which rows the
   90-day sweep deletes, what it never touches (outbox work items,
   subscription tombstones), the timestamp-shape contract every table

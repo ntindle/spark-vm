@@ -356,7 +356,7 @@ def test_last_known_good_none_by_default_and_not_written_by_deploy(store):
     with open(snap_path, "r", encoding="utf-8") as fh:
         rec = json.load(fh)["planes"]["plane-1"]
     assert rec["last_known_good"] is None
-    assert rec["schema"] == "plane-inventory-record/2"
+    assert rec["schema"] == "plane-inventory-record/3"
 
 
 def test_last_known_good_preserved_by_deploy_and_retire(store):
@@ -482,6 +482,6 @@ def test_deploy_normalizes_legacy_record_to_lkg_none(store):
                 "--template", "worker-template@v2").returncode == 0
     with open(snap_path, "r", encoding="utf-8") as fh:
         new_rec = json.load(fh)["planes"]["plane-1"]
-    assert new_rec["schema"] == "plane-inventory-record/2"
+    assert new_rec["schema"] == "plane-inventory-record/3"
     assert "last_known_good" in new_rec
     assert new_rec["last_known_good"] is None

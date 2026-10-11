@@ -43,6 +43,22 @@ box. No new box-side daemon, no new inbound port, no control plane.
   promotion step writes. Stdlib only.
 - `test_plane_inventory.py` — hermetic suite (run with `python3 -m pytest
   fleet/test_plane_inventory.py`).
+- `plane_deploy.py` — rollout-controller deploy driver: the controller's
+  hands (S4, #1287). Pushes pinned template releases to tenant planes
+  through the Cloudflare tooling (`deploy`), redeploys the plane's
+  `last_known_good` pin (`rollback`, release-record verified per the
+  #1287 Security advisory), refuses all deploys while the controller
+  store is frozen and refuses out-of-live-wave deploys (`freeze`,
+  D-RC-5), prints a no-side-effects plan (`--dry-run`), SHA-256-verifies
+  the deployed bytes against the pin before recording, writes the
+  F-RC-10 artifact join onto the plane record, and emits the D-MT5 cost
+  event for every deploy/rollback (D-RC-6). The Cloudflare push is an
+  injectable seam (default fails closed); the wave file is the S2 wave
+  machine's writer contract, read here. Stdlib only.
+- `test_plane_deploy.py` — hermetic suite: subprocess tests for dry-run,
+  D-RC-5 refusals, and fail-closed pin reads, plus in-process tests that
+  inject a fake deployer for the push seam (run with `python3 -m pytest
+  fleet/test_plane_deploy.py`).
 
 ## Release gating (G18 / #777, S1a)
 
