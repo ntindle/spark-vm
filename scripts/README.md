@@ -160,3 +160,4 @@ never drift from what's on disk.
 | `test_waitlist_page.py` | waitlist page build slice (`site/`) |
 | `test_waitlist_patha.py` | `site/waitlist_patha.py` + waitlistd path-A additions (H15) |
 | `test_waitlistd.py` | `site/waitlistd.py` daemon (H15) |
+| `test_workflow_action_pins.py` | GitHub Actions SHA-pin inventory across `.github/workflows/` |
