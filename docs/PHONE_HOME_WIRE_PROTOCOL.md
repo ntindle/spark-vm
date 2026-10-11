@@ -506,8 +506,9 @@ S6 verifies, against a live plane, on this contract:
    each DO binds its own `box_id`; a frame sent on box A's socket never
    surfaces on box B's stub (journal + stub-id assertion).
 2. **Revoke-during-socket:** revoke box A's token mid-socket; the DO
-   closes `revoked` on next inbound/wake; box A falls back to HTTPS,
-   gets `401`, prints re-pair guidance; no reconnect storm.
+   closes `revoked` on next inbound/wake; box A's daemon exits
+   immediately (exit 1 — no reconnect, no HTTPS fallback); the separate
+   #864 heartbeat cron's 401 prints the re-pair guidance; no reconnect storm.
 3. **Reconnect-resume clean:** box reconnects with `generation+1`;
    the old socket gets `superseded-generation`; pending commands
    re-drive off the durable-queue cursor (no loss, no double-execution
