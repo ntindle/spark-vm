@@ -35,7 +35,12 @@ box. No new box-side daemon, no new inbound port, no control plane.
   controller can gate wave promotion on it). Cost events
   (provision/update/rollback with duration and optional cost) feed the
   D-MT5 revisit trigger's measured per-plane operational cost.
-  Stdlib only.
+  S3 (#1286) adds template releases: each template version is pinned to
+  exactly one (deployment id, SHA-256 of the deployed plane code) via
+  `release`, readable as the deploy target via `release-show`/`releases`
+  (D-RC-2 pick (b) — the pinned manifest, not an in-repo artifact); plane
+  records carry a `last_known_good` rollback pin that only the S2
+  promotion step writes. Stdlib only.
 - `test_plane_inventory.py` — hermetic suite (run with `python3 -m pytest
   fleet/test_plane_inventory.py`).
 

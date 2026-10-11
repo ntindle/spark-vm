@@ -169,6 +169,23 @@ operational cost is measurable.*
   S3 slice picks one; S2's wave code is blocked on the pick. Not both —
   a controller that accepts two identity schemes for the same artifact
   inherits an ambiguity a freeze cannot resolve.
+  **PICKED by S3 (#1286, 2026-10-11): (b).** The tenant-plane worker source
+  lives outside the repo today (PRODUCTION_DEPLOY_CONTRACT pins the
+  deployed Worker code to the operator's workspace); moving operator plane
+  source into the public repo is a product/security decision this lane
+  does not own, and the tenant planes themselves do not exist yet (N=0,
+  the provisioning lane creates them) — an in-repo artifact home would be
+  scaffolding around nothing. The manifest keeps S1's operator-recorded
+  trust discipline intact: nothing plane-reported enters the pin, and the
+  content address (SHA-256 of the deployed bytes) is a stronger
+  convergence identity than a repo commit because it pins what IS
+  deployed. Shipped: `release`/`release-show`/`releases` in
+  `fleet/plane_inventory.py` (pin immutability — a template version binds
+  exactly one (deployment_id, worker_sha256), re-release fails closed;
+  releases snapshot + journal with the same divergence discipline as the
+  planes snapshot), plus the per-plane `last_known_good` schema
+  ({template_version, deployment_id, worker_sha256, recorded_at}, None
+  until the S2 promotion step writes it; deploy/retire preserve it).
 - **D-RC-3 — Wave assignment is deterministic plus tenant-aware.**
   Mechanical rule: `hash(plane_id) mod buckets` (the box controller's
   rule, transferred). Tenant rule: the canary wave holds only planes

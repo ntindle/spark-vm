@@ -240,3 +240,223 @@ def test_help_exits_zero():
                        text=True, timeout=_STORE_TIMEOUT_S)
     assert p.returncode == 0
     assert "register" in p.stdout
+
+
+_SHA256_A = "ab" * 32
+_SHA256_B = "cd" * 32
+
+
+def _release(store, template="worker-template@abc1234", channel="stable",
+              deployment_id="dpl_8f3a2b", sha256=_SHA256_A, notes=""):
+    argv = ["release", "--template", template, "--channel", channel,
+            "--deployment-id", deployment_id, "--worker-sha256", sha256]
+    if notes:
+        argv += ["--notes", notes]
+    return _run(store, *argv)
+
+
+def test_release_roundtrip(store):
+    p = _release(store)
+    assert p.returncode == 0, p.stderr
+    assert _json(p)["deployment_id"] == "dpl_8f3a2b"
+
+    p = _run(store, "release-show", "--template", "worker-template@abc1234")
+    assert p.returncode == 0, p.stderr
+    rec = _json(p)
+    assert rec["worker_sha256"] == _SHA256_A
+    assert rec["channel"] == "stable"
+    assert rec["schema"] == "plane-template-release/1"
+
+    p = _run(store, "releases")
+    assert p.returncode == 0, p.stderr
+    rows = _json(p)["releases"]
+    assert len(rows) == 1
+    assert rows[0]["template_version"] == "worker-template@abc1234"
+
+
+def test_release_is_immutable(store):
+    # Non-vacuity neuter: removing the re-release gate lets a second pin
+    # silently overwrite the first — the whole D-RC-2 "one identity scheme"
+    # guarantee collapses.
+    assert _release(store).returncode == 0
+    p = _release(store, deployment_id="dpl_9999", sha256=_SHA256_B)
+    assert p.returncode == 2
+    assert "already released" in p.stderr
+    # Even an identical re-release is refused (no silent no-ops).
+    p = _release(store)
+    assert p.returncode == 2
+
+
+def test_release_rejects_bad_pin_inputs(store):
+    assert _release(store, sha256="zz" * 32).returncode == 2
+    assert _release(store, sha256="ab" * 31).returncode == 2
+    # Uppercase hex is a second spelling of the same pin — rejected.
+    assert _release(store, sha256="AB" * 32).returncode == 2
+    # Python's `$` matches before a trailing newline: a newline-poisoned
+    # pin would exit 0 and could never hex-match the S4 driver's digest.
+    # Non-vacuity neuter: `\\A...\\Z` back to `^...$` accepts the newline.
+    assert _release(store, sha256=_SHA256_A + "\n").returncode == 2
+    assert _release(store, deployment_id="has whitespace").returncode == 2
+    assert _release(store, deployment_id="dpl_2\n").returncode == 2
+    assert _release(store, deployment_id="").returncode == 2
+
+
+def test_release_show_unknown_template_fails_closed(store):
+    # The S4 driver must never deploy a template with no pinned manifest.
+    p = _run(store, "release-show", "--template", "never-released")
+    assert p.returncode == 2
+    assert "no pinned release" in p.stderr
+
+
+def test_releases_channel_filter(store):
+    assert _release(store, template="t-canary", channel="canary").returncode == 0
+    assert _release(store, template="t-stable", channel="stable").returncode == 0
+    p = _run(store, "releases", "--channel", "canary")
+    rows = _json(p)["releases"]
+    assert [r["template_version"] for r in rows] == ["t-canary"]
+
+
+def test_releases_snapshot_divergence_fails_closed(store):
+    # The pinned manifest is the rollout's trust root: a forged pin in
+    # releases.json must fail closed, never deploy.
+    assert _release(store).returncode == 0
+    snap_path = os.path.join(store, "releases.json")
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        snap = json.load(fh)
+    snap["releases"]["worker-template@abc1234"]["worker_sha256"] = _SHA256_B
+    with open(snap_path, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh)
+
+    p = _run(store, "release-show", "--template", "worker-template@abc1234")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+    p = _run(store, "releases")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+
+
+def test_releases_null_snapshot_fails_closed(store):
+    assert _release(store).returncode == 0
+    with open(os.path.join(store, "releases.json"), "w", encoding="utf-8") as fh:
+        fh.write("null\n")
+    p = _run(store, "releases")
+    assert p.returncode == 2
+    assert "corrupt" in p.stderr
+
+
+def test_last_known_good_none_by_default_and_not_written_by_deploy(store):
+    # Writer contract: only the S2 promotion step writes last_known_good.
+    # deploy must never set it (neuter: setting it in cmd_deploy makes the
+    # last recorded observation the rollback target — wrong by design).
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    assert _run(store, "deploy", "--plane-id", "plane-1",
+                "--template", "worker-template@v2").returncode == 0
+    snap_path = os.path.join(store, "planes.json")
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)["planes"]["plane-1"]
+    assert rec["last_known_good"] is None
+    assert rec["schema"] == "plane-inventory-record/2"
+
+
+def test_last_known_good_preserved_by_deploy_and_retire(store):
+    # A promotion-written pin must survive later observation records.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    snap_path = os.path.join(store, "planes.json")
+    pin = {"template_version": "worker-template@v1", "deployment_id": "dpl_1",
+           "worker_sha256": _SHA256_A, "recorded_at": "2026-10-11T00:00:00+00:00"}
+    journal_path = os.path.join(store, "planes_journal.jsonl")
+    for path in (snap_path, journal_path):
+        if path == journal_path:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = [json.loads(line) for line in fh if line.strip()]
+            lines[-1]["last_known_good"] = pin
+            with open(path, "w", encoding="utf-8") as fh:
+                for line in lines:
+                    fh.write(json.dumps(line, sort_keys=True) + "\n")
+        else:
+            with open(path, "r", encoding="utf-8") as fh:
+                snap = json.load(fh)
+            snap["planes"]["plane-1"]["last_known_good"] = pin
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(snap, fh)
+
+    assert _run(store, "deploy", "--plane-id", "plane-1",
+                "--template", "worker-template@v2").returncode == 0
+    assert _run(store, "retire", "--plane-id", "plane-1").returncode == 0
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)["planes"]["plane-1"]
+    assert rec["last_known_good"] == pin
+
+
+def test_last_known_good_covered_by_divergence_check(store):
+    # A tampered rollback pin must fail closed like a tampered template.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    snap_path = os.path.join(store, "planes.json")
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        snap = json.load(fh)
+    snap["planes"]["plane-1"]["last_known_good"] = {
+        "template_version": "worker-template@evil", "deployment_id": "dpl_x",
+        "worker_sha256": _SHA256_B, "recorded_at": "2026-10-11T00:00:00+00:00"}
+    with open(snap_path, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh)
+    p = _run(store, "stale", "--expected", "worker-template@new")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+
+
+def test_release_after_snapshot_delete_fails_closed(store):
+    # Deleting releases.json must not silently re-open pinning: the
+    # missing-snapshot path replays the journal and fails closed when it
+    # is non-empty (neuter: returning {} without verifying lets a
+    # different pin through and the journal silently holds two pins).
+    assert _release(store).returncode == 0
+    os.unlink(os.path.join(store, "releases.json"))
+
+    p = _release(store)
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+    p = _release(store, deployment_id="dpl_other", sha256=_SHA256_B)
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+    p = _run(store, "releases")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+    p = _run(store, "release-show", "--template", "worker-template@abc1234")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+
+
+def test_deploy_normalizes_legacy_record_to_lkg_none(store):
+    # /1-era records carry no last_known_good key; deploy must stamp a
+    # /2 record that carries the /2-mandated field (None until promotion
+    # writes it), not a /2 record that omits it. Neuter: dropping the
+    # setdefault leaves the field absent on the new record.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    snap_path = os.path.join(store, "planes.json")
+    journal_path = os.path.join(store, "planes_journal.jsonl")
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        snap = json.load(fh)
+    rec = snap["planes"]["plane-1"]
+    rec["schema"] = "plane-inventory-record/1"
+    del rec["last_known_good"]
+    with open(snap_path, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh)
+    with open(journal_path, "r", encoding="utf-8") as fh:
+        lines = [json.loads(line) for line in fh if line.strip()]
+    lines[-1]["schema"] = "plane-inventory-record/1"
+    del lines[-1]["last_known_good"]
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(json.dumps(line, sort_keys=True) + "\n")
+
+    assert _run(store, "deploy", "--plane-id", "plane-1",
+                "--template", "worker-template@v2").returncode == 0
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        new_rec = json.load(fh)["planes"]["plane-1"]
+    assert new_rec["schema"] == "plane-inventory-record/2"
+    assert "last_known_good" in new_rec
+    assert new_rec["last_known_good"] is None
