@@ -1168,6 +1168,21 @@ def test_read_pin_parses_pins_file(env):
     assert r.returncode == 0 and r.stdout == ""
 
 
+def test_read_pin_ignores_indented_comments(env):
+    # Plane-agreement with load_pins (which strips the whole line before
+    # its comment test): an indented comment containing "=" must not parse
+    # as a pin. The observable divergence is a query for the comment's
+    # pseudo-name — old code returned the comment's "version".
+    pins = env["tmp"] / "pins.conf"
+    pins.write_text("  # phantom = 9.9.9\ncua-driver = 0.28.2\n")
+    r = source_and('PINS_FILE={pins} _read_pin "#phantom"'.format(
+        pins=pins), env["env"])
+    assert r.returncode == 0 and r.stdout == ""
+    r = source_and('PINS_FILE={pins} _read_pin cua-driver'.format(
+        pins=pins), env["env"])
+    assert r.returncode == 0 and r.stdout == "0.28.2"
+
+
 def test_pin_ok_rejects_unsafe(env):
     for bad in ("", "../x", "/abs", "-x", ".x", "a b", "a;b", "a/b", "0.28.2\n"):
         r = source_and(f'_pin_ok "{bad}"', env["env"])

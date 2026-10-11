@@ -105,6 +105,20 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- `self-update status` now probes the same managed targets the update plane's
+  pin-driven layers converge (the managed venv's python for Playwright, the
+  managed `$CUA_DRIVER_BIN` for cua-driver), falling back to PATH when the
+  managed target isn't present — for these pin-driven tools, "drift" in the
+  status report is now exactly the drift the updater's layers clear, and the
+  report names the probed target. The apt-layer tools (docker, node, gh) and
+  the Playwright browser builds remain outside that invariant: the apt layer
+  converges repo-latest rather than pins, and browser builds are reported as
+  a count, not a version. (#TBD)
+- A pins file naming the same tool twice no longer parses first-wins in one
+  plane and last-wins in the other: `self_update.py` now matches
+  `toolset-update.sh`'s first-wins, and duplicate pin names are surfaced as
+  dead config in the status table footer and `status --json`. (#TBD)
+
 - `local-gate.sh`'s pre-merge docs-guard step now runs the same three checks
   CI runs on every PR — including the inventories that pin the documented
   merge-gate checks and the markdown link-check exclusions — so a docs-only

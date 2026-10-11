@@ -728,6 +728,12 @@ _read_pin() {
     [ -n "$pins" ] && [ -f "$pins" ] || return 0
     local line name ver
     while IFS= read -r line || [ -n "$line" ]; do
+        # Strip leading whitespace before the comment/blank tests: an
+        # indented comment containing "=" would otherwise parse as a pin
+        # (plane-agreement with load_pins, which strips the whole line
+        # before its comment test). Pure parameter expansion — no
+        # subprocess, so the hermetic test env needs no new tools.
+        line="${line#"${line%%[![:space:]]*}"}"
         case "$line" in \#*|'') continue ;; esac
         case "$line" in *"="*) ;; *) continue ;; esac
         name="$(printf '%s' "$line" | cut -d= -f1 | tr -d ' \t')"

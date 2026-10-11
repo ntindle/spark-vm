@@ -17,6 +17,10 @@ elevated — no network, no writes, no sudo. Later slices (roadmap in
 ``docs/SELF_UPDATE.md``) add update execution, the systemd timer, and the
 backfill installer.
 
+Traceability: F-A1 (issue #1308) — the playwright/cua-driver probes target
+the managed artifacts the update plane converges; F-A2 (issue #1309) —
+pins are first-wins (matching ``_read_pin``) and duplicates are loud.
+
 Probes never raise: a tool that cannot be probed reports ``installed: false``
 with a note, so ``status`` always exits 0. Stdlib only.
 """
@@ -36,6 +40,16 @@ _PROBE_TIMEOUT_S = 10
 
 _PINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "self_update_pins.conf")
+
+# The update plane (deploy/toolset-update.sh) converges MANAGED targets, never
+# PATH — the status plane must report the same artifacts the updater holds,
+# or "drift" in S1 is not the drift S2's layers clear (F-A1). These are the
+# update plane's defaults, honoring its environment overrides so the two
+# planes keep agreeing when the operator relocates the managed locations.
+_MANAGED_CUA_DRIVER = os.environ.get("CUA_DRIVER_BIN",
+                                     "/home/ntindle/cua/bin/cua-driver")
+_MANAGED_PLAYWRIGHT_VENV = os.environ.get("PLAYWRIGHT_VENV",
+                                          "/home/ntindle/.venvs/pw")
 
 
 def default_runner(argv, timeout=_PROBE_TIMEOUT_S):
@@ -66,6 +80,54 @@ def _version_output(stdout, stderr):
     """
     line = _first_line(stdout)
     return line if line else _first_line(stderr)
+
+
+def _probe_binary_version_at(path, argv, pattern=None, runner=default_runner):
+    """Probe an explicit binary path, run argv, return (installed, version, note).
+
+    Same contract as _probe_binary_version but for a caller-resolved path
+    (the managed target), so the version query runs against the exact
+    artifact the update plane converges, not a PATH lookup.
+    """
+    try:
+        rc, stdout, stderr = runner([path] + argv)
+    except Exception:
+        # A runner that raises (rather than returning rc != 0) still must not
+        # break the inventory — the binary exists, its version is unknown.
+        return True, None, "found at %s but version query raised" % path
+    line = _version_output(stdout, stderr)
+    if rc != 0 or not line:
+        return True, None, "found at %s but version query failed" % path
+    version = line
+    if pattern is not None:
+        # Some tools print banners above their version line; scan all
+        # non-empty lines for the first pattern match before falling back
+        # to the raw first line (a banner must never become the version).
+        # stdout is searched before stderr, matching _version_output's
+        # preference (B1).
+        m = None
+        for stream in (stdout, stderr):
+            for candidate in (stream or "").strip().splitlines():
+                candidate = candidate.strip()
+                if not candidate:
+                    continue
+                m = re.search(pattern, candidate)
+                if m:
+                    break
+            if m:
+                break
+        version = m.group(1) if m else line
+    return True, version, "via %s %s" % (path, " ".join(argv))
+
+
+def _managed_executable(path):
+    """True when the managed target is a real executable file.
+
+    Existence + executability on the real filesystem, so the probes'
+    managed-first preference order is testable with real tmp files
+    (no mocking needed) rather than a stubbed filesystem.
+    """
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 def _probe_binary_version(binary, argv, pattern=None, which=shutil.which,
@@ -119,7 +181,7 @@ def _probe_python_package(package, python=sys.executable,
     line = _version_output(stdout, stderr)
     if rc != 0 or not line:
         return False, None, "python package %r not installed" % package
-    return True, line, "python package"
+    return True, line, "python package via %s" % python
 
 
 _DEFAULT_UU_CONF_PATHS = ("/etc/apt/apt.conf.d/20auto-upgrades",
@@ -182,15 +244,23 @@ def probe_gh(which=shutil.which, runner=default_runner):
                                  which=which, runner=runner)
 
 
-def probe_playwright(runner=default_runner, which=shutil.which):
-    """Probe the playwright package in the box's canonical python3.
+def probe_playwright(runner=default_runner, which=shutil.which, managed=None):
+    """Probe the playwright package in the managed venv's python when present.
 
-    Uses the PATH-resolved `python3` (the interpreter SETUP provisioned
-    Playwright into), not necessarily the interpreter running this script —
-    invoking via a venv or uv-managed python must not false-report a miss
-    (B4).
+    The update plane converges the MANAGED venv ($PLAYWRIGHT_VENV), never
+    PATH — the status plane must report the same interpreter the updater
+    holds (F-A1): a PATH python3 carrying a different playwright would
+    report drift the updater can never clear, or report clean while the
+    managed venv rots. PATH python3 is the fallback for boxes the updater
+    never managed; the note names the interpreter either way. `managed`
+    is injectable (the venv dir) so the preference order is testable.
     """
-    python = which("python3") or sys.executable
+    venv = _MANAGED_PLAYWRIGHT_VENV if managed is None else managed
+    managed_py = os.path.join(venv, "bin", "python") if venv else None
+    if _managed_executable(managed_py):
+        python = managed_py
+    else:
+        python = which("python3") or sys.executable
     return _probe_python_package("playwright", python=python, runner=runner)
 
 
@@ -232,7 +302,20 @@ def probe_snap(which=shutil.which, runner=default_runner):
     return True, "%d snap(s)" % len(names), ", ".join(names)
 
 
-def probe_cua_driver(which=shutil.which, runner=default_runner):
+def probe_cua_driver(which=shutil.which, runner=default_runner, managed=None):
+    """Probe cua-driver at the managed binary when present, else on PATH.
+
+    The update plane converges the MANAGED binary ($CUA_DRIVER_BIN) as its
+    owner, never PATH (PATH-hijacking: the timer runs as root) — the status
+    plane must report the same artifact the updater holds on the pin
+    (F-A1). PATH is the fallback for boxes the updater never managed; the
+    note names the probed path either way. `managed` is injectable (the
+    binary path) so the preference order is testable.
+    """
+    target = _MANAGED_CUA_DRIVER if managed is None else managed
+    if _managed_executable(target):
+        return _probe_binary_version_at(
+            target, ["--version"], r"([0-9][\w.\-]*)", runner=runner)
     # cua-driver is held on a known-good pin (see self_update_pins.conf);
     # S1 reports drift only.
     return _probe_binary_version("cua-driver", ["--version"],
@@ -313,6 +396,11 @@ def load_pins(path=_PINS_FILE):
     crash the status inventory (B2). Non-decodable bytes are replaced — the
     same defensive pattern as probe_unattended_upgrades — and lines without
     "name=value" shape are skipped.
+
+    First occurrence of a duplicated tool name wins, matching _read_pin in
+    deploy/toolset-update.sh (F-A2): the two planes read the same pins file
+    and must agree on which line is the pin. Duplicates are surfaced by
+    pin_duplicates — a losing line is silently ignored forever otherwise.
     """
     pins = {}
     try:
@@ -323,11 +411,35 @@ def load_pins(path=_PINS_FILE):
                     continue
                 name, _, value = line.partition("=")
                 name, value = name.strip(), value.strip()
-                if name and value:
+                if name and value and name not in pins:
                     pins[name] = value
     except OSError:
         pass
     return pins
+
+
+def pin_duplicates(path=_PINS_FILE):
+    """Pin tool names appearing more than once — dead config must be loud.
+
+    The two planes read the same pins file with first-wins semantics
+    (load_pins here, _read_pin in deploy/toolset-update.sh); a duplicated
+    tool name means every later line is silently ignored forever, so
+    duplicates are surfaced in the table footer and the --json document.
+    """
+    counts = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                name, value = name.strip(), value.strip()
+                if name and value:
+                    counts[name] = counts.get(name, 0) + 1
+    except OSError:
+        return []
+    return sorted(name for name, n in counts.items() if n > 1)
 
 
 def run_probe(name, probe, pins):
@@ -371,7 +483,7 @@ def pin_warnings(pins):
     return sorted(name for name in pins if name not in known)
 
 
-def format_table(records, pin_warnings=()):
+def format_table(records, pin_warnings=(), duplicate_pins=()):
     rows = [("TOOL", "INSTALLED", "VERSION", "PINNED", "DRIFT", "NOTE")]
     for r in records:
         rows.append((
@@ -400,6 +512,9 @@ def format_table(records, pin_warnings=()):
     if pin_warnings:
         lines.append("unmatched pins (no such probe): %s"
                      % ", ".join(pin_warnings))
+    if duplicate_pins:
+        lines.append("duplicate pins (later lines ignored): %s"
+                     % ", ".join(duplicate_pins))
     return "\n".join(lines)
 
 
@@ -418,15 +533,18 @@ def main(argv=None):
     if args.command == "status":
         records = status(pins_path=args.pins)
         warnings = pin_warnings(load_pins(args.pins))
+        duplicates = pin_duplicates(args.pins)
         if args.json:
             print(json.dumps({
                 "generated_at": int(time.time()),
                 "slice": "S1-status",
                 "tools": records,
                 "pin_warnings": warnings,
+                "duplicate_pins": duplicates,
             }, indent=2))
         else:
-            print(format_table(records, pin_warnings=warnings))
+            print(format_table(records, pin_warnings=warnings,
+                               duplicate_pins=duplicates))
         return 0
     return 2  # unreachable: argparse enforces the subcommand
 
