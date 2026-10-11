@@ -270,6 +270,12 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
         "print('clean')\n")
     (tmp / "scripts" / "test_docs_index_coverage.py").write_text(
         "def test_stub_ok():\n    assert True\n")
+    # Step 4 invokes CI's exact three-file docs-index invocation, so the
+    # scratch repo needs stubs for all three (dx 20261011-0429).
+    (tmp / "scripts" / "test_ci_md_link_excludes.py").write_text(
+        "def test_stub_ok():\n    assert True\n")
+    (tmp / "scripts" / "test_contributing_ci_gates.py").write_text(
+        "def test_stub_ok():\n    assert True\n")
     shutil.copy(str(GATE), str(tmp / "scripts" / "local-gate.sh"))
     git("add", ".")
     git("commit", "-qm", "base")
@@ -311,7 +317,10 @@ def test_plan_mode_lists_every_step_without_running():
         return next(l for l in lines if step in l)
     assert "ci_shard_plan.py" in plan_line("shard plan")
     assert "lint-changelog-ritual.py" in plan_line("changelog ritual lint")
-    assert "test_docs_index_coverage.py" in plan_line("docs index coverage")
+    for f in ("test_docs_index_coverage.py", "test_ci_md_link_excludes.py",
+              "test_contributing_ci_gates.py"):
+        assert f in plan_line("docs index coverage"), \
+            f"--plan's docs-index line omits {f}"
     assert "shellcheck" in plan_line("shellcheck")
     assert "python3 -m pytest" in plan_line("python tests")
 
@@ -321,6 +330,56 @@ def test_gate_script_is_executable_and_strict():
     head = GATE.read_text().splitlines()[0]
     assert head == "#!/bin/bash"
     assert "set -euo pipefail" in GATE.read_text()
+
+
+def _ci_docs_guard_files():
+    """Extract the test-file list of CI's `docs index coverage` job.
+
+    The job exists precisely so the doc-inventory pins ride the
+    always-on docs carve-out (a docs-only PR hand-editing CONTRIBUTING.md's
+    gate inventory or CI.md's link-exclude inventory must fail CI), so its
+    file list is the source of truth for step 4."""
+    text = CI_YML.read_text()
+    m = re.search(r"name: docs index coverage\n(.*?)(?=\n  [a-z-]+:\n)", text, re.S)
+    assert m, "docs index coverage job missing from ci.yml"
+    run = re.search(r"run:\s*python3 -m pytest ([^\n]+)", m.group(1))
+    assert run, "docs-index job's pytest run line not found"
+    files = re.findall(r"scripts/test_[A-Za-z0-9_]+\.py", run.group(1))
+    assert files, "no test files parsed from the docs-index job"
+    return sorted(files)
+
+
+def _local_gate_pytest_file_lists():
+    """Every `python3 -m pytest scripts/test_*.py ...` invocation line in
+    local-gate.sh (line continuations joined), in the order written."""
+    joined = re.sub(r"\\\n", " ", GATE.read_text())
+    found = re.findall(
+        r"^\s*python3 -m pytest (scripts/test_[A-Za-z0-9_]+\.py"
+        r"(?:\s+scripts/test_[A-Za-z0-9_]+\.py)*)",
+        joined, re.M)
+    return [sorted(re.findall(r"scripts/test_[A-Za-z0-9_]+\.py", inv))
+            for inv in found]
+
+
+def test_docs_index_step_matches_ci_job_invocation():
+    """Local-gate step 4 must run CI's exact three-file docs-index
+    invocation — every pytest line in the script naming test files must
+    name the same set CI's `docs index coverage` job runs. This covers
+    both the executable step-4 line and the --plan text: if one drifts
+    from CI or from the other, this fails. (dx 20261011-0429: step 4 ran
+    only test_docs_index_coverage.py while CI ran three files, so a
+    docs-only contributor PR hand-editing an inventory block passed the
+    local gate while CI failed it.)
+
+    Non-vacuity: revert step 4 to the single file and the step-4 entry
+    mismatches CI's three; add a fourth file to CI's job line and the
+    script-side entries mismatch back."""
+    ci_files = _ci_docs_guard_files()
+    gate_lists = _local_gate_pytest_file_lists()
+    assert gate_lists, "no test-file pytest invocation found in local-gate.sh"
+    for files in gate_lists:
+        assert files == ci_files, (
+            f"local-gate invocation {files} != CI docs-index job {ci_files}")
 
 
 # File selection of the standalone shellcheck CI job

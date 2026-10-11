@@ -99,6 +99,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- `local-gate.sh`'s pre-merge docs-guard step now runs the same three checks
+  CI runs on every PR — including the inventories that pin the documented
+  merge-gate checks and the markdown link-check exclusions — so a docs-only
+  edit that drifts one of those inventories fails locally before push
+  instead of only on CI. (#1305)
+
 - The unattended updater no longer raises a false "deploy failed" alert on
   a brand-new box whose rollout wave hasn't gone live yet: with no
   deployment watermark recorded and the fleet gate reporting nothing to
