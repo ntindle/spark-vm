@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Cycle-67 competitor watch (2026-10-11): a full pass over the
+  tracked agent-sandbox vendors — Microsandbox shipped v0.7.8 (secret
+  substitution scoping, `msb restore --mount-disk`, runtime-owned
+  detached jobs, filesystem state limits), Vercel's changelog gained a
+  2026-10-09 section (domain purchases via CLI, deployment retention
+  and storage billing changes, AI Gateway model additions; no Drives
+  GA). No new vendor filings; both tracked funding rounds (Modal
+  $750M, Baseten ~$26B) remain unclosed, no Vercel sandbox zero-day
+  CVE/write-up yet, AgentComputer still publishes no egress pricing.
+  (#1318)
+
 - An operator guide for the push-sender retention sweeper: which rows the
   90-day sweep deletes, what it never touches (outbox work items,
   subscription tombstones), the timestamp-shape contract every table
