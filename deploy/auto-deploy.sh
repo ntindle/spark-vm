@@ -1227,6 +1227,12 @@ cmd_deploy() {
             # would fail and every tick would alert + audit a misleading
             # precheck failure. Stay quiet — the gate's verdict stands.
             log "no watermark yet and the gate reports nothing to do — skipping extra-inputs scan"
+            # Keep the per-tick heartbeat: the quiet path must not erase the
+            # operator's only audit-visible signal for a box stuck in gate
+            # staging (a provisioned-but-never-deployed box is otherwise
+            # indistinguishable in audit.log from an updater that is not
+            # running). 'noop', not an alert — the gate's verdict stands.
+            audit 'check' ',"result":"noop"'
             return 0
         fi
         # Issue #302: host-side (non-repo) inputs can change with zero new

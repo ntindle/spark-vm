@@ -470,9 +470,10 @@ def test_deploy_skips_forced_synthesis_without_watermark(tmp_path):
     assert "no watermark yet" in r.stdout + r.stderr, r.stdout + r.stderr
     assert not (state / "last-failure").exists(), \
         "spurious precheck alert fired on a watermark-less box"
-    audit = state / "audit.log"
-    if audit.exists():
-        assert "precheck-fail" not in audit.read_text(), audit.read_text()
+    audit = (state / "audit.log").read_text()
+    assert '"result":"noop"' in audit, \
+        "quiet path must keep the per-tick audit heartbeat: " + audit
+    assert "precheck-fail" not in audit, audit
 
 
 def test_deploy_forced_synthesis_runs_with_watermark(tmp_path):
