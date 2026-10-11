@@ -105,6 +105,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The toolset self-update status report no longer shows drift you cannot
+  act on after a pin bump: the privileged install now publishes a
+  world-readable hash of the installed pins, and the status report warns
+  loudly ("installed pins differ from checkout — run
+  `toolset-update.sh install`") when the checkout pins have moved past
+  the installed ones. (#1319)
 - The unattended updater's host-side-input redeploy (e.g. a proxy CA rotation
   with no new commits) no longer bypasses the fleet rollout gate: on a box
   whose wave hasn't gone live, or whose fleet is frozen, the redeploy now

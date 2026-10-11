@@ -19,13 +19,18 @@ backfill installer.
 
 Traceability: F-A1 (issue #1308) — the playwright/cua-driver probes target
 the managed artifacts the update plane converges; F-A2 (issue #1309) —
-pins are first-wins (matching ``_read_pin``) and duplicates are loud.
+pins are first-wins (matching ``_read_pin``) and duplicates are loud;
+issue #1313 — the status plane compares its checkout pins against the
+sha256(installed pins) record the privileged install publishes
+(``PINS_HASH_FILE``), warning when they differ so a pin bump without an
+install is loud instead of un-actionable drift.
 
 Probes never raise: a tool that cannot be probed reports ``installed: false``
 with a note, so ``status`` always exits 0. Stdlib only.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,6 +45,25 @@ _PROBE_TIMEOUT_S = 10
 
 _PINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "self_update_pins.conf")
+
+# Issue #1313: the update plane reads the INSTALLED pins
+# ($TOOLSET_STATE_DIR/self_update_pins.conf, root-owned mode 700) while the
+# status plane reads the CHECKOUT pins (_PINS_FILE). A pin bump without a
+# privileged `toolset-update.sh install` leaves S1 reporting drift the
+# updater can never clear — silently. The privileged install publishes
+# sha256(installed pins) to this world-readable record (only a privileged
+# install may write it; the pins themselves are public in the repo), and S1
+# compares it against its checkout pins: match / mismatch / unknown (no
+# record yet — pre-#1313 installs, or an unreadable record; silent by
+# design, not an error).
+_PINS_HASH_FILE = os.environ.get(
+    "PINS_HASH_FILE", "/var/lib/sparkvm-toolset/self_update_pins.hash")
+
+# "installed pins differ from checkout — run `toolset-update.sh install`"
+# is the prescribed wording (issue #1313): the mismatch is actionable only
+# by re-running the privileged install.
+_PINS_MISMATCH_WARNING = ("installed pins differ from checkout — "
+                          "run `toolset-update.sh install`")
 
 # The update plane (deploy/toolset-update.sh) converges MANAGED targets, never
 # PATH — the status plane must report the same artifacts the updater holds,
@@ -442,6 +466,39 @@ def pin_duplicates(path=_PINS_FILE):
     return sorted(name for name, n in counts.items() if n > 1)
 
 
+def installed_pins_state(pins_path=_PINS_FILE, hash_path=None):
+    """Compare checkout pins vs the installed pins' published hash.
+
+    Returns "match", "mismatch", or "unknown". "unknown" is the honest
+    no-signal state: the hash record is missing, unreadable, or malformed
+    (pre-#1313 installs publish none; the record is an informational signal,
+    not an enforcement point — a corrupt record is indistinguishable from
+    absent to the unprivileged reader, and the privileged install fails
+    closed on write). Never raises.
+
+    hash_path defaults to _PINS_HASH_FILE resolved at call time (not import
+    time), so tests can override the record location by monkeypatching the
+    module constant (the PINS_HASH_FILE env var itself is read once at
+    import).
+    """
+    if hash_path is None:
+        hash_path = _PINS_HASH_FILE
+    try:
+        with open(hash_path, encoding="utf-8", errors="replace") as f:
+            recorded = f.read().strip()
+    except OSError:
+        return "unknown"
+    if (len(recorded) != 64
+            or any(c not in "0123456789abcdef" for c in recorded)):
+        return "unknown"
+    try:
+        with open(pins_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return "unknown"
+    return "match" if digest == recorded else "mismatch"
+
+
 def run_probe(name, probe, pins):
     """Run one probe, never raise. Returns the inventory record dict."""
     try:
@@ -534,6 +591,9 @@ def main(argv=None):
         records = status(pins_path=args.pins)
         warnings = pin_warnings(load_pins(args.pins))
         duplicates = pin_duplicates(args.pins)
+        pins_state = installed_pins_state(pins_path=args.pins)
+        mismatch_lines = ([_PINS_MISMATCH_WARNING]
+                          if pins_state == "mismatch" else [])
         if args.json:
             print(json.dumps({
                 "generated_at": int(time.time()),
@@ -541,10 +601,14 @@ def main(argv=None):
                 "tools": records,
                 "pin_warnings": warnings,
                 "duplicate_pins": duplicates,
+                "installed_pins_state": pins_state,
             }, indent=2))
         else:
-            print(format_table(records, pin_warnings=warnings,
-                               duplicate_pins=duplicates))
+            table = format_table(records, pin_warnings=warnings,
+                                 duplicate_pins=duplicates)
+            if mismatch_lines:
+                table += "\n\n" + "\n".join(mismatch_lines)
+            print(table)
         return 0
     return 2  # unreachable: argparse enforces the subcommand
 
