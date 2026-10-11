@@ -76,7 +76,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   exit-code contract, the journal-as-truth store layout and
   snapshot-divergence trust model, the register/deploy/retire lifecycle,
   the convergence-check gate for rollout-wave promotion, and cost events
-  with the D-MT5 operational-cost measurement. (#TBD)
+  with the D-MT5 operational-cost measurement. (#1293)
 
 ### Fixed
 
