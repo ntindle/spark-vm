@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Waitlist durability gap analysis (2026-10-11): a consolidated pin of the
+  waitlist daemon's crash-recovery, persistence, and erasure story — the
+  ten open architecture findings on the store re-verified against the
+  current tree, with design decisions recorded (the proxy-IP abuse guard
+  is resolved by the trusted-proxy contract; erasure covers the
+  pre-claim waitlist entry; read paths stay under the data lock with
+  store size as the lever) and the remaining work dispositioned per
+  issue. (#1336)
+
 - Per-host opt-in for the message-stream refusal (2026-10-11, #629): the
   proxy killed every server-sent-events stream and protocol upgrade from
   allowlisted hosts at headers time, because a stream's body never
