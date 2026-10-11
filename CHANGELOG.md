@@ -52,6 +52,25 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Phone-home S6 readiness pin (2026-10-11, #960): the #847 lane's six-item
+  live-acceptance checklist mapped against the shipped tree — what the
+  box-side tests and the deployed plane already prove per item, what only
+  the live run can prove, and a concrete runbook for the executing turn
+  (harness-first, then live E2E with test-row cleanup). Highest-uncertainty
+  item named: the epoch-expiry half of the command contract has never been
+  live-proven. (#1321)
+
+- Cycle-67 competitor watch (2026-10-11): a full pass over the
+  tracked agent-sandbox vendors — Microsandbox shipped v0.7.8 (secret
+  substitution scoping, `msb restore --mount-disk`, runtime-owned
+  detached jobs, filesystem state limits), Vercel's changelog gained a
+  2026-10-09 section (domain purchases via CLI, deployment retention
+  and storage billing changes, AI Gateway model additions; no Drives
+  GA). No new vendor filings; both tracked funding rounds (Modal
+  $750M, Baseten ~$26B) remain unclosed, no Vercel sandbox zero-day
+  CVE/write-up yet, AgentComputer still publishes no egress pricing.
+  (#1318)
+
 - An operator guide for the push-sender retention sweeper: which rows the
   90-day sweep deletes, what it never touches (outbox work items,
   subscription tombstones), the timestamp-shape contract every table
@@ -111,6 +130,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
   loudly ("installed pins differ from checkout — run
   `toolset-update.sh install`") when the checkout pins have moved past
   the installed ones. (#1319)
+- CI rebalance rationale accuracy pass: the shard-plan note now measures the
+  deploy suite's share against the local per-suite timings (not the CI wall
+  clock) and pins the harness shard's pole time to direct CI measurements,
+  and two push-lane retention notes now cite the real timestamp-assumption
+  source. (#1323)
+
+- CI Python test gate rebalanced again: the deploy suite (420 tests, ~43% of
+  the unit shard's wall time — 2.8x the next-heaviest suite) had become the
+  slowest shard's dominant slice, so it now runs in its own parallel shard.
+  A code PR's test signal arrives in roughly four minutes instead of five;
+  the required `python tests` check keeps its name and still gates the
+  merge, and rebalancing never touches the required status checks. (#1322)
 - The unattended updater's host-side-input redeploy (e.g. a proxy CA rotation
   with no new commits) no longer bypasses the fleet rollout gate: on a box
   whose wave hasn't gone live, or whose fleet is frozen, the redeploy now
