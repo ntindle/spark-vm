@@ -68,7 +68,7 @@ Decisions (continuing the push lane's D-series; D89 was the last pin):
   (``_insert_attempt_row``) and suppressed_terminal/dead-letter audit
   rows (``_insert_audit_row``), both sharing the one helper-rendered
   ``at``) and this module's own cutoff render go through it, so the
-  shape can never drift by independent edits; ``push_events._quiet_window_start``
+  shape can never drift by independent edits; ``push_events.last_heartbeat_stale_page_at``
   pins the same assumption for its ``MAX(at)``. A writer bypassing the
   helper with a different shape (naive ISO, ``Z`` suffix, epoch) silently
   corrupts retention in either direction: premature deletion of the
