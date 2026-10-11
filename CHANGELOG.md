@@ -152,6 +152,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Wire-protocol doc accuracy (2026-10-11, #1320): the phone-home re-drive
+  pin no longer says the DO scopes re-drive rows by "epoch equal to the
+  session's accepted generation" — generation and epoch are separate
+  counters (a plain reconnect bumps generation only), and the corrected
+  wording names the true scope, the box's current command epoch learned
+  from epoch claims. The close-taxonomy `revoked` row and the box-side
+  wire constraints also match the shipped box: the daemon exits
+  immediately on `revoked` (no reconnect, no HTTPS fallback), and the
+  heartbeat cron's 401 carries the re-pair guidance. (#1338)
+
 - The fleet console's `--watch` interval guard is now pinned by tests that
   cannot hang the suite: the zero/negative/non-finite interval checks run
   the console in a subprocess with a timeout, so a future regression in
