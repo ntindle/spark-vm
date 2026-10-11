@@ -57,7 +57,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   convergence check that gates rollout-wave promotion and a cost ledger
   (provision/update/rollback durations and costs) that feeds the
   per-tenant operational-cost measurement the multi-tenant model's
-  revisit decision needs. (#TBD)
+  revisit decision needs. (#1284)
 - The SSH-key-as-account onboarding doc: the first-run experience for
   key-identity accounts — the first-connect walkthrough, the manifest
   vocabulary with the claim-link bookmark rule, the "same key -> same
