@@ -106,12 +106,14 @@ def test_signal_wrong_owner_rejected(tmp_path, monkeypatch):
     assert push._image_plane_signal() is None
 
 
-def test_signal_symlink_rejected(tmp_path, monkeypatch):
+def test_signal_symlink_rejected(tmp_path, monkeypatch, caplog):
     real = _write_signal(tmp_path, "1\n")
     link = tmp_path / "plane-push-link"
     os.symlink(real, str(link))
     _env(monkeypatch, tmp_path)
-    assert push._image_plane_signal(str(link)) is None
+    with caplog.at_level("WARNING", logger="sparkvm.push"):
+        assert push._image_plane_signal(str(link)) is None
+    assert "symlink" in caplog.text
 
 
 def test_signal_fifo_rejected(tmp_path, monkeypatch):

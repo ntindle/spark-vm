@@ -78,6 +78,7 @@ Config (env):
 import base64
 import binascii
 import contextlib
+import errno
 import fcntl
 import json
 import logging
@@ -714,8 +715,15 @@ def _image_plane_signal(path=None):
                 or "/run/sparkvm/plane-push")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None  # no signal file — not an error
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            # A symlink is an integrity violation, not an absent file —
+            # warn like the other violations below (the docstring's
+            # fail-open promise covers warnings, not silence).
+            log.warning("push-queue: ignoring plane-push signal symlink "
+                        "(expected a root-owned regular file) — treating "
+                        "as no signal")
+        return None  # no signal file (or unreadable path) — not an error
     try:
         st = os.fstat(fd)
         if (not stat.S_ISREG(st.st_mode)
