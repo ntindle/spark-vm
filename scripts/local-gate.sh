@@ -67,7 +67,12 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "local-gate.sh: --head needs a ref argument" >&2; exit 2; }
       EVAL_HEAD="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,40p' "$0"
+      # $0 is the invocation-relative path and goes stale after the cd
+      # above; read the help text from the script's absolute location
+      # (computed before the cd), never from $0. (dx 20261010-2259: --
+      # help used to fail with `sed: can't read ../scripts/local-gate.sh`
+      # when run from a subdirectory via a relative path.)
+      sed -n '2,42p' "$SCRIPT_DIR/local-gate.sh"
       exit 0 ;;
     *) echo "local-gate.sh: unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac

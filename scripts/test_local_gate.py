@@ -15,6 +15,7 @@ Non-vacuity: every test below is sensitive to its contract — neuter the
 corresponding script behavior and the test fails (verified by hand during
 development).
 """
+import fnmatch
 import os
 import re
 import subprocess
@@ -322,20 +323,104 @@ def test_gate_script_is_executable_and_strict():
     assert "set -euo pipefail" in GATE.read_text()
 
 
+# File selection of the standalone shellcheck CI job
+# (ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca —
+# the SHA pinned in .github/workflows/ci.yml), replicated in Python:
+#
+#  Pass 1 — named shell files: the basename matches the action's -name
+#  list (*.sh, *.bash, *.ksh, *.zsh, *.shlib, .bashrc, ...), shebang or not.
+#  Pass 2 — extension-less executables: no '.' in the basename, any exec
+#  bit set (find -perm /111), whose FIRST line matches the action's
+#  shebang regex ^#! */[^ ]*/(env *)?[abk]*sh.
+#
+# Excludes (mirroring the action): .git, *.go, */mvnw. Keep this helper in
+# sync with the pinned action version — if the SHA moves, re-read the
+# action's find expression and update both passes.
+_ACTION_SHELL_NAME_PATTERNS = (
+    "*.bash", ".bashrc", "bashrc", ".bash_aliases", ".bash_completion",
+    ".bash_login", ".bash_logout", ".bash_profile", "bash_profile",
+    "*.ksh", "suid_profile", "*.zsh", ".zlogin", "zlogin", ".zlogout",
+    "zlogout", ".zprofile", "zprofile", ".zsenv", "zsenv", ".zshrc",
+    "zshrc", "*.sh", "*.shlib",
+)
+# The action's -path patterns '*/.profile' and '*/profile', evaluated
+# against '/'-prefixed relative paths the way find sees './profile'.
+_ACTION_PROFILE_PATH_SUFFIXES = ("/.profile", "/profile")
+_ACTION_SHEBANG_RE = re.compile(r"^#![ ]*/[^ ]*/(env[ ]*)?[abk]*sh")
+
+
+def _ci_shellcheck_files():
+    """Replicate the standalone shellcheck CI job's file selection."""
+    files = []
+    for p in REPO_ROOT.rglob("*"):
+        # Both of the action's finds carry `-type f`, and under find's
+        # default -P that never matches symlinks or directories — gate both
+        # passes identically (a symlinked *.sh is selected by neither CI
+        # nor this helper).
+        if p.is_symlink() or not p.is_file():
+            continue
+        rel = p.relative_to(REPO_ROOT).as_posix()
+        if "/.git/" in f"/{rel}":
+            continue
+        if rel.endswith(".go") or rel == "mvnw" or rel.endswith("/mvnw"):
+            continue  # the action's -path excludes, mirrored for parity
+        name = p.name
+        if ("/" + rel).endswith(_ACTION_PROFILE_PATH_SUFFIXES) or any(
+            fnmatch.fnmatchcase(name, pat) for pat in _ACTION_SHELL_NAME_PATTERNS
+        ):
+            files.append(p)  # pass 1: named shell file, shebang or not
+            continue
+        if "." in name or not (p.stat().st_mode & 0o111):
+            continue  # pass 2 needs an extension-less executable
+        try:
+            # First line only, like the action's `head -n1`.
+            with p.open("rb") as fh:
+                first = fh.readline().decode("ascii", "replace")
+        except OSError:
+            continue  # CI's -exec head|grep silently skips unreadable files
+        if _ACTION_SHEBANG_RE.match(first):
+            files.append(p)
+    return sorted(str(p) for p in files)
+
+
 def test_repo_shell_scripts_pass_shellcheck_error():
-    """The standalone shellcheck CI job runs severity=error over every .sh
-    file in the repo. A comment line beginning `# shellcheck` that is not a
-    valid directive (e.g. `# shellcheck CI job's ...`) fails the whole job
-    with SC1073 — this bit the local-gate.sh ship itself. Replicate the job
-    here when shellcheck is installed; skip loudly otherwise (the suite's
-    standing shellcheck-gate convention)."""
+    """The standalone shellcheck CI job runs severity=error over the shell
+    scripts it selects (see _ci_shellcheck_files: named shell files plus
+    extension-less executables with a shell shebang, e.g.
+    proxy/cred-registry-set).
+    A comment line beginning `# shellcheck` that is not a valid directive
+    (e.g. `# shellcheck CI job's ...`) fails the whole job with SC1073 —
+    this bit the local-gate.sh ship itself. Replicate the job here when
+    shellcheck is installed; skip loudly otherwise (the suite's standing
+    shellcheck-gate convention)."""
     import shutil
     if shutil.which("shellcheck") is None:
         pytest.skip("shellcheck not installed — CI's standalone job does not skip")
-    sh_files = sorted(
-        str(p) for p in REPO_ROOT.rglob("*.sh")
-        if ".git/" not in str(p))
-    assert sh_files, "no .sh files found — the scan is vacuous"
-    out = subprocess.run(["shellcheck", "-S", "error", *sh_files],
+    shell_files = _ci_shellcheck_files()
+    assert shell_files, "no shell files found — the scan is vacuous"
+    out = subprocess.run(["shellcheck", "-S", "error", *shell_files],
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stdout
+
+
+def test_shellcheck_scan_covers_extensionless_shebang_tools():
+    """Pin the widened scan: the CI job's second pass covers extension-less
+    executables with a shell shebang (the proxy/* tools). A *.sh-only
+    selection must fail this test. (dx follow-up 20261009-0729.)"""
+    files = _ci_shellcheck_files()
+    extensionless = [f for f in files if "." not in Path(f).name]
+    assert extensionless, (
+        "no extension-less shebang tools selected — the shebang pass is vacuous")
+
+
+def test_help_prints_usage_from_subdirectory_relative_path():
+    """--help must print the usage header when invoked from a subdirectory
+    via a relative path. local-gate.sh cds to the repo root before parsing
+    args, so a help implementation reading $0 sees the invocation-relative
+    path against the wrong cwd and dies (`sed: can't read
+    ../scripts/local-gate.sh`). (dx follow-up 20261009-0729.)"""
+    out = subprocess.run(
+        ["bash", "../scripts/local-gate.sh", "--help"],
+        cwd=REPO_ROOT / "docs", capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "Usage:" in out.stdout, out.stdout
