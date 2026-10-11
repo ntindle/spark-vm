@@ -126,6 +126,12 @@ def env(tmp_path):
         "APT_CONF_DIR": str(aptdir),
         "SYSTEMD_DIR": str(sysdir),
         "OPTOUT_FILE": str(optout),
+        # Issue #1313: the install publishes the installed-pins hash to
+        # PINS_HASH_DIR (default /var/lib/sparkvm-toolset) — every test
+        # must redirect it under tmp, or install tests would write to the
+        # real machine path (as root) / fail (as non-root), breaking the
+        # fixture's "all state dirs under tmp" contract.
+        "PINS_HASH_DIR": str(tmp_path / "pinshash"),
         "SKIP_SYSTEMCTL": "1",
         "SKIP_SUDO": "1",
         # install -o/-g needs privilege for root; hermetic tests run as
@@ -3223,3 +3229,187 @@ def test_probe_mktemp_failure_never_rms_dev_null(env, tmp_path):
     assert r.stdout == "version-unknown", (r.stdout, r.stderr)
     assert stat.S_ISCHR(os.stat("/dev/null").st_mode), \
         "/dev/null was removed by the probe cleanup"
+
+
+# --- install publishes the installed-pins hash (issue #1313) ------------------
+
+def _install_with_hash(env, tmp_path, extra=None):
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    if extra:
+        e.update(extra)
+    return run_bash("./deploy/toolset-update.sh install", env_extra=e), e
+
+
+def test_install_publishes_installed_pins_hash(env, tmp_path):
+    # The privileged install publishes sha256(installed pins) to a
+    # world-readable carrier dir (the state dir is mode 700, unreadable by
+    # the S1 status plane). (Vacuity: without the publish step no record
+    # exists and the mode assertions fail.)
+    r, _ = _install_with_hash(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    hashdir = tmp_path / "pinshash"
+    assert stat.S_IMODE(hashdir.stat().st_mode) == 0o755
+    h = hashdir / "self_update_pins.hash"
+    assert h.exists()
+    assert stat.S_IMODE(h.stat().st_mode) == 0o644
+    want = hashlib.sha256(
+        (env["state"] / "self_update_pins.conf").read_bytes()).hexdigest()
+    assert h.read_text().strip() == want
+
+
+def test_install_honors_pins_hash_file_override(env, tmp_path):
+    # PINS_HASH_FILE set explicitly wins over the PINS_HASH_DIR derivation.
+    h = tmp_path / "custom" / "pins.hash"
+    r, _ = _install_with_hash(env, tmp_path,
+                              extra={"PINS_HASH_FILE": str(h)})
+    assert r.returncode == 0, r.stderr
+    assert h.exists()
+    assert not (tmp_path / "pinshash").exists()
+
+
+def test_install_refreshes_stale_pins_hash(env, tmp_path):
+    # Re-running install must move the signal to the current installed pins:
+    # pre-seed a record that cannot match (all-zero hash), re-install, and
+    # the record is rewritten to the installed pins' digest. (Fabricated
+    # staleness stands in for "pins bumped since the last install" — the
+    # publish step runs unconditionally in cmd_install, so any re-install
+    # refreshes it.)
+    hashdir = tmp_path / "pinshash"
+    hashdir.mkdir()
+    (hashdir / "self_update_pins.hash").write_text("0" * 64 + "\n")
+    r, _ = _install_with_hash(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    want = hashlib.sha256(
+        (env["state"] / "self_update_pins.conf").read_bytes()).hexdigest()
+    assert (hashdir / "self_update_pins.hash").read_text().strip() == want
+
+
+def test_install_fails_loud_when_hash_dir_uncreatable(env, tmp_path):
+    # A PINS_HASH_DIR that cannot be created (here: an existing file, so
+    # `install -d` fails deterministically for any uid) must fail the
+    # install loudly — a silent install would leave the mismatch signal
+    # dead. (Vacuity: without the fail-closed publish step, install would
+    # succeed and this fails.)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    r, _ = _install_with_hash(env, tmp_path,
+                              extra={"PINS_HASH_DIR": str(blocker)})
+    assert r.returncode != 0
+    assert "pins hash" in r.stderr
+
+
+def test_install_then_status_reports_match(env, tmp_path):
+    # End-to-end across the planes: install publishes the record, then S1
+    # (unprivileged read of the record, checkout pins as its reference)
+    # reports "match". (Vacuity: neuter the publish step and this reports
+    # "unknown".)
+    r, e = _install_with_hash(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    se = {"PINS_HASH_FILE": str(tmp_path / "pinshash" / "self_update_pins.hash"),
+          "PATH": os.environ["PATH"]}
+    r2 = subprocess.run(
+        ["python3", "scripts/self_update.py", "status", "--json"],
+        cwd=REPO, env=dict(os.environ, **se),
+        capture_output=True, text=True, timeout=60)
+    assert r2.returncode == 0, r2.stderr
+    doc = json.loads(r2.stdout)
+    assert doc["installed_pins_state"] == "match"
+
+
+def test_status_reports_mismatch_when_checkout_pins_drift(env, tmp_path):
+    # Same setup, but S1 reads a CHECKOUT pins file that drifted past the
+    # installed pins (pin bump without re-install): "mismatch" + the loud
+    # warning. (Vacuity: without the comparison, no warning fires.)
+    r, e = _install_with_hash(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    drifted = tmp_path / "drifted_pins.conf"
+    drifted.write_text("cua-driver = 99.99.9\n")
+    se = {"PINS_HASH_FILE": str(tmp_path / "pinshash" / "self_update_pins.hash"),
+          "PATH": os.environ["PATH"]}
+    r2 = subprocess.run(
+        ["python3", "scripts/self_update.py", "status", "--json",
+         "--pins", str(drifted)],
+        cwd=REPO, env=dict(os.environ, **se),
+        capture_output=True, text=True, timeout=60)
+    assert r2.returncode == 0, r2.stderr
+    doc = json.loads(r2.stdout)
+    assert doc["installed_pins_state"] == "mismatch"
+    r3 = subprocess.run(
+        ["python3", "scripts/self_update.py", "status",
+         "--pins", str(drifted)],
+        cwd=REPO, env=dict(os.environ, **se),
+        capture_output=True, text=True, timeout=60)
+    assert "installed pins differ from checkout" in r3.stdout
+
+
+def test_publish_stages_outside_unwritable_carrier_dir(env, tmp_path):
+    # Security B1: the staging write must not require carrier-dir write
+    # permission as the invoking user — a non-root operator installing via
+    # the _sudo/sudo path could not write a staging file into the
+    # root-owned 0755 carrier dir. Pre-create the carrier dir mode 555 and
+    # publish: staging happens in /tmp via mktemp, the privileged install
+    # moves the record, and `install -d` heals the dir mode.
+    # Discrimination note: the pre-fix in-dir staging fails this test for
+    # any non-root invoker (the supported sudo path — e.g. CI runners);
+    # when the suite runs as root the kernel bypasses the mode check and
+    # both implementations pass, so this pins the new staging path rather
+    # than proving the old one broken under root.
+    carrier = tmp_path / "carrier"
+    carrier.mkdir(mode=0o555)
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(carrier)
+    r = source_and("_publish_installed_pins_hash", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    h = carrier / "self_update_pins.hash"
+    assert h.exists()
+    want = hashlib.sha256(
+        (env["state"] / "self_update_pins.conf").read_bytes()).hexdigest()
+    assert h.read_text().strip() == want
+
+
+def test_install_refuses_relative_pins_hash_file(env, tmp_path):
+    # Security N3: a relative PINS_HASH_FILE would make the privileged
+    # `install -d` chmod/chown the current working directory — install must
+    # refuse it loudly instead (fail-closed).
+    r, _ = _install_with_hash(env, tmp_path,
+                              extra={"PINS_HASH_FILE": "relative/pins.hash"})
+    assert r.returncode != 0
+    assert "absolute path" in r.stderr
+
+
+def test_install_refuses_root_parent_pins_hash_file(env, tmp_path):
+    # Companion to the relative-path guard: a record directly under
+    # filesystem root is refused too.
+    r, _ = _install_with_hash(env, tmp_path,
+                              extra={"PINS_HASH_FILE": "/pins.hash"})
+    assert r.returncode != 0
+    assert "filesystem root" in r.stderr
+
+
+def test_uninstall_removes_pins_hash_record(env, tmp_path):
+    # Security N5: uninstall removes the published record — otherwise the
+    # stale record keeps S1 warning about a checkout/installed split for an
+    # updater that no longer exists.
+    r, e = _install_with_hash(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    h = tmp_path / "pinshash" / "self_update_pins.hash"
+    assert h.exists()
+    r2 = run_bash("./deploy/toolset-update.sh uninstall", env_extra=e)
+    assert r2.returncode == 0, r2.stderr
+    assert not h.exists()
+
+
+def test_publish_fails_loud_when_pins_unhashable(env, tmp_path):
+    # The hash step must report "cannot hash" (not the misleading
+    # "malformed hash") when sha256sum itself fails: point PINS_FILE at a
+    # nonexistent path. Guards the PIPESTATUS-through-$() trap — the
+    # pipeline's status is cut's, so the substitution's own status must be
+    # tested instead. (Vacuity: testing PIPESTATUS[0] after the substitution
+    # lets the failure fall through to "malformed hash" and this fails.)
+    e = dict(env["env"])
+    e["PINS_FILE"] = str(tmp_path / "no-such-pins.conf")
+    r = source_and("_publish_installed_pins_hash", env_extra=e)
+    assert r.returncode != 0
+    assert "cannot hash installed pins file" in r.stderr
+    assert "malformed" not in r.stderr

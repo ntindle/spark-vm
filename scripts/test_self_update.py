@@ -4,6 +4,7 @@ Probes are pure reads, so they are tested with injected fake `which` and
 `runner` callables — no real tools, no PATH dependence, no network.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -675,3 +676,116 @@ def test_snap_header_only_reports_zero():
         which=fake_which({"snap": "/usr/bin/snap"}), runner=runner)
     assert installed is True
     assert version == "0 snaps"
+
+
+# --- installed-pins hash signal (issue #1313) --------------------------------
+
+
+def _pins_with_hash(tmp_path, pins_text, hash_text):
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text(pins_text)
+    h = tmp_path / "self_update_pins.hash"
+    h.write_text(hash_text)
+    return str(pins), str(h)
+
+
+def test_installed_pins_match_is_silent(tmp_path):
+    # The privileged install published sha256(installed pins); the checkout
+    # pins are identical — no warning.
+    pins_text = "cua-driver = 0.28.2\n"
+    pins, h = _pins_with_hash(
+        tmp_path, pins_text, hashlib.sha256(pins_text.encode()).hexdigest())
+    assert self_update.installed_pins_state(
+        pins_path=pins, hash_path=h) == "match"
+
+
+def test_installed_pins_mismatch_detected(tmp_path):
+    # Pin bumped in the checkout, privileged install not re-run: the hash
+    # (over the OLD installed pins) no longer matches — loud mismatch.
+    pins_text = "cua-driver = 0.28.3\n"
+    pins, h = _pins_with_hash(
+        tmp_path, pins_text, hashlib.sha256(b"old installed pins").hexdigest())
+    assert self_update.installed_pins_state(
+        pins_path=pins, hash_path=h) == "mismatch"
+
+
+def test_installed_pins_hash_absent_is_unknown(tmp_path):
+    # Pre-#1313 installs publish no hash record: honest no-signal state,
+    # silent by design — not an error, not a mismatch.
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text("cua-driver = 0.28.2\n")
+    assert self_update.installed_pins_state(
+        pins_path=str(pins),
+        hash_path=str(tmp_path / "missing.hash")) == "unknown"
+
+
+def test_installed_pins_malformed_hash_is_unknown(tmp_path):
+    # A corrupt authority record is indistinguishable from absent to the
+    # unprivileged reader — unknown, not mismatch.
+    pins, h = _pins_with_hash(tmp_path, "cua-driver = 0.28.2\n", "not-a-hash\n")
+    assert self_update.installed_pins_state(
+        pins_path=pins, hash_path=h) == "unknown"
+
+
+def test_installed_pins_unreadable_is_unknown(tmp_path):
+    # A valid hash record but an unreadable pins file (e.g. a directory):
+    # unknown, not mismatch — the comparison cannot be computed.
+    pins_text = "cua-driver = 0.28.2\n"
+    pins, h = _pins_with_hash(
+        tmp_path, pins_text, hashlib.sha256(pins_text.encode()).hexdigest())
+    assert self_update.installed_pins_state(
+        pins_path=str(tmp_path), hash_path=h) == "unknown"
+
+
+def test_installed_pins_state_never_raises(tmp_path):
+    # A hash path that is a directory (read fails) must not break status.
+    assert self_update.installed_pins_state(
+        pins_path=str(tmp_path), hash_path=str(tmp_path)) == "unknown"
+
+
+def _status_main_with_hash(tmp_path, monkeypatch, capsys, pins_text,
+                           hash_text, argv_extra=()):
+    pins, h = _pins_with_hash(tmp_path, pins_text, hash_text)
+    monkeypatch.setattr(self_update, "_PINS_HASH_FILE", h)
+    rc = self_update.main(["status", "--pins", pins, *argv_extra])
+    assert rc == 0
+    return capsys.readouterr().out
+
+
+def test_status_table_emits_mismatch_warning(tmp_path, monkeypatch, capsys):
+    out = _status_main_with_hash(
+        tmp_path, monkeypatch, capsys,
+        "cua-driver = 0.28.3\n", hashlib.sha256(b"old pins").hexdigest())
+    # Lock the full canonical wording — a drifted warning must be caught
+    # here, not discovered by an operator squinting at output.
+    assert self_update._PINS_MISMATCH_WARNING in out
+
+
+def test_status_table_silent_on_match(tmp_path, monkeypatch, capsys):
+    pins_text = "cua-driver = 0.28.2\n"
+    out = _status_main_with_hash(
+        tmp_path, monkeypatch, capsys, pins_text,
+        hashlib.sha256(pins_text.encode()).hexdigest())
+    assert "installed pins differ from checkout" not in out
+
+
+def test_status_table_silent_when_hash_unknown(tmp_path, monkeypatch, capsys):
+    # No hash record (pre-#1313 install): no warning — the no-signal state.
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text("cua-driver = 0.28.2\n")
+    monkeypatch.setattr(self_update, "_PINS_HASH_FILE",
+                        str(tmp_path / "missing.hash"))
+    rc = self_update.main(["status", "--pins", str(pins)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "installed pins differ from checkout" not in out
+
+
+def test_status_json_carries_installed_pins_state(tmp_path, monkeypatch,
+                                                  capsys):
+    out = _status_main_with_hash(
+        tmp_path, monkeypatch, capsys,
+        "cua-driver = 0.28.3\n", hashlib.sha256(b"old pins").hexdigest(),
+        argv_extra=("--json",))
+    doc = json.loads(out)
+    assert doc["installed_pins_state"] == "mismatch"

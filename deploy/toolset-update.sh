@@ -145,7 +145,12 @@
 # TOOLSET_SNAPSHOT_KEEP (pre-update snapshots retained; default 5).
 # PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
 # refreshed only by the privileged `install` step, never read from the live
-# checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
+# checkout), PINS_HASH_FILE (world-readable sha256 record of the installed
+# pins; default $PINS_HASH_DIR/self_update_pins.hash — the state dir is
+# mode 700 so the unprivileged S1 status plane reads this record instead of
+# the pins themselves; written only by the privileged `install` step),
+# PINS_HASH_DIR (carrier dir for PINS_HASH_FILE; default /var/lib/sparkvm-toolset),
+# CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
 # CUA_DRIVER_OWNER/GROUP (default ntindle — the daemon runs as ntindle, not
 # root), CUA_RELEASE_BASE (release download base; tests point it at a local
 # dir), PLAYWRIGHT_VENV (managed Playwright venv; default
@@ -228,6 +233,16 @@ TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # privileged `install` step — never from the live repo checkout (see
 # docs/SELF_UPDATE.md "Two planes" contract).
 : "${PINS_FILE:=$TOOLSET_STATE_DIR/self_update_pins.conf}"
+# Pins hash: the world-readable record the unprivileged S1 status plane
+# compares against its checkout pins (issue #1313). The state dir is mode
+# 700 so S1 cannot read the installed pins directly; this hash file is the
+# only thing crossing that boundary. It carries no secret — the pins are
+# public in the repo — but only a privileged `install` may write it, so the
+# dir is created root-owned 0755 and the file root-owned 0644: a
+# non-privileged writer could otherwise move the mismatch signal at will.
+# (PINS_HASH_FILE set explicitly wins; otherwise it derives from the dir.)
+: "${PINS_HASH_DIR:=/var/lib/sparkvm-toolset}"
+: "${PINS_HASH_FILE:=$PINS_HASH_DIR/self_update_pins.hash}"
 : "${CUA_DRIVER_BIN:=/home/ntindle/cua/bin/cua-driver}"
 : "${CUA_DRIVER_OWNER:=ntindle}"
 : "${CUA_DRIVER_GROUP:=ntindle}"
@@ -2677,6 +2692,83 @@ cmd_unblock() {
 }
 
 # --- install / uninstall ----------------------------------------------------------
+_publish_installed_pins_hash() {
+    # _publish_installed_pins_hash — write sha256(installed pins) to the
+    # world-readable PINS_HASH_FILE (issue #1313). Called only from
+    # cmd_install (privileged). The carrier dir is created owner-owned 0755
+    # (root in production) and the record is installed owner-owned 0644
+    # (GNU install unlinks + recreates, so readers see old-or-new, never
+    # partial): the S1 status plane reads this as an unprivileged user, and
+    # only a privileged install may move the signal. The record carries no
+    # secret (pins are public in the repo) — its only job is telling S1
+    # when the checkout pins differ from the installed pins. Failures are
+    # loud: without the record, a pin bump without install leaves S1's
+    # drift column silently un-actionable.
+    local _hash _tmp _dir
+    # A relative PINS_HASH_FILE would make the privileged `install -d`
+    # below chmod/chown the *current working directory* — refuse it loudly
+    # instead (fail-closed). Ditto a record directly under filesystem root.
+    case "$PINS_HASH_FILE" in
+        /*) ;;
+        *) echo "ERROR: PINS_HASH_FILE must be an absolute path" >&2; return 1 ;;
+    esac
+    # The carrier dir is the record's own parent (== PINS_HASH_DIR under the
+    # default derivation), so an explicitly overridden PINS_HASH_FILE works
+    # too.
+    _dir="$(dirname -- "$PINS_HASH_FILE")"
+    # Canonicalize before the root check: a PINS_HASH_FILE like
+    # /x/../pins.hash would otherwise pass the guard while `install -d`
+    # chmod/chowns the filesystem root itself.
+    _dir="$(readlink -m -- "$_dir")" \
+        || { echo "ERROR: cannot canonicalize pins hash dir" >&2; return 1; }
+    case "$_dir" in
+        /|//)
+            echo "ERROR: refusing to publish pins hash under filesystem root" >&2
+            return 1 ;;
+    esac
+    _sudo install -d -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0755 "$_dir" \
+        || { echo "ERROR: cannot create pins hash dir $_dir" >&2; return 1; }
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "ERROR: sha256sum not found; cannot publish installed pins hash" >&2
+        return 1
+    fi
+    # Hash $PINS_FILE (not the hardcoded state-dir path): that is the file
+    # the update plane's layers actually read, including under a PINS_FILE
+    # override.
+    _hash="$(sha256sum "$PINS_FILE" 2>/dev/null)" \
+        || { echo "ERROR: cannot hash installed pins file $PINS_FILE" >&2; return 1; }
+    # NOTE: no pipeline inside the substitution — PIPESTATUS does not
+    # propagate through $(...) (it would reflect cut's status, not
+    # sha256sum's); the substitution's own exit status IS sha256sum's.
+    # Strip the "  <path>" suffix sha256sum appends.
+    _hash="${_hash%% *}"
+    # Defensive: never publish a non-hash — a truncated sha256sum output
+    # (or a hostile alias in PATH) must not poison the authority record.
+    # Exactly 64 lowercase hex chars, else loud failure. (_stripped removes
+    # every non-hex char; a clean hash survives stripping unchanged.)
+    local _stripped="${_hash//[!0-9a-f]/}"
+    if [ "${#_hash}" != "64" ] || [ "$_stripped" != "$_hash" ]; then
+        echo "ERROR: refused to publish malformed pins hash" >&2
+        return 1
+    fi
+    # Stage in a user-writable temp dir, never in the carrier dir: the
+    # carrier dir is root-owned 0755, so a non-root operator installing via
+    # the _sudo/sudo path could not write a staging file there — staging
+    # there would regress that supported privilege path (fail-closed, but
+    # a regression). The privileged `_sudo install` performs the move.
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/pins-hash.XXXXXX")" \
+        || { echo "ERROR: cannot stage pins hash record" >&2; return 1; }
+    printf '%s\n' "$_hash" >"$_tmp" 2>/dev/null \
+        || { echo "ERROR: cannot stage pins hash record" >&2; rm -f "$_tmp"; return 1; }
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0644 "$_tmp" "$PINS_HASH_FILE" \
+        || { echo "ERROR: cannot publish pins hash record $PINS_HASH_FILE" >&2; rm -f "$_tmp"; return 1; }
+    rm -f "$_tmp"
+    log "install: published installed-pins hash to $PINS_HASH_FILE"
+    return 0
+}
+
 cmd_install() {
     # One-command backfill: copy the script to the state-dir installed copy,
     # install the systemd units, enable the timer. Re-running refreshes the
@@ -2726,6 +2818,15 @@ cmd_install() {
     # trust model (docs/SELF_UPDATE.md "Two planes" contract).
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/self_update_pins.conf" "$TOOLSET_STATE_DIR/self_update_pins.conf" \
         || { echo "ERROR: cannot install pins file" >&2; return 1; }
+    # #1313: publish the installed pins' hash to the world-readable carrier
+    # dir so the unprivileged S1 status plane can detect a checkout/installed
+    # pins split (a pin bump without a privileged `install` leaves S1
+    # reporting drift the updater can never clear, silently). The hash is
+    # computed over the INSTALLED copy — what the update plane actually
+    # reads. Like every other install step this fails loudly: a hash that
+    # cannot be published leaves the mismatch signal dead, and a silent
+    # install is worse than a failed one.
+    _publish_installed_pins_hash || return 1
     # The wheel-hashes file is the operator-owned hash authority for the
     # playwright layer's wheel download. Installed/backfilled ONLY here —
     # the update plane never reads it from the live checkout, same
@@ -2760,6 +2861,16 @@ cmd_uninstall() {
     fi
     _sudo rm -f "$SYSTEMD_DIR/$SERVICE_NAME.service" "$SYSTEMD_DIR/$SERVICE_NAME.timer" \
         2>/dev/null || true
+    # #1313: remove the published installed-pins hash record — a stale
+    # record would leave S1 warning about a checkout/installed split for an
+    # updater that no longer exists. Best-effort (uninstall must not fail on
+    # this), absolute paths only (never rm relative to CWD), and the carrier
+    # dir is removed only if empty.
+    case "${PINS_HASH_FILE:-}" in
+        /*)
+            _sudo rm -f "$PINS_HASH_FILE" 2>/dev/null || true
+            _sudo rmdir "$(dirname -- "$PINS_HASH_FILE")" 2>/dev/null || true ;;
+    esac
     if [ "$SKIP_SYSTEMCTL" != "1" ]; then
         _sudo systemctl daemon-reload 2>/dev/null || true
     fi

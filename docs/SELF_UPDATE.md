@@ -168,6 +168,32 @@ with first-wins semantics for duplicated tool names
 the status plane surfaces duplicate pin names as dead config
 (`duplicate_pins` in `status --json` and the table footer).
 
+Pin-source split and the installed-pins hash (issue #1313): the
+installed-copy trust model means the two planes read *different* pin files
+by design — the status plane reads the checkout copy
+(`scripts/self_update_pins.conf`), the update plane reads the installed
+copy (`$TOOLSET_STATE_DIR/self_update_pins.conf`, root-owned mode 700).
+A pin bump without a privileged `install` therefore leaves the status plane
+reporting drift the updater can never clear, silently. The privileged
+`install` step closes that gap by publishing
+`sha256(installed pins)` to a world-readable record,
+`/var/lib/sparkvm-toolset/self_update_pins.hash` (root-owned 0755 dir,
+0644 file; written only by `install`), and the status plane compares its
+checkout pins against it: `match` / `mismatch` / `unknown` (no record yet —
+pre-#1313 installs, or an unreadable record; silent by design). A mismatch
+renders the loud footer line "installed pins differ from checkout — run
+`toolset-update.sh install`" and the `installed_pins_state: "mismatch"`
+field in `status --json`. The comparison is byte-exact over the pins file
+with no line-ending normalization — a checkout whose line endings differ
+from the installed copy would read as a mismatch; unreachable in practice
+(`install` byte-copies from the same checkout, and git normalizes to LF on
+Linux), recorded here so the behavior is not a surprise. The record
+carries no secret (the pins are public in the repo); its only job is
+making a checkout/installed split loud. The record path (`PINS_HASH_DIR` /
+`PINS_HASH_FILE`) must be a root-controlled path — a non-root-writable
+carrier dir would let anyone move the mismatch signal; `install` refuses
+relative paths and the filesystem root.
+
 ## Recovery (from #532)
 
 Self-update without recovery is just a fancier way to break the box. The

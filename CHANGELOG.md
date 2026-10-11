@@ -124,6 +124,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The toolset self-update status report no longer shows drift you cannot
+  act on after a pin bump: the privileged install now publishes a
+  world-readable hash of the installed pins, and the status report warns
+  loudly ("installed pins differ from checkout — run
+  `toolset-update.sh install`") when the checkout pins have moved past
+  the installed ones. (#1319)
 - CI rebalance rationale accuracy pass: the shard-plan note now measures the
   deploy suite's share against the local per-suite timings (not the CI wall
   clock) and pins the harness shard's pole time to direct CI measurements,
