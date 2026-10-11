@@ -139,8 +139,14 @@ def _validate_manifest(manifest: dict) -> dict:
             sys.exit(f"ERROR: manifest {comp}.state must be one of "
                      f"{WAVE_STATES}, got {state!r}.")
         live = wave.get("live")
-        if not isinstance(live, int) or live < 0:
-            sys.exit(f"ERROR: manifest {comp}.live must be a non-negative int.")
+        if type(live) is not int or not 0 <= live <= 4:
+            # bool is an int subclass: `live: true` would silently become 1
+            # (the same trap the assignments check below names explicitly).
+            # The wave model is closed at 0..4 — hash_mod_4 cohorts are 0-3
+            # and the canary pin is 1 — so a ceiling above 4 can only permit
+            # pins outside the wave model, never a real cohort (#1324).
+            sys.exit(f"ERROR: manifest {comp}.live must be a wave number "
+                     f"0..4 (a plain int, not a bool), got {live!r}.")
         assignments = wave.get("assignments", {})
         if (not isinstance(assignments, dict)
                 or any(not isinstance(k, str) or type(v) is not int
@@ -148,6 +154,17 @@ def _validate_manifest(manifest: dict) -> dict:
             sys.exit(f"ERROR: manifest {comp}.assignments must be "
                      "{box_id: wave_number} (plain ints — true/false are not "
                      "wave numbers).")
+        if any(not 0 <= v <= 4 for v in assignments.values()):
+            # Pins name waves inside the closed 0..4 model: a pin above 4
+            # names a cohort that does not exist (no ceiling 0..4 can ever
+            # permit it), and a negative pin is <= every ceiling — an
+            # undocumented always-live pin in the fail-unsafe direction.
+            # Either way the manifest's meaning is undefined, so the
+            # publisher refuses it rather than signing the ambiguity (#1324).
+            # (If a permanent-hold idiom is ever wanted, it should be a
+            # first-class concept, not an emergent out-of-range integer.)
+            sys.exit(f"ERROR: manifest {comp}.assignments pins must be "
+                     "wave numbers 0..4.")
         if wave.get("default", "hash_mod_4") != "hash_mod_4":
             sys.exit(f"ERROR: manifest {comp}.default must be 'hash_mod_4' "
                      "in S1 (the only supported default).")

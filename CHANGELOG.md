@@ -124,6 +124,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The release-gate publisher now refuses wave manifests with malformed
+  wave numbers instead of signing them: the `live` ceiling must be a
+  real wave number (0–4 — a boolean like `true` no longer silently
+  becomes wave 1), and box assignments must be wave numbers 0–4 (a
+  negative pin no longer quietly grants a box permission in every wave,
+  and a pin above 4 no longer names a cohort that does not exist).
+  The deeper state↔live correspondence is still unenforced at publish
+  time — see #1324. (#TBD)
 - The toolset self-update status report no longer shows drift you cannot
   act on after a pin bump: the privileged install now publishes a
   world-readable hash of the installed pins, and the status report warns
