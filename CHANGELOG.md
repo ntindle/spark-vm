@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   dependency-ordered build slices (wave/promotion state machine, template
   artifact + versioning + last-known-good, deploy driver + rollback +
   freeze refusal + cost emission, plane update-event reporting).
-  (#TBD)
+  (#1289)
 - The operator's per-tenant-plane version inventory: a fleet-side store
   recording which template version each tenant plane runs, with a
   convergence check that gates rollout-wave promotion and a cost ledger
