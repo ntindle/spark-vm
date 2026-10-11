@@ -159,8 +159,11 @@ hook path (unreadable/tokenless record, pairing in flight, absent
 identity env) clears a stale signal, so re-running the hook after
 de-enrollment (or a reboot, which wipes /run's tmpfs) restores the
 box-local channel instead of standing down forever. The worker re-reads the file on every pass, so
-an operator who runs `redeem` after boot only needs to re-run this hook
-as root — no worker restart — for the stand-down to take effect. The
+an operator who runs `redeem` after boot only needs to propagate the
+signal as root — `sudo identity-seed-hook.sh --propagate-plane-push-signal`
+(env-free; inspects the root state dir, the `SUDO_USER` home, and
+`/home/*` candidates, mirroring §5b's two-home check) — no worker
+restart, no reboot. The
 explicit `SPARKVM_PLANE_PUSH` env knob remains the documented override
 (e.g. via machine-config env).
 

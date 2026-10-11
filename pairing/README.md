@@ -628,6 +628,14 @@ python3 pairing/spark_pair.py request --name garage-box
 SVM_OWNER_KEY=... python3 pairing/spark_pair.py approve --pairing-id pair_...
 python3 pairing/spark_pair.py redeem
 
+# golden image only (deploy/golden-image/): the identity-seed-hook starts
+# pairing into /root/.config/spark-pair — run redeem against that same dir
+# (--dir / SVM_PAIR_DIR), then propagate the plane-push signal (#1268) so
+# the swapd push worker stands down quietly instead of logging the hourly
+# disabled-sender note:
+# python3 pairing/spark_pair.py --dir /root/.config/spark-pair redeem
+# sudo identity-seed-hook.sh --propagate-plane-push-signal
+
 # keep the token fresh (cron/systemd runs `rotate --auto` hourly):
 # NOTE: rotate/revoke need the control-plane endpoints that closed #846
 # (live on the hosted plane since 2026-10-02; self-hosted planes need the

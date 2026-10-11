@@ -91,6 +91,11 @@ The full flow is `pairing/README.md` — this is the operator's checklist:
    the submitted pubkey itself, so an attacker can't substitute one.
 3. `spark-pair.py redeem` (ed25519 proof-of-possession over the
    server-issued challenge) → token saved 0600.
+   - **Golden image:** redeem against the hook's state dir, then propagate
+     the plane-push signal so the swapd push worker stands down quietly:
+     `python3 pairing/spark_pair.py --dir /root/.config/spark-pair redeem`
+     followed by `sudo identity-seed-hook.sh --propagate-plane-push-signal`
+     (see `deploy/golden-image/README.md`).
 4. Install both cron lines **after verifying the plane serves the
    endpoints** (a manual `rotate` and a manual `heartbeat` first):
    - `0 * * * * /path/to/spark-pair.py rotate --auto` — rotates only when

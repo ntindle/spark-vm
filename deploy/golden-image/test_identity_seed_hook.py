@@ -75,13 +75,13 @@ def harness(tmp_path):
         "SPARKVM_PLANE_PUSH_FILE": str(tmp_path / "plane-push"),
     }
 
-    def run(env_extra=None, env_remove=()):
+    def run(env_extra=None, env_remove=(), args=()):
         env = dict(base_env)
         env.update(env_extra or {})
         for k in env_remove:
             env.pop(k, None)
         return subprocess.run(
-            ["bash", HOOK], env=env, capture_output=True, text=True,
+            ["bash", HOOK, *args], env=env, capture_output=True, text=True,
             timeout=30)
 
     return {"run": run, "logdir": logdir, "state": state,
@@ -198,7 +198,73 @@ def test_inflight_pairing_writes_no_plane_push_signal(harness):
     r = harness["run"](_full_env())
     assert r.returncode == 0, r.stderr
     assert not harness["signal"].exists()
-    assert "re-run this hook as root" in r.stderr
+    assert "--propagate-plane-push-signal" in r.stderr
+
+
+def test_propagate_flag_writes_signal_without_identity_env(harness):
+    # #1268/Product B1: post-boot redeem completes as the operator, when
+    # machine-config env is gone. The env-free mode must work with NO
+    # identity env at all (a plain re-run of the hook would exit at the env
+    # gate and clear the signal).
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert "not enrolling" not in r.stderr
+    assert _argv_lines(harness) == []
+    sig = harness["signal"]
+    assert sig.read_text() == "1\n"
+    assert stat.S_IMODE(os.stat(sig).st_mode) == 0o644
+    assert "plane-push signal written" in r.stderr
+
+
+def test_propagate_flag_clears_stale_signal_when_unenrolled(harness):
+    # Flag mode with no record anywhere: stale stand-down is cleared,
+    # worker fails open to box-local.
+    _plant_signal(harness)
+    r = harness["run"](args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_propagate_flag_sees_sudo_user_home(harness, tmp_path):
+    # #1268/Product B2: the operator's own redeem lands in their home
+    # (mirror of proxy/deploy.sh §5b's two-home check).
+    opdir = tmp_path / "op" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](env_extra={"SUDO_USER": "op",
+                                  "SPARKVM_HOME_ROOT": str(tmp_path)},
+                       args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert harness["signal"].read_text() == "1\n"
+    assert "plane-push signal written" in r.stderr
+
+
+def test_propagate_flag_scans_home_candidates_without_sudo_user(
+        harness, tmp_path):
+    # Boot-time shape: no SUDO_USER, but a record under /home/*.
+    opdir = tmp_path / "op2" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](env_extra={"SPARKVM_HOME_ROOT": str(tmp_path)},
+                       args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert harness["signal"].read_text() == "1\n"
+
+
+def test_propagate_flag_prefers_signal_over_boot_state_dir(harness):
+    # The hook's own (root) state dir still wins as first candidate when
+    # present — boot behavior unchanged by the two-home extension.
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"]({**_full_env()})
+    assert r.returncode == 0, r.stderr
+    assert harness["signal"].read_text() == "1\n"
+    assert "plane-push signal written" in r.stderr
 
 
 def _plant_signal(harness):

@@ -30,6 +30,12 @@
 #   the exact command and stops; it never polls for approval inside the
 #   boot sequence.
 #
+# Operator mode: `identity-seed-hook.sh --propagate-plane-push-signal`
+# re-derives only the #1268 plane-push signal from existing pairing state
+# (root state dir, SUDO_USER's home, /home/* candidates) — no identity env
+# required, nothing presented. After a manual post-boot `redeem`:
+#   sudo identity-seed-hook.sh --propagate-plane-push-signal
+#
 # Cold-stop note (arch 2026-10-09, #1203): pairing state lives in
 # SVM_PAIR_DIR (default ~/.config/spark-pair of the hook's user). On an
 # ephemeral-rootfs machine without a persisted state dir (#1205's /data
@@ -84,6 +90,79 @@ clear_plane_signal() {
     fi
 }
 
+# --- env-free plane-push signal propagation (#1268) -------------------------
+# The swapd push worker cannot read the pairing record itself (root/operator
+# homes), so this hook propagates the enrolled/plane-eligible decision to it
+# via a root-owned world-readable signal file. This step needs no identity
+# env: it inspects only existing pairing state, never presents anything.
+# It runs at boot (after the env gate, on the already-enrolled branch) and
+# doubles as the operator command after a manual post-boot `redeem`:
+#   sudo identity-seed-hook.sh --propagate-plane-push-signal
+#
+# Candidate record homes mirror proxy/deploy.sh §5b's two-home check: the
+# hook's own STATE_DIR, SUDO_USER's home when invoked via sudo, and every
+# /home/* candidate. A record with a nonempty token in ANY candidate means
+# "enrolled" — the signal is a per-box boolean, not per-user. The /home
+# root is overridable (SPARKVM_HOME_ROOT) for tests.
+_HOME_ROOT="${SPARKVM_HOME_ROOT:-/home}"
+propagate_plane_push_signal() {
+    _cands=("$STATE_DIR")
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        _cands+=("$_HOME_ROOT/$SUDO_USER/.config/spark-pair")
+    fi
+    shopt -s nullglob
+    for _h in "$_HOME_ROOT"/*/.config/spark-pair; do
+        _cands+=("$_h")
+    done
+    shopt -u nullglob
+    for _cand in "${_cands[@]}"; do
+        if "$PYTHON" -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("token") else 1)
+' "$_cand/enrollment.json" 2>/dev/null; then
+            # Atomic write: mktemp + chmod + rename replaces a pre-planted
+            # symlink/FIFO instead of following it, and closes the
+            # create->chmod mode window. The dir mode is pinned (root umask
+            # is not a promise).
+            _signal_dir="$(dirname "$SIGNAL_FILE")"
+            _signal_tmp=""
+            if mkdir -p "$_signal_dir" && chmod 0755 "$_signal_dir" \
+                && _signal_tmp="$(mktemp "$_signal_dir/.plane-push.XXXXXX")" \
+                && printf '1\n' > "$_signal_tmp" \
+                && chmod 0644 "$_signal_tmp" \
+                && mv -f "$_signal_tmp" "$SIGNAL_FILE"; then
+                log "plane-push signal written ($SIGNAL_FILE) — enrolled boxes stand down the box-local push queue"
+            else
+                [ -n "$_signal_tmp" ] && rm -f "$_signal_tmp"
+                log "WARNING: could not write plane-push signal $SIGNAL_FILE — worker falls back to record auto-detect"
+            fi
+            unset _signal_dir _signal_tmp
+            unset _cands _h _cand
+            return 0
+        fi
+    done
+    unset _cands _h _cand
+    log "no enrolled pairing record found — not writing plane-push signal; worker fails open to box-local"
+    clear_plane_signal
+    return 0
+}
+
+# Env-free operator mode: a post-boot `redeem` completes as the operator,
+# after the boot-time hook run — machine-config env (incl. the single-use
+# attestation token) is gone, so a plain hook re-run can never reach the
+# enrolled branch (the env gate below exits first, and would clear the
+# signal as "stale"). This mode re-derives only the signal from existing
+# pairing state; it presents nothing and needs no identity env. Placed
+# before the env gate deliberately.
+if [ "${1:-}" = "--propagate-plane-push-signal" ]; then
+    propagate_plane_push_signal
+    exit 0
+fi
+
 # --- env gate: fail closed on enrollment, not on boot ------------------------
 # A whitespace-only token is as good as absent (base64url has no meaningful
 # whitespace; the client strips anyway). Two-step: ${VAR//…/} on an unset
@@ -115,47 +194,19 @@ fi
 if [ -f "$STATE_DIR/enrollment.json" ]; then
     log "enrollment state present — already enrolled, skipping (token never re-presented)"
     # Plane-push signal (#1268): propagate the #1135 handoff to the image's
-    # push worker env. The worker runs as swapd and can never read this
-    # root-owned record, so auto-detect always fails open to box-local on
-    # the image. Mirror proxy/deploy.sh §5b's systemd drop-in semantics
+    # push worker env. The worker runs as swapd and can never read the
+    # pairing record itself, so auto-detect always fails open to box-local
+    # on the image. Mirror proxy/deploy.sh §5b's systemd drop-in semantics
     # with a root-owned, world-readable boolean the worker reads fresh on
     # every pass (confirm/push.py _image_plane_signal). Re-written at every
-    # boot; /run is tmpfs so a stale value cannot survive a reboot. A
-    # corrupt record writes nothing — fail-open to box-local, never a
-    # planted kill of the box-local channel.
-    if "$PYTHON" -c '
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and d.get("token") else 1)
-' "$STATE_DIR/enrollment.json" 2>/dev/null; then
-        # Atomic write: mktemp + chmod + rename replaces a pre-planted
-        # symlink/FIFO instead of following it, and closes the
-        # create->chmod mode window. The dir mode is pinned (root umask
-        # is not a promise).
-        _signal_dir="$(dirname "$SIGNAL_FILE")"
-        _signal_tmp=""
-        if mkdir -p "$_signal_dir" && chmod 0755 "$_signal_dir" \
-            && _signal_tmp="$(mktemp "$_signal_dir/.plane-push.XXXXXX")" \
-            && printf '1\n' > "$_signal_tmp" \
-            && chmod 0644 "$_signal_tmp" \
-            && mv -f "$_signal_tmp" "$SIGNAL_FILE"; then
-            log "plane-push signal written ($SIGNAL_FILE) — enrolled boxes stand down the box-local push queue"
-        else
-            [ -n "$_signal_tmp" ] && rm -f "$_signal_tmp"
-            log "WARNING: could not write plane-push signal $SIGNAL_FILE — worker falls back to record auto-detect"
-        fi
-        unset _signal_dir _signal_tmp
-    else
-        log "enrollment record unreadable or tokenless — not writing plane-push signal; worker fails open to box-local"
-        clear_plane_signal
-    fi
+    # boot; /run is tmpfs so a stale value cannot survive a reboot. The
+    # propagation step scans operator homes too (the redeem step completes
+    # as the operator, after boot).
+    propagate_plane_push_signal
     exit 0
 fi
 if [ -f "$STATE_DIR/pairing.json" ]; then
-    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" redeem, then re-run this hook as root to propagate the plane-push signal (#1268)"
+    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
     clear_plane_signal
     exit 0
 fi
