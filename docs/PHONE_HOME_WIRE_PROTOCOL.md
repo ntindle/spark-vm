@@ -329,7 +329,8 @@ revocation-latency ceiling for a silent socket is that wake interval.
   reference, which silently detaches the listener mid-session — the same
   silent-failure class as the unwrapped callable. Live-verified against
   the deployed plane 2026-10-05 ~15:2x CDT
-  (`control-plane/live_smoke_1000.py`, 12/12 checks: hello → welcome
+  (`control-plane/live_smoke_1000.py` — operator-side script, not in the
+  public tree — 12/12 checks: hello → welcome
   with `accepted_generation`, newer-generation supersede binding the
   new socket with `close`/`superseded-generation` on the old one,
   stale-generation close carrying `last_generation`, connect rows in
