@@ -195,7 +195,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - CI now pins every GitHub Actions step to an immutable commit SHA instead
   of a mutable version tag, so a tag rewrite on an action repository can no
   longer silently change what CI runs. A new pin test fails the suite if any
-  workflow step drifts back to a tag. (#TBD)
+  workflow step drifts back to a tag. (#1317)
 
 - Centralized the push notification retention sweeper's timestamp
   rendering in one tested helper used by every send-result writer, so a
