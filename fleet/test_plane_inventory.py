@@ -485,3 +485,49 @@ def test_deploy_normalizes_legacy_record_to_lkg_none(store):
     assert new_rec["schema"] == "plane-inventory-record/3"
     assert "last_known_good" in new_rec
     assert new_rec["last_known_good"] is None
+    # /3-era keys normalize too: a /1 record has no artifact identity.
+    assert new_rec["deployment_id"] is None
+    assert new_rec["worker_sha256"] is None
+
+
+def test_s1_deploy_and_retire_preserve_artifact_identity(store):
+    # Writer contract (F-RC-10): ONLY the S4 driver writes
+    # deployment_id/worker_sha256; the S1 deploy/retire commands preserve
+    # them untouched. Neuter: dropping the setdefault-free preservation
+    # (e.g. rebuilding the record without dict(prev)) wipes the join and
+    # must flip this test.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    snap_path = os.path.join(store, "planes.json")
+    journal_path = os.path.join(store, "planes_journal.jsonl")
+
+    def _plant_artifact(deployment_id, worker_sha256):
+        with open(snap_path, "r", encoding="utf-8") as fh:
+            snap = json.load(fh)
+        rec = snap["planes"]["plane-1"]
+        rec["deployment_id"] = deployment_id
+        rec["worker_sha256"] = worker_sha256
+        with open(snap_path, "w", encoding="utf-8") as fh:
+            json.dump(snap, fh)
+        with open(journal_path, "r", encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh if line.strip()]
+        lines[-1]["deployment_id"] = deployment_id
+        lines[-1]["worker_sha256"] = worker_sha256
+        with open(journal_path, "w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(json.dumps(line, sort_keys=True) + "\n")
+
+    _plant_artifact("dep-9", "cc" * 32)
+    assert _run(store, "deploy", "--plane-id", "plane-1",
+                "--template", "worker-template@v2").returncode == 0
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)["planes"]["plane-1"]
+    assert rec["deployment_id"] == "dep-9"
+    assert rec["worker_sha256"] == "cc" * 32
+    assert rec["template_version"] == "worker-template@v2"
+    assert _run(store, "retire", "--plane-id", "plane-1").returncode == 0
+    with open(snap_path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)["planes"]["plane-1"]
+    assert rec["deployment_id"] == "dep-9"
+    assert rec["worker_sha256"] == "cc" * 32
+    assert rec["status"] == "retired"

@@ -269,6 +269,17 @@ def test_waves_corrupt_fails_closed(store):
     assert "refusing deploys" in p.stderr
 
 
+def test_waves_boolean_assignment_fails_closed_not_wave_one(store):
+    # JSON true == 1 in Python: a boolean assignment must not pass as
+    # wave 1 — the corrupt-waves philosophy fails closed instead.
+    _register_release(store)
+    _plant_waves(store, 1, {"plane-1": True})
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "refusing deploys" in p.stderr
+
+
 def test_rollback_no_pin_fails_closed(store):
     _register_release(store)
     p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
@@ -399,7 +410,10 @@ def test_deploy_sha_mismatch_fails_closed_no_writes(store, monkeypatch):
     assert _cost_events(store) == []
 
 
-def test_deploy_malformed_observed_sha_fails_closed(store, monkeypatch):
+def test_deploy_malformed_observed_sha_fails_closed(store, monkeypatch,
+                                                   capsys):
+    # The assertion on stderr pins the malformed-digest check itself, not
+    # just fail-closed-ness (the mismatch path fails closed identically).
     _register_release(store)
     monkeypatch.setattr(plane_deploy, "DEPLOYER",
                         _fake_deployer_factory(observed_sha="not-a-sha"))
@@ -407,6 +421,7 @@ def test_deploy_malformed_observed_sha_fails_closed(store, monkeypatch):
         plane_deploy.main(["--store", store, "deploy",
                            "--plane-id", "plane-1", "--template", "w@v1"])
     assert ei.value.code == 2
+    assert "malformed" in capsys.readouterr().err
     assert len(_journal_lines(store)) == 1
 
 
@@ -414,6 +429,20 @@ def test_deployer_exception_fails_closed_no_writes(store, monkeypatch):
     _register_release(store)
     monkeypatch.setattr(plane_deploy, "DEPLOYER",
                         _fake_deployer_factory(exc=RuntimeError("boom")))
+    with pytest.raises(SystemExit) as ei:
+        plane_deploy.main(["--store", store, "deploy",
+                           "--plane-id", "plane-1", "--template", "w@v1"])
+    assert ei.value.code == 2
+    assert len(_journal_lines(store)) == 1
+    assert _cost_events(store) == []
+
+
+def test_deployer_garbage_duration_fails_closed(store, monkeypatch):
+    # A deployer-reported duration that is not a non-negative number must
+    # not enter the D-MT5 ledger — fail closed, nothing recorded.
+    _register_release(store)
+    monkeypatch.setattr(plane_deploy, "DEPLOYER",
+                        _fake_deployer_factory(duration_s="soon"))
     with pytest.raises(SystemExit) as ei:
         plane_deploy.main(["--store", store, "deploy",
                            "--plane-id", "plane-1", "--template", "w@v1"])

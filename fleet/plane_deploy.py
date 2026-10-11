@@ -182,9 +182,18 @@ def _gates(store_dir, plane_id):
         _fail("controller store is frozen — action refused "
               "(D-RC-5; `freeze --off` to resume)")
     live_wave, assignments = _read_waves(store_dir)
-    if live_wave is not None and assignments.get(plane_id) != live_wave:
-        _fail(f"plane {plane_id!r} is not in the live wave {live_wave} — "
-              "action refused (D-RC-5)")
+    if live_wave is not None:
+        assigned = assignments.get(plane_id)
+        # The bool trap: JSON true == 1 in Python, so a boolean assignment
+        # must not pass as wave 1 — fail closed on a non-integer
+        # assignment, per the file's corrupt-waves philosophy.
+        if assigned is not None and (isinstance(assigned, bool)
+                                     or not isinstance(assigned, int)):
+            _fail(f"waves file: assignment for plane {plane_id!r} is not "
+                  "an integer — refusing deploys")
+        if assigned != live_wave:
+            _fail(f"plane {plane_id!r} is not in the live wave {live_wave} — "
+                  "action refused (D-RC-5)")
     return live_wave
 
 

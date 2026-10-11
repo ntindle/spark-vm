@@ -420,6 +420,13 @@ def record_plane_observation(store_dir, record):
     controller never silently creates a plane row mid-rollout. Callers
     build the full /3 record (the driver sets the artifact-identity
     fields; S1 commands preserve-and-normalize them).
+
+    Concurrency note: the record is built from a pre-lock read and the
+    registration re-check happens under the lock, so two concurrent
+    writers serialize on the append with last-writer-wins snapshot
+    semantics (the journal stays append-only — no observation is lost).
+    This CLI is operator-run (single writer in practice); a future
+    multi-writer controller should rebuild the record inside the lock.
     """
     plane_id = record.get("plane_id")
     if not plane_id:
@@ -555,9 +562,9 @@ def cmd_deploy(args):
     if prev is None:
         _fail(f"plane {plane_id!r} is not registered (register first)")
     record = dict(prev)
-    # /1-era records carry no last_known_good key: normalize to the /2
+    # /1-era records carry no last_known_good key: normalize to the /3
     # invariant (None until the S2 promotion step writes it) rather
-    # than stamping a /2 record that omits a /2-mandated field.
+    # than stamping a /3 record that omits a /3-mandated field.
     record.setdefault("last_known_good", None)
     # /1- and /2-era records carry no artifact-identity keys: normalize
     # to the /3 invariant (None until the S4 driver writes them).
