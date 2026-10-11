@@ -27,6 +27,17 @@ box. No new box-side daemon, no new inbound port, no control plane.
   operator's cron at ≤ TTL/2.
 - `test_gate.py` — hermetic suite for the gating channel, including the
   §4 freeze drill (run with `python3 -m pytest fleet/test_gate.py`).
+- `plane_inventory.py` — per-tenant-plane version inventory + the D-MT5
+  operational-cost ledger (#1261 / F-OP7/D-OP7): the box inventory's two
+  questions asked of the *plane layer* — which template version each
+  tenant plane runs, and which planes have not converged (`stale`
+  exits 1 when any plane is off the expected template, so the rollout
+  controller can gate wave promotion on it). Cost events
+  (provision/update/rollback with duration and optional cost) feed the
+  D-MT5 revisit trigger's measured per-plane operational cost.
+  Stdlib only.
+- `test_plane_inventory.py` — hermetic suite (run with `python3 -m pytest
+  fleet/test_plane_inventory.py`).
 
 ## Release gating (G18 / #777, S1a)
 

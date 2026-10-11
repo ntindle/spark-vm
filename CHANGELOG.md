@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The operator's per-tenant-plane version inventory: a fleet-side store
+  recording which template version each tenant plane runs, with a
+  convergence check that gates rollout-wave promotion and a cost ledger
+  (provision/update/rollback durations and costs) that feeds the
+  per-tenant operational-cost measurement the multi-tenant model's
+  revisit decision needs. (#TBD)
 - The SSH-key-as-account onboarding doc: the first-run experience for
   key-identity accounts — the first-connect walkthrough, the manifest
   vocabulary with the claim-link bookmark rule, the "same key -> same
