@@ -1115,14 +1115,20 @@ cmd_check() {
         # Up-to-date (or blocked); already logged. Mirror deploy's
         # synthesized-range check so `check` stays honest about what a
         # deploy would do — but a blocked head stays quiet, exactly like
-        # deploy (Engineering review).
+        # deploy (Engineering review), and a watermark-less box stays
+        # quiet too: deploy skips the extra-inputs scan when there is no
+        # watermark (the gate's verdict stands), so claiming a forced
+        # redeploy here would lie (Architecture review).
         if [ ! -f "$BLOCKED_COMMIT" ]; then
-            local ec
-            for ec in "${COMPONENTS[@]}"; do
-                if extra_inputs_changed "$ec"; then
-                    log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
-                fi
-            done
+            local wmark ec
+            wmark="$(cat "$WATERMARK" 2>/dev/null || echo "")"
+            if [ -n "$wmark" ]; then
+                for ec in "${COMPONENTS[@]}"; do
+                    if extra_inputs_changed "$ec"; then
+                        log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
+                    fi
+                done
+            fi
         fi
         return 0
     fi
@@ -1533,6 +1539,11 @@ cmd_status() {
     # Issue #302: surface the host-side input digests so a proxy redeploy
     # with an unchanged watermark is explainable (QA review).
     local sc rec cur
+    # The "next deploy force-redeploys" claim is only true when a deploy
+    # exists to be forced: on a watermark-less box deploy skips the
+    # extra-inputs scan (the gate's verdict stands), so qualify the claim
+    # (Architecture review).
+    local status_wmark; status_wmark="$(cat "$WATERMARK" 2>/dev/null || echo "")"
     for sc in "${COMPONENTS[@]}"; do
         [ -n "$(get_arr "$sc" extra_paths 2>/dev/null)" ] || continue
         # B1 (Engineering review): missing state file must not abort
@@ -1547,8 +1558,10 @@ cmd_status() {
         fi
         if [ "$rec" = "$cur" ]; then
             echo "extra-inputs($sc): in sync (${cur:0:12}…)"
-        else
+        elif [ -n "$status_wmark" ]; then
             echo "extra-inputs($sc): CHANGED — recorded '${rec:0:12}' vs current '${cur:0:12}' (next deploy force-redeploys $sc)"
+        else
+            echo "extra-inputs($sc): CHANGED — recorded '${rec:0:12}' vs current '${cur:0:12}' (no watermark yet: the first gate-permitted deploy converges it; a gate-held box stays quiet)"
         fi
     done
     if [ -f "$LAST_FAILURE" ]; then echo "LAST FAILURE:"; cat "$LAST_FAILURE"; fi
