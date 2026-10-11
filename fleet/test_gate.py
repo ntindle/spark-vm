@@ -149,6 +149,62 @@ def test_publish_refuses_bad_commit(tmp_path, keyfile, manifest):
     assert "max_permitted_commit" in r.stderr
 
 
+def _publish_with_manifest(tmp_path, keyfile, registry, waves):
+    p = tmp_path / "waves.json"
+    p.write_text(json.dumps(waves))
+    out = str(tmp_path / "gate.json")
+    return run(sys.executable, PUBLISH, "--registry", registry,
+               "--manifest", str(p), "--key-id", KEY_ID,
+               "--key-file", keyfile, "--out", out)
+
+
+def _waves(live, assignments=None):
+    return {comp: {"live": live, "state": "wave-2",
+                   "assignments": assignments or {}, "default": "hash_mod_4"}
+            for comp in ("repo", "toolset", "image")}
+
+
+def test_publish_refuses_bool_live(tmp_path, keyfile, registry):
+    # bool is an int subclass: `live: true` must not silently become 1 (#1324).
+    r = _publish_with_manifest(tmp_path, keyfile, registry, _waves(True))
+    assert r.returncode != 0
+    assert ".live" in r.stderr
+
+
+def test_publish_refuses_live_above_4(tmp_path, keyfile, registry):
+    # The wave model is closed at 0..4; a ceiling above 4 can only permit
+    # pins outside the wave model, never a real cohort (#1324).
+    r = _publish_with_manifest(tmp_path, keyfile, registry, _waves(99))
+    assert r.returncode != 0
+    assert ".live" in r.stderr
+
+
+def test_publish_refuses_negative_assignment(tmp_path, keyfile, registry):
+    # A negative pin is <= every live ceiling: an undocumented always-live
+    # pin in the fail-unsafe direction (#1324).
+    r = _publish_with_manifest(tmp_path, keyfile, registry,
+                               _waves(2, {"box-07": -1}))
+    assert r.returncode != 0
+    assert "assignments" in r.stderr
+
+
+def test_publish_refuses_assignment_above_4(tmp_path, keyfile, registry):
+    # A pin above 4 names a cohort outside the closed wave model: no valid
+    # ceiling can ever permit it, so the manifest's meaning is undefined
+    # (a typo for pin 1? an undocumented permanent hold?) — refused (#1324).
+    r = _publish_with_manifest(tmp_path, keyfile, registry,
+                               _waves(2, {"box-07": 99}))
+    assert r.returncode != 0
+    assert "assignments" in r.stderr
+
+
+def test_publish_accepts_wave_numbers_0_to_4(tmp_path, keyfile, registry):
+    # Boundary control: the full closed range still publishes.
+    for live in (0, 1, 2, 3, 4):
+        r = _publish_with_manifest(tmp_path, keyfile, registry, _waves(live))
+        assert r.returncode == 0, (live, r.stderr)
+
+
 def test_publish_freeze_flag(tmp_path, keyfile, registry, manifest):
     out = publish(tmp_path, keyfile, registry, manifest, freeze=True)
     assert json.loads(open(out).read())["freeze"] is True
