@@ -21,25 +21,40 @@ trusted for ordering, because nothing plane-reported exists at this
 slice. A future slice may accept plane-signed heartbeats; they must
 not backfill `at` — same discipline as the box inventory.
 
-This also makes the tool both-supported (D-RC-1): on self-hosted
-estates the "operator" is the human running the repo CLI; on the
-hosted product the operator plane runs the same component as the
-source for rollout waves. Same binary, same contract.
+This keeps the tool both-supported (D-RC-1): on self-hosted
+estates the "operator" is the human running the repo CLI — that half
+is shipped and documented here. The hosted product's consumption is
+the S2+ design intent: the future operator plane reuses this same
+CLI and exit-code contract as its wave source, but the operator plane
+itself is not built yet (F-RC-8) — today the hosted operator runs
+this tool the same way the self-hosted human does. Same binary, same
+contract.
+
+All examples run from the repo root (`python3 fleet/plane_inventory.py`).
+A missing `--store` directory is created automatically as an empty
+store — there is no init step.
 
 ## The operator's contract: exit codes, JSON, one-line errors
 
 - **Exit 0** on a printed result (JSON to stdout).
-- **Exit 1** from `stale` only: at least one eligible plane is not
-  converged on the expected template. The rollout controller reads
-  this before promoting a wave — 1 means "do not promote".
-- **Exit 2** on bad input, unusable `--store`, a fail-closed trust
-  check, or an internal failure. The message is one line on stderr,
-  `plane_inventory: error: ...` — never a bare traceback.
+- **Exit 1** from `stale` only: the `not_converged` list is
+  non-empty — an eligible plane on the wrong template, a
+  record-stale plane, *or a retired plane* (listed with reason
+  `retired`). The rollout controller reads this before promoting a
+  wave — 1 means "do not promote". Exit 0 only when no plane is
+  listed at all.
+- **Exit 2** on bad input, unwritable `--store`, a fail-closed trust
+  check, or an internal failure. Operational errors print one line
+  on stderr, `plane_inventory: error: ...`; internal failures print
+  `plane_inventory: internal error: ...`; argparse usage errors print
+  `plane_inventory.py: error: ...`. All exit 2; none print a bare
+  traceback.
 - `--store` is required on every command.
 
 Identifiers (`--plane-id`, `--tenant-id`, `--channel`) match
-`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; template versions are non-empty
-strings without whitespace or control characters (up to 128 chars).
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; template versions match
+`^[A-Za-z0-9][A-Za-z0-9._:+~@-]{0,127}$` — start alphanumeric, up to
+128 chars, charset `[A-Za-z0-9._:+~@-]` (no `/`, `!`, or parens).
 
 ## Store layout and journal discipline
 
@@ -55,7 +70,17 @@ Writes serialize on the store-scoped journal lock (`fleet/events.py`).
 Journal appends are single `O_APPEND` `write()` calls; the snapshot is
 published via process-unique tmp file + `os.replace()`; both are
 `fsync`'d. A crash between the journal append and the snapshot publish
-heals itself: the journal is the truth, and every read replays it.
+does **not** heal itself: the next read fails closed (exit 2,
+`snapshot/journal divergence` — the journal is the truth and every
+read replays it, so a journal-ahead snapshot is a divergence). The
+observation is not lost — the journal has it — but recovery is manual:
+remove the stale `planes.json`. Note that a *missing* snapshot reads
+as an empty store (the journal is not replayed to rebuild it), so the
+planes must then be re-registered, minting duplicate journal records.
+There is no `verify`/repair subcommand in S1. The snapshot tmp file
+is `fsync`'d but the store directory is not `fsync`'d after
+`os.replace()`, so the happy path carries a similar crash window
+landing in the same fail-closed state.
 
 ### Trust model
 
@@ -112,7 +137,12 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
 ```
 
 The plane is kept for cost history but excluded from census
-percentages and `stale` evaluation.
+percentages. Note the asymmetry: `stale` still lists retired planes
+in `not_converged` (reason `retired`, `template_version: null`), so
+a retired plane keeps the pre-promotion gate at exit 1 —
+retirements are operator-visible to the rollout, not silently
+dropped. Retiring an already-retired plane succeeds (it refreshes
+`observed_at`).
 
 ## Observation commands
 
@@ -136,7 +166,8 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store census
 The denominator is **eligible planes only**: non-retired planes whose
 latest record is fresher than the staleness window (default 24h).
 Excluded planes are printed alongside the percentage, so a 100%
-census over 1 of 50 planes is honest.
+census over 1 of 50 planes is honest. Planes registered without
+`--template` appear with `template_version: null`.
 
 ### `stale` — the pre-promotion gate
 
@@ -156,17 +187,36 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
 }
 ```
 
-- Exit 1 when anything is not converged; exit 0 when all eligible
-  planes run the expected template.
+- Exit 1 whenever any plane is listed in `not_converged` — a
+  version-mismatch, a record-stale plane, or a retired plane.
+  Exit 0 only when the list is empty.
 - Non-convergence reasons: `version-mismatch` (eligible plane on the
   wrong version), `stale` (record older than the window), `retired`
   (retired planes are listed with their exclusion reason rather than
   silently passing). Rows for planes with no current version carry
-  `template_version: null`.
+  `template_version: null` — including eligible planes registered
+  without `--template`, which `stale` reports as `version-mismatch`.
 - `--stale-hours` (default 24) tunes the freshness window on both
   `census` and `stale`. It must be a positive number — `NaN` is
   rejected at the boundary (it would otherwise silently mark every
-  record stale).
+  record stale); note `inf` passes the check and makes every record
+  fresh forever.
+- A typo'd `--store` path silently becomes a fresh empty store, and
+  `stale` on it exits 0 with `count: 0` — a false green for the
+  pre-promotion gate. The controller must pin and verify the store
+  path rather than rely on fail-closed behavior here.
+
+## A rollout wave, end to end
+
+```
+$ python3 fleet/plane_inventory.py --store ~/var/plane-store census
+$ python3 fleet/plane_inventory.py --store ~/var/plane-store stale --expected sparkvm-control@def456
+# exit 1: plane-b is still on sparkvm-control@abc123 — do not promote
+$ python3 fleet/plane_inventory.py --store ~/var/plane-store deploy --plane-id plane-b --template sparkvm-control@def456 --notes "wave 1"
+$ python3 fleet/plane_inventory.py --store ~/var/plane-store stale --expected sparkvm-control@def456
+# exit 0: converged — the wave may proceed
+$ python3 fleet/plane_inventory.py --store ~/var/plane-store cost --plane-id plane-b --event update --duration-s 75 --cost-usd 0.09
+```
 
 ## Cost commands
 
@@ -183,7 +233,10 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
 - `--duration-s` and `--cost-usd` are optional but must be finite
   numbers ≥ 0 when given — `inf`/`nan` are rejected (JSON would emit
   `Infinity`, poisoning the recurring total).
-- Cost events are refused for unregistered planes.
+- Cost events are refused for never-registered planes, but accepted
+  on retired ones (cost history keeps accruing after retirement).
+- `--notes` is *replaced* per event, not appended; the default is the
+  empty string.
 
 ### `cost-summary` — the D-MT5 measurement
 
@@ -191,12 +244,18 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
 python3 fleet/plane_inventory.py --store ~/var/plane-store cost-summary
 ```
 
-Aggregates per plane and globally: per-event counts, total cost, how
-many events reported a cost, and median durations. The keyed output
-is `recurring_cost_usd_total` (update + rollback): D-MT5's trigger
-compares **recurring** update cost across template versions, not
-all-time totals — provision cost is one-time and would hide a
-regression. Add `--plane-id` to scope the summary to one plane.
+Aggregates per plane and globally: per-event counts, total cost,
+how many events reported a cost, and median durations
+(`duration_s_median` is `null` when no durations were reported).
+The keyed output is `recurring_cost_usd_total` (update + rollback),
+alongside the provision totals: D-MT5's measurement is **measured
+per-tenant-plane operational cost — provision + update rollout** —
+compared against the amortized cost of the tenant-layer security
+redesign. Provision is one-time but it counts in the predicate;
+rollback costs are tracked as recurring operational cost. D-MT5's
+other predicate (tenant count approaching Cloudflare per-account
+Worker/D1 limits) is not measured by this tool. Add `--plane-id`
+to scope the summary to one plane.
 
 ## Failure catalog
 
@@ -204,11 +263,14 @@ regression. Add `--plane-id` to scope the summary to one plane.
 | --- | --- | --- |
 | `register` on an already-registered plane | 2 | `plane 'x' is already registered (use deploy to change state)` |
 | `deploy`/`cost` on an unregistered plane | 2 | `plane 'x' is not registered (register first)` |
-| Snapshot and journal disagree | 2 | `snapshot/journal divergence for plane 'x': field <f> differs ...` |
+| `retire` on an unregistered plane | 2 | `plane 'x' is not registered` (no "register first" suffix) |
+| Snapshot and journal disagree on a field | 2 | `snapshot/journal divergence for plane 'x': field <f> differs ...` |
+| Snapshot and journal disagree on plane sets | 2 | `snapshot/journal divergence: plane sets differ (journal=[...], snapshot=[...])` |
 | `null`/non-object planes document | 2 | `planes snapshot is corrupt: ...` |
 | Non-finite or negative cost/duration | 2 | `--duration-s must be a finite number >= 0, got 'inf'` |
-| Bad `--stale-hours` (≤ 0, NaN) | 2 | `--stale-hours must be a positive number` |
-| `--store` missing or unwritable | 2 | `--store is not a usable directory: ...` |
+| Bad `--stale-hours` (≤ 0, NaN) | 2 | `--stale-hours must be a positive number` (note: `inf` is accepted and makes every record fresh) |
+| `--store` directory missing | — | auto-created as an empty store (exit 0); a typo'd path is a fresh empty store — `stale` on it exits 0 with `count: 0` |
+| `--store` unwritable | 2 | `--store is not a usable directory: ...` |
 | `stale` finds unconverged planes | 1 | (JSON on stdout names them; nothing on stderr) |
 
 ## What this doc deliberately does not cover
