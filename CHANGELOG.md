@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Rollout-controller convergence pin (2026-10-11, #1261): the template
+  artifact question is now answered — pinned deployment-ID + SHA-256
+  manifests, not a floating "latest" — so the wave/promotion slices' ship
+  gate is cleared; the pin also records the build order (deploy driver,
+  then wave machine, then event reporting) and two new scope questions:
+  for the wave machine, which release channels a wave converges (F-RC-9);
+  for the deploy driver, how a plane's deploy record identifies the exact
+  bytes that landed (F-RC-10). (#1304)
+
 - Template releases are now pinned artifacts for the tenant-plane
   rollout: each template version records its deployment ID and the
   SHA-256 of the deployed plane code, so a rollout wave converges to a
