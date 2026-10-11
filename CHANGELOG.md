@@ -72,6 +72,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   vocabulary with the claim-link bookmark rule, the "same key -> same
   box" resume semantics, the rotate-vs-claim decision rule, and the
   connect-time wiring acceptance spec. (#1277)
+- An operator guide for the tenant-plane version inventory: the
+  exit-code contract, the journal-as-truth store layout and
+  snapshot-divergence trust model, the register/deploy/retire lifecycle,
+  the convergence-check gate for rollout-wave promotion, and cost events
+  with the D-MT5 operational-cost measurement. (#TBD)
 
 ### Fixed
 
