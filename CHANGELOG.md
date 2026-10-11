@@ -162,6 +162,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   clock) and pins the harness shard's pole time to direct CI measurements,
   and two push-lane retention notes now cite the real timestamp-assumption
   source. (#1323)
+- The self-update status and update planes now read the same pin from the
+  same pins file, down to whitespace: the update plane's pin reader used
+  to delete interior whitespace from pin values while the status plane
+  preserved it, so a malformed pin read as two different values. Both
+  planes now strip edges only and agree; real versions are unaffected
+  (they never contain whitespace). (#1335)
 
 - CI Python test gate rebalanced again: the deploy suite (420 tests, ~43% of
   the unit shard's wall time — 2.8x the next-heaviest suite) had become the

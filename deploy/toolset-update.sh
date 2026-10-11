@@ -733,11 +733,33 @@ _os_security_repair() {
 # probe); reinstall the pinned release when drifted or absent. Never restarts the CUA
 # daemon — the new binary takes effect at the next daemon restart, which the
 # updater does not perform.
+# _strip <str> — print <str> with leading and trailing whitespace removed
+# (interior whitespace preserved). Matches Python str.strip() on ASCII
+# whitespace — the pins file is ASCII `tool = version` by format; exotic
+# Unicode whitespace (e.g. U+00A0) is stripped by Python but not by
+# `[[:space:]]`, so parity is scoped to ASCII. Beyond ASCII the planes can
+# still diverge (the shell keeps non-ASCII edge bytes, Python strips them),
+# but the update plane fails closed there: every `_read_pin` consumer gates
+# on `_pin_ok`, which rejects any non-ASCII byte loudly (log + layer
+# failure, no install). The status plane performs no such validation and
+# reports the stripped value — the update plane's refusal is the operative
+# guarantee.
+# Pure parameter expansion — no subprocess, so the hermetic test env needs
+# no new tools.
+_strip() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 _read_pin() {
     # _read_pin <tool> — print the pinned version from the pins file, or
     # nothing. Format: one `tool = version` per line; `#` comments and blank
     # lines ignored. First matching tool wins; fail-closed (empty) on a
-    # missing/unreadable pins file.
+    # missing/unreadable pins file. Names and values are edge-stripped only
+    # (issue #1314 — plane-agreement with load_pins' str.strip(); the old
+    # tr -d ' \t' deleted interior whitespace, which load_pins preserves).
     local tool="$1"
     local pins="${PINS_FILE:-}"
     [ -n "$pins" ] && [ -f "$pins" ] || return 0
@@ -751,8 +773,8 @@ _read_pin() {
         line="${line#"${line%%[![:space:]]*}"}"
         case "$line" in \#*|'') continue ;; esac
         case "$line" in *"="*) ;; *) continue ;; esac
-        name="$(printf '%s' "$line" | cut -d= -f1 | tr -d ' \t')"
-        ver="$(printf '%s' "$line" | cut -d= -f2- | tr -d ' \t')"
+        name="$(_strip "$(printf '%s' "$line" | cut -d= -f1)")"
+        ver="$(_strip "$(printf '%s' "$line" | cut -d= -f2-)")"
         if [ "$name" = "$tool" ] && [ -n "$ver" ]; then
             printf '%s' "$ver"
             return 0

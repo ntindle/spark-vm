@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -581,6 +582,64 @@ def test_load_pins_first_occurrence_wins(tmp_path):
     pins_file = tmp_path / "pins.conf"
     pins_file.write_text("cua-driver = 0.28.2\ncua-driver = 0.29.0\n")
     assert self_update.load_pins(str(pins_file)) == {"cua-driver": "0.28.2"}
+
+
+def test_read_pin_agrees_with_load_pins_on_whitespace(tmp_path):
+    # Issue #1314 (F-A2): the shell _read_pin deleted ALL whitespace
+    # (tr -d ' \t') while load_pins strips only the edges (str.strip()).
+    # For every line in the pins file, the shell's parsed value must equal
+    # the status plane's — interior whitespace included — so the two planes
+    # never report different pins from the same file.
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text(
+        "# comment\n"
+        "\n"
+        "cua-driver = 0.28.2\n"
+        "foo = 1.2 beta\n"
+        "bar = 0.9.0 \n"
+        "\t baz \t = \t 3.3.3 \t\n"
+        "   # indented = not-a-pin\n"
+    )
+    want = self_update.load_pins(str(pins_file))
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    env = dict(os.environ, LC_ALL="C")  # pin [[:space:]] to ASCII parity
+    for name, value in want.items():
+        proc = subprocess.run(
+            ["bash", "-c",
+             "export TOOLSET_UPDATE_NO_MAIN=1; "
+             "source ./deploy/toolset-update.sh; "
+             f'PINS_FILE="{pins_file}" _read_pin "{name}"'],
+            cwd=repo, capture_output=True, text=True, timeout=60, env=env)
+        assert proc.returncode == 0, name
+        assert proc.stdout == value, (name, value, proc.stdout)
+    assert want == {
+        "cua-driver": "0.28.2",
+        "foo": "1.2 beta",
+        "bar": "0.9.0",
+        "baz": "3.3.3",
+    }
+
+
+def test_read_pin_agrees_with_load_pins_on_real_pins_file():
+    # Issue #1314 regression anchor: the parity claim must hold on the
+    # real operator pins file, not just fixtures. Both planes read the
+    # same values — a future _read_pin rewrite that silently diverges
+    # from load_pins on real input fails here. Version-agnostic: asserts
+    # agreement, not any particular pin.
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    pins_file = os.path.join(repo, "scripts", "self_update_pins.conf")
+    want = self_update.load_pins(pins_file)
+    assert want, "real pins file must define at least one pin"
+    env = dict(os.environ, LC_ALL="C")
+    for name, value in want.items():
+        proc = subprocess.run(
+            ["bash", "-c",
+             "export TOOLSET_UPDATE_NO_MAIN=1; "
+             "source ./deploy/toolset-update.sh; "
+             f'PINS_FILE="{pins_file}" _read_pin "{name}"'],
+            cwd=repo, capture_output=True, text=True, timeout=60, env=env)
+        assert proc.returncode == 0, name
+        assert proc.stdout == value, (name, value, proc.stdout)
 
 
 def test_pin_duplicates_flags_repeated_names(tmp_path):
