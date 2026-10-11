@@ -1160,6 +1160,37 @@ def stage_browser_archives(tmp_path, names=("chromium-1234",), digest=None,
     return browsers, hashes, dryrun, curldir
 
 
+def test_strip_removes_edges_only(env):
+    # _strip matches Python str.strip(): edges go, interior stays.
+    for src, want in (
+        ("0.28.2", "0.28.2"),
+        ("  0.28.2  ", "0.28.2"),
+        ("\t1.2 beta\t", "1.2 beta"),
+        ("a b c", "a b c"),
+        ("0.28.2\r", "0.28.2"),
+        ("   ", ""),
+        ("", ""),
+    ):
+        r = source_and(f'_strip "{src}"', env["env"])
+        assert r.returncode == 0 and r.stdout == want, (src, r.stdout)
+
+
+def test_read_pin_preserves_interior_whitespace(env):
+    # Issue #1314: _read_pin deleted ALL whitespace (tr -d ' \t') while
+    # load_pins keeps interior whitespace (str.strip()). The planes must
+    # agree: edge-strip only. Real versions never contain whitespace —
+    # _pin_ok rejects them — so a malformed pin now reads identically
+    # (fail-closed downstream) in both planes instead of diverging.
+    pins = env["tmp"] / "pins.conf"
+    pins.write_text("cua-driver = 0.28.2\nfoo = 1.2 beta\nbar = 0.9.0 \n")
+    r = source_and(f'PINS_FILE={pins} _read_pin cua-driver', env["env"])
+    assert r.returncode == 0 and r.stdout == "0.28.2"
+    r = source_and(f'PINS_FILE={pins} _read_pin foo', env["env"])
+    assert r.returncode == 0 and r.stdout == "1.2 beta"
+    r = source_and(f'PINS_FILE={pins} _read_pin bar', env["env"])
+    assert r.returncode == 0 and r.stdout == "0.9.0"
+
+
 def test_read_pin_parses_pins_file(env):
     pins = env["tmp"] / "pins.conf"
     pins.write_text("# comment\n\ncua-driver = 0.28.2\ndocker=26.1\nno-equals-line\n")
