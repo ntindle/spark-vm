@@ -156,7 +156,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   cannot hang the suite: the zero/negative/non-finite interval checks run
   the console in a subprocess with a timeout, so a future regression in
   the guard fails loudly instead of spinning the test runner forever.
-  (#TBD)
+  (#1337)
 
 - The release-gate publisher now refuses wave manifests with malformed
   wave numbers instead of signing them: the `live` ceiling must be a
