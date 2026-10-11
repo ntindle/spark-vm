@@ -65,7 +65,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
   root-owned enrollment signal the worker (which runs as a different user
   and can never read the pairing record itself) checks on every pass, so
   enrolled boxes stop logging the hourly disabled-sender note and no longer
-  journal into a channel that could never page. (#1282)
+  journal into a channel that could never page. `identity-seed-hook.sh
+  --propagate-plane-push-signal` re-propagates the signal after a manual
+  post-boot `redeem` (no reboot needed). (#1282)
 - The golden-image tag-ref validator now pins its tag grammar to ASCII:
   non-ASCII tag references (e.g. a `ß` or CJK character in the tag) are
   rejected at pin time instead of passing validation and failing loudly
