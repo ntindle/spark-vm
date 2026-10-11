@@ -450,6 +450,56 @@ def test_pending_range_return_contract(tmp_path):
     assert '"result":"precheck-fail"' in audit, audit
 
 
+def test_deploy_skips_forced_synthesis_without_watermark(tmp_path):
+    """A watermark-less box whose pending_range reports "nothing to do"
+    (rc=1 — the gate's staging verdict: a gate-managed box whose wave is
+    not live) must NOT synthesize a zero-width extra-inputs forced range:
+    `git reset --hard ""` would fail and every tick would alert + audit a
+    misleading precheck failure. Regression for the 20261011-0059 arch
+    deep-read finding."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    # No deployed-commit file -> empty watermark (fresh box).
+    assert not (state / "deployed-commit").exists()
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "pending_range() { return 1; }; "          # gate staging: nothing to do
+        "extra_inputs_changed() { return 0; }; "   # host inputs "changed"
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    assert "DEPLOY_RC=0" in r.stdout, r.stdout + r.stderr
+    assert "no watermark yet" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert not (state / "last-failure").exists(), \
+        "spurious precheck alert fired on a watermark-less box"
+    audit = state / "audit.log"
+    if audit.exists():
+        assert "precheck-fail" not in audit.read_text(), audit.read_text()
+
+
+def test_deploy_forced_synthesis_runs_with_watermark(tmp_path):
+    """Control for the watermark-less guard: with a watermark present, the
+    same rc=1 + changed-inputs stubs must still synthesize the zero-width
+    forced range (the guard is fresh-box-only)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "pending_range() { return 1; }; "
+        "extra_inputs_changed() { return 0; }; "
+        "run_gates() { return 0; }; snapshot_component() { return 0; }; "
+        "install_component() { return 0; }; reload_and_enable() { return 0; }; "
+        "restart_component_services() { return 0; }; health_check() { return 0; }; "
+        "record_extra_inputs() { return 0; }; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    assert "DEPLOY_RC=0" in r.stdout, r.stdout + r.stderr
+    assert "host-side inputs changed with no new commits" in r.stdout + r.stderr, \
+        r.stdout + r.stderr
+    assert "no watermark yet" not in r.stdout + r.stderr
+    audit = (state / "audit.log").read_text()
+    assert '"result":"ok"' in audit, audit
+    assert (state / "deployed-commit").read_text().strip() == base
+
+
 # --- upstream pinning ----------------------------------------------------------
 
 def test_pinned_upstream_refuses_rewired_origin(tmp_path):

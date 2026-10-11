@@ -80,6 +80,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The unattended updater no longer raises a false "deploy failed" alert on
+  a brand-new box whose rollout wave hasn't gone live yet: with no
+  deployment watermark recorded and the fleet gate reporting nothing to
+  do, the updater stays quiet instead of attempting a redeploy it cannot
+  run. (#TBD)
+
 - `local-gate.sh --help` now prints the usage text even when the script is
   run from a subdirectory (it previously died on a stale relative path),
   and the local shellcheck check now scans the same shell scripts CI's

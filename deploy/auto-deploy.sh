@@ -1217,6 +1217,18 @@ cmd_deploy() {
         if [ -f "$BLOCKED_COMMIT" ]; then
             return 0
         fi
+        old="$(cat "$WATERMARK" 2>/dev/null || echo "")"
+        if [ -z "$old" ]; then
+            # A watermark-less box reaches this branch only when the gate
+            # says "nothing to do" (e.g. a gate-managed box whose wave is
+            # not live / staging — pending_range's first-run branch returns
+            # rc=0 when the gate permits). There is no deployed commit to
+            # synthesize a zero-width forced range at: `git reset --hard ""`
+            # would fail and every tick would alert + audit a misleading
+            # precheck failure. Stay quiet — the gate's verdict stands.
+            log "no watermark yet and the gate reports nothing to do — skipping extra-inputs scan"
+            return 0
+        fi
         # Issue #302: host-side (non-repo) inputs can change with zero new
         # commits — e.g. a mitmproxy CA rotation. pending_range reports
         # "nothing to do" for an up-to-date repo, so scan the extra-inputs
@@ -1231,7 +1243,6 @@ cmd_deploy() {
             audit 'check' ',"result":"noop"'
             return 0
         fi
-        old="$(cat "$WATERMARK" 2>/dev/null || echo "")"
         new="$old"
         range_synthesized=1
         log "host-side inputs changed with no new commits — deploying changed components at $new"
