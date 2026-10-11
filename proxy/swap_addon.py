@@ -230,6 +230,14 @@ SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE",
 # leading-dot subdomains), operator-owned — the auditable escape hatch
 # for LLM providers whose `stream: true` default would otherwise be
 # fail-closed refused. Absent/unreadable file = no opt-in (fail closed).
+# Why a file, not the registry flag the #629 body sketches
+# ("allow_stream": true): the refusal decision is host-granular — it
+# fires for allowlisted hosts whether or not any credential is
+# involved, so a credential-entry flag would need an ambiguous
+# host->entry inversion — and credentials.json is injector-owned, so
+# provision-time writes would clobber operator intent. A host-scoping
+# file keeps the operator's escape hatch under operator ownership,
+# alongside hosts.allow / smoke-hosts / ssrf.allow.
 STREAM_HOSTS_FILE = _env_path("SWAP_STREAM_HOSTS_FILE",
                               "/home/swapd/stream-hosts")
 REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
@@ -3855,9 +3863,11 @@ class SwapAddon:
         # Issue #629 piece 3: a host listed in the stream-hosts file is
         # explicitly opted in by the operator — the kill is skipped and
         # the pass is audited instead. SSE bodies then buffer until the
-        # stream completes and are scrubbed by the `response` hook; a
-        # never-ending stream buffers unboundedly (finding-40e piece 1,
-        # stated residual — the operator accepts it by opting in).
+        # stream completes and are scrubbed by the `response` hook
+        # within its 5 MB cap (a completed over-cap stream is delivered
+        # unscrubbed, like any other oversize body); a never-ending
+        # stream buffers unboundedly (finding-40e piece 1, stated
+        # residual — the operator accepts it by opting in).
         reason = self._stream_refusal_reason(resp)
         if reason is not None:
             if self._host_allows_stream(host):
