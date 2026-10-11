@@ -92,7 +92,15 @@ complementary planes, not competitors (see "Two planes" below).
   reports each tool's installed version against the pin file, as a human table
   or `--json`. Pure reads, stdlib only, never raises, always exits 0. This is
   the drift-visibility half of the system — it makes "the box rotted" a
-  checkable fact before anything is automated.
+  checkable fact before anything is automated. For the playwright and
+  cua-driver probes, the status plane targets the same managed artifacts the
+  update plane's pin-driven layers converge (the managed venv's python for
+  Playwright, `$CUA_DRIVER_BIN` for cua-driver), falling back to PATH when
+  the managed target isn't present — for these pin-driven tools, "drift" in
+  S1 is exactly the drift the updater's layers clear. The apt-layer tools
+  (docker, node, gh) and the Playwright browser builds remain outside that
+  invariant: the apt layer converges repo-latest rather than the pins, and
+  S1 reports browser builds as a count, not a version.
 - **S2 — update execution + recovery (framework shipped, #551; cua-driver, apt, and playwright layers shipped; pre-update snapshots + automatic rollback + blocked marking shipped):** per-tool
   updaters behind `deploy/toolset-update.sh update`, with `--dry-run`, the idle
   guard (defer while agent jobs are live), per-tool pinning enforcement, and
@@ -146,12 +154,19 @@ because the repo checkout is untrusted-by-design for the update path, and that
 rationale extends to pin *data* — a checkout writer with version-selection
 authority over what root installs is the data-plane equivalent of the code
 injection the model was built to prevent (bounded by signed apt/pip repo
-contents, but pin-to-vulnerable-version is still real authority). So future
+contents, but pin-to-vulnerable-version is still real authority). So
 privileged layers MUST read pins from an installed/backfilled copy refreshed
-only via the privileged `install` step (path TBD by the landing slice —
-proposed: alongside the installed script under the toolset state dir), never
-from the live checkout. Until a layer implements this, the contract is
-status-plane-only.
+only via the privileged `install` step, never from the live checkout —
+implemented: `toolset-update.sh install` installs `self_update_pins.conf`,
+`playwright_wheel_hashes.txt`, and `playwright_browser_hashes.txt` into
+`$TOOLSET_STATE_DIR` (root-owned; the state dir is mode 700, the files
+0644), and the update plane reads them from there (`_read_pin` reads
+`$TOOLSET_STATE_DIR/self_update_pins.conf`;
+the wheel/browser-hash files likewise). Both planes parse the pins file
+with first-wins semantics for duplicated tool names
+(`_read_pin` in `toolset-update.sh`, `load_pins` in `self_update.py`), and
+the status plane surfaces duplicate pin names as dead config
+(`duplicate_pins` in `status --json` and the table footer).
 
 ## Recovery (from #532)
 

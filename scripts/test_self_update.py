@@ -152,18 +152,122 @@ def test_playwright_probe_reports_real_package_or_clean_miss():
         assert version and version[0].isdigit()
 
 
-def test_playwright_probe_uses_path_python3():
-    # B4: the probe must target the box's canonical python3, not the
-    # interpreter running this script.
+def test_playwright_probe_prefers_managed_venv(tmp_path):
+    # F-A1: the probe must target the managed venv's python (the artifact
+    # the update plane converges), not the PATH python3. `managed` is the
+    # venv dir; the probe runs <venv>/bin/python.
+    venv = tmp_path / "pw"
+    (venv / "bin").mkdir(parents=True)
+    venv_py = venv / "bin" / "python"
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o755)
+    seen = {}
+    def runner(argv, timeout=10):
+        seen["argv"] = argv
+        return 0, "1.62.0\n", ""
+    installed, version, note = self_update.probe_playwright(
+        runner=runner, which=fake_which({"python3": "/usr/bin/python3"}),
+        managed=str(venv))
+    assert seen["argv"][0] == str(venv_py)
+    assert installed is True
+    assert version == "1.62.0"
+    assert str(venv_py) in note
+
+
+def test_playwright_probe_falls_back_to_path_python3(tmp_path):
+    # F-A1: on a box the updater never managed (no venv), the PATH python3
+    # probe still reports — the inventory stays useful everywhere.
     seen = {}
     def runner(argv, timeout=10):
         seen["argv"] = argv
         return 0, "1.49.1\n", ""
-    installed, version, _ = self_update.probe_playwright(
-        runner=runner, which=fake_which({"python3": "/usr/bin/python3"}))
+    installed, version, note = self_update.probe_playwright(
+        runner=runner, which=fake_which({"python3": "/usr/bin/python3"}),
+        managed=str(tmp_path / "no-such-venv"))
     assert seen["argv"][0] == "/usr/bin/python3"
     assert installed is True
     assert version == "1.49.1"
+    assert "/usr/bin/python3" in note
+
+
+def test_playwright_managed_non_executable_falls_back(tmp_path):
+    # A managed target that exists but is not executable is not trusted —
+    # fall back to PATH rather than probing a dud.
+    venv = tmp_path / "pw"
+    (venv / "bin").mkdir(parents=True)
+    venv_py = venv / "bin" / "python"
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o644)  # exists but not executable
+    seen = {}
+    def runner(argv, timeout=10):
+        seen["argv"] = argv
+        return 0, "1.49.1\n", ""
+    installed, _, _ = self_update.probe_playwright(
+        runner=runner, which=fake_which({"python3": "/usr/bin/python3"}),
+        managed=str(venv))
+    assert seen["argv"][0] == "/usr/bin/python3"
+    assert installed is True
+
+
+# --- cua-driver probes (managed binary, F-A1) --------------------------------
+
+def test_cua_driver_probe_prefers_managed_binary(tmp_path):
+    # F-A1: the probe must target the managed binary (the artifact the
+    # update plane converges and the pin holds), never PATH, when it exists.
+    managed = tmp_path / "cua-driver"
+    managed.write_text("#!/bin/sh\n")
+    managed.chmod(0o755)
+    runner = fake_runner({(str(managed), "--version"):
+                          (0, "cua-driver 0.28.2\n", "")})
+    installed, version, note = self_update.probe_cua_driver(
+        which=fake_which({"cua-driver": "/usr/bin/cua-driver"}),
+        runner=runner, managed=str(managed))
+    assert installed is True
+    assert version == "0.28.2"
+    assert str(managed) in note
+
+
+def test_cua_driver_probe_falls_back_to_path(tmp_path):
+    # On a box the updater never managed, the PATH probe still reports.
+    runner = fake_runner({("cua-driver", "--version"):
+                          (0, "cua-driver 0.28.2\n", "")})
+    installed, version, note = self_update.probe_cua_driver(
+        which=fake_which({"cua-driver": "/usr/bin/cua-driver"}),
+        runner=runner, managed=str(tmp_path / "no-such-binary"))
+    assert installed is True
+    assert version == "0.28.2"
+    assert "cua-driver --version" in note
+
+
+def test_cua_driver_managed_failure_still_counts_as_installed(tmp_path):
+    # A present-but-broken managed binary reports installed with no version
+    # (same never-raise contract as the PATH probe).
+    managed = tmp_path / "cua-driver"
+    managed.write_text("#!/bin/sh\n")
+    managed.chmod(0o755)
+    runner = fake_runner({})
+    installed, version, note = self_update.probe_cua_driver(
+        which=fake_which({}), runner=runner, managed=str(managed))
+    assert installed is True
+    assert version is None
+    assert "failed" in note
+
+
+def test_managed_defaults_honor_env_overrides(monkeypatch):
+    # The managed defaults honor the update plane's CUA_DRIVER_BIN /
+    # PLAYWRIGHT_VENV overrides so the two planes keep agreeing when the
+    # operator relocates the managed locations. The binding is at import
+    # time, so this reloads the module under the overridden env.
+    import importlib
+    monkeypatch.setenv("CUA_DRIVER_BIN", "/opt/custom/cua-driver")
+    monkeypatch.setenv("PLAYWRIGHT_VENV", "/opt/custom/pw")
+    try:
+        reloaded = importlib.reload(self_update)
+        assert reloaded._MANAGED_CUA_DRIVER == "/opt/custom/cua-driver"
+        assert reloaded._MANAGED_PLAYWRIGHT_VENV == "/opt/custom/pw"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
 
 
 # --- playwright browsers ---------------------------------------------------
@@ -466,6 +570,54 @@ def test_status_json_no_warnings_when_all_known(tmp_path, capsys):
     assert rc == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["pin_warnings"] == []
+
+
+# --- duplicate pins (F-A2: first-wins must agree across planes) ---------------
+
+def test_load_pins_first_occurrence_wins(tmp_path):
+    # _read_pin in deploy/toolset-update.sh is first-wins; load_pins must
+    # agree, or the two planes read different pins from the same file.
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("cua-driver = 0.28.2\ncua-driver = 0.29.0\n")
+    assert self_update.load_pins(str(pins_file)) == {"cua-driver": "0.28.2"}
+
+
+def test_pin_duplicates_flags_repeated_names(tmp_path):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text(
+        "cua-driver = 0.28.2\ndocker = 27.5.1\ncua-driver = 0.29.0\n")
+    assert self_update.pin_duplicates(str(pins_file)) == ["cua-driver"]
+
+
+def test_pin_duplicates_empty_when_unique(tmp_path):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("cua-driver = 0.28.2\ndocker = 27.5.1\n")
+    assert self_update.pin_duplicates(str(pins_file)) == []
+
+
+def test_pin_duplicates_missing_file_returns_empty(tmp_path):
+    assert self_update.pin_duplicates(str(tmp_path / "nope.conf")) == []
+
+
+def test_status_table_and_json_surface_duplicates(tmp_path, capsys):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("docker = 27.5.1\ndocker = 26.1\n")
+    rc = self_update.main(["status", "--pins", str(pins_file)])
+    assert rc == 0
+    assert "duplicate pins (later lines ignored): docker" in \
+        capsys.readouterr().out
+    rc = self_update.main(["status", "--json", "--pins", str(pins_file)])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["duplicate_pins"] == ["docker"]
+
+
+def test_status_json_duplicate_pins_empty_when_unique(tmp_path, capsys):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("docker = 27.5.1\n")
+    rc = self_update.main(["status", "--json", "--pins", str(pins_file)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["duplicate_pins"] == []
 
 
 # --- banner lines above the version line ------------------------------------
