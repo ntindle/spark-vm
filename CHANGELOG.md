@@ -146,7 +146,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rendering in one tested helper used by every send-result writer, so a
   future timestamp-format change on any writer path can't silently
   corrupt the 90-day retention window (premature deletion of the send
-  audit trail, or retention silently stopping). (#TBD)
+  audit trail, or retention silently stopping). (#1301)
 
 ## [0.8.0] - 2026-10-10
 
