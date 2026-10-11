@@ -1,7 +1,7 @@
 """Shard inventory for the `python tests` CI gate (#1138).
 
 CI's `python-tests` job fans out into one matrix job per shard (see
-`.github/workflows/ci.yml`), so the ~40-minute serial suite runs as 4
+`.github/workflows/ci.yml`), so the ~40-minute serial suite runs as 5
 parallel shards and the slowest shard becomes the new pole. This file is
 the single source of the shard inventory:
 
@@ -31,22 +31,36 @@ local — ~1.5x the next-heaviest dir (muse-job/tests ~188s local, deploy
 ~123s) and ~70% of shard-components' whole wall time. The minimax move is to
 extract harness/ into its own shard: the pole becomes the harness
 shard itself at ~4m (estimated from the CI/local ratio of the old
-shard-components), vs the old 5m50s. If the suite grows past this
-again, the same playbook applies — split the new pole dir into its own
-shard; the aggregate `python tests` gate, the ruleset anchor, and the
-workflow all stay untouched (per-shard check names are deliberately
-never required status checks).
+shard-components), vs the old 5m50s.
+
+Rebalance 2026-10-11 (follow-up turn): the suite grew past that again —
+the 2026-10-11 main CI run measured shard-unit as the new pole at 4m50s
+vs shard-harness 4m03s, shard-integration 3m13s, shard-components 1m53s.
+Full per-dir local timings on the loop VM pinned the driver: deploy/
+alone is ~161s local (~43% of the whole shard-unit wall time, 420 tests)
+— 2.8x the next-heaviest dir (fleet/ ~57s local). The minimax move is to
+extract deploy/ into its own shard: the pole becomes the harness shard
+at ~4m (from the CI/local ratio ~0.78 measured this run), vs the old
+4m50s.
+
+If the suite grows past this again, the same playbook applies — split
+the new pole dir into its own shard; the aggregate `python tests` gate,
+the ruleset anchor, and the workflow all stay untouched (per-shard check
+names are deliberately never required status checks).
 
 - shard-integration: muse-job/tests — the named slow integration dir
   (real manager/host round-trips; 685 tests, the largest suite).
 - shard-harness: harness — the measured pole driver (~278s local;
   real-worker process-spawning harness, ~1.5x any other dir).
+- shard-deploy: deploy — the measured pole driver of the old shard-unit
+  (~161s local, ~43% of its wall time; 420 tests of deploy-gate and
+  update-rollout coverage).
 - shard-components: proxy, hosted — the remaining process-spawning
   integration suites. proxy/ also carries the sudo root tests (see
   `root_tests` below).
-- shard-unit: confirm, deploy, scripts, cred-ui/tests, cua, jail,
-  credlib, fleet, pairing, browser-driver — component suites and the
-  fast unit/lint/schema/docs-guard suites.
+- shard-unit: confirm, scripts, cred-ui/tests, cua, jail, credlib, fleet,
+  pairing, browser-driver — component suites and the fast unit/lint/
+  schema/docs-guard suites.
 
 Pure stdlib, no fixtures: the plan must import cleanly in the CI `plan`
 job with nothing installed beyond the runner's Python.
@@ -65,13 +79,15 @@ SHARDS = {
     "shard-harness": [
         "harness",
     ],
+    "shard-deploy": [
+        "deploy",
+    ],
     "shard-components": [
         "proxy",
         "hosted",
     ],
     "shard-unit": [
         "confirm",
-        "deploy",
         "scripts",
         "cred-ui/tests",
         "cua",

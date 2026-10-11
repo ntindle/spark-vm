@@ -124,6 +124,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- CI Python test gate rebalanced again: the deploy suite (420 tests, ~43% of
+  the unit shard's wall time — 2.8x the next-heaviest suite) had become the
+  slowest shard's dominant slice, so it now runs in its own parallel shard.
+  A code PR's test signal arrives in roughly four minutes instead of five;
+  the required `python tests` check keeps its name and still gates the
+  merge, and rebalancing never touches the required status checks. (#1322)
 - The unattended updater's host-side-input redeploy (e.g. a proxy CA rotation
   with no new commits) no longer bypasses the fleet rollout gate: on a box
   whose wave hasn't gone live, or whose fleet is frozen, the redeploy now
