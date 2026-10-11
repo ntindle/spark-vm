@@ -1042,6 +1042,56 @@ gate_cap() {
     return 2
 }
 
+# gate_permits_touch — #1294. The extra-inputs forced path synthesizes a
+# zero-width range inside cmd_deploy, so it never passes through
+# pending_range's gate consultation — a gate-managed box whose wave is not
+# live (staging) or whose fleet is frozen would still see component
+# installs + service restarts when a host-side input digest flips (the
+# mitmproxy CA rotation path is swapd-writable and dampened to one forced
+# deploy per hour — the bypass was rate-limited, not closed).
+#
+# Design decision (owed to #1285 S2 / #1287 S4, which formalize wave
+# semantics): the fail-closed reading — the gate governs whether the box
+# may be touched at all right now. Returns 0 when the forced deploy may
+# proceed (gate unmanaged — no keys installed — or live with this box's
+# wave permitted); returns 1 — defer, stay quiet — when the gate says
+# staging (repo_permitted != true) or frozen (state != live). stdout
+# carries nothing; chatter goes through log() (stderr). A live gate at
+# the deployed watermark ("already deployed") returns 0: version flow
+# says nothing to do, but the box is not frozen, so host-side input
+# redeploys at the permitted version may still proceed.
+gate_permits_touch() {
+    if [ ! -f "$GATE_QUERY" ]; then
+        # Unmanaged (pre-G18 behavior): no gate to consult.
+        return 0
+    fi
+    if [ -z "${SPARKVM_GATE_KEYS:-}" ]; then
+        # Unmanaged: the box was never enrolled, or is half-enrolled (gate
+        # file present, no keys — gate_cap warns about that case); the
+        # fail-closed contract binds provisioned boxes, not these.
+        return 0
+    fi
+    local state gstate repo_permitted
+    if ! state="$(python3 "$GATE_QUERY" state)"; then
+        log "ERROR: gate_query failed to run — deferring extra-inputs forced deploy (fail closed, #1294)"
+        return 1
+    fi
+    gstate="$(printf '%s\n' "$state" | sed -n 's/^state=//p')"
+    repo_permitted="$(printf '%s\n' "$state" | sed -n 's/^repo_permitted=//p')"
+    if [ "$gstate" != "live" ]; then
+        log "gate state is '${gstate:-unknown}' — fleet frozen, deferring extra-inputs forced deploy (fail closed, #1294)"
+        return 1
+    fi
+    if [ "$repo_permitted" != "true" ]; then
+        # G18 §2: a box whose wave is not live gets no version at all —
+        # a frozen fleet that relies on the gate to hold boxes still must
+        # not see service restarts via the forced path.
+        log "gate: this box's wave is not live for repo (repo_permitted=${repo_permitted:-missing}) — deferring extra-inputs forced deploy (#1294)"
+        return 1
+    fi
+    return 0
+}
+
 pending_range() {
     # Prints "old new" commit shas on stdout.
     # Returns 0 = range ready; 1 = nothing to do; 2 = error, do not proceed.
@@ -1120,12 +1170,20 @@ cmd_check() {
         # watermark (the gate's verdict stands), so claiming a forced
         # redeploy here would lie (Architecture review).
         if [ ! -f "$BLOCKED_COMMIT" ]; then
-            local wmark ec
+            local wmark ec gate_touch=0
             wmark="$(cat "$WATERMARK" 2>/dev/null || echo "")"
             if [ -n "$wmark" ]; then
+                # #1294: deploy consults the gate before synthesizing the
+                # forced range — evaluate once here so check reports the
+                # deferral, not a redeploy, on a staged/frozen gate.
+                if gate_permits_touch; then gate_touch=1; fi
                 for ec in "${COMPONENTS[@]}"; do
                     if extra_inputs_changed "$ec"; then
-                        log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
+                        if [ "$gate_touch" -eq 1 ]; then
+                            log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
+                        else
+                            log "up-to-date, but host-side inputs changed for $ec — deploy would defer the forced redeploy (gate staging/frozen, #1294)"
+                        fi
                     fi
                 done
             fi
@@ -1252,6 +1310,15 @@ cmd_deploy() {
             if extra_inputs_changed "$ec"; then forced_any=1; break; fi
         done
         if [ "$forced_any" -eq 0 ]; then
+            audit 'check' ',"result":"noop"'
+            return 0
+        fi
+        # #1294: the forced path must consult the gate directly — it never
+        # passes through pending_range, so a staging/frozen gate would
+        # otherwise be bypassed. Defer (stay quiet, next tick retries) until
+        # the gate permits, like the watermark-less guard above.
+        if ! gate_permits_touch; then
+            log "gate staging/frozen — deferring extra-inputs forced deploy until the gate permits"
             audit 'check' ',"result":"noop"'
             return 0
         fi

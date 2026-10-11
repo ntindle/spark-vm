@@ -528,6 +528,98 @@ def test_check_mirror_stays_honest_without_watermark(tmp_path):
     assert "would force-redeploy" in r.stdout + r.stderr, r.stdout + r.stderr
 
 
+def _install_fake_gate(state, stdout_lines, exit_code=0):
+    """Install a fake gate_query.py that answers `state` with fixed lines.
+
+    gate_permits_touch shells out to `python3 $GATE_QUERY state` and parses
+    key=value lines (state=, repo_permitted=) — the same contract the real
+    gate_query.py documents."""
+    bin_dir = state / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = "\n".join(["#!/usr/bin/env python3", "import sys"] +
+                       ["print(%r)" % line for line in stdout_lines] +
+                       ["sys.exit(%d)" % exit_code])
+    (bin_dir / "gate_query.py").write_text(script + "\n")
+
+
+def test_deploy_forced_synthesis_defers_on_gate_staging(tmp_path):
+    """#1294: the extra-inputs forced path must consult the gate. A
+    gate-managed box whose wave is not live (staging) must NOT synthesize
+    the zero-width forced range — it defers, staying quiet until the gate
+    permits, exactly like the watermark-less guard. The gate's bypass was
+    previously rate-limited (dampened), not closed."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    env = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "pending_range() { return 1; }; "          # gate staging: nothing to do
+        "extra_inputs_changed() { return 0; }; "   # host inputs "changed"
+        "install_component() { echo SHOULD_NOT_RUN; return 0; }; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert "deferring" in out, out
+    assert "SHOULD_NOT_RUN" not in out, "forced deploy ran on a staged gate"
+    assert (state / "deployed-commit").read_text().strip() == base
+    assert not (state / "last-failure").exists(), \
+        "spurious precheck alert fired on the gate-deferral path"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"noop"' in audit, audit
+    assert '"result":"ok"' not in audit, \
+        "deferred tick must not audit an 'ok' deploy: " + audit
+    # check must report the deferral, not a forced redeploy
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "pending_range() { return 1; }; "
+        "extra_inputs_changed() { return 0; }; "
+        "cmd_check",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "would defer the forced redeploy" in out, out
+    assert "would force-redeploy it" not in out, out
+
+
+def test_gate_permits_touch_verdicts(tmp_path):
+    """gate_permits_touch: unmanaged boxes (no GATE_QUERY file, or no
+    keys) proceed; staging (live, repo_permitted=false) and frozen
+    (state != live) gates defer; a failing gate_query fails closed."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    probe = ("if gate_permits_touch; then echo TOUCH=yes; "
+             "else echo TOUCH=no; fi")
+
+    def verdict(env_extra=None):
+        r = source_and(probe, env_extra=env_extra or env)
+        out = r.stdout + r.stderr
+        assert "TOUCH=" in out, out
+        return "TOUCH=yes" in out
+
+    # Unmanaged: no GATE_QUERY installed.
+    assert verdict() is True
+    # Half-enrolled: GATE_QUERY present but no keys.
+    _install_fake_gate(state, ["state=frozen"])
+    assert verdict() is True
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    # Staging: live state, wave not permitted.
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    assert verdict(env_keys) is False
+    # Frozen fleet.
+    _install_fake_gate(state, ["state=frozen", "repo_permitted=true"])
+    assert verdict(env_keys) is False
+    # Live + permitted: forced deploy proceeds (a gate at the deployed
+    # watermark is not a freeze — only version flow says "nothing to do").
+    _install_fake_gate(state, ["state=live", "repo_permitted=true",
+                               "repo_max=%s" % base])
+    assert verdict(env_keys) is True
+    # gate_query invocation failure fails closed.
+    _install_fake_gate(state, [], exit_code=3)
+    assert verdict(env_keys) is False
+
+
 def test_status_qualifies_force_redeploy_without_watermark(tmp_path):
     """cmd_status's extra-inputs CHANGED line must not promise a forced
     redeploy on a watermark-less box (deploy skips the extra-inputs scan
