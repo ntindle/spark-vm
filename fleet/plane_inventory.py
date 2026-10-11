@@ -255,6 +255,12 @@ def _load_json(path, what):
 def _snapshot(store_dir):
     status, data = _load_json(os.path.join(store_dir, PLANES_SNAPSHOT_NAME), "planes snapshot")
     if status == _MISSING:
+        # A missing snapshot with a non-empty journal is a divergence (a
+        # hand-deleted planes.json must not silently re-open registration):
+        # fail closed, exactly like the releases store's missing-snapshot
+        # path and the planes store's tampered-snapshot path. No-op on a
+        # genuinely fresh store.
+        _verify_snapshot_consistent(store_dir, {})
         return {"schema": SNAPSHOT_SCHEMA, "planes": {}}
     # A `null` document is structural corruption, not an empty store —
     # fail closed, never read it as "no planes."

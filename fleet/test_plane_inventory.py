@@ -429,6 +429,31 @@ def test_release_after_snapshot_delete_fails_closed(store):
     assert "divergence" in p.stderr
 
 
+def test_register_after_snapshot_delete_fails_closed(store):
+    # Deleting planes.json must not silently re-open registration: the
+    # missing-snapshot path replays the journal and fails closed when it
+    # is non-empty (neuter: returning {} without verifying lets the second
+    # register through and the journal silently holds two registration
+    # rows for plane-1).
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    os.unlink(os.path.join(store, "planes.json"))
+
+    p = _run(store, "register", "--plane-id", "plane-1",
+             "--tenant-id", "t")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+    p = _run(store, "stale", "--expected", "worker-template@new")
+    assert p.returncode == 2
+    assert "divergence" in p.stderr
+
+    # Control: a genuinely fresh store (no journal rows either) still
+    # registers fine — the verify is a no-op on an empty journal.
+    with tempfile.TemporaryDirectory(prefix="plane-inventory-fresh-") as fresh:
+        assert _run(fresh, "register", "--plane-id", "plane-1",
+                    "--tenant-id", "t").returncode == 0
+
+
 def test_deploy_normalizes_legacy_record_to_lkg_none(store):
     # /1-era records carry no last_known_good key; deploy must stamp a
     # /2 record that carries the /2-mandated field (None until promotion

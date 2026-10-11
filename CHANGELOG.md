@@ -105,6 +105,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The unattended updater's host-side-input redeploy (e.g. a proxy CA rotation
+  with no new commits) no longer bypasses the fleet rollout gate: on a box
+  whose wave hasn't gone live, or whose fleet is frozen, the redeploy now
+  waits quietly for the gate to permit instead of installing components and
+  restarting services anyway. `auto-deploy check` reports the deferral too.
+  (#1316)
+- The tenant-plane version inventory's planes store now fails closed when
+  its snapshot file is missing but the journal still holds records: a
+  hand-deleted planes.json can no longer silently re-open plane
+  registration with a duplicate registration row. (#1316)
 - `self-update status` now probes the same managed targets the update plane's
   pin-driven layers converge (the managed venv's python for Playwright, the
   managed `$CUA_DRIVER_BIN` for cua-driver), falling back to PATH when the
