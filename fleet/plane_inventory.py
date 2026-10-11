@@ -41,16 +41,44 @@ Subcommands:
   cost-summary --store DIR [--plane-id ID]
       D-MT5 input: per-plane and total provision vs update cost, with
       event counts and median durations.
+  release --store DIR --template V --channel C --deployment-id D --worker-sha256 S [--notes T]
+      Pin a template release (D-RC-2 pick (b), S3 #1286): bind template
+      version V to exactly one (deployment_id, worker_sha256) — the pinned
+      manifest the S4 deploy driver consumes as its deploy target.
+      Re-releasing V fails closed: a template version is immutable once
+      pinned; mint a new template version to change the pin.
+  release-show --store DIR --template V
+      Print the pinned manifest for V (the S4 driver's deploy-target reader).
+  releases --store DIR [--channel C]
+      List pinned template releases (template identity -> channel).
 
 Store layout:
   <store>/planes.json          derived snapshot: latest record per plane_id
   <store>/planes_journal.jsonl append-only observation records
   <store>/costs.jsonl          append-only cost events
+  <store>/releases.json       derived snapshot: pinned release per template
+  <store>/releases_journal.jsonl append-only release pins
 
-Record schema (S1):
+Record schema (S1, bumped to /2 by S3):
   {schema, plane_id, tenant_id, template_version, channel,
    status{provisioning,healthy,degraded,retired}, observed_at,
-   reporter, notes}
+   reporter, notes, last_known_good}
+  last_known_good is None or
+  {template_version, deployment_id, worker_sha256, recorded_at} — the
+  rollback pin the S4 driver redeploys. Writer contract: ONLY the S2
+  promotion step writes it (this slice ships no writer); deploy/retire
+  preserve it untouched, so it always names the last wave-landed
+  template, never the latest recorded observation.
+Release-record schema (S3):
+  {schema, template_version, channel, deployment_id, worker_sha256,
+   released_at, reporter, notes}
+  The D-RC-2 (b) pinned manifest: the template artifact's home is the
+  production deploy contract's existing pin discipline — deployment id +
+  SHA-256 of the deployed worker.py bytes — rather than an in-repo
+  artifact. The operator records the pin after the deploy contract's
+  verify step; the controller treats template_version as an opaque
+  comparable token and the S4 driver redeploys only the pinned bytes
+  (SHA-256 verified), never a floating "latest".
 Cost-event schema (S1):
   {schema, plane_id, event{provision,update,rollback},
    at, duration_s, cost_usd, notes}
@@ -84,6 +112,18 @@ is auditable at the call site):
     pre-promotion gate.
   - deploy against an unregistered plane fails closed (exit 2): the
     controller must never silently create a plane row mid-rollout.
+  - A template version pins exactly one artifact (deployment_id,
+    worker_sha256). Re-releasing V fails closed even with an identical
+    pin — the journal stays append-only and honest, with no silent
+    no-ops. To change a pin, mint a new template version.
+  - The releases snapshot gets the same journal-as-truth discipline as
+    the planes snapshot: every read replays releases_journal.jsonl and
+    fails closed (exit 2) on any divergence, because the pinned manifest
+    is the rollout's trust root — a tampered pin must never present a
+    forged deploy target to the S4 driver.
+  - last_known_good is None until the S2 promotion step writes it. deploy
+    and retire preserve whatever value the previous record carried; no
+    command in this slice writes it (a test pins this).
 
 Exit 0 on a printed result, 2 on bad input/arguments. An unexpected
 internal failure also exits 2 with a one-line message, never a bare
@@ -108,13 +148,17 @@ from datetime import datetime, timezone
 # exercises the CLIs through subprocess, never through imports.
 import events
 
-RECORD_SCHEMA = "plane-inventory-record/1"
+RECORD_SCHEMA = "plane-inventory-record/2"
 SNAPSHOT_SCHEMA = "plane-inventory-snapshot/1"
 COST_SCHEMA = "plane-cost-event/1"
+RELEASE_SCHEMA = "plane-template-release/1"
+RELEASES_SNAPSHOT_SCHEMA = "plane-template-releases-snapshot/1"
 
 PLANES_SNAPSHOT_NAME = "planes.json"
 PLANES_JOURNAL_NAME = "planes_journal.jsonl"
 COSTS_JOURNAL_NAME = "costs.jsonl"
+RELEASES_SNAPSHOT_NAME = "releases.json"
+RELEASES_JOURNAL_NAME = "releases_journal.jsonl"
 
 _STATUSES = ("provisioning", "healthy", "degraded", "retired")
 _COST_EVENTS = ("provision", "update", "rollback")
@@ -122,8 +166,14 @@ _COST_EVENTS = ("provision", "update", "rollback")
 # within the same process, so future-skew handling is unnecessary.
 DEFAULT_STALE_HOURS = 24
 
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+~@-]{0,127}$")
+# Python's `$` matches before a trailing newline, which would let a
+# newline-poisoned pin through (`"ab"*32 + "\n"` exits 0 and can never
+# hex-match the S4 driver's digest). `\A...\Z` anchors to the true
+# string ends. A SHA-256 pin is lowercase hex only: one spelling per
+# pin, so two records can never carry "the same" hash in different cases.
+_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_TEMPLATE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:+~@-]{0,127}\Z")
+_SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
 def _fail(msg):
@@ -150,6 +200,15 @@ def _check_template(value):
         _fail(
             f"template version must be a non-empty string without whitespace "
             f"or control characters, got {value!r}"
+        )
+    return value
+
+
+def _check_sha256(value):
+    if not value or not _SHA256_RE.match(value):
+        _fail(
+            f"worker sha256 must be 64 lowercase hex characters, "
+            f"got {value!r}"
         )
     return value
 
@@ -248,7 +307,9 @@ def _verify_snapshot_consistent(store_dir, planes):
         )
     for plane_id, jrec in journal.items():
         srec = planes[plane_id]
-        for field in ("template_version", "status", "observed_at"):
+        # last_known_good is covered too: a tampered rollback pin must fail
+        # closed exactly like a tampered template version.
+        for field in ("template_version", "status", "observed_at", "last_known_good"):
             if jrec.get(field) != srec.get(field):
                 _fail(
                     f"snapshot/journal divergence for plane {plane_id!r}: "
@@ -336,6 +397,9 @@ def cmd_register(args):
         "observed_at": _now_iso(),
         "reporter": "operator",
         "notes": args.notes or "",
+        # S3: the rollback pin. None until the S2 promotion step writes it;
+        # deploy/retire preserve it (they copy the previous record whole).
+        "last_known_good": None,
     }
     notes = []
     record["notes"] = args.notes or ""
@@ -379,6 +443,10 @@ def cmd_deploy(args):
         if prev is None:
             _fail(f"plane {plane_id!r} is not registered (register first)")
         record = dict(prev)
+        # /1-era records carry no last_known_good key: normalize to the /2
+        # invariant (None until the S2 promotion step writes it) rather
+        # than stamping a /2 record that omits a /2-mandated field.
+        record.setdefault("last_known_good", None)
         record.update(
             {
                 "schema": RECORD_SCHEMA,
@@ -407,6 +475,8 @@ def cmd_retire(args):
         if prev is None:
             _fail(f"plane {plane_id!r} is not registered")
         record = dict(prev)
+        # Same /1 -> /2 normalization as cmd_deploy (see above).
+        record.setdefault("last_known_good", None)
         record.update(
             {
                 "schema": RECORD_SCHEMA,
@@ -544,6 +614,167 @@ def cmd_cost_summary(args):
     return 0
 
 
+def _latest_release_records(store_dir):
+    """Replay releases_journal.jsonl: latest pin per template_version."""
+    path = os.path.join(store_dir, RELEASES_JOURNAL_NAME)
+    latest = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    if not isinstance(rec, dict) or "template_version" not in rec:
+                        _fail(f"releases journal at {path} has a malformed record")
+                    latest[rec["template_version"]] = rec
+        except (OSError, ValueError) as exc:
+            _fail(f"cannot replay releases journal at {path}: {exc}")
+    return latest
+
+
+def _verify_releases_consistent(store_dir, releases):
+    """Fail closed when the releases snapshot disagrees with the journal.
+
+    Release pins are immutable, so the comparison is whole-record: any
+    drift between snapshot and journal is tamper or a stale restore, and
+    the pinned manifest is the rollout's trust root — the S4 driver must
+    never deploy from a forged pin.
+    """
+    journal = _latest_release_records(store_dir)
+    if set(journal) != set(releases):
+        _fail(
+            "releases snapshot/journal divergence: template sets differ "
+            f"(journal={sorted(journal)}, snapshot={sorted(releases)})"
+        )
+    for template, jrec in journal.items():
+        if jrec != releases[template]:
+            _fail(
+                f"releases snapshot/journal divergence for template "
+                f"{template!r}: pinned record differs"
+            )
+
+
+def _releases_snapshot(store_dir):
+    status, data = _load_json(
+        os.path.join(store_dir, RELEASES_SNAPSHOT_NAME), "releases snapshot"
+    )
+    if status == _MISSING:
+        # A missing snapshot with a non-empty journal is a divergence (a
+        # hand-deleted releases.json must not silently re-open pinning):
+        # fail closed, exactly like the planes store's tampered-snapshot
+        # path. No-op on a genuinely fresh store.
+        _verify_releases_consistent(store_dir, {})
+        return {"schema": RELEASES_SNAPSHOT_SCHEMA, "releases": {}}
+    # A `null` document is structural corruption, not an empty store —
+    # fail closed, never read it as "no releases."
+    if not isinstance(data, dict):
+        _fail("releases snapshot is corrupt: top-level is not an object")
+    releases = data.get("releases")
+    if not isinstance(releases, dict):
+        _fail("releases snapshot is corrupt: 'releases' is not an object")
+    _verify_releases_consistent(store_dir, releases)
+    return {"schema": RELEASES_SNAPSHOT_SCHEMA, "releases": releases}
+
+
+def _publish_releases_snapshot(store_dir, releases):
+    """Atomically replace releases.json (process-unique tmp path, os.replace)."""
+    path = os.path.join(store_dir, RELEASES_SNAPSHOT_NAME)
+    payload = {"schema": RELEASES_SNAPSHOT_SCHEMA, "releases": releases}
+    fd, tmp = tempfile.mkstemp(
+        dir=store_dir, prefix=RELEASES_SNAPSHOT_NAME + ".tmp."
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _append_release_records_locked(store_dir, records):
+    """Append to the releases journal. Caller must hold events.journal_lock."""
+    path = os.path.join(store_dir, RELEASES_JOURNAL_NAME)
+    lines = [json.dumps(r, sort_keys=True) + "\n" for r in records]
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        _fail(f"cannot append to {RELEASES_JOURNAL_NAME}: {exc}")
+
+
+def cmd_release(args):
+    store_dir = _ensure_store(args.store)
+    template = _check_template(args.template)
+    channel = _check_id(args.channel, "--channel") if args.channel else "stable"
+    deployment_id = _check_id(args.deployment_id, "--deployment-id")
+    worker_sha256 = _check_sha256(args.worker_sha256)
+
+    record = {
+        "schema": RELEASE_SCHEMA,
+        "template_version": template,
+        "channel": channel,
+        "deployment_id": deployment_id,
+        "worker_sha256": worker_sha256,
+        "released_at": _now_iso(),
+        "reporter": "operator",
+        "notes": args.notes or "",
+    }
+
+    with events.journal_lock(store_dir):
+        releases = _releases_snapshot(store_dir)["releases"]
+        prev = releases.get(template)
+        if prev is not None:
+            _fail(
+                f"template {template!r} is already released "
+                f"(deployment_id={prev['deployment_id']!r}): a template "
+                f"version pins exactly one artifact — mint a new template "
+                f"version to change the pin"
+            )
+        _append_release_records_locked(store_dir, [record])
+        releases[template] = record
+        _publish_releases_snapshot(store_dir, releases)
+    print(json.dumps({"ok": True, "template_version": template,
+                      "channel": channel, "deployment_id": deployment_id}))
+    return 0
+
+
+def cmd_release_show(args):
+    store_dir = _ensure_store(args.store)
+    template = _check_template(args.template)
+    releases = _releases_snapshot(store_dir)["releases"]
+    rec = releases.get(template)
+    if rec is None:
+        _fail(f"template {template!r} has no pinned release (release it first)")
+    print(json.dumps(rec, indent=2))
+    return 0
+
+
+def cmd_releases(args):
+    store_dir = _ensure_store(args.store)
+    releases = _releases_snapshot(store_dir)["releases"]
+    rows = sorted(
+        releases.values(),
+        key=lambda r: (r["released_at"], r["template_version"]),
+    )
+    if args.channel:
+        channel = _check_id(args.channel, "--channel")
+        rows = [r for r in rows if r["channel"] == channel]
+    print(json.dumps({"releases": rows}, indent=2))
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Per-tenant-plane version inventory + operational-cost ledger (#1261)."
@@ -591,6 +822,22 @@ def build_parser():
     p_cs = sub.add_parser("cost-summary", help="D-MT5 operational-cost measurement")
     p_cs.add_argument("--plane-id", default=None)
     p_cs.set_defaults(func=cmd_cost_summary)
+
+    p_rel = sub.add_parser("release", help="pin a template release (D-RC-2 manifest)")
+    p_rel.add_argument("--template", required=True)
+    p_rel.add_argument("--channel", default="stable")
+    p_rel.add_argument("--deployment-id", required=True)
+    p_rel.add_argument("--worker-sha256", required=True)
+    p_rel.add_argument("--notes", default="")
+    p_rel.set_defaults(func=cmd_release)
+
+    p_rs = sub.add_parser("release-show", help="print the pinned manifest for a template")
+    p_rs.add_argument("--template", required=True)
+    p_rs.set_defaults(func=cmd_release_show)
+
+    p_rl = sub.add_parser("releases", help="list pinned template releases")
+    p_rl.add_argument("--channel", default=None)
+    p_rl.set_defaults(func=cmd_releases)
 
     return p
 
