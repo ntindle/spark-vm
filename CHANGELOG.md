@@ -113,11 +113,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   report names the probed target. The apt-layer tools (docker, node, gh) and
   the Playwright browser builds remain outside that invariant: the apt layer
   converges repo-latest rather than pins, and browser builds are reported as
-  a count, not a version. (#TBD)
+  a count, not a version. (#1315)
 - A pins file naming the same tool twice no longer parses first-wins in one
   plane and last-wins in the other: `self_update.py` now matches
   `toolset-update.sh`'s first-wins, and duplicate pin names are surfaced as
-  dead config in the status table footer and `status --json`. (#TBD)
+  dead config in the status table footer and `status --json`. (#1315)
 
 - `local-gate.sh`'s pre-merge docs-guard step now runs the same three checks
   CI runs on every PR — including the inventories that pin the documented
