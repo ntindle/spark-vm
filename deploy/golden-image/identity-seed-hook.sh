@@ -60,8 +60,29 @@ PAIR_CLIENT="${SPARKVM_PAIR_CLIENT:-/opt/sparkvm/pairing/spark_pair.py}"
 # the fallback because supervisord children are not guaranteed a HOME.
 STATE_DIR="${SVM_PAIR_DIR:-${HOME:-/root}/.config/spark-pair}"
 PYTHON="${SPARKVM_PYTHON:-/usr/bin/python3}"
+# The plane-push signal file (#1268): root-owned, world-readable, consumed
+# by the swapd push worker (confirm/push.py _image_plane_signal), which
+# cannot read the pairing record itself. Written here when the box is
+# already enrolled; override the path via SPARKVM_PLANE_PUSH_FILE (the
+# same variable the worker consults). A whitespace-only override is as
+# good as unset (mirrors the attestation-token gate below).
+_signal_file_raw="${SPARKVM_PLANE_PUSH_FILE:-/run/sparkvm/plane-push}"
+_signal_file_raw="${_signal_file_raw//[[:space:]]/}"
+SIGNAL_FILE="${_signal_file_raw:-/run/sparkvm/plane-push}"
+unset _signal_file_raw
 
 log() { echo "$HOOK: $*" >&2; }
+
+# Clear a stale plane-push signal (#1268): the signal is only valid while
+# the box is enrolled — any non-enrolled branch must not leave a
+# stand-down behind, or a de-enrolled box keeps its box-local paging
+# channel stood down with no plane lane to replace it.
+clear_plane_signal() {
+    if [ -e "$SIGNAL_FILE" ]; then
+        rm -f "$SIGNAL_FILE"
+        log "cleared stale plane-push signal ($SIGNAL_FILE)"
+    fi
+}
 
 # --- env gate: fail closed on enrollment, not on boot ------------------------
 # A whitespace-only token is as good as absent (base64url has no meaningful
@@ -72,6 +93,9 @@ _token_stripped="${_token_stripped//[[:space:]]/}"
 if [ -z "${SPARKVM_BOX_ID:-}" ] || [ -z "${SPARKVM_PLANE_URL:-}" ] \
     || [ -z "$_token_stripped" ]; then
     log "identity env incomplete (need SPARKVM_BOX_ID, SPARKVM_PLANE_URL, SPARKVM_ATTESTATION_TOKEN) — not enrolling; normal for non-provisioned images"
+    # No identity env means this box is not a provisioned plane box — a
+    # stale signal must not outlive the enrollment it described.
+    clear_plane_signal
     exit 0
 fi
 
@@ -82,20 +106,66 @@ fi
 # token silently defeat the scrub and leak to the persisted hook log.
 if [[ ! "$SPARKVM_ATTESTATION_TOKEN" =~ ^[A-Za-z0-9_-]+$ ]]; then
     log "attestation token is not base64url — refusing to present or echo it; not enrolled"
+    # Not enrolled (the token never gets presented) — no stale stand-down.
+    clear_plane_signal
     exit 1
 fi
 
 # --- idempotency: the token is single-use; present it at most once -----------
 if [ -f "$STATE_DIR/enrollment.json" ]; then
     log "enrollment state present — already enrolled, skipping (token never re-presented)"
+    # Plane-push signal (#1268): propagate the #1135 handoff to the image's
+    # push worker env. The worker runs as swapd and can never read this
+    # root-owned record, so auto-detect always fails open to box-local on
+    # the image. Mirror proxy/deploy.sh §5b's systemd drop-in semantics
+    # with a root-owned, world-readable boolean the worker reads fresh on
+    # every pass (confirm/push.py _image_plane_signal). Re-written at every
+    # boot; /run is tmpfs so a stale value cannot survive a reboot. A
+    # corrupt record writes nothing — fail-open to box-local, never a
+    # planted kill of the box-local channel.
+    if "$PYTHON" -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("token") else 1)
+' "$STATE_DIR/enrollment.json" 2>/dev/null; then
+        # Atomic write: mktemp + chmod + rename replaces a pre-planted
+        # symlink/FIFO instead of following it, and closes the
+        # create->chmod mode window. The dir mode is pinned (root umask
+        # is not a promise).
+        _signal_dir="$(dirname "$SIGNAL_FILE")"
+        _signal_tmp=""
+        if mkdir -p "$_signal_dir" && chmod 0755 "$_signal_dir" \
+            && _signal_tmp="$(mktemp "$_signal_dir/.plane-push.XXXXXX")" \
+            && printf '1\n' > "$_signal_tmp" \
+            && chmod 0644 "$_signal_tmp" \
+            && mv -f "$_signal_tmp" "$SIGNAL_FILE"; then
+            log "plane-push signal written ($SIGNAL_FILE) — enrolled boxes stand down the box-local push queue"
+        else
+            [ -n "$_signal_tmp" ] && rm -f "$_signal_tmp"
+            log "WARNING: could not write plane-push signal $SIGNAL_FILE — worker falls back to record auto-detect"
+        fi
+        unset _signal_dir _signal_tmp
+    else
+        log "enrollment record unreadable or tokenless — not writing plane-push signal; worker fails open to box-local"
+        clear_plane_signal
+    fi
     exit 0
 fi
 if [ -f "$STATE_DIR/pairing.json" ]; then
-    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" redeem"
+    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" redeem, then re-run this hook as root to propagate the plane-push signal (#1268)"
+    clear_plane_signal
     exit 0
 fi
 
 # --- first enroll ------------------------------------------------------------
+# Invariant (#1268): past the idempotency block, enrollment.json is absent
+# by construction — every exit from here leaves the box unenrolled, so any
+# stale signal is cleared up front. The signal exists only when a run
+# verified enrollment.json-with-token.
+clear_plane_signal
 log "identity env present — enrolling box via attested pairing"
 
 # A keypair is usable only when BOTH halves exist: a previous init that died

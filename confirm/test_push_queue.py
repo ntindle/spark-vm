@@ -80,7 +80,14 @@ class TestEnqueue(unittest.TestCase):
         pair_dir = os.path.join(self._td.name, "pair")
         os.makedirs(pair_dir, exist_ok=True)
         self._env = mock.patch.dict(os.environ, {
-            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir}, clear=False)
+            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir,
+            # Hermetic w.r.t. the #1268 signal file: point it at a path
+            # that never exists, so an ambient export or a real
+            # /run/sparkvm/plane-push on the test host cannot flip these
+            # tests' _plane_push_owner results.
+            "SPARKVM_PLANE_PUSH_FILE": os.path.join(self._td.name,
+                                                    "no-signal")},
+            clear=False)
         self._env.start()
 
     def tearDown(self):
@@ -148,7 +155,11 @@ class TestRunOnce(unittest.TestCase):
         pair_dir = os.path.join(self._td.name, "pair")
         os.makedirs(pair_dir, exist_ok=True)
         self._env = mock.patch.dict(os.environ, {
-            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir}, clear=False)
+            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir,
+            # Hermetic w.r.t. the #1268 signal file (see TestEnqueue).
+            "SPARKVM_PLANE_PUSH_FILE": os.path.join(self._td.name,
+                                                    "no-signal")},
+            clear=False)
         self._env.start()
 
     def tearDown(self):
@@ -460,6 +471,8 @@ class TestWorkerCLI(unittest.TestCase):
                    "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json"),
                    # Hermetic w.r.t. the #1135 handoff (see TestEnqueue).
                    "SPARKVM_PLANE_PUSH": "",
+                   # Hermetic w.r.t. the #1268 signal file (see TestEnqueue).
+                   "SPARKVM_PLANE_PUSH_FILE": os.path.join(td, "no-signal"),
                    "SVM_PAIR_DIR": os.path.join(td, "pair")}
             with mock.patch.dict(os.environ, env, clear=False):
                 q = push.PushQueue.default()
@@ -483,6 +496,8 @@ class TestWorkerCLI(unittest.TestCase):
                    "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json"),
                    # Hermetic w.r.t. the #1135 handoff (see TestEnqueue).
                    "SPARKVM_PLANE_PUSH": "",
+                   # Hermetic w.r.t. the #1268 signal file (see TestEnqueue).
+                   "SPARKVM_PLANE_PUSH_FILE": os.path.join(td, "no-signal"),
                    "SVM_PAIR_DIR": os.path.join(td, "pair")}
             with mock.patch.dict(os.environ, env, clear=False):
                 q = push.PushQueue.default()
@@ -510,7 +525,13 @@ class TestPlaneHandoff(unittest.TestCase):
         # Hermetic env: never consult the real pairing dir or caller env.
         self._pair_dir = os.path.join(self._td.name, "pair")
         os.makedirs(self._pair_dir, exist_ok=True)
-        env = {"SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": self._pair_dir}
+        env = {"SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": self._pair_dir,
+               # Hermetic w.r.t. the #1268 signal file (see TestEnqueue):
+               # an ambient export or a real /run/sparkvm/plane-push on the
+               # test host must not flip these tests' _plane_push_owner
+               # results.
+               "SPARKVM_PLANE_PUSH_FILE": os.path.join(self._td.name,
+                                                       "no-signal")}
         self._env = mock.patch.dict(os.environ, env, clear=False)
         self._env.start()
 
@@ -644,6 +665,9 @@ class TestPlaneHandoff(unittest.TestCase):
                "CONFIRM_PUSH_DEAD": os.path.join(self._td.name, "d.jsonl"),
                "CONFIRM_PUSH_SUBS": os.path.join(self._td.name, "s.json"),
                "SPARKVM_PLANE_PUSH": "1",
+               # Hermetic w.r.t. the #1268 signal file (see TestEnqueue).
+               "SPARKVM_PLANE_PUSH_FILE": os.path.join(self._td.name,
+                                                       "no-signal"),
                "SVM_PAIR_DIR": self._pair_dir}
         with mock.patch.dict(os.environ, env, clear=False):
             q = push.PushQueue.default()

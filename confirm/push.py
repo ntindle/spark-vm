@@ -61,6 +61,16 @@ Config (env):
                       carries a box token. Any check error fails open to
                       the box-local queue — a handoff-check failure must
                       never lose a filed approval.
+  SPARKVM_PLANE_PUSH_FILE
+                      golden-image signal path (GitHub #1268, default
+                      /run/sparkvm/plane-push): a root-owned regular file
+                      whose content is the same 1/true/yes or 0/false/no
+                      boolean, written by the image's root first-boot hook
+                      (the swapd worker cannot read the pairing record
+                      itself). Consulted after SPARKVM_PLANE_PUSH and
+                      before the auto-detect above; read fresh on every
+                      check, so a later enrollment propagates without a
+                      worker restart once the file is written.
   SVM_PAIR_DIR        pairing state dir for the auto-detect above (default
                       ~/.config/spark-pair)
 """
@@ -651,10 +661,95 @@ def _note_plane_stand_down() -> None:
     global _plane_startup_warned
     if not _plane_startup_warned:
         log.warning("push-queue: box-local push queue standing down on "
-                    "this plane-enrolled box (SPARKVM_PLANE_PUSH or "
-                    "enrollment record; SPARKVM_PLANE_PUSH=0 forces "
-                    "box-local)")
+                    "this plane-enrolled box (SPARKVM_PLANE_PUSH, signal "
+                    "file, or enrollment record; SPARKVM_PLANE_PUSH=0 "
+                    "forces box-local)")
         _plane_startup_warned = True
+
+
+# Golden-image plane-push signal (GitHub #1268): on the golden image the
+# push worker runs as swapd but the pairing record lives in the
+# boot/operator user's home (identity-seed-hook.sh runs as root; `redeem`
+# runs as the operator), so the worker's auto-detect always fails open to
+# box-local. The root-owned first-boot hook writes this file when the box
+# is enrolled; the worker reads it fresh on every _plane_push_owner()
+# check — re-readable at runtime, not baked once — mirroring
+# proxy/deploy.sh §5b's systemd drop-in semantics for the image. The
+# explicit SPARKVM_PLANE_PUSH env knob stays the documented override.
+IMAGE_SIGNAL_OWNER_UID = 0
+SIGNAL_MAX_BYTES = 64
+
+# The two boolean vocabularies (env knob + signal file) share one parser
+# so they cannot drift apart.
+_PLANE_TRUE = ("1", "true", "yes")
+_PLANE_FALSE = ("0", "false", "no")
+
+
+def _parse_plane_bool(raw):
+    """Parse a plane-push boolean ("1"/"true"/"yes" or "0"/"false"/"no").
+
+    Returns True/False, or None when the value is unparseable.
+    """
+    v = raw.strip().lower()
+    if v in _PLANE_TRUE:
+        return True
+    if v in _PLANE_FALSE:
+        return False
+    return None
+
+
+def _image_plane_signal(path=None):
+    """Read the root-written plane-push signal file (GitHub #1268).
+
+    Returns True (stand down), False (explicit box-local), or None (no
+    signal — fall through to the auto-detect). Fail-open throughout: any
+    integrity violation (wrong owner/mode, symlink, FIFO, oversized,
+    unreadable, undecodable, unparseable) warns and returns None. A
+    planted record must never silently kill the box-local paging channel,
+    so the file must be a root-owned regular file, never
+    group/world-writable.
+    """
+    if path is None:
+        path = (os.environ.get("SPARKVM_PLANE_PUSH_FILE")
+                or "/run/sparkvm/plane-push")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None  # no signal file — not an error
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode)
+                or st.st_uid != IMAGE_SIGNAL_OWNER_UID
+                or stat.S_IMODE(st.st_mode) & 0o022):
+            log.warning("push-queue: ignoring plane-push signal file with "
+                        "unexpected owner/mode (expected root-owned regular "
+                        "file, not group/world-writable) — treating as no "
+                        "signal")
+            return None
+        # errors="replace": undecodable bytes become U+FFFD, which can never
+        # match the boolean spellings — binary content flows through the
+        # unparseable path below instead of raising.
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+            fd = None  # fdopen owns it now
+            try:
+                raw = f.read(SIGNAL_MAX_BYTES + 1)
+            except OSError:
+                log.warning("push-queue: ignoring unreadable plane-push "
+                            "signal file — treating as no signal")
+                return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if len(raw) > SIGNAL_MAX_BYTES:
+        log.warning("push-queue: ignoring oversized plane-push signal file "
+                    "— treating as no signal")
+        return None
+    val = _parse_plane_bool(raw)
+    if val is not None:
+        return val
+    log.warning("push-queue: ignoring unparseable plane-push signal file — "
+                "treating as no signal")
+    return None
 
 
 def _plane_push_owner() -> bool:
@@ -674,8 +769,10 @@ def _plane_push_owner() -> bool:
     local channel; it does not create a paging path.
 
     Decision: the explicit SPARKVM_PLANE_PUSH env knob wins ("1"/"true"/
-    "yes" → stand down; "0"/"false"/"no" → box-local); otherwise
-    auto-detect: the box is plane-enrolled when
+    "yes" → stand down; "0"/"false"/"no" → box-local); next the golden
+    image's root-written signal file (SPARKVM_PLANE_PUSH_FILE, default
+    /run/sparkvm/plane-push — GitHub #1268); otherwise auto-detect: the
+    box is plane-enrolled when
     SVM_PAIR_DIR/enrollment.json (the pairing record) exists with a
     non-empty box token.
 
@@ -685,18 +782,24 @@ def _plane_push_owner() -> bool:
     enqueue path. The token itself is never logged — only the boolean
     decision is.
     """
-    raw = os.environ.get("SPARKVM_PLANE_PUSH", "").strip().lower()
-    if raw in ("1", "true", "yes"):
-        return True
-    if raw in ("0", "false", "no"):
-        return False
-    if raw:
+    raw = os.environ.get("SPARKVM_PLANE_PUSH", "")
+    if raw.strip():
+        val = _parse_plane_bool(raw)
+        if val is not None:
+            return val
         global _warned_bad_plane_env
         if not _warned_bad_plane_env:
             log.warning("push-queue: ignoring bad SPARKVM_PLANE_PUSH=%r "
                         "(expected 1/true/yes or 0/false/no); "
                         "auto-detecting", raw)
             _warned_bad_plane_env = True
+    # Golden-image signal (#1268): the root-written boolean that mirrors
+    # deploy.sh §5b's drop-in semantics for the image. The worker cannot
+    # read the pairing record itself, so without this the auto-detect
+    # below always fails open to box-local on image boxes.
+    signal = _image_plane_signal()
+    if signal is not None:
+        return signal
     try:
         d = os.environ.get("SVM_PAIR_DIR") or os.path.expanduser(
             "~/.config/spark-pair")

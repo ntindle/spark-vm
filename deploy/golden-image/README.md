@@ -139,6 +139,30 @@ the boot sequence); cold-stop state persistence is #1205's `/data` contract
 boot presents the token again — the plane 403s the consumed-token replay
 and the hook logs loudly instead of retry-looping).
 
+## Plane-push signal for the push worker (#1268)
+
+The push worker (`[program:push-worker]` in `supervisord.conf`) runs as
+`swapd`, so it can never read the pairing record (written by this
+root-run hook into `/root/.config/spark-pair`, or by the operator's later
+`redeem` into their own `$HOME`) — the record auto-detect in
+`confirm/push.py` always fails open to box-local on the image. When this
+hook finds an already-enrolled box at boot, it writes the #1135 handoff
+decision to a root-owned, world-readable signal file,
+`/run/sparkvm/plane-push` (override: `SPARKVM_PLANE_PUSH_FILE`, the same
+variable the worker consults), so the worker stands the box-local push
+queue down quietly instead of logging the hourly disabled-sender note.
+This mirrors `proxy/deploy.sh` §5b's systemd drop-in semantics; a corrupt
+or tokenless record writes nothing (fail-open to box-local, never a
+planted kill of the paging channel), and `/run` is tmpfs so a stale value
+cannot survive a reboot. The signal is bidirectional: any non-enrolled
+hook path (unreadable/tokenless record, pairing in flight, absent
+identity env) clears a stale signal, so a box de-enrolled without a
+reboot restores its box-local channel instead of standing down forever. The worker re-reads the file on every pass, so
+an operator who runs `redeem` after boot only needs to re-run this hook
+as root — no worker restart — for the stand-down to take effect. The
+explicit `SPARKVM_PLANE_PUSH` env knob remains the documented override
+(e.g. via machine-config env).
+
 ## Host-key attestation (#1204, D-D3)
 
 `sparkvm-sshd-firstboot.sh` installs the sshd host keys with a precedence
