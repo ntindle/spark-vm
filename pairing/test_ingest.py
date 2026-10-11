@@ -932,6 +932,65 @@ def test_ingest_aid_xlock_blocks_across_processes(ctx):
             p.join(timeout=5)
 
 
+def _plant_locks_blocker(approvals):
+    # Break lockfile creation the honest way: a regular file where the
+    # locks/ directory must go, so os.makedirs(..., exist_ok=True) raises
+    # FileExistsError (an OSError) and the xlock's loud-degrade fires.
+    with open(os.path.join(approvals, "locks"), "w") as f:
+        f.write("blocker")
+
+
+def test_ingest_aid_xlock_degrade_logs_loud_and_proceeds(ctx, capsys):
+    """The #945 loud-degrade contract, pinned: when the cross-process
+    stamp lock cannot be created, the ingest logs loudly (ingest.log +
+    stderr) and proceeds WITHOUT the lock — never a traceback, never a
+    wedge. The pre-#945 mitigations still apply."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    _plant_locks_blocker(approvals)
+    proceeded = []
+    with spark_pair._ingest_aid_xlock(ctx.dir, approvals, AID):
+        proceeded.append(True)
+    assert proceeded == [True]
+    log = open(os.path.join(ctx.dir, "ingest.log")).read()
+    assert "cross-process stamp lock unavailable" in log, log
+    assert "pre-#945 mitigations still apply" in log, log
+    err = capsys.readouterr().err
+    assert "cross-process stamp lock unavailable" in err, err
+
+
+def test_ingest_aid_xlock_degrade_needs_path_d(ctx):
+    """The degrade path builds the log path as os.path.join(d, ...) — a
+    non-path `d` turns the loud-degrade into an unhandled TypeError,
+    violating the never-traceback contract. This pins that the `d`
+    argument is load-bearing typing, not a cosmetic fixture choice
+    (regression guard for the ctx-vs-ctx.dir class)."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    _plant_locks_blocker(approvals)
+    with pytest.raises(TypeError):
+        with spark_pair._ingest_aid_xlock(ctx, approvals, AID):
+            pass  # pragma: no cover - the raise precedes the yield
+
+
+def test_ingest_deny_stamps_when_xlock_unavailable(ctx, monkeypatch,
+                                                  capsys):
+    """End-to-end degrade pin: a deny decision stamps and acks even when
+    the xlock cannot be created — the whole _ingest_approval_decision
+    path degrades per the documented contract (loud log, proceeds,
+    consumed) instead of crashing the ingest tick."""
+    approvals = os.environ["SVM_APPROVALS_DIR"]
+    _plant_locks_blocker(approvals)
+    _file_pending(ctx)
+    plane = FakePlane(commands=[_cmd(21)], watermark=20)
+    assert _run(ctx, plane, monkeypatch) == 0
+    rec = _consumed(ctx)
+    assert rec is not None and rec["decision"] == "deny", rec
+    assert plane.acked == [21]
+    log = open(os.path.join(ctx.dir, "ingest.log")).read()
+    assert "cross-process stamp lock unavailable" in log, log
+    err = capsys.readouterr().err
+    assert "cross-process stamp lock unavailable" in err, err
+
+
 def test_ingest_decision_holds_xlock(ctx):
     """_ingest_approval_decision does not proceed while another process
     holds the aid's xlock — even on the instant already-ingested fast
@@ -955,8 +1014,12 @@ def test_ingest_decision_holds_xlock(ctx):
         result = {}
 
         def run():
+            # `d` is the ingest state dir (a path): the loud-degrade
+            # contract of _ingest_aid_xlock (os.path.join(d, ...)) only
+            # holds for a path — passing the fixture object here would
+            # TypeError on any degrade path instead of logging loudly.
             result["v"] = spark_pair._ingest_approval_decision(
-                ctx, approvals, BOX_ID, TOKEN, 99, payload, ingested, {})
+                ctx.dir, approvals, BOX_ID, TOKEN, 99, payload, ingested, {})
             done.set()
 
         t = threading.Thread(target=run, daemon=True)
