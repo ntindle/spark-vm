@@ -58,6 +58,21 @@ Decisions (continuing the push lane's D-series; D89 was the last pin):
   nor corrupt the ops-log counts. Returns per-table deleted counts
   so the plane logs the sweep where the ops console can see it.
 
+- **Retention-shape contract (pinned).** The ``at < cutoff`` comparison
+  is lexicographic TEXT, so it is chronological only while every writer
+  of ``push_send_results.at`` emits the same string shape —
+  ``moment.astimezone(timezone.utc).isoformat()`` (``+00:00``-suffixed).
+  All in-repo writers do today (``push_enqueue.enqueue_page``;
+  ``push_events`` reminder/suppressed-terminal writes via ``_utcnow``;
+  ``push_send_loop`` attempt rows via ``_utcnow`` — verified 2026-10-11),
+  and ``push_events._quiet_window_start`` pins the same assumption for
+  its ``MAX(at)``. A writer emitting a different shape (naive ISO,
+  ``Z`` suffix, epoch) silently corrupts retention in either direction:
+  premature deletion of the audit trail, or retention silently stopping
+  and unbounded D1 growth. New writers must keep the shape;
+  ``test_gc_writer_at_shape_matches_cutoff`` enforces it for the
+  enqueue path.
+
 Plane seams (injected — this module never sees a Worker secret, a data
 key, or a box token):
 

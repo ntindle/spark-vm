@@ -140,6 +140,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   external GC pass can no longer fake a failure while a genuine leak on
   the fchmod-failure path still fails the test. (#1290) (#1297)
 
+### Security
+
+- Pinned the push notification retention sweeper's timestamp contract and
+  added a regression test enforcing it, so a future timestamp-format
+  change can't silently corrupt the 90-day retention window in either
+  direction (premature deletion of the send audit trail, or retention
+  silently stopping). (#TBD)
+
 ## [0.8.0] - 2026-10-10
 
 ### Added
