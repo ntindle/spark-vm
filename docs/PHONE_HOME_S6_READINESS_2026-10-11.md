@@ -12,9 +12,10 @@ This document is the pre-acceptance pin for #960 (the #847 S6 live
 acceptance). It maps each item of the S3 contract's §11 checklist
 (`docs/PHONE_HOME_WIRE_PROTOCOL.md` §11) against what the shipped tree
 already proves and what only the live run can prove, so the turn that
-executes S6 starts from a verified map instead of re-deriving it. It files
-no new issues: every remaining unknown below is already inside #960's
-explicit scope.
+executes S6 starts from a verified map instead of re-deriving it. One
+doc-accuracy follow-up filed as #1320 (wire-protocol §7 epoch/generation
+wording + the §6 revoked-row observation, both surfaced by Architecture
+review); every remaining lane unknown is inside #960's explicit scope.
 
 **Non-overlap map (what this doc is not):**
 - `docs/PHONE_HOME_WIRE_PROTOCOL.md` — the S3 contract (#941): §11 is the
@@ -44,7 +45,9 @@ client (`pairing/spark_pair.py`), and the box-side tests. The S6 method's
 operator's checkout against a sqlite-backed D1 stub (the archived
 `hidden_files/harness_958_s4a.py.bak-pre-1001-s4b2-20261007-1259`
 pattern from #846/#848/#952 — the latest incarnation of that harness
-in the loop workspace) — that harness is the only pre-live verification
+in the loop workspace; `hidden_files/` is operator-side, there is no
+such directory in the public repo) — that harness is the only pre-live
+verification
 of plane behavior. In-tree `pairing/test_phone_home.py` (86 tests) covers
 the box half against a contract-faithful plane stub.
 
@@ -63,7 +66,11 @@ the box half against a contract-faithful plane stub.
   the owner journal read path `GET /v1/boxes/{id}/phone-home/events`,
   S4b-4). The "stub-id assertion" is the per-box journal attribution —
   the stub identity is deterministic from the token, so box_id-keyed
-  journal rows *are* the stub binding evidence.
+  journal rows *are* the stub binding evidence. Additionally, the one
+  probe that directly exercises "URL id is a routing hint only": connect
+  with A's token to B's URL id (`/v1/boxes/{B}/phone-home`) and assert
+  the bind lands on A's stub (journal `phone_home.connect` under A's
+  box_id, never B's).
 - **Verdict: READY.** No new gaps.
 
 ### Item 2 — Revoke-during-socket
@@ -124,7 +131,11 @@ the box half against a contract-faithful plane stub.
   `phone_home.generation_fence` journal row (`seen_generation` = M−1,
   `generation` = M, the kept one) via the owner read path.
   `test_phone_home.py`'s frame encode/decode helpers are the probe's
-  starting point.
+  starting point. Note: the probe advances the DO's durable
+  `last_generation` to M, so the daemon's next reconnect takes the
+  adopt+epoch-bump path — re-sync the generation file
+  (`last_generation + 1`) before resuming the daemon, or expect the
+  counter-loss round trip.
 - **Verdict: READY**, with a probe-building step.
 
 ### Item 5 — Fallback honored
@@ -155,15 +166,20 @@ the box half against a contract-faithful plane stub.
   are never delivered again" and the racing-lower-claim `409`
   (`docs/DURABLE_COMMANDS.md`, #848/#958 scope). The plane source is not
   in the public tree (F-S6-1) and no live epoch-bump test is recorded
-  anywhere. S6 must: enqueue a command for A, force an epoch bump
-  (delete the generation file → counter-loss path, or the owner epoch
-  reset), and assert the old-epoch command is never delivered; then
+  anywhere. S6 must: enqueue a command for A, force an epoch bump by
+  overwriting the generation file in place with garbage — corrupt-but-
+  present is the true `counter-loss` path (`_phone_home_claim_generation`
+  reports `counter-loss` only when the file exists but is unparseable;
+  *deleting* the file reports `first-run` and the epoch bump then arrives
+  a round trip later via the DO's `stale-generation` adopt, which needs
+  the DO's durable `last_generation` to be present) — or via the owner
+  epoch reset — and assert the old-epoch command is never delivered; then
   attempt a racing lower `?epoch=` claim and expect `409`. If the plane
   does not implement either half, that is a genuine gap to file against
   #848's scope — it is inside #960's checklist, not a new issue.
 - **Verdict: NOT VERIFIED — the highest-uncertainty item.** It should be
-  the live run's first probe (D-S6-6): everything after it assumes the
-  epoch contract holds.
+  the live run's first probe (D-S6-3): it is the riskiest unknown, so it
+  runs first fail-fast — not because the other items depend on it.
 
 ## 3. Findings
 
@@ -187,8 +203,10 @@ the box half against a contract-faithful plane stub.
   attribution: the stub name is deterministic from the token's box_id,
   so `phone_home.*` rows keyed by box_id are the binding evidence.
 - **F-S6-6** — Items 3 and 6 need opposite restart disciplines (plain
-  restart vs counter-loss restart). Mixing them up makes each test
-  vacuously pass or spuriously fail.
+  restart with the generation file intact vs corrupt-but-present
+  counter-loss). Mixing them up makes each test vacuously pass or
+  spuriously fail — and "delete the file" is not the counter-loss path
+  (it reports `first-run`).
 - **F-S6-7** — Docs accuracy: the wire-protocol §7 S4b-1 note cites
   `control-plane/live_smoke_1000.py`, which is not in the public tree
   (verified by search at main `2cd2c4d`). Fixed in this turn with a
@@ -227,14 +245,20 @@ provision none of them itself:
   (owner approves `request` + `redeem`). Every test row — boxes, tokens,
   journal rows, commands — is deleted afterwards; real boxes' heartbeats
   must be unaffected (the #952 hygiene).
-- **D-S6-3** — Item order: 6 (epoch probe first — everything assumes the
-  contract), 1, 3, 4, 5, 2 last (revocation destroys the token).
+- **D-S6-3** — Item order: 6, 1, 3, 4, 5, 2. Rationale is fail-fast
+  risk ordering, not dependency: 6 is the riskiest unknown (F-S6-2) so
+  it probes first; 2 runs last because revocation destroys the test
+  token. Items 1, 4, 5 do not depend on the epoch-expiry plane half.
 - **D-S6-4** — The executor needs an owner key (revoke endpoint, journal
   read path, owner-decide enqueue, test-row cleanup). This analysis
   creates no credentials.
 - **D-S6-5** — Item 3 uses `kill -9` + restart with the generation file
-  intact; item 6 uses generation-file deletion (counter-loss). Never the
-  reverse.
+  intact (plain restart, no epoch bump); item 6 overwrites the generation
+  file in place with garbage (corrupt-but-present → true `counter-loss`
+  → epoch+1 claimed before connect). Never the reverse — and never
+  "delete the file" for item 6: deletion reports `first-run`, and the
+  epoch bump then depends on the DO's `stale-generation` adopt round
+  trip.
 - **D-S6-6** — If any probe contradicts the contract (notably the epoch
   expiry / 409), the executor files the gap against the owning slice's
   scope and stops the acceptance — a failed probe is a finding, not a
