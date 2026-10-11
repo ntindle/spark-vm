@@ -32,8 +32,9 @@
 #
 # Operator mode: `identity-seed-hook.sh --propagate-plane-push-signal`
 # re-derives only the #1268 plane-push signal from existing pairing state
-# (root state dir, SUDO_USER's home, /home/* candidates) — no identity env
-# required, nothing presented. After a manual post-boot `redeem`:
+# (root state dir, or the SUDO_USER home when invoked via sudo) — no
+# identity env required, nothing presented. After a manual post-boot
+# `redeem`:
 #   sudo identity-seed-hook.sh --propagate-plane-push-signal
 #
 # Cold-stop note (arch 2026-10-09, #1203): pairing state lives in
@@ -84,7 +85,11 @@ log() { echo "$HOOK: $*" >&2; }
 # stand-down behind, or a de-enrolled box keeps its box-local paging
 # channel stood down with no plane lane to replace it.
 clear_plane_signal() {
-    if [ -e "$SIGNAL_FILE" ]; then
+    # Guard the rm: under `set -e` a directory (or other non-removable
+    # path) at the signal path would abort the script with a nonzero exit;
+    # the worker rejects non-regular files anyway, so nothing there needs
+    # clearing.
+    if [ -f "$SIGNAL_FILE" ] || [ -L "$SIGNAL_FILE" ]; then
         rm -f "$SIGNAL_FILE"
         log "cleared stale plane-push signal ($SIGNAL_FILE)"
     fi
@@ -95,26 +100,25 @@ clear_plane_signal() {
 # homes), so this hook propagates the enrolled/plane-eligible decision to it
 # via a root-owned world-readable signal file. This step needs no identity
 # env: it inspects only existing pairing state, never presents anything.
-# It runs at boot (after the env gate, on the already-enrolled branch) and
+# It runs at boot on the already-enrolled branch (before the env gate) and
 # doubles as the operator command after a manual post-boot `redeem`:
 #   sudo identity-seed-hook.sh --propagate-plane-push-signal
 #
 # Candidate record homes mirror proxy/deploy.sh §5b's two-home check: the
-# hook's own STATE_DIR, SUDO_USER's home when invoked via sudo, and every
-# /home/* candidate. A record with a nonempty token in ANY candidate means
-# "enrolled" — the signal is a per-box boolean, not per-user. The /home
-# root is overridable (SPARKVM_HOME_ROOT) for tests.
+# hook's own STATE_DIR, plus SUDO_USER's home when invoked via sudo. A
+# record with a nonempty token in either candidate means "enrolled" — the
+# signal is a per-box boolean, not per-user. /home/* is deliberately NOT
+# scanned: any local user can write their own home, so a glob would let an
+# unprivileged user plant a fake enrollment record and silently stand the
+# box-local paging channel down (a filed approval would be dropped as
+# "plane-owned" without journaling). The /home root is overridable
+# (SPARKVM_HOME_ROOT) for tests.
 _HOME_ROOT="${SPARKVM_HOME_ROOT:-/home}"
 propagate_plane_push_signal() {
     _cands=("$STATE_DIR")
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         _cands+=("$_HOME_ROOT/$SUDO_USER/.config/spark-pair")
     fi
-    shopt -s nullglob
-    for _h in "$_HOME_ROOT"/*/.config/spark-pair; do
-        _cands+=("$_h")
-    done
-    shopt -u nullglob
     for _cand in "${_cands[@]}"; do
         if "$PYTHON" -c '
 import json, sys
@@ -130,36 +134,65 @@ sys.exit(0 if isinstance(d, dict) and d.get("token") else 1)
             # is not a promise).
             _signal_dir="$(dirname "$SIGNAL_FILE")"
             _signal_tmp=""
-            if mkdir -p "$_signal_dir" && chmod 0755 "$_signal_dir" \
+            if mkdir -p "$_signal_dir" && [ ! -L "$_signal_dir" ] \
+                && chmod 0755 "$_signal_dir" \
                 && _signal_tmp="$(mktemp "$_signal_dir/.plane-push.XXXXXX")" \
                 && printf '1\n' > "$_signal_tmp" \
                 && chmod 0644 "$_signal_tmp" \
                 && mv -f "$_signal_tmp" "$SIGNAL_FILE"; then
-                log "plane-push signal written ($SIGNAL_FILE) — enrolled boxes stand down the box-local push queue"
+                log "plane-push signal written ($SIGNAL_FILE) from pairing record $_cand — enrolled boxes stand down the box-local push queue"
             else
-                [ -n "$_signal_tmp" ] && rm -f "$_signal_tmp"
+                if [ -n "$_signal_tmp" ]; then rm -f "$_signal_tmp"; fi
                 log "WARNING: could not write plane-push signal $SIGNAL_FILE — worker falls back to record auto-detect"
             fi
             unset _signal_dir _signal_tmp
-            unset _cands _h _cand
+            unset _cands _cand
             return 0
         fi
     done
-    unset _cands _h _cand
+    unset _cands _cand
     log "no enrolled pairing record found — not writing plane-push signal; worker fails open to box-local"
     clear_plane_signal
     return 0
 }
 
-# Env-free operator mode: a post-boot `redeem` completes as the operator,
-# after the boot-time hook run — machine-config env (incl. the single-use
-# attestation token) is gone, so a plain hook re-run can never reach the
-# enrolled branch (the env gate below exits first, and would clear the
-# signal as "stale"). This mode re-derives only the signal from existing
-# pairing state; it presents nothing and needs no identity env. Placed
-# before the env gate deliberately.
+# Env-free operator mode: a post-boot `redeem` can complete as the operator
+# in their own home rather than the hook's state dir — a plain hook re-run
+# only consults the hook's own state dir (the enrolled branch above), so
+# this mode re-derives the signal from the invoking operator's home too
+# (SUDO_USER candidate). It presents nothing and needs no identity env.
+# Placed before the env gate deliberately.
 if [ "${1:-}" = "--propagate-plane-push-signal" ]; then
     propagate_plane_push_signal
+    exit 0
+fi
+
+# --- idempotency: the token is single-use; present it at most once -----------
+# Runs BEFORE the env gate: machine-config env (incl. the single-use
+# attestation token) is gone on later boots, so the env gate would exit
+# first and clear the signal as "stale" before this branch could rewrite
+# it — /run is tmpfs, so the signal would never survive a reboot. These
+# branches never touch the token, so the single-use guarantee is unchanged.
+if [ -f "$STATE_DIR/enrollment.json" ]; then
+    log "enrollment state present — already enrolled, skipping (token never re-presented)"
+    # Plane-push signal (#1268): propagate the #1135 handoff to the image's
+    # push worker env. The worker runs as swapd and can never read the
+    # pairing record itself, so auto-detect always fails open to box-local
+    # on the image. Mirror proxy/deploy.sh §5b's systemd drop-in semantics
+    # with a root-owned, world-readable boolean the worker reads fresh on
+    # every pass (confirm/push.py _image_plane_signal). Re-written at every
+    # boot from the hook's own state dir; /run is tmpfs so a stale value
+    # cannot survive a reboot. A record that lives only in an operator's
+    # home (redeem completed post-boot) is not seen at boot — the operator
+    # re-runs `sudo identity-seed-hook.sh --propagate-plane-push-signal`
+    # after a reboot (SUDO_USER home candidate) until #907's box-side
+    # redeem completion lands.
+    propagate_plane_push_signal
+    exit 0
+fi
+if [ -f "$STATE_DIR/pairing.json" ]; then
+    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
+    clear_plane_signal
     exit 0
 fi
 
@@ -188,27 +221,6 @@ if [[ ! "$SPARKVM_ATTESTATION_TOKEN" =~ ^[A-Za-z0-9_-]+$ ]]; then
     # Not enrolled (the token never gets presented) — no stale stand-down.
     clear_plane_signal
     exit 1
-fi
-
-# --- idempotency: the token is single-use; present it at most once -----------
-if [ -f "$STATE_DIR/enrollment.json" ]; then
-    log "enrollment state present — already enrolled, skipping (token never re-presented)"
-    # Plane-push signal (#1268): propagate the #1135 handoff to the image's
-    # push worker env. The worker runs as swapd and can never read the
-    # pairing record itself, so auto-detect always fails open to box-local
-    # on the image. Mirror proxy/deploy.sh §5b's systemd drop-in semantics
-    # with a root-owned, world-readable boolean the worker reads fresh on
-    # every pass (confirm/push.py _image_plane_signal). Re-written at every
-    # boot; /run is tmpfs so a stale value cannot survive a reboot. The
-    # propagation step scans operator homes too (the redeem step completes
-    # as the operator, after boot).
-    propagate_plane_push_signal
-    exit 0
-fi
-if [ -f "$STATE_DIR/pairing.json" ]; then
-    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
-    clear_plane_signal
-    exit 0
 fi
 
 # --- first enroll ------------------------------------------------------------

@@ -182,6 +182,25 @@ def test_enrolled_state_writes_plane_push_signal(harness):
     assert "plane-push signal written" in r.stderr
 
 
+def test_enrolled_state_writes_plane_push_signal_without_identity_env(harness):
+    # #1268 boot shape (Engineering B1): machine-config env (incl. the
+    # single-use attestation token) is gone on later boots, so the env gate
+    # can never be what reaches the enrolled branch — the idempotency block
+    # must run first and rewrite the signal at every boot (/run is tmpfs;
+    # otherwise the box silently reverts to box-local after a reboot).
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"]()
+    assert r.returncode == 0, r.stderr
+    assert "not enrolling" not in r.stderr
+    assert _argv_lines(harness) == []
+    sig = harness["signal"]
+    assert sig.read_text() == "1\n"
+    assert stat.S_IMODE(os.stat(sig).st_mode) == 0o644
+    assert "plane-push signal written" in r.stderr
+    assert "already enrolled" in r.stderr
+
+
 def test_tokenless_enrollment_writes_no_plane_push_signal(harness):
     # A corrupt/tokenless record is not enrollment — no signal, so the
     # worker fails open to box-local instead of standing down on a lie.
@@ -243,28 +262,41 @@ def test_propagate_flag_sees_sudo_user_home(harness, tmp_path):
     assert "plane-push signal written" in r.stderr
 
 
-def test_propagate_flag_scans_home_candidates_without_sudo_user(
+def test_propagate_flag_ignores_home_candidates_without_sudo_user(
         harness, tmp_path):
-    # Boot-time shape: no SUDO_USER, but a record under /home/*.
-    opdir = tmp_path / "op2" / ".config" / "spark-pair"
+    # Security (planted-record kill): /home/* is deliberately not scanned —
+    # any local user could plant a fake enrollment.json and silently stand
+    # the box down (a filed approval would drop as "plane-owned" without
+    # journaling). A record under another user's home with no SUDO_USER must
+    # NOT produce a signal; a stale one is cleared (fail-open to box-local).
+    _plant_signal(harness)
+    opdir = tmp_path / "mallory" / ".config" / "spark-pair"
     opdir.mkdir(parents=True)
     (opdir / "enrollment.json").write_text(
-        json.dumps({"box_id": BOX_ID, "token": "t"}))
+        json.dumps({"box_id": BOX_ID, "token": "fake"}))
     r = harness["run"](env_extra={"SPARKVM_HOME_ROOT": str(tmp_path)},
                        args=["--propagate-plane-push-signal"])
     assert r.returncode == 0, r.stderr
-    assert harness["signal"].read_text() == "1\n"
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+    assert "no enrolled pairing record found" in r.stderr
 
 
-def test_propagate_flag_prefers_signal_over_boot_state_dir(harness):
-    # The hook's own (root) state dir still wins as first candidate when
-    # present — boot behavior unchanged by the two-home extension.
+def test_enrolled_state_dir_wins_signal_candidate(harness, tmp_path):
+    # Candidate preference is observable via the "from pairing record" audit
+    # line: the hook's own state dir is checked first, before the
+    # SUDO_USER home.
     (harness["state"] / "enrollment.json").write_text(
         json.dumps({"box_id": BOX_ID, "token": "t"}))
-    r = harness["run"]({**_full_env()})
+    opdir = tmp_path / "op" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "other"}))
+    r = harness["run"]({**_full_env(), "SUDO_USER": "op",
+                        "SPARKVM_HOME_ROOT": str(tmp_path)})
     assert r.returncode == 0, r.stderr
     assert harness["signal"].read_text() == "1\n"
-    assert "plane-push signal written" in r.stderr
+    assert f"from pairing record {harness['state']}" in r.stderr
 
 
 def _plant_signal(harness):

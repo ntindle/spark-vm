@@ -689,6 +689,7 @@ _PLANE_FALSE = ("0", "false", "no")
 def _parse_plane_bool(raw):
     """Parse a plane-push boolean ("1"/"true"/"yes" or "0"/"false"/"no").
 
+    `raw` must be `str` (callers pass env/file text, never bytes/None).
     Returns True/False, or None when the value is unparseable.
     """
     v = raw.strip().lower()
@@ -804,8 +805,14 @@ def _plane_push_owner() -> bool:
     # Golden-image signal (#1268): the root-written boolean that mirrors
     # deploy.sh §5b's drop-in semantics for the image. The worker cannot
     # read the pairing record itself, so without this the auto-detect
-    # below always fails open to box-local on image boxes.
-    signal = _image_plane_signal()
+    # below always fails open to box-local on image boxes. Guarded: a
+    # signal-read bug must never crash the worker pass (fail-open).
+    try:
+        signal = _image_plane_signal()
+    except Exception:  # noqa: BLE001 - fail-open by contract
+        log.warning("push-queue: plane-push signal read failed "
+                    "unexpectedly — treating as no signal", exc_info=True)
+        signal = None
     if signal is not None:
         return signal
     try:

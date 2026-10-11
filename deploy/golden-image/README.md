@@ -146,24 +146,30 @@ The push worker (`[program:push-worker]` in `supervisord.conf`) runs as
 root-run hook into `/root/.config/spark-pair`, or by the operator's later
 `redeem` into their own `$HOME`) — the record auto-detect in
 `confirm/push.py` always fails open to box-local on the image. When this
-hook finds an already-enrolled box at boot, it writes the #1135 handoff
-decision to a root-owned, world-readable signal file,
-`/run/sparkvm/plane-push` (override: `SPARKVM_PLANE_PUSH_FILE`, the same
-variable the worker consults), so the worker stands the box-local push
-queue down quietly instead of logging the hourly disabled-sender note.
-This mirrors `proxy/deploy.sh` §5b's systemd drop-in semantics; a corrupt
-or tokenless record writes nothing (fail-open to box-local, never a
-planted kill of the paging channel), and `/run` is tmpfs so a stale value
-cannot survive a reboot. The signal is bidirectional: any non-enrolled
-hook path (unreadable/tokenless record, pairing in flight, absent
-identity env) clears a stale signal, so re-running the hook after
-de-enrollment (or a reboot, which wipes /run's tmpfs) restores the
-box-local channel instead of standing down forever. The worker re-reads the file on every pass, so
-an operator who runs `redeem` after boot only needs to propagate the
-signal as root — `sudo identity-seed-hook.sh --propagate-plane-push-signal`
-(env-free; inspects the root state dir, the `SUDO_USER` home, and
-`/home/*` candidates, mirroring §5b's two-home check) — no worker
-restart, no reboot. The
+hook finds an already-enrolled box at boot (enrollment record in the
+hook's own state dir), it rewrites the #1135 handoff decision to a
+root-owned, world-readable signal file, `/run/sparkvm/plane-push`
+(override: `SPARKVM_PLANE_PUSH_FILE`, the same variable the worker
+consults), so the worker stands the box-local push queue down quietly
+instead of logging the hourly disabled-sender note. This mirrors
+`proxy/deploy.sh` §5b's systemd drop-in semantics; a corrupt or tokenless
+record writes nothing (fail-open to box-local — only the hook's own state
+dir or the invoking operator's home can source a stand-down, so a fake
+record planted in another user's home can never kill the paging channel),
+and `/run` is tmpfs so a stale value cannot survive a reboot. The signal
+is bidirectional: any non-enrolled hook path (unreadable/tokenless
+record, pairing in flight, absent identity env) clears a stale signal, so
+re-running the hook after de-enrollment (or a reboot, which wipes /run's
+tmpfs) restores the box-local channel instead of standing down forever.
+The worker re-reads the file on every pass, so an operator who runs
+`redeem` after boot only needs to propagate the signal as root —
+`sudo identity-seed-hook.sh --propagate-plane-push-signal` (env-free;
+inspects the hook's root state dir and, when invoked via sudo, the
+`SUDO_USER` home — mirroring §5b's two-home check; `/home/*` is
+deliberately not scanned) — no worker restart, no reboot. Boot
+limitation: a record that lives only in an operator's home (redeem
+completed post-boot) is not seen at boot, so after a reboot the operator
+re-runs the flag (until #907's box-side redeem completion lands). The
 explicit `SPARKVM_PLANE_PUSH` env knob remains the documented override
 (e.g. via machine-config env).
 
