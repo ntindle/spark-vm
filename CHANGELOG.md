@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   digest state, and send-result rows older than 90 days are now deleted
   in batched, idempotent sweeps, so the push tables stop growing
   forever. Outbox work items and dead-subscription tombstones are never
-  touched. (#1058)(#TBD)
+  touched. (#1058)(#1300)
 - The tenant-plane rollout controller's build path: a vision-vs-state
   analysis of what the staged-rollout controller still needs after the
   version-inventory slice shipped — the template artifact has no repo
