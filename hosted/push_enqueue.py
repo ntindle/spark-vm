@@ -263,7 +263,7 @@ def utc_iso(now=None):
     """Render one UTC instant in the retention-shape contract's byte shape.
 
     The push lane's TEXT timestamp comparisons (`push_gc`'s `at < cutoff`,
-    `push_events._quiet_window_start`'s `MAX(at)`) are lexicographic, so
+    `push_events.last_heartbeat_stale_page_at`'s `MAX(at)`) are lexicographic, so
     they are chronological only while every writer of
     `push_send_results.at` emits this exact shape. This helper
     single-sources the render step: every `at` writer must go through it,

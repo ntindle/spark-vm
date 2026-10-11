@@ -37,11 +37,11 @@ Rebalance 2026-10-11 (follow-up turn): the suite grew past that again —
 the 2026-10-11 main CI run measured shard-unit as the new pole at 4m50s
 vs shard-harness 4m03s, shard-integration 3m13s, shard-components 1m53s.
 Full per-dir local timings on the loop VM pinned the driver: deploy/
-alone is ~161s local (~43% of the whole shard-unit wall time, 420 tests)
-— 2.8x the next-heaviest dir (fleet/ ~57s local). The minimax move is to
-extract deploy/ into its own shard: the pole becomes the harness shard
-at ~4m (from the CI/local ratio ~0.78 measured this run), vs the old
-4m50s.
+alone is ~161s local (~43% of the local shard-unit per-dir wall-time
+total, 420 tests) — 2.8x the next-heaviest dir (fleet/ ~57s local).
+The minimax move is to extract deploy/ into its own shard: the pole
+becomes the harness shard at ~4m (measured directly — 4m03s on main,
+3m49s on PR #1322's run), vs the old 4m50s.
 
 If the suite grows past this again, the same playbook applies — split
 the new pole dir into its own shard; the aggregate `python tests` gate,
@@ -53,8 +53,8 @@ names are deliberately never required status checks).
 - shard-harness: harness — the measured pole driver (~278s local;
   real-worker process-spawning harness, ~1.5x any other dir).
 - shard-deploy: deploy — the measured pole driver of the old shard-unit
-  (~161s local, ~43% of its wall time; 420 tests of deploy-gate and
-  update-rollout coverage).
+  (~161s local, ~43% of the local shard-unit per-dir wall-time total;
+  420 tests of deploy-gate and update-rollout coverage).
 - shard-components: proxy, hosted — the remaining process-spawning
   integration suites. proxy/ also carries the sudo root tests (see
   `root_tests` below).

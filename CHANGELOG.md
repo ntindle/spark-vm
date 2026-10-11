@@ -124,6 +124,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- CI rebalance rationale accuracy pass: the shard-plan note now measures the
+  deploy suite's share against the local per-suite timings (not the CI wall
+  clock) and pins the harness shard's pole time to direct CI measurements,
+  and two push-lane retention notes now cite the real timestamp-assumption
+  source. (#1323)
+
 - CI Python test gate rebalanced again: the deploy suite (420 tests, ~43% of
   the unit shard's wall time — 2.8x the next-heaviest suite) had become the
   slowest shard's dominant slice, so it now runs in its own parallel shard.
