@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rollout: each template version records its deployment ID and the
   SHA-256 of the deployed plane code, so a rollout wave converges to a
   verifiable target instead of a floating "latest"; planes also carry a
-  last-known-good pin that future rollback work can redeploy. (#TBD)
+  last-known-good pin that future rollback work can redeploy. (#1303)
 - The hosted plane's push-sender retention sweeper: budget buckets,
   digest state, and send-result rows older than 90 days are now deleted
   in batched, idempotent sweeps, so the push tables stop growing
