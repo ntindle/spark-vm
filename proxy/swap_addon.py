@@ -69,7 +69,11 @@ refused outright — the flow is killed in `responseheaders` — because
 their bodies never finish and the scrubber can never see them; a
 replacement body synthesized at headers time would be overwritten by
 mitmproxy's post-hook body buffering, so killing is the only sound
-refusal (finding 40e, issue #92). Redirects (301/302/303/307/308) whose
+refusal (finding 40e, issue #92). Issue #629 piece 3 adds the one
+explicit exception: a host the operator lists in the stream-hosts
+file is opted in — the kill is skipped (audited as stream-optin) and
+the `websocket_message` insertion path is re-enabled for that host.
+Redirects (301/302/303/307/308) whose
 Location carries a known secret value — raw, percent-encoded at any
 depth, or form-encoded (`+` for space) — to a
 non-allowlisted host are likewise refused at headers time (issue #94):
@@ -219,6 +223,15 @@ HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 # injector owns the file (see harness/inject-provision-state.sh step 8).
 SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE",
                              "/home/swapd/smoke-hosts")
+# Issue #629 piece 3: per-host opt-in for the finding-40e stream refusal
+# (issue #92). Hosts listed here are exempted from the stream kill in
+# `responseheaders` and re-enable the `websocket_message` insertion
+# path. One hostname per line, same format as hosts.allow (exact or
+# leading-dot subdomains), operator-owned — the auditable escape hatch
+# for LLM providers whose `stream: true` default would otherwise be
+# fail-closed refused. Absent/unreadable file = no opt-in (fail closed).
+STREAM_HOSTS_FILE = _env_path("SWAP_STREAM_HOSTS_FILE",
+                              "/home/swapd/stream-hosts")
 REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
 LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 # Finding 49/50: swapd files structured approvals here when it
@@ -984,6 +997,9 @@ class SwapAddon:
         self.secrets = {}
         self.hosts = []
         self.smoke_hosts = []
+        # Issue #629 piece 3: per-host stream opt-in (stream-hosts file).
+        # Empty list = no opt-in (the default stream refusal applies).
+        self.stream_hosts = []
         # §3a (G6): monotonic set of every host EVER seen in the
         # smoke-only list. A host that drops out of a later successful
         # load (rotation) stays restricted -- silently un-restricting it
@@ -1015,6 +1031,7 @@ class SwapAddon:
         self._secret_file_sig = {}
         self._hosts_mtime = None
         self._smoke_hosts_mtime = None
+        self._stream_hosts_mtime = None
         self._registry_mtime = None
         self._ssrf_mtime = None
         self._deny_mtime = None
@@ -1239,6 +1256,23 @@ class SwapAddon:
         # so a crash between the two leaves at most an inert list --
         # never a live allowlisted-but-unrestricted echo host.
         smoke_hosts = self._load_smoke_hosts(secrets)
+        # Issue #629 piece 3: per-host stream opt-in. Same line format
+        # as hosts.allow. Fail-closed WITHOUT latching (unlike the
+        # smoke-hosts poison): a missing/unreadable file degrades to the
+        # default refusal, which is already the safe posture — a latch
+        # here would leave the opt-in permanently off after the operator
+        # fixes the file, a denial, not a leak.
+        stream_hosts = []
+        try:
+            if STREAM_HOSTS_FILE.is_file():
+                for line in STREAM_HOSTS_FILE.read_text(
+                        encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        stream_hosts.append(line.lower())
+        except OSError as e:
+            log.warning("swap: cannot read stream-hosts: %s "
+                        "(stream opt-in disabled)", e)
         ssrf_hosts, ssrf_nets = [], []
         try:
             if SSRF_ALLOW_FILE.is_file():
@@ -1265,6 +1299,7 @@ class SwapAddon:
         self.secrets = secrets
         self.hosts = hosts
         self.smoke_hosts = smoke_hosts
+        self.stream_hosts = stream_hosts
         self.ssrf_hosts = ssrf_hosts
         self.ssrf_nets = ssrf_nets
         self.deny_hosts = deny_hosts
@@ -1273,6 +1308,7 @@ class SwapAddon:
         self._secret_file_sig = secret_sig
         self._hosts_mtime = self._mtime(HOSTS_FILE)
         self._smoke_hosts_mtime = self._mtime(SMOKE_HOSTS_FILE)
+        self._stream_hosts_mtime = self._mtime(STREAM_HOSTS_FILE)
         self._registry_mtime = self._mtime(REGISTRY_FILE)
         self._ssrf_mtime = self._mtime(SSRF_ALLOW_FILE)
         self._deny_mtime = self._mtime(SSRF_DENY_FILE)
@@ -1303,6 +1339,8 @@ class SwapAddon:
         if (self._mtime(SECRETS_DIR) != self._store_mtime
                 or self._mtime(HOSTS_FILE) != self._hosts_mtime
                 or self._mtime(SMOKE_HOSTS_FILE) != self._smoke_hosts_mtime
+                or self._mtime(STREAM_HOSTS_FILE)
+                != self._stream_hosts_mtime
                 or self._mtime(REGISTRY_FILE) != self._registry_mtime
                 or self._mtime(SSRF_ALLOW_FILE) != self._ssrf_mtime
                 or self._mtime(SSRF_DENY_FILE) != self._deny_mtime
@@ -1394,6 +1432,14 @@ class SwapAddon:
     # ------------------------------------------------------------------
     def _host_allowed(self, host):
         return _host_in_list(host, self.hosts)
+
+    def _host_allows_stream(self, host):
+        """Issue #629 piece 3: True when the host is listed in the
+        stream-hosts opt-in file — the operator explicitly accepts the
+        stream-refusal bypass (finding 40e) for this host. Fail-closed:
+        an unloaded/empty list never opts a host in."""
+        return bool(self.stream_hosts) and _host_in_list(
+            host, self.stream_hosts)
 
     def _host_is_smoke_only(self, host):
         """True when the host is a §3a smoke echo host: only the public
@@ -3059,16 +3105,18 @@ class SwapAddon:
                             "client-visible approval signal")
 
     def websocket_message(self, flow):
-        # SUPERSEDED by the finding-40e stream refusal (issue #92):
-        # `responseheaders` kills the 101 upgrade for allowlisted hosts,
-        # so this hook sees no 101 from those hosts. HTTP/2
-        # extended-CONNECT (RFC 8441) never reaches the proxy at all:
-        # mitmproxy's H2 layer rejects it with a connection-terminating
-        # protocol error before any addon hook fires (#629 piece 2,
-        # verified non-issue on mitmproxy 12.2.3). Non-allowlisted hosts
-        # early-return in both hooks. Kept, with its unit tests, for
-        # the insertion logic itself — a per-host stream opt-in
-        # (follow-up to #92) would re-enable this path.
+        # Issue #629 piece 3 (per-host stream opt-in, follow-up to
+        # issue #92): this hook is the opt-in's insertion path.
+        # `responseheaders` kills the 101 upgrade for every host NOT
+        # listed in the stream-hosts file, so in production this hook
+        # only ever sees 101s from opted-in hosts — but the insertion
+        # is gated on the opt-in anyway, defense in depth, so a frame
+        # that somehow reaches a non-opted-in host passes through
+        # unswapped rather than swapped. HTTP/2 extended-CONNECT
+        # (RFC 8441) never reaches the proxy at all: mitmproxy's H2
+        # layer rejects it with a connection-terminating protocol
+        # error before any addon hook fires (#629 piece 2, verified
+        # non-issue on mitmproxy 12.2.3).
         self._maybe_reload()
         self._current_egress_ip = None
         # H18: no header channel exists on websocket messages, so any
@@ -3082,6 +3130,10 @@ class SwapAddon:
             return
         if self.inference_mode:
             return  # never: page content must not traverse insertion
+        if not self._host_allows_stream(host):
+            # #629: insertion is the opt-in's re-enabled path, not a
+            # fallback for refused streams — pass through unswapped.
+            return
         msgs = flow.websocket.messages if flow.websocket else None
         if not msgs:
             return
@@ -3800,10 +3852,19 @@ class SwapAddon:
         # audit trail like any other refusal. The approval-signal
         # headers rendered above cannot ride a killed flow — inherent to
         # refusal; the dropped connection is the client-visible signal.
+        # Issue #629 piece 3: a host listed in the stream-hosts file is
+        # explicitly opted in by the operator — the kill is skipped and
+        # the pass is audited instead. SSE bodies then buffer until the
+        # stream completes and are scrubbed by the `response` hook; a
+        # never-ending stream buffers unboundedly (finding-40e piece 1,
+        # stated residual — the operator accepts it by opting in).
         reason = self._stream_refusal_reason(resp)
         if reason is not None:
-            self._audit_note(host, "stream-refused", reason)
-            flow.kill()
+            if self._host_allows_stream(host):
+                self._audit_note(host, "stream-optin", reason)
+            else:
+                self._audit_note(host, "stream-refused", reason)
+                flow.kill()
 
     def response(self, flow):
         """Scrub known secret values out of text response bodies from
@@ -3822,8 +3883,11 @@ class SwapAddon:
 
         The hook buffers the whole body: message-stream responses (SSE /
         protocol upgrades) are killed in `responseheaders` (finding 40e)
-        and never reach this hook; obox must not depend on streamed
-        provider responses through this proxy."""
+        and never reach this hook — unless the host is listed in the
+        stream-hosts opt-in file (issue #629 piece 3), in which case the
+        completed stream body is scrubbed here like any other finite
+        body. obox must not depend on streamed provider responses
+        through this proxy unless that provider is explicitly opted in."""
         self._maybe_reload()
         req = flow.request
         host = req.pretty_host if req else ""

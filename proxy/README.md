@@ -46,6 +46,18 @@ binding never swaps: fail closed. Everything else passes through untouched.
 - **Host matching** lives in [host_match.py](host_match.py), the single
   source of truth (exact names or leading-dot subdomain entries), shared
   with the provision-time injector so the two can never drift.
+- **Message streams:** server-sent events and protocol upgrades (101)
+  from allowlisted hosts are killed at headers time — a stream's body
+  never finishes, so the response scrubber can never see it (issue
+  #92). The one explicit exception is the operator-owned `stream-hosts`
+  file (`/home/swapd/stream-hosts`, one hostname per line, same
+  format as `hosts.allow`): a listed host is opted in — the kill is
+  skipped (audited as `stream-optin` in `swap.log`), WebSocket text
+  frames get placeholder insertion again, and SSE bodies are scrubbed
+  when the stream completes. Fail closed: no file, no opt-in. Opting a
+  host in re-admits the stated residual that a *never-ending* stream
+  buffers unboundedly — use it for streaming LLM providers, not for
+  arbitrary endpoints.
 
 The addon's own audit log (`swap.log`) is the intended observability —
 mitmdump's default per-flow request lines print full URLs, so the service
