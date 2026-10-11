@@ -60,6 +60,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- On the golden image, the push worker now stands the box-local push queue
+  down quietly on plane-enrolled boxes: the first-boot hook writes a
+  root-owned enrollment signal the worker (which runs as a different user
+  and can never read the pairing record itself) checks on every pass, so
+  enrolled boxes stop logging the hourly disabled-sender note and no longer
+  journal into a channel that could never page. `identity-seed-hook.sh
+  --propagate-plane-push-signal` re-propagates the signal after a manual
+  post-boot `redeem` (no reboot needed). (#1268) (#1282)
 - The golden-image tag-ref validator now pins its tag grammar to ASCII:
   non-ASCII tag references (e.g. a `ß` or CJK character in the tag) are
   rejected at pin time instead of passing validation and failing loudly

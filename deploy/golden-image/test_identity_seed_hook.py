@@ -69,18 +69,23 @@ def harness(tmp_path):
         "SPARKVM_PAIR_CLIENT": str(stub),
         "SVM_PAIR_DIR": str(state),
         "STUB_LOG": str(logdir),
+        # The hook's plane-push signal (#1268) defaults to
+        # /run/sparkvm/plane-push — sandbox it into the tmp dir so the
+        # enrolled-skip path never touches the real host path.
+        "SPARKVM_PLANE_PUSH_FILE": str(tmp_path / "plane-push"),
     }
 
-    def run(env_extra=None, env_remove=()):
+    def run(env_extra=None, env_remove=(), args=()):
         env = dict(base_env)
         env.update(env_extra or {})
         for k in env_remove:
             env.pop(k, None)
         return subprocess.run(
-            ["bash", HOOK], env=env, capture_output=True, text=True,
+            ["bash", HOOK, *args], env=env, capture_output=True, text=True,
             timeout=30)
 
-    return {"run": run, "logdir": logdir, "state": state}
+    return {"run": run, "logdir": logdir, "state": state,
+            "signal": tmp_path / "plane-push"}
 
 
 def _full_env():
@@ -163,6 +168,177 @@ def test_enrolled_state_skips_and_never_represents(harness):
     assert "already enrolled" in r.stderr
 
 
+def test_enrolled_state_writes_plane_push_signal(harness):
+    # #1268: the enrolled-skip path propagates the #1135 handoff to the
+    # image's push worker via the root-written signal file (the worker
+    # cannot read the pairing record itself).
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    sig = harness["signal"]
+    assert sig.read_text() == "1\n"
+    assert stat.S_IMODE(os.stat(sig).st_mode) == 0o644
+    assert "plane-push signal written" in r.stderr
+
+
+def test_enrolled_state_writes_plane_push_signal_without_identity_env(harness):
+    # #1268 boot shape (Engineering B1): machine-config env (incl. the
+    # single-use attestation token) is gone on later boots, so the env gate
+    # can never be what reaches the enrolled branch — the idempotency block
+    # must run first and rewrite the signal at every boot (/run is tmpfs;
+    # otherwise the box silently reverts to box-local after a reboot).
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"]()
+    assert r.returncode == 0, r.stderr
+    assert "not enrolling" not in r.stderr
+    assert _argv_lines(harness) == []
+    sig = harness["signal"]
+    assert sig.read_text() == "1\n"
+    assert stat.S_IMODE(os.stat(sig).st_mode) == 0o644
+    assert "plane-push signal written" in r.stderr
+    assert "already enrolled" in r.stderr
+
+
+def test_tokenless_enrollment_writes_no_plane_push_signal(harness):
+    # A corrupt/tokenless record is not enrollment — no signal, so the
+    # worker fails open to box-local instead of standing down on a lie.
+    (harness["state"] / "enrollment.json").write_text("{}")
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "not writing plane-push signal" in r.stderr
+
+
+def test_inflight_pairing_writes_no_plane_push_signal(harness):
+    (harness["state"] / "pairing.json").write_text(
+        json.dumps({"pairing_id": "pair_x"}))
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "--propagate-plane-push-signal" in r.stderr
+
+
+def test_propagate_flag_writes_signal_without_identity_env(harness):
+    # #1268/Product B1: post-boot redeem completes as the operator, when
+    # machine-config env is gone. The env-free mode must work with NO
+    # identity env at all (a plain re-run of the hook would exit at the env
+    # gate and clear the signal).
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert "not enrolling" not in r.stderr
+    assert _argv_lines(harness) == []
+    sig = harness["signal"]
+    assert sig.read_text() == "1\n"
+    assert stat.S_IMODE(os.stat(sig).st_mode) == 0o644
+    assert "plane-push signal written" in r.stderr
+
+
+def test_propagate_flag_clears_stale_signal_when_unenrolled(harness):
+    # Flag mode with no record anywhere: stale stand-down is cleared,
+    # worker fails open to box-local.
+    _plant_signal(harness)
+    r = harness["run"](args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_propagate_flag_sees_sudo_user_home(harness, tmp_path):
+    # #1268/Product B2: the operator's own redeem lands in their home
+    # (mirror of proxy/deploy.sh §5b's two-home check).
+    opdir = tmp_path / "op" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    r = harness["run"](env_extra={"SUDO_USER": "op",
+                                  "SPARKVM_HOME_ROOT": str(tmp_path)},
+                       args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert harness["signal"].read_text() == "1\n"
+    assert "plane-push signal written" in r.stderr
+
+
+def test_propagate_flag_ignores_home_candidates_without_sudo_user(
+        harness, tmp_path):
+    # Security (planted-record kill): /home/* is deliberately not scanned —
+    # any local user could plant a fake enrollment.json and silently stand
+    # the box down (a filed approval would drop as "plane-owned" without
+    # journaling). A record under another user's home with no SUDO_USER must
+    # NOT produce a signal; a stale one is cleared (fail-open to box-local).
+    _plant_signal(harness)
+    opdir = tmp_path / "mallory" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "fake"}))
+    r = harness["run"](env_extra={"SPARKVM_HOME_ROOT": str(tmp_path)},
+                       args=["--propagate-plane-push-signal"])
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+    assert "no enrolled pairing record found" in r.stderr
+
+
+def test_enrolled_state_dir_wins_signal_candidate(harness, tmp_path):
+    # Candidate preference is observable via the "from pairing record" audit
+    # line: the hook's own state dir is checked first, before the
+    # SUDO_USER home.
+    (harness["state"] / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "t"}))
+    opdir = tmp_path / "op" / ".config" / "spark-pair"
+    opdir.mkdir(parents=True)
+    (opdir / "enrollment.json").write_text(
+        json.dumps({"box_id": BOX_ID, "token": "other"}))
+    r = harness["run"]({**_full_env(), "SUDO_USER": "op",
+                        "SPARKVM_HOME_ROOT": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert harness["signal"].read_text() == "1\n"
+    assert f"from pairing record {harness['state']}" in r.stderr
+
+
+def _plant_signal(harness):
+    harness["signal"].write_text("1\n")
+    assert harness["signal"].exists()
+
+
+def test_tokenless_enrollment_clears_stale_plane_push_signal(harness):
+    # De-enrolled without a reboot: the stale stand-down must not
+    # outlive the enrollment it described (#1268 fail-open).
+    _plant_signal(harness)
+    (harness["state"] / "enrollment.json").write_text("{}")
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_inflight_pairing_clears_stale_plane_push_signal(harness):
+    _plant_signal(harness)
+    (harness["state"] / "pairing.json").write_text(
+        json.dumps({"pairing_id": "pair_x"}))
+    r = harness["run"](_full_env())
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_absent_env_clears_stale_plane_push_signal(harness):
+    _plant_signal(harness)
+    r = harness["run"]()
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_absent_env_writes_no_plane_push_signal(harness):
+    r = harness["run"]()
+    assert r.returncode == 0, r.stderr
+    assert not harness["signal"].exists()
+
+
 def test_inflight_pairing_skips_and_names_redeem(harness):
     (harness["state"] / "pairing.json").write_text(
         json.dumps({"pairing_id": "pair_x"}))
@@ -218,6 +394,28 @@ def test_request_failure_exits_nonzero_and_loud(harness):
     r = harness["run"]({**_full_env(), "STUB_REQUEST_EXIT": "1"})
     assert r.returncode != 0
     assert "not enrolled" in r.stderr
+
+
+def test_request_failure_clears_stale_plane_push_signal(harness):
+    # The realistic de-enroll flow: machine-config env persists,
+    # enrollment.json is gone, the replayed token fails (here: stubbed
+    # permanent failure) — the stale stand-down must not survive the
+    # failed run (#1268 fail-open).
+    _plant_signal(harness)
+    r = harness["run"]({**_full_env(), "STUB_REQUEST_EXIT": "1"})
+    assert r.returncode != 0
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
+
+
+def test_charset_gate_rejection_clears_stale_plane_push_signal(harness):
+    _plant_signal(harness)
+    env = _full_env()
+    env["SPARKVM_ATTESTATION_TOKEN"] = "not base64url!!"
+    r = harness["run"](env)
+    assert r.returncode != 0
+    assert not harness["signal"].exists()
+    assert "cleared stale plane-push signal" in r.stderr
 
 
 def _request_invocations(harness):
