@@ -705,7 +705,7 @@ def send_loop(conn, *, list_subscriptions, vapid_keys, vapid_subject,
         raise ValueError("max_claims must be a positive int")
 
     moment = _utcnow(now)
-    at = moment.isoformat()
+    at = push_enqueue.utc_iso(moment)
     sent_at = moment.timestamp()
     summary = SendLoopSummary(moment)
 

@@ -271,3 +271,33 @@ def test_gc_logs_counts(conn):
                    "push_send_results": 1}
     assert len(lines) == 1
     assert "retention_days=90" in lines[0] and "total=3" in lines[0]
+
+
+def test_gc_writer_at_shape_matches_cutoff(conn):
+    """The enqueue writer's `at` shape is byte-identical to the shape the
+    GC's lexicographic `at < cutoff` comparison uses (retention-shape
+    contract, pinned in the module docstring): a writer emitting any
+    other ISO shape (naive, `Z`-suffixed) silently corrupts retention —
+    premature audit-trail deletion or retention silently stopping. The
+    row must also actually be collected at 91 days, tying the shape pin
+    to the retention behavior."""
+    t = NOW - timedelta(days=91)
+    r = push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal="owner-1",
+        box_id="box-1", key_material="aid-shape", now=t)
+    assert r.disposition == "queued"
+    conn.commit()
+    stored = conn.execute(
+        "SELECT at FROM push_send_results WHERE event_key = ?",
+        ("box-1\x00aid-shape",)).fetchone()[0]
+    assert stored == t.astimezone(timezone.utc).isoformat()
+    assert stored == push_gc._instant_cutoff_iso(t + timedelta(days=91), 91)
+    # Flip to a terminal outcome (the sender loop's delivery transition):
+    # the 'queued' outbox work item is immortal under the GC by design
+    # (D92). The `at` value above is still exactly what the writer wrote.
+    conn.execute("UPDATE push_send_results SET outcome = 'accepted'"
+                 " WHERE event_key = ?", ("box-1\x00aid-shape",))
+    conn.commit()
+    out = push_gc.gc_push_tables(conn, now=NOW)
+    assert out["push_send_results"] == 1
+    assert _count(conn, "push_send_results") == 0

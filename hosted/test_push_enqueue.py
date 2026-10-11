@@ -444,3 +444,16 @@ def test_hour_bucket_format():
     from datetime import datetime, timezone
     assert push_enqueue.hour_bucket(
         datetime(2026, 10, 5, 16, 29, tzinfo=timezone.utc)) == "2026-10-05T16"
+
+
+def test_utc_iso_byte_shape():
+    """The retention-shape contract's single render step: byte-exact
+    `+00:00`-suffixed ISO for aware input, naive assumed UTC. Every
+    `push_send_results.at` writer and the GC cutoff render go through
+    this helper, so the shape can never drift by independent edits."""
+    from datetime import datetime, timezone
+    assert push_enqueue.utc_iso(
+        datetime(2026, 10, 11, 2, 30, 45, 123456,
+                 tzinfo=timezone.utc)) == "2026-10-11T02:30:45.123456+00:00"
+    assert push_enqueue.utc_iso(
+        datetime(2026, 10, 11, 2, 30)) == "2026-10-11T02:30:00+00:00"

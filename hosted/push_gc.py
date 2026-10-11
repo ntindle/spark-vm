@@ -58,6 +58,26 @@ Decisions (continuing the push lane's D-series; D89 was the last pin):
   nor corrupt the ops-log counts. Returns per-table deleted counts
   so the plane logs the sweep where the ops console can see it.
 
+- **Retention-shape contract (pinned).** The ``at < cutoff`` comparison
+  is lexicographic TEXT, so it is chronological only while every writer
+  of ``push_send_results.at`` emits the same string shape —
+  ``moment.astimezone(timezone.utc).isoformat()`` (``+00:00``-suffixed).
+  The render step is single-sourced in ``push_enqueue.utc_iso``: every
+  in-repo ``at`` writer (``push_enqueue.enqueue_page``; ``push_events``
+  reminder/suppressed-terminal writes; ``push_send_loop`` attempt rows
+  (``_insert_attempt_row``) and suppressed_terminal/dead-letter audit
+  rows (``_insert_audit_row``), both sharing the one helper-rendered
+  ``at``) and this module's own cutoff render go through it, so the
+  shape can never drift by independent edits; ``push_events._quiet_window_start``
+  pins the same assumption for its ``MAX(at)``. A writer bypassing the
+  helper with a different shape (naive ISO, ``Z`` suffix, epoch) silently
+  corrupts retention in either direction: premature deletion of the
+  audit trail (which also re-opens the D94 replay window early), or
+  retention silently stopping and unbounded D1 growth (which delays
+  D94's re-opening). New writers must use ``utc_iso``;
+  ``test_utc_iso_byte_shape`` and
+  ``test_gc_writer_at_shape_matches_cutoff`` enforce it.
+
 Plane seams (injected — this module never sees a Worker secret, a data
 key, or a box token):
 
@@ -96,10 +116,7 @@ def _window_cutoff(now, retention_days):
 
 def _instant_cutoff_iso(now, retention_days):
     """ISO-UTC instant cutoff for push_send_results.at."""
-    moment = now - timedelta(days=retention_days)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc).isoformat()
+    return push_enqueue.utc_iso(now - timedelta(days=retention_days))
 
 
 def _delete_batches(conn, table, predicate, params, batch_size):

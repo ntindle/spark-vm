@@ -259,6 +259,23 @@ def hour_bucket(now=None):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
 
 
+def utc_iso(now=None):
+    """Render one UTC instant in the retention-shape contract's byte shape.
+
+    The push lane's TEXT timestamp comparisons (`push_gc`'s `at < cutoff`,
+    `push_events._quiet_window_start`'s `MAX(at)`) are lexicographic, so
+    they are chronological only while every writer of
+    `push_send_results.at` emits this exact shape. This helper
+    single-sources the render step: every `at` writer must go through it,
+    so the shape can never drift by independent edits. Accepts None (now)
+    or a datetime; naive datetimes are assumed UTC (the lane's convention).
+    """
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat()
+
+
 def event_key_for(event_kind, owner_principal, box_id, key_material):
     """Build the §1.3a event key: scope + U+0000 + key_material.
 
@@ -400,7 +417,7 @@ def enqueue_page(conn, *, event_kind, owner_principal, box_id,
     moment = now if now is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    at = moment.astimezone(timezone.utc).isoformat()
+    at = utc_iso(moment)
     window_start = hour_bucket(moment)
     # Digest rows store box_id='' (stable dedup key); the reservation
     # for a digest is owner-only (D52) — no ("box","") shared counter.
