@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   WebSocket text frames get credential insertion again, and stream
   bodies are scrubbed when they complete. Fail closed: no file, no
   opt-in; opting a host in accepts the stated residual that a
-  never-ending stream buffers unboundedly. (#TBD)
+  never-ending stream buffers unboundedly. (#1334)
 
 - Phone-home S6 readiness pin (2026-10-11, #960): the #847 lane's six-item
   live-acceptance checklist mapped against the shipped tree — what the
@@ -273,7 +273,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   degrades to the same deny-by-default posture as a missing or unreadable
   file, with a warning in the proxy log. The approval summons journal
   sweep likewise skips a single undecodable line loudly instead of
-  abandoning the whole sweep. (#TBD)
+  abandoning the whole sweep. (#1334)
 
 ## [0.8.0] - 2026-10-10
 
