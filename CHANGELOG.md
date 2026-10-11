@@ -160,7 +160,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   from epoch claims. The close-taxonomy `revoked` row and the box-side
   wire constraints also match the shipped box: the daemon exits
   immediately on `revoked` (no reconnect, no HTTPS fallback), and the
-  heartbeat cron's 401 carries the re-pair guidance. (#TBD)
+  heartbeat cron's 401 carries the re-pair guidance. (#1338)
 
 - The fleet console's `--watch` interval guard is now pinned by tests that
   cannot hang the suite: the zero/negative/non-finite interval checks run
