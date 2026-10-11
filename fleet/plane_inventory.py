@@ -59,16 +59,21 @@ Store layout:
   <store>/releases.json       derived snapshot: pinned release per template
   <store>/releases_journal.jsonl append-only release pins
 
-Record schema (S1, bumped to /2 by S3):
+Record schema (S1, bumped to /2 by S3, to /3 by S4 #1287):
   {schema, plane_id, tenant_id, template_version, channel,
    status{provisioning,healthy,degraded,retired}, observed_at,
-   reporter, notes, last_known_good}
+   reporter, notes, last_known_good, deployment_id, worker_sha256}
   last_known_good is None or
   {template_version, deployment_id, worker_sha256, recorded_at} — the
   rollback pin the S4 driver redeploys. Writer contract: ONLY the S2
   promotion step writes it (this slice ships no writer); deploy/retire
   preserve it untouched, so it always names the last wave-landed
   template, never the latest recorded observation.
+  deployment_id / worker_sha256 are None or the pinned artifact identity
+  of the last deploy the S4 driver performed (F-RC-10: "which bytes
+  landed on plane #k", not just "which template"). Writer contract: ONLY
+  the S4 deploy driver writes them; S1 deploy/retire preserve them
+  untouched; /1- and /2-era records normalize to None.
 Release-record schema (S3):
   {schema, template_version, channel, deployment_id, worker_sha256,
    released_at, reporter, notes}
@@ -124,6 +129,12 @@ is auditable at the call site):
   - last_known_good is None until the S2 promotion step writes it. deploy
     and retire preserve whatever value the previous record carried; no
     command in this slice writes it (a test pins this).
+  - deployment_id / worker_sha256 name the pinned artifact of the last
+    S4-driver deploy (F-RC-10). ONLY the S4 driver writes them; deploy
+    and retire preserve whatever the previous record carried; the
+    snapshot/journal divergence check covers both fields, so a tampered
+    artifact identity fails closed exactly like a tampered template
+    version.
 
 Exit 0 on a printed result, 2 on bad input/arguments. An unexpected
 internal failure also exits 2 with a one-line message, never a bare
@@ -148,7 +159,7 @@ from datetime import datetime, timezone
 # exercises the CLIs through subprocess, never through imports.
 import events
 
-RECORD_SCHEMA = "plane-inventory-record/2"
+RECORD_SCHEMA = "plane-inventory-record/3"
 SNAPSHOT_SCHEMA = "plane-inventory-snapshot/1"
 COST_SCHEMA = "plane-cost-event/1"
 RELEASE_SCHEMA = "plane-template-release/1"
@@ -213,6 +224,16 @@ def _check_sha256(value):
     return value
 
 
+def is_sha256_pin(value):
+    """Non-raising form of the SHA-256 pin grammar.
+
+    For validating deployer-reported digests (the S4 driver must fail
+    closed on a malformed observed digest with its own message, not the
+    CLI-input message above).
+    """
+    return isinstance(value, str) and _SHA256_RE.match(value) is not None
+
+
 def _check_nonneg_number(value, what):
     if value is None:
         return None
@@ -240,6 +261,20 @@ def _ensure_store(store_dir):
 
 _MISSING = "missing"  # sentinel: store file absent (distinct from a `null` document)
 _PRESENT = "present"
+
+
+# Public aliases for the S4 deploy driver (fleet/plane_deploy.py). The pin
+# grammars, the error contract, the clock, and the store guard are
+# trust-critical: one definition, shared, never duplicated — see #21's
+# centralize-trust-validation follow-up (three copies of the ANSI regex
+# was the original sin; the plane lane gets one copy from the start).
+check_id = _check_id
+check_template = _check_template
+check_sha256 = _check_sha256
+check_nonneg_number = _check_nonneg_number
+now_iso = _now_iso
+ensure_store = _ensure_store
+fail = _fail
 
 
 def _load_json(path, what):
@@ -314,8 +349,12 @@ def _verify_snapshot_consistent(store_dir, planes):
     for plane_id, jrec in journal.items():
         srec = planes[plane_id]
         # last_known_good is covered too: a tampered rollback pin must fail
-        # closed exactly like a tampered template version.
-        for field in ("template_version", "status", "observed_at", "last_known_good"):
+        # closed exactly like a tampered template version. The S4 /3
+        # artifact-identity fields get the same coverage: a tampered
+        # deployment_id in the snapshot must never present forged bytes as
+        # the landed artifact.
+        for field in ("template_version", "status", "observed_at",
+                      "last_known_good", "deployment_id", "worker_sha256"):
             if jrec.get(field) != srec.get(field):
                 _fail(
                     f"snapshot/journal divergence for plane {plane_id!r}: "
@@ -359,6 +398,77 @@ def _append_journal(store_dir, journal_name, records):
                 os.fsync(fh.fileno())
         except OSError as exc:
             _fail(f"cannot append to {journal_name}: {exc}")
+
+
+def read_planes(store_dir):
+    """Fail-closed read of the latest plane record per plane_id.
+
+    The S4 deploy driver's plane reader: journal-as-truth with the
+    snapshot/divergence discipline, so the driver can never act on a
+    tampered or stale-restored inventory.
+    """
+    return _snapshot(store_dir)["planes"]
+
+
+def record_plane_observation(store_dir, record):
+    """Append one plane observation record: journal (source of truth) + derived snapshot.
+
+    The shared locked writer for the S1 inventory commands and the S4
+    deploy driver (F-RC-10): one path appends, republishes, and
+    re-verifies, so the driver cannot drift from the inventory's journal
+    discipline. Fails closed when the plane is not registered — the
+    controller never silently creates a plane row mid-rollout. Callers
+    build the full /3 record (the driver sets the artifact-identity
+    fields; S1 commands preserve-and-normalize them).
+
+    Concurrency note: the record is built from a pre-lock read and the
+    registration re-check happens under the lock, so two concurrent
+    writers serialize on the append with last-writer-wins snapshot
+    semantics (the journal stays append-only — no observation is lost).
+    This CLI is operator-run (single writer in practice); a future
+    multi-writer controller should rebuild the record inside the lock.
+    """
+    plane_id = record.get("plane_id")
+    if not plane_id:
+        _fail("record_plane_observation: record has no plane_id")
+    with events.journal_lock(store_dir):
+        snap = _snapshot(store_dir)
+        if plane_id not in snap["planes"]:
+            _fail(f"plane {plane_id!r} is not registered (register first)")
+        _append_records_locked(store_dir, [record])
+        snap["planes"][plane_id] = record
+        _publish_snapshot(store_dir, snap["planes"])
+
+
+def append_cost_event(store_dir, plane_id, event, duration_s=None,
+                      cost_usd=None, notes=""):
+    """Append one D-MT5 operational-cost event.
+
+    The D-RC-6 writer: the S4 deploy driver calls this for every deploy
+    and rollback it performs (event update/rollback). Missing events do
+    not block promotion — cost-summary reports coverage
+    (cost_usd_reported vs count) so the D-MT5 revisit query stays honest
+    about its inputs.
+    """
+    if event not in _COST_EVENTS:
+        _fail(f"event must be one of {','.join(_COST_EVENTS)}, got {event!r}")
+    duration_s = _check_nonneg_number(duration_s, "duration_s")
+    cost_usd = _check_nonneg_number(cost_usd, "cost_usd")
+    with events.journal_lock(store_dir):
+        snap = _snapshot(store_dir)
+        if plane_id not in snap["planes"]:
+            _fail(f"plane {plane_id!r} is not registered (register first)")
+    record = {
+        "schema": COST_SCHEMA,
+        "plane_id": plane_id,
+        "event": event,
+        "at": _now_iso(),
+        "duration_s": duration_s,
+        "cost_usd": cost_usd,
+        "notes": notes or "",
+    }
+    _append_journal(store_dir, COSTS_JOURNAL_NAME, [record])
+    return record
 
 
 def _read_costs(store_dir):
@@ -406,6 +516,11 @@ def cmd_register(args):
         # S3: the rollback pin. None until the S2 promotion step writes it;
         # deploy/retire preserve it (they copy the previous record whole).
         "last_known_good": None,
+        # S4 (#1287, F-RC-10): the pinned artifact identity of the last
+        # driver deploy. None until the S4 driver writes it; S1 commands
+        # preserve it untouched.
+        "deployment_id": None,
+        "worker_sha256": None,
     }
     notes = []
     record["notes"] = args.notes or ""
@@ -443,29 +558,29 @@ def cmd_deploy(args):
     if status not in ("healthy", "degraded"):
         _fail("--status must be healthy or degraded, got %r" % (args.status,))
 
-    with events.journal_lock(store_dir):
-        snap = _snapshot(store_dir)
-        prev = snap["planes"].get(plane_id)
-        if prev is None:
-            _fail(f"plane {plane_id!r} is not registered (register first)")
-        record = dict(prev)
-        # /1-era records carry no last_known_good key: normalize to the /2
-        # invariant (None until the S2 promotion step writes it) rather
-        # than stamping a /2 record that omits a /2-mandated field.
-        record.setdefault("last_known_good", None)
-        record.update(
-            {
-                "schema": RECORD_SCHEMA,
-                "template_version": template,
-                "status": status,
-                "observed_at": _now_iso(),
-                "reporter": "operator",
-                "notes": args.notes or "",
-            }
-        )
-        _append_records_locked(store_dir, [record])
-        snap["planes"][plane_id] = record
-        _publish_snapshot(store_dir, snap["planes"])
+    prev = read_planes(store_dir).get(plane_id)
+    if prev is None:
+        _fail(f"plane {plane_id!r} is not registered (register first)")
+    record = dict(prev)
+    # /1-era records carry no last_known_good key: normalize to the /3
+    # invariant (None until the S2 promotion step writes it) rather
+    # than stamping a /3 record that omits a /3-mandated field.
+    record.setdefault("last_known_good", None)
+    # /1- and /2-era records carry no artifact-identity keys: normalize
+    # to the /3 invariant (None until the S4 driver writes them).
+    record.setdefault("deployment_id", None)
+    record.setdefault("worker_sha256", None)
+    record.update(
+        {
+            "schema": RECORD_SCHEMA,
+            "template_version": template,
+            "status": status,
+            "observed_at": _now_iso(),
+            "reporter": "operator",
+            "notes": args.notes or "",
+        }
+    )
+    record_plane_observation(store_dir, record)
     print(json.dumps({"ok": True, "plane_id": plane_id, "template_version": template,
                       "status": status}))
     return 0
@@ -475,26 +590,25 @@ def cmd_retire(args):
     store_dir = _ensure_store(args.store)
     plane_id = _check_id(args.plane_id, "--plane-id")
 
-    with events.journal_lock(store_dir):
-        snap = _snapshot(store_dir)
-        prev = snap["planes"].get(plane_id)
-        if prev is None:
-            _fail(f"plane {plane_id!r} is not registered")
-        record = dict(prev)
-        # Same /1 -> /2 normalization as cmd_deploy (see above).
-        record.setdefault("last_known_good", None)
-        record.update(
-            {
-                "schema": RECORD_SCHEMA,
-                "status": "retired",
-                "observed_at": _now_iso(),
-                "reporter": "operator",
-                "notes": args.notes or "",
-            }
-        )
-        _append_records_locked(store_dir, [record])
-        snap["planes"][plane_id] = record
-        _publish_snapshot(store_dir, snap["planes"])
+    prev = read_planes(store_dir).get(plane_id)
+    if prev is None:
+        _fail(f"plane {plane_id!r} is not registered")
+    record = dict(prev)
+    # Same /1 -> /2 normalization as cmd_deploy (see above).
+    record.setdefault("last_known_good", None)
+    # Same /1,/2 -> /3 normalization as cmd_deploy (F-RC-10).
+    record.setdefault("deployment_id", None)
+    record.setdefault("worker_sha256", None)
+    record.update(
+        {
+            "schema": RECORD_SCHEMA,
+            "status": "retired",
+            "observed_at": _now_iso(),
+            "reporter": "operator",
+            "notes": args.notes or "",
+        }
+    )
+    record_plane_observation(store_dir, record)
     print(json.dumps({"ok": True, "plane_id": plane_id, "status": "retired"}))
     return 0
 
@@ -508,20 +622,8 @@ def cmd_cost(args):
     duration_s = _check_nonneg_number(args.duration_s, "--duration-s")
     cost_usd = _check_nonneg_number(args.cost_usd, "--cost-usd")
 
-    with events.journal_lock(store_dir):
-        snap = _snapshot(store_dir)
-        if plane_id not in snap["planes"]:
-            _fail(f"plane {plane_id!r} is not registered (register first)")
-    record = {
-        "schema": COST_SCHEMA,
-        "plane_id": plane_id,
-        "event": event,
-        "at": _now_iso(),
-        "duration_s": duration_s,
-        "cost_usd": cost_usd,
-        "notes": args.notes or "",
-    }
-    _append_journal(store_dir, COSTS_JOURNAL_NAME, [record])
+    append_cost_event(store_dir, plane_id, event, duration_s, cost_usd,
+                      args.notes or "")
     print(json.dumps({"ok": True, "plane_id": plane_id, "event": event}))
     return 0
 
@@ -684,6 +786,21 @@ def _releases_snapshot(store_dir):
     return {"schema": RELEASES_SNAPSHOT_SCHEMA, "releases": releases}
 
 
+def read_release(store_dir, template):
+    """Fail-closed read of the pinned release manifest for a template.
+
+    The S4 deploy driver's deploy-target reader (D-RC-2(b)): the pinned
+    (deployment_id, worker_sha256) is the rollout's trust root — read
+    through the journal-as-truth path, fail closed when unpinned. The
+    driver never deploys a floating "latest".
+    """
+    template = _check_template(template)
+    rec = _releases_snapshot(store_dir)["releases"].get(template)
+    if rec is None:
+        _fail(f"template {template!r} has no pinned release (release it first)")
+    return rec
+
+
 def _publish_releases_snapshot(store_dir, releases):
     """Atomically replace releases.json (process-unique tmp path, os.replace)."""
     path = os.path.join(store_dir, RELEASES_SNAPSHOT_NAME)
@@ -758,11 +875,7 @@ def cmd_release(args):
 
 def cmd_release_show(args):
     store_dir = _ensure_store(args.store)
-    template = _check_template(args.template)
-    releases = _releases_snapshot(store_dir)["releases"]
-    rec = releases.get(template)
-    if rec is None:
-        _fail(f"template {template!r} has no pinned release (release it first)")
+    rec = read_release(store_dir, args.template)
     print(json.dumps(rec, indent=2))
     return 0
 
