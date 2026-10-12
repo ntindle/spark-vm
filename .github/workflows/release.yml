@@ -41,6 +41,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # tag cut + GitHub release publish
+    timeout-minutes: 30
     outputs:
       # The exact tag the cut published (or the recovery step published).
       # The gate job consumes this as its build target — never re-derived
@@ -112,6 +114,8 @@ jobs:
     # total failure, where no release exists to gate.
     name: golden-image build gate
     needs: release
+    # mirrors build-and-gate's own bound; the caller job must not outlive it
+    timeout-minutes: 60
     if: always() && needs.release.outputs.tag != ''
     permissions:
       contents: read
