@@ -50,6 +50,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+
+- The plane Worker's push-lane cron triggers now have a deploy contract
+  and a post-deploy proof: an operator-facing contract pins the
+  per-minute reminder/digest sweep trigger and the daily 90-day
+  retention trigger, the scheduled-handler dispatch order, the manual
+  ops triggers for verification runs and catch-up after outages, and
+  the reminder-pass retirement rule for when per-approval Durable
+  Object alarms land. A verification script asserts every contracted
+  trigger is actually registered on the worker (read-only, token from
+  the environment, never logged) — catching the silently-unwired
+  failure where the handler deploys but nothing ever ticks. (#TBD)
+
 ### Fixed
 
 - The operator gate-sync loop no longer turns the operator's cron
