@@ -4911,6 +4911,37 @@ class DecodeFailureTests(unittest.TestCase):
             self.assertIn("cannot read secret", msgs)
 
 
+class ReadTextLinesHelperTests(unittest.TestCase):
+    """Issue #1332: _read_text_lines is the single structural choke point
+    for the #1328 contract (decode failures are read failures). These pin
+    the helper directly; DecodeFailureTests above pins the six call sites'
+    behavior through it."""
+
+    def test_valid_file_returns_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "hosts"
+            p.write_bytes(b"good.example\n# comment\n")
+            with self.assertNoLogs(sa.log, level="WARNING"):
+                self.assertEqual(
+                    sa._read_text_lines(p, "hosts.allow"),
+                    "good.example\n# comment\n")
+
+    def test_nonutf8_returns_none_and_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "hosts"
+            p.write_bytes(b"good.example\n\xff\xfe-bad\n")
+            with self.assertLogs(sa.log, level="WARNING") as cm:
+                self.assertIsNone(sa._read_text_lines(p, "hosts.allow"))
+            self.assertIn("cannot read hosts.allow", "\n".join(cm.output))
+
+    def test_missing_file_returns_none_and_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "no-such-file"
+            with self.assertLogs(sa.log, level="WARNING") as cm:
+                self.assertIsNone(sa._read_text_lines(p, "hosts.allow"))
+            self.assertIn("cannot read hosts.allow", "\n".join(cm.output))
+
+
 class SummonsSweepDecodeTests(unittest.TestCase):
     """Issue #1331: a byte-corrupt summons-journal line used to raise
     UnicodeDecodeError out of the journal-read block into the sweep-wide

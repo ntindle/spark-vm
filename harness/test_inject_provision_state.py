@@ -1932,3 +1932,56 @@ def test_sweeps_stale_smoke_hosts_tmps(stack):
     assert fresh.exists(), "a live writer's fresh tmp must never be touched"
     # The step still wrote the host list around the sweep.
     assert SMOKE_HOST in paths["smoke_hosts_file"].read_text().split()
+
+
+def _extract_8b2_snippet():
+    """Extract step 8b2's inline Python from the shipped injector script.
+
+    The tests below run the actual shipped code, not a copy: the snippet is
+    the heredoc between the step 8b2 header comment and the step 8c header.
+    """
+    sh_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "inject-provision-state.sh")
+    with open(sh_path, encoding="utf-8") as f:
+        text = f.read()
+    start = text.index("# 8b2.")
+    end = text.index("# 8c.", start)
+    block = text[start:end].splitlines()
+    begin = next(i for i, l in enumerate(block) if "python3 - <<'EOF'" in l)
+    close = next(i for i, l in enumerate(block) if l.strip() == "EOF")
+    return "\n".join(block[begin + 1:close])
+
+
+def _run_8b2_snippet(snippet, allow_path, smoke_host):
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "ALLOW_FILE": str(allow_path),
+        "SMOKE_HOST": smoke_host,
+        "IMPORT_DIR": os.path.dirname(os.path.abspath(__file__)),
+    }
+    return subprocess.run([sys.executable, "-c", snippet], env=env,
+                          capture_output=True, text=True)
+
+
+def test_8b2_nonutf8_allow_file_degrades_not_crashes(tmp_path):
+    """#1333: a non-UTF-8 MAIN_HOSTS_ALLOW is a read failure, not a
+    provision-time crash. The snippet degrades to the missing-file path
+    (exit 1 -> the injector appends the smoke host) instead of raising
+    UnicodeDecodeError out of the heredoc."""
+    snippet = _extract_8b2_snippet()
+    allow = tmp_path / "hosts.allow"
+    allow.write_bytes(b"good.example\n\xff\xfe-not-utf8\n")
+    proc = _run_8b2_snippet(snippet, allow, SMOKE_HOST)
+    assert proc.returncode == 1, proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "UnicodeDecodeError" not in proc.stderr, proc.stderr
+
+
+def test_8b2_snippet_presence_check_control(tmp_path):
+    """Control for the #1333 test: the extracted snippet still implements
+    the presence check (exit 0 when the host is listed, 1 when it is not)."""
+    snippet = _extract_8b2_snippet()
+    allow = tmp_path / "hosts.allow"
+    allow.write_bytes(b"good.example\n")
+    assert _run_8b2_snippet(snippet, allow, "good.example").returncode == 0
+    assert _run_8b2_snippet(snippet, allow, SMOKE_HOST).returncode == 1

@@ -700,6 +700,31 @@ _AUDIT_FIELD_ALLOW_RE = re.compile(r"[^!-~]")
 log = logging.getLogger(__name__)
 
 
+def _read_text_lines(path, label):
+    """Read a UTF-8 line-format file; the #1328 contract, structural (#1332).
+
+    Decoding errors are read failures: UnicodeDecodeError is not an OSError,
+    so without the UnicodeError disjunct a non-UTF-8 file would raise out of
+    the loader (inside _maybe_reload's hook-path try) instead of degrading
+    fail-closed like a missing/unreadable file does. This is the single place
+    that names the (OSError, UnicodeError) tuple, so the next line-format
+    file added cannot forget it — the contract is structural, not
+    comment-load-bearing.
+
+    Returns the decoded text, or None after a loud warning naming `label`
+    (the operator-facing file name plus what the degradation means, e.g.
+    "ssrf.allow (default deny)"). Callers keep their own missing-file
+    handling and their own failure semantics (skip credential, empty list,
+    poison flag); the JSON reads (registry, grants) are out of scope —
+    they already catch (OSError, ValueError), which covers decode errors.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        log.warning("swap: cannot read %s: %s", label, e)
+        return None
+
+
 def _sanitize_audit_field(value):
     """Keep printable-ASCII only in one audit-log field (#17).
 
@@ -1148,13 +1173,11 @@ class SwapAddon:
         Lines that do not match k=v are dropped with a warning
         (finding 40b), naming the line number but never the content.
         """
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as e:
+        text = _read_text_lines(path, "secret %s" % path.name)
+        if text is None:
             # #1328: non-UTF-8 bytes are a read failure like any other --
             # the credential is skipped (fail-closed), never raised out
             # of _load() into the hook.
-            log.warning("swap: cannot read secret %s: %s", path.name, e)
             return None
         lines = [l for l in text.splitlines() if l.strip()]
         if not lines or lines[0].strip() != MULTI_MARKER:
@@ -1262,22 +1285,16 @@ class SwapAddon:
                     "swap: secret %r has a value shorter than %d chars; "
                     "response scrubbing is disabled for it", name,
                     _MIN_SCRUB_LEN)
-        # Issue #1328: decoding errors are read failures. UnicodeDecodeError
-        # is not an OSError, so without the UnicodeError disjunct a
-        # non-UTF-8 file would raise out of _load() (inside _maybe_reload's
-        # hook-path try) instead of degrading fail-closed like a
-        # missing/unreadable file does. Applies to every line-format
-        # allowlist read in this method; the JSON reads (registry, grants)
-        # already catch (OSError, ValueError), which covers decode errors.
+        # Line-format allowlist reads go through _read_text_lines (#1328/#1332):
+        # decode failures degrade fail-closed like missing/unreadable files.
         hosts = []
-        try:
-            if HOSTS_FILE.is_file():
-                for line in HOSTS_FILE.read_text(encoding="utf-8").splitlines():
+        if HOSTS_FILE.is_file():
+            text = _read_text_lines(HOSTS_FILE, "hosts.allow")
+            if text is not None:
+                for line in text.splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
                         hosts.append(line.lower())
-        except (OSError, UnicodeError) as e:
-            log.warning("swap: cannot read hosts.allow: %s", e)
         # §3a smoke echo hosts: same line format as hosts.allow.
         # ORDERED CONTRACT with the injector (harness/
         # inject-provision-state.sh step 8): the injector writes this
@@ -1292,39 +1309,33 @@ class SwapAddon:
         # here would leave the opt-in permanently off after the operator
         # fixes the file, a denial, not a leak.
         stream_hosts = []
-        try:
-            if STREAM_HOSTS_FILE.is_file():
-                for line in STREAM_HOSTS_FILE.read_text(
-                        encoding="utf-8").splitlines():
+        if STREAM_HOSTS_FILE.is_file():
+            text = _read_text_lines(
+                STREAM_HOSTS_FILE, "stream-hosts (stream opt-in disabled)")
+            if text is not None:
+                for line in text.splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
                         stream_hosts.append(line.lower())
-        except (OSError, UnicodeError) as e:
-            log.warning("swap: cannot read stream-hosts: %s "
-                        "(stream opt-in disabled)", e)
         ssrf_hosts, ssrf_nets = [], []
-        try:
-            if SSRF_ALLOW_FILE.is_file():
-                ssrf_hosts, ssrf_nets = _parse_ssrf_allow(
-                    SSRF_ALLOW_FILE.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError) as e:
-            log.warning("swap: cannot read ssrf.allow: %s (default deny)",
-                        e)
+        if SSRF_ALLOW_FILE.is_file():
+            text = _read_text_lines(
+                SSRF_ALLOW_FILE, "ssrf.allow (default deny)")
+            if text is not None:
+                ssrf_hosts, ssrf_nets = _parse_ssrf_allow(text)
         # Finding 47: the deny list beats the allow list. Same format
         # as ssrf.allow; reloaded with it.
         # Finding 61: warn loudly if the file is missing - a rebuild
         # from the repo without it silently loses the self-peer guard.
         deny_hosts, deny_nets = [], []
-        try:
-            if SSRF_DENY_FILE.is_file():
-                deny_hosts, deny_nets = _parse_ssrf_allow(
-                    SSRF_DENY_FILE.read_text(encoding="utf-8"))
-            else:
-                log.warning(
-                    "swap: ssrf.deny MISSING at %s - the jail can "
-                    "impersonate the owner (finding 47/61)", SSRF_DENY_FILE)
-        except (OSError, UnicodeError) as e:
-            log.warning("swap: cannot read ssrf.deny: %s", e)
+        if SSRF_DENY_FILE.is_file():
+            text = _read_text_lines(SSRF_DENY_FILE, "ssrf.deny")
+            if text is not None:
+                deny_hosts, deny_nets = _parse_ssrf_allow(text)
+        else:
+            log.warning(
+                "swap: ssrf.deny MISSING at %s - the jail can "
+                "impersonate the owner (finding 47/61)", SSRF_DENY_FILE)
         self.secrets = secrets
         self.hosts = hosts
         self.smoke_hosts = smoke_hosts
@@ -1421,19 +1432,17 @@ class SwapAddon:
             secrets = self.secrets
         smoke_hosts = []
         smoke_load_ok = False
-        try:
-            if SMOKE_HOSTS_FILE.is_file():
-                for line in SMOKE_HOSTS_FILE.read_text(
-                        encoding="utf-8").splitlines():
+        if SMOKE_HOSTS_FILE.is_file():
+            # #1328: non-UTF-8 bytes degrade here via the helper, not out of
+            # the hook -- the fail-closed poison path below treats them like
+            # any unreadable file.
+            text = _read_text_lines(SMOKE_HOSTS_FILE, "smoke-hosts")
+            if text is not None:
+                for line in text.splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
                         smoke_hosts.append(line.lower())
                 smoke_load_ok = True
-        except (OSError, UnicodeError) as e:
-            # #1328: non-UTF-8 bytes land here, not out of the hook --
-            # the fail-closed poison path below treats them like any
-            # unreadable file.
-            log.warning("swap: cannot read smoke-hosts: %s", e)
         # A readable-but-empty file is not a valid scoping list (the
         # injector always writes at least one entry); treat it like a
         # missing one.

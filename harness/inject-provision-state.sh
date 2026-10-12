@@ -916,7 +916,11 @@ p = os.environ["ALLOW_FILE"]
 try:
     with open(p, encoding="utf-8") as f:
         entries = [ln.strip() for ln in f if ln.strip()]
-except FileNotFoundError:
+except (FileNotFoundError, UnicodeDecodeError):
+    # #1333: like #1328, a non-UTF-8 allowlist is a read failure, not a
+    # provision-time crash -- degrade to the missing-file path (the smoke
+    # host is appended; the proxy's own loader fails closed on the file
+    # and warns loudly when it later reads it).
     entries = []
 sys.exit(0 if proxy_match.host_in_list(os.environ["SMOKE_HOST"], entries) else 1)
 EOF
