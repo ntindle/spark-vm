@@ -21,6 +21,7 @@ own (e.g. the #1013 phone-home GC).
 """
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -64,7 +65,7 @@ def parse_schedules(doc):
         raise ValueError("schedules payload has no 'result' list")
     crons = set()
     for entry in result:
-        if not isinstance(entry, dict) or "cron" not in entry:
+        if not isinstance(entry, dict) or not isinstance(entry.get("cron"), str):
             raise ValueError("schedules entry missing 'cron' field")
         crons.add(normalize_cron(entry["cron"]))
     return crons
@@ -106,11 +107,18 @@ def fetch_schedules(account_id, script_name, api_token):
     except urllib.error.URLError as exc:
         raise RuntimeError("Workers API request failed: %s" % exc.reason
                            ) from None
+    except (OSError, http.client.HTTPException) as exc:
+        # Mid-read transport failures (socket timeouts, truncated bodies)
+        # surface raw from resp.read(), unwrapped by urlopen's URLError
+        # mapping — they are API errors (exit 2), never "trigger missing".
+        raise RuntimeError("Workers API read failed: %s" % exc) from None
     try:
         doc = json.loads(body)
     except ValueError as exc:
         raise RuntimeError("Workers API returned non-JSON: %s" % exc
                            ) from None
+    if not isinstance(doc, dict):
+        raise RuntimeError("Workers API returned a non-object JSON payload")
     if not doc.get("success", False):
         errors = doc.get("errors", [])
         raise RuntimeError(
@@ -121,6 +129,15 @@ def fetch_schedules(account_id, script_name, api_token):
 def load_fixture(path):
     with open(path, "r", encoding="utf-8") as fh:
         doc = json.load(fh)
+    if not isinstance(doc, dict):
+        raise ValueError("fixture payload must be a JSON object")
+    # A saved *failed* API response (e.g. a 401 captured by a naive
+    # `curl > schedules.json`) must never pass as deploy proof — the
+    # live path treats success:false as an API error (exit 2), and the
+    # fixture path must do the same.
+    if not doc.get("success", False):
+        raise ValueError("fixture payload reports API failure: %s"
+                         % (doc.get("errors") or "no detail"))
     return parse_schedules(doc)
 
 
@@ -144,7 +161,11 @@ def main(argv=None):
         except (OSError, ValueError) as exc:
             print("error: cannot read fixture: %s" % exc, file=sys.stderr)
             return 2
+        provenance = " (fixture)"
+        print("note: asserting against fixture '%s' — NOT the live Workers API"
+              % args.fixture)
     else:
+        provenance = ""
         api_token = os.environ.get(_TOKEN_ENV)
         if not api_token:
             print("error: set %s (env) to query the live Workers API, "
@@ -157,7 +178,11 @@ def main(argv=None):
         try:
             actual = fetch_schedules(args.account_id, args.script_name,
                                      api_token)
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
+            # fetch_schedules raises RuntimeError for transport/API errors;
+            # parse_schedules raises ValueError on a malformed successful
+            # payload. Both are check/usage errors (exit 2), never a
+            # "trigger missing" (exit 1).
             # exc never carries the token (see fetch_schedules).
             print("error: %s" % exc, file=sys.stderr)
             return 2
@@ -166,15 +191,15 @@ def main(argv=None):
     for cron in extras:
         print("note: extra cron schedule not in the contract: %s" % cron)
     if missing:
-        print("FAIL: %d expected cron trigger(s) not registered on '%s':"
-              % (len(missing), args.script_name))
+        print("FAIL%s: %d expected cron trigger(s) not registered on '%s':"
+              % (provenance, len(missing), args.script_name))
         for cron, why in missing:
             print("  missing %r — %s" % (normalize_cron(cron), why))
         print("The handler is deployed but nothing will ever tick: "
               "register the triggers, then re-run this check. (#1069)")
         return 1
-    print("ok: all %d contract cron triggers registered on '%s'"
-          % (len(EXPECTED_TRIGGERS), args.script_name))
+    print("ok%s: all %d contract cron triggers registered on '%s'"
+          % (provenance, len(EXPECTED_TRIGGERS), args.script_name))
     return 0
 
 

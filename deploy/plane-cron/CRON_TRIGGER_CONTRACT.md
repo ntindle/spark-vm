@@ -120,7 +120,12 @@ listed, not failed.
 
 **CI/offline mode:** `--fixture schedules.json` asserts against a
 saved payload (the test suite pins the comparison logic; capture the
-fixture with the API call above).
+fixture with the API call above). A fixture pass asserts against a
+saved snapshot only — it does not prove the triggers are registered on
+the worker; only the live API call is deploy proof. The script labels
+fixture runs explicitly in its output (`NOT the live Workers API` /
+`ok (fixture):` / `FAIL (fixture):`) so a transcript can never be
+mistaken for live verification.
 
 Then, once, per deploy: invoke one `scheduled` event in staging and
 assert a clean no-op sweep, or observe one live cron tick enqueuing a

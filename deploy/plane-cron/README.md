@@ -32,6 +32,17 @@ CF_API_TOKEN=... CF_ACCOUNT_ID=... \
   python3 deploy/plane-cron/verify_plane_cron.py --script-name sparkvm-control
 ```
 
+A fixture pass (`--fixture`) asserts against a saved snapshot only —
+it does not prove the triggers are registered on the worker; only the
+live API call is deploy proof. The script labels fixture runs in its
+output so a transcript can never be mistaken for live verification.
+
+Security note: the token is env-only (never a CLI flag, never logged),
+but typing it into an interactive shell lands it in `~/.bash_history`
+— prefix the assignment with a space or use `read -s CF_API_TOKEN`.
+Use a minimal-scoped Cloudflare token (read access to the worker is
+all this script needs).
+
 The silently-unwired failure this catches: the `scheduled` handler
 deploys fine, the trigger is never registered, and nothing ever ticks.
 A handler that runs proves nothing about registration — this check is
