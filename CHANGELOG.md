@@ -293,6 +293,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
   sides and asserts no new fds rather than full set equality, so an
   external GC pass can no longer fake a failure while a genuine leak on
   the fchmod-failure path still fails the test. (#1290) (#1297)
+- The proxy's six line-format file reads now share one decode-failure
+  helper (2026-10-11, #1332): each site previously repeated the same
+  read-or-decode-failure handling, so the next file added had to remember
+  the decode half or a non-UTF-8 file would crash the request path. One
+  helper now owns the "bad bytes are a read failure" contract; behavior
+  is unchanged — unreadable files still degrade fail-closed exactly as
+  before. (#1341)
+- Provisioning no longer aborts on a non-UTF-8 allowlist file (2026-10-11,
+  #1333): the provisioner's smoke-host presence check crashed on
+  undecodable bytes instead of hitting its missing-file path. It now
+  treats bad bytes like a missing file — the host is appended and
+  provisioning continues, while the proxy itself still refuses the
+  corrupt file loudly at load time. (#1341)
 
 ### Security
 
