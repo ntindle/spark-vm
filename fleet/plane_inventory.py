@@ -263,11 +263,13 @@ _MISSING = "missing"  # sentinel: store file absent (distinct from a `null` docu
 _PRESENT = "present"
 
 
-# Public aliases for the S4 deploy driver (fleet/plane_deploy.py). The pin
-# grammars, the error contract, the clock, and the store guard are
-# trust-critical: one definition, shared, never duplicated — see #21's
-# centralize-trust-validation follow-up (three copies of the ANSI regex
-# was the original sin; the plane lane gets one copy from the start).
+# Public aliases for the S4 deploy driver (fleet/plane_deploy.py) and the
+# S2 wave machine (fleet/plane_waves.py). The pin grammars, the error
+# contract, the clock, the staleness rule, the controller-freeze reader,
+# and the store guard are trust-critical: one definition, shared, never
+# duplicated — see #21's centralize-trust-validation follow-up (three
+# copies of the ANSI regex was the original sin; the plane lane gets one
+# copy from the start).
 check_id = _check_id
 check_template = _check_template
 check_sha256 = _check_sha256
@@ -275,6 +277,59 @@ check_nonneg_number = _check_nonneg_number
 now_iso = _now_iso
 ensure_store = _ensure_store
 fail = _fail
+
+# Controller-store freeze contract (D-RC-5), read by both the S4 deploy
+# driver and the S2 wave machine. The freeze file is written by the S4
+# `freeze` command; the constants live here so the reader is defined
+# exactly once.
+FREEZE_SCHEMA = "plane-controller-freeze/1"
+FREEZE_NAME = "freeze.json"
+
+
+def read_controller_freeze(store_dir):
+    """True when the controller store is frozen (D-RC-5).
+
+    Missing file = not frozen (fresh store). Corrupt file, wrong schema,
+    or a non-boolean `frozen` fails closed — a tampered freeze file must
+    never silently unfreeze the controller. Reports under the
+    plane_inventory error name (the shared reader has one spelling).
+    """
+    path = os.path.join(store_dir, FREEZE_NAME)
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        _fail(f"freeze file at {path} is unreadable ({exc}) — refusing deploys")
+    if not isinstance(data, dict) or data.get("schema") != FREEZE_SCHEMA:
+        _fail(f"freeze file at {path} has an unexpected schema — refusing deploys")
+    frozen = data.get("frozen")
+    if not isinstance(frozen, bool):
+        _fail(f"freeze file at {path}: 'frozen' is not a boolean — refusing deploys")
+    return frozen
+
+
+def is_record_fresh(record, stale_hours):
+    """The S1 staleness rule, shared with the S2 promotion gate (D-RC-4).
+
+    A record the operator has not refreshed within the window is not an
+    observation the controller may promote on — same rule the `stale`
+    pre-promotion gate applies, one definition.
+
+    Corruption fails closed, never launders into "stale": only a missing
+    or unparseable timestamp reads as not-fresh. A non-dict record or a
+    non-string observed_at raises TypeError, which the caller's exit-2
+    contract turns into a loud failure — a corrupt record must never
+    present as a routine "wait and re-run" stale refusal.
+    """
+    try:
+        observed = datetime.fromisoformat(record["observed_at"])
+    except (KeyError, ValueError):
+        return False
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - observed).total_seconds() <= stale_hours * 3600
 
 
 def _load_json(path, what):
@@ -487,13 +542,9 @@ def _read_costs(store_dir):
 
 
 def _record_is_fresh(record, stale_hours):
-    try:
-        observed = datetime.fromisoformat(record["observed_at"])
-    except (KeyError, ValueError):
-        return False
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - observed).total_seconds() <= stale_hours * 3600
+    # One definition: the S2 promotion gate shares this rule via the
+    # public is_record_fresh alias above.
+    return is_record_fresh(record, stale_hours)
 
 
 def cmd_register(args):
