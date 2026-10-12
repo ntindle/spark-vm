@@ -63,6 +63,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the environment, never logged) — catching the silently-unwired
   failure where the handler deploys but nothing ever ticks. (#1385)
 
+- A scheduler-home convergence analysis pins the D9 reminder/digest
+  sweep's vision against the current state: what the deploy contract
+  covers, what still needs the operator's trigger wiring and one observed
+  live tick, a code-verified digest-pass bound gap, and the newly filed
+  watcher-derivation gap. (#1386)
+
 ### Fixed
 
 - The operator gate-sync loop no longer turns the operator's cron
