@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
+  committed snapshot of the inlined dashboard block ships with the
+  repo, and the test suite fails on GitHub Actions when the dashboard
+  page is edited without regenerating it — previously the byte-identity
+  rule was enforced only where a worker checkout was reachable. The
+  sync script also gains a read-only extraction mode for diffing a
+  hand-edited deployed copy against the canonical page before
+  re-authoring the change by hand (direct worker edits are never
+  synced back into the repo). (#1339)
+
 - Fleet-consumption lane, part 2: sentinel feed + metering as the
   fourth source (2026-10-11): a vision-vs-state analysis of the two
   remaining unanalyzed fleet consumers after the one-plane-per-tenant

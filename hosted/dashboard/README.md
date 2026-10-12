@@ -50,11 +50,21 @@ The Worker deploys as a single file, so it carries this page inline
 (between `# --- BEGIN dashboard (#845 authenticated fleet dashboard) ---`
 / `# --- END dashboard ---` markers in the control-plane `worker.py`).
 **This file is the canonical copy** —
-edit here, then run `./sync_dashboard.py` to re-inline it into
-`worker.py`; `test_dashboard.py` asserts the two are byte-identical when
-the worker source is reachable. The inlined HTML must not contain a
-`"""` sequence (it would terminate the Python string); the test and
-the sync script both enforce this.
+edit here, then regenerate the snapshot *and* re-inline:
+
+    ./sync_dashboard.py --write-snapshot   # regenerate dashboard.inlined.txt
+    ./sync_dashboard.py                    # re-inline into worker.py
+
+`dashboard.inlined.txt` (committed next to this README) is the exact
+block the sync writes between the markers, derived from this page.
+The test suite asserts the snapshot is byte-identical to what the sync
+would write — that assertion needs no worker checkout, so it runs on
+GitHub Actions: an edit to the page that skips `--write-snapshot`
+fails CI. The byte-identity test against the *live* worker copy still
+needs a reachable worker checkout, so it runs wherever one exists (the
+loop VM) and skips elsewhere. That split is deliberate, not an
+accident: CI guards the repo-side contract, the loop VM guards the
+deployed copy.
 
 ## Syncing the worker copy
 
@@ -81,3 +91,24 @@ loop VM's control-plane checkout
 test runs for real instead of skipping wherever the env points at a
 worker — on the loop VM that means the control-plane checkout; on CI
 (forks) the test still skips.
+
+## Never reverse-sync: the worker copy is never the source of truth
+
+The deployed worker copy is a build artifact. If it was hand-edited
+on the plane (as the AgentID surface once was), the repair is
+*forensics, not a merge*:
+
+1. `./sync_dashboard.py --extract > /tmp/worker-page.html` — read-only;
+   dumps the worker's inlined block exactly as it is.
+2. `diff /tmp/worker-page.html dashboard.html` — see what the hand-edit
+   actually changed.
+3. Hand-port the change into `dashboard.html` (this file), regenerating
+   the snapshot and re-running the sync as above.
+4. Re-deploy; verify with `--check`.
+
+Do **not** paste the extracted block back into `dashboard.html`. A
+hand-pasted block carries the literal-control-byte corruption class
+the sync guards refuse (observed 2026-10-11: `\xNN` escapes converted
+to raw control bytes, including a NUL inside the inlined Python
+string); the sync will reject it loudly, and so will the static tests.
+Re-author by hand — the extract path is diagnostics only.
