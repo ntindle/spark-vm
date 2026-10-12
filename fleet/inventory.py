@@ -888,7 +888,12 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     except OSError as exc:
         return "cannot list estate dir %s: %s" % (estate_dir, exc)
     box_dirs = [e for e in entries
-                if os.path.isdir(os.path.join(estate_dir, e))]
+                if os.path.isdir(os.path.join(estate_dir, e))
+                # Dot-directories are loop/operator metadata (e.g.
+                # gate_sync.sh's .gate_sync_state/), never boxes — the
+                # sync loop's own "$ESTATE"/*/ glob already ignores them,
+                # so the collector must agree (#1326).
+                and not e.startswith(".")]
     if not box_dirs:
         return "no per-box directories found in %s" % estate_dir
 

@@ -725,10 +725,14 @@ def test_gate_sync_delivers_atomically_mode_600(tmp_path, sync_harness,
     assert "synced box-01" in r.stdout
 
 
-def test_gate_sync_provisioning_gap_fails_loud(tmp_path, sync_harness, keyfile,
-                                              registry, manifest):
-    # A missing remote gate dir is a provisioning gap, not a sync gap:
-    # loud failure (exit 1), and no other box is affected.
+def test_gate_sync_probe_failure_warns_and_marks_stale(tmp_path, sync_harness,
+                                                       keyfile, registry,
+                                                       manifest):
+    # #1326: a failed gate-dir probe (box down, or dir genuinely
+    # unprovisioned — the loop cannot tell them apart) is the transient
+    # class, not the loud-fail class. The run warns, marks per-box
+    # staleness, keeps the estate moving, and exits 0 — one down box no
+    # longer keeps the operator's cron permanently red.
     estate = tmp_path / "estate"
     (estate / "box-01").mkdir(parents=True)
     gate = publish(tmp_path, keyfile, registry, manifest)
@@ -736,8 +740,12 @@ def test_gate_sync_provisioning_gap_fails_loud(tmp_path, sync_harness, keyfile,
     (fakeroot / "box-01").mkdir(parents=True)  # no gate dir underneath
     env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
     r = run("bash", SYNC, env_extra=env)
-    assert r.returncode == 1
-    assert "provision it first" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    stale = estate / ".gate_sync_state" / "box-01"
+    assert stale.exists(), "per-box staleness record must be written"
+    epoch, phase = stale.read_text().strip().split()
+    assert epoch.isdigit() and phase == "probe-failed"
 
 
 def test_gate_sync_rejects_option_injection(tmp_path, sync_harness, keyfile,
@@ -768,8 +776,13 @@ def test_gate_sync_failed_install_leaves_no_tmp(tmp_path, sync_harness,
     env = sync_env(tmp_path, sync_harness, estate,
                    {"GATE": gate, "FAKE_SSH_INSTALL_FAIL": "1"})
     r = run("bash", SYNC, env_extra=env)
-    assert r.returncode == 1
-    assert "atomic install" in r.stderr
+    # #1326: install failure is transient — warn, mark stale, exit 0.
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "atomic install failed" in r.stderr
+    stale = estate / ".gate_sync_state" / "box-01"
+    assert stale.exists()
+    assert stale.read_text().strip().split()[1] == "install-failed"
     leftovers = [p for p in gatedir.iterdir()
                  if p.name.startswith(".gate.json.tmp.")]
     assert leftovers == []
@@ -788,13 +801,110 @@ def test_gate_sync_failed_scp_cleans_partial_tmp(tmp_path, sync_harness,
     env = sync_env(tmp_path, sync_harness, estate,
                    {"GATE": gate, "FAKE_SCP_FAIL": "1"})
     r = run("bash", SYNC, env_extra=env)
-    assert r.returncode == 1
-    assert "scp to box-01 failed" in r.stderr
+    # #1326: scp failure is transient — warn, mark stale, exit 0.
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "scp failed" in r.stderr
+    stale = estate / ".gate_sync_state" / "box-01"
+    assert stale.exists()
+    assert stale.read_text().strip().split()[1] == "scp-failed"
     leftovers = [p for p in gatedir.iterdir()
                  if p.name.startswith(".gate.json.tmp.")]
     assert leftovers == []
     # The best-effort cleanup ssh actually ran.
     assert "rm -f" in open(tmp_path / "ssh.log").read()
+
+
+def test_gate_sync_staleness_cleared_on_success(tmp_path, sync_harness, keyfile,
+                                               registry, manifest):
+    # #1326: transient outages self-heal out of the estate state — a box
+    # marked stale by a failed run has its record cleared by the next
+    # successful sync.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    gatedir = fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate"
+    gatedir.mkdir(parents=True)
+    env = sync_env(tmp_path, sync_harness, estate,
+                   {"GATE": gate, "FAKE_SCP_FAIL": "1"})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 0
+    stale = estate / ".gate_sync_state" / "box-01"
+    assert stale.exists()
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "synced box-01" in r.stdout
+    assert not stale.exists(), "staleness record must clear on success"
+
+
+def test_gate_sync_misconfigured_fails_loud_no_state(tmp_path, sync_harness,
+                                                     keyfile, registry,
+                                                     manifest):
+    # #1326: the misconfigured class stays loud — an invalid ssh-target is
+    # operator data under local control, so it exits 1 and writes no
+    # staleness record (nothing remote was even attempted).
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    (estate / "box-01" / "ssh-target").write_text("-oProxyCommand=evil\n")
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 1
+    assert "invalid ssh-target" in r.stderr
+    assert not (estate / ".gate_sync_state").exists()
+
+
+def test_gate_sync_dry_run_writes_no_state(tmp_path, sync_harness, keyfile,
+                                           registry, manifest):
+    # #1326: --dry-run is a read of intent — it must not create or touch
+    # the staleness state.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, "--dry-run", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert not (estate / ".gate_sync_state").exists()
+
+
+def test_gate_sync_success_survives_broken_state_dir(tmp_path, sync_harness,
+                                                     keyfile, registry,
+                                                     manifest):
+    # #1326 (QA B3): _clear_stale is best-effort on the success path — a
+    # state-dir pathology (here: a directory where the box's staleness
+    # record should be — rm -f fails "Is a directory") must not turn a
+    # successful sync into a red cron under set -e.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    (fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate").mkdir(
+        parents=True)
+    (estate / ".gate_sync_state" / "box-01").mkdir(parents=True)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "synced box-01" in r.stdout
+
+
+def test_gate_sync_stale_write_failure_degrades_to_warning(
+        tmp_path, sync_harness, keyfile, registry, manifest):
+    # #1326: _mark_stale is advisory telemetry — when the state write
+    # itself fails, the loop degrades to a warning, never to a red cron.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    (fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate").mkdir(
+        parents=True)
+    (estate / ".gate_sync_state").write_text("not a directory\n")
+    env = sync_env(tmp_path, sync_harness, estate,
+                   {"GATE": gate, "FAKE_SCP_FAIL": "1"})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "could not record staleness" in r.stderr
 
 
 def test_gate_sync_overlapping_run_exits_loud(tmp_path, sync_harness, keyfile,
