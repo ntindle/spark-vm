@@ -83,22 +83,107 @@ class TestContract:
         # rootfs is root-owned); pin that the guard is not weakened.
         assert '$SUDO test -x "$ROOTFS/bin/bash"' in active
 
-    def test_rebuild_stops_running_jail_before_rm(self, active):
-        # A running jail survives `rm -rf` on unlinked inodes: the
-        # container keeps executing the OLD tree while the fresh
-        # debootstrap lands unused, and the `machinectl show` start check
-        # later sees a running machine and skips the restart — a rebuild
-        # without a stop silently rebuilds nothing. Pin the ordering:
-        # the rebuild block must stop the machine before removing the
-        # rootfs (a failed stop aborts loudly under set -e).
+    def test_rebuild_stops_running_jail_before_swap(self, active):
+        # #1370: rebuilds debootstrap into a staging dir and rename-swap
+        # the trees. A rename under a running container is undefined
+        # behavior (machined registers the machine by name), so the
+        # rebuild block must still stop the machine — now before the swap,
+        # not before an rm -rf (#1369's fail-closed stop, kept).
         rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
         assert rebuild_idx != -1, "rebuild block not found"
         tail = active[rebuild_idx:]
         stop_idx = tail.find("machinectl stop")
-        rm_idx = tail.find('rm -rf "$ROOTFS"')
+        swap_idx = tail.find('mv "$ROOTFS" "$PREV"')
         assert stop_idx != -1, "rebuild does not stop the machine"
-        assert rm_idx != -1, "rebuild does not remove the rootfs"
-        assert stop_idx < rm_idx, "machine stop must precede rootfs removal"
+        assert swap_idx != -1, "rebuild does not swap the rootfs"
+        assert stop_idx < swap_idx, "machine stop must precede rootfs swap"
+
+    def test_rebuild_debootstraps_staging_while_live(self, active):
+        # #1370: the minutes-long debootstrap must land in the staging
+        # dir BEFORE the stop, so the running jail keeps serving through
+        # the rebuild; the in-place rm -rf + rebuild shape is gone.
+        rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
+        assert rebuild_idx != -1, "rebuild block not found"
+        tail = active[rebuild_idx:]
+        deboot_idx = tail.find('debootstrap noble "$STAGING"')
+        stop_idx = tail.find("machinectl stop")
+        assert deboot_idx != -1, "rebuild does not debootstrap into staging"
+        assert stop_idx != -1, "rebuild does not stop the machine"
+        assert deboot_idx < stop_idx, "staging debootstrap must precede the stop"
+        assert 'rm -rf "$ROOTFS"' not in tail, \
+            "in-place rootfs removal must not return"
+
+    def test_rebuild_swap_keeps_old_tree_until_new_is_live(self, active):
+        # #1370: the old tree survives as .prev until the rename-swap has
+        # placed the new tree at the live path; only then is .prev
+        # removed. A crash between the renames is fail-safe: the next
+        # rebuild's .prev triage restores it before staging anything new
+        # (pinned by test_rebuild_triages_stale_prev_before_staging).
+        rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
+        assert rebuild_idx != -1, "rebuild block not found"
+        tail = active[rebuild_idx:]
+        to_prev = tail.find('mv "$ROOTFS" "$PREV"')
+        to_live = tail.find('mv "$STAGING" "$ROOTFS"')
+        assert to_prev != -1 and to_live != -1, "swap sequence incomplete"
+        # The .prev triage above also carries an `rm -rf "$PREV"`; the one
+        # this pin cares about is the post-swap removal, so search after
+        # the swap's second rename.
+        rm_prev = tail.find('rm -rf "$PREV"', to_live + 1)
+        assert rm_prev != -1, "post-swap .prev removal not found"
+        assert to_prev < to_live < rm_prev, \
+            "old tree must survive until the new tree is live"
+
+    def test_rebuild_clears_machine_id_on_staging(self, active):
+        # #1370: debootstrap stamps a machine-id; the staging tree must
+        # not carry it across the swap (the live-path rm below still runs
+        # on every build, belt and braces).
+        rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
+        assert rebuild_idx != -1, "rebuild block not found"
+        tail = active[rebuild_idx:]
+        clear_idx = tail.find('rm -f "$STAGING/etc/machine-id"')
+        swap_idx = tail.find('mv "$ROOTFS" "$PREV"')
+        assert clear_idx != -1, "staging machine-id not cleared"
+        assert clear_idx < swap_idx, \
+            "staging machine-id must be cleared before the swap"
+
+    def test_rebuild_triages_stale_prev_before_staging(self, active):
+        # #1370: the unconditional `$SUDO rm -rf "$STAGING" "$PREV"` this
+        # replaced would have deleted the only surviving copy of the old
+        # tree after a between-renames crash (contradicting the pinned
+        # "crash is recoverable" claim). The rebuild must triage .prev
+        # FIRST, before staging anything new:
+        #  - .prev present + live path absent  -> restore .prev to live
+        #    (crash between the two renames: fail-safe restore)
+        #  - .prev present + live path present -> remove .prev
+        #    (crash during the final rm: live tree already new)
+        rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
+        assert rebuild_idx != -1, "rebuild block not found"
+        tail = active[rebuild_idx:]
+        triage_idx = tail.find('test -e "$PREV"')
+        restore_idx = tail.find('mv "$PREV" "$ROOTFS"')
+        rm_prev_idx = tail.find('rm -rf "$PREV"')
+        deboot_idx = tail.find('debootstrap noble "$STAGING"')
+        assert triage_idx != -1, ".prev triage not found"
+        assert restore_idx != -1, "interrupted-swap restore not found"
+        assert rm_prev_idx != -1, "stale .prev removal not found"
+        assert triage_idx < restore_idx < deboot_idx, \
+            ".prev triage must restore before the new staging build"
+        assert triage_idx < rm_prev_idx < deboot_idx, \
+            ".prev triage must clear the stale .prev before the new build"
+        # The triage must not be the old unconditional wipe of both.
+        assert 'rm -rf "$STAGING" "$PREV"' not in tail, \
+            "unconditional staging+.prev wipe must not return"
+
+    def test_rebuild_staging_paths_same_dir_as_live(self, active):
+        # The swap is atomic only as same-filesystem renames: STAGING and
+        # PREV must live in the same directory as ROOTFS, or `mv` degrades
+        # to copy+unlink (non-atomic) while every ordering pin stays green.
+        assert 'ROOTFS=/var/lib/machines/$MACHINE' in active
+        for var in ("STAGING", "PREV"):
+            m = re.search(rf'^{var}=(\S+)\s*$', active, re.M)
+            assert m, f"{var} assignment not found"
+            assert os.path.dirname(m.group(1)) == "/var/lib/machines", \
+                f"{var} must share the live path's directory for atomic rename"
 
 
 class TestHelp:

@@ -42,9 +42,16 @@ only if the weaker shared-kernel boundary is documented as such."* With C:
   no tenant key lands in `cred`, the registry, or the secrets dir. #280 is
   decided for the hosted track: the answer is *no tenant dimension in the
   box-side stack*.
-- The vend contract's tenant dimension is **`box_id`**, 1:1 with the tenant
-  in the hosted shape. The plane's per-box secret manifest (§2.4) is the
-  tenant boundary; two tenants never share a manifest.
+- The vend contract's record-level key is **`box_id`** — within the tenant
+  plane's own D1. Retired (D-MT1, 2026-10-09: one plane per tenant —
+  `docs/MULTI_TENANT_PLANE_MODEL_DECISION.md`): the older claim that
+  `box_id` is "1:1 with the tenant" in the hosted shape. Under D-MT1 the
+  **tenant is the plane** (#1261 rolls the tenant-plane worker template
+  across N tenant planes; the plane, not the box, is the per-tenant
+  deploy unit). The per-box manifest boundary is kept (the safe
+  direction — no weaker than the tenant boundary): the plane's per-box
+  secret manifest (§2.4) is the record-level boundary, and two tenants
+  never share a manifest.
 - The proxy's host-wide grants (A1) stay **benign in the hosted shape**:
   each box runs exactly one tenant's processes against its own proxy, so
   "any local process can spend any grant" spends only that tenant's
@@ -60,11 +67,16 @@ only if the weaker shared-kernel boundary is documented as such."* With C:
   implemented separately (§7).
 - The jail remains a cost optimization for cooperative tenants, never a
   security equivalence (audit §2 finding 1, quoted above).
-- **"Two tenants never share a manifest" is an operator provisioning
-  invariant, not a schema guarantee.** The D1 schema permits an owner
-  to write identical secret values into two boxes' manifests; nothing
-  in v1 detects or forbids it. The tenant boundary holds only while
-  provisioning keeps the 1:1 box:tenant mapping.
+- **"Two tenants never share a manifest" is D1 separation, not an
+  operator provisioning invariant.** Retired (D-MT1, 2026-10-09): the
+  older claim that this was an operator provisioning invariant the tenant
+  boundary held only while provisioning kept a 1:1 box:tenant mapping.
+  Each tenant plane is its own Worker with its own D1 database, so two
+  tenants' manifests live in different databases — sharing one would
+  require cross-database writes no vend path performs. Within a plane,
+  the per-box manifest boundary is kept (no weaker than the tenant
+  boundary); the D1 schema still permits identical secret *values* in two
+  boxes' manifests (values, not the boundary, are duplicated).
 
 ## 2. S2 — the vend contract
 
@@ -236,8 +248,10 @@ vend_audit(id INTEGER PRIMARY KEY, at TEXT, box_id TEXT, name TEXT,
 `swap.log` keeps auditing box-side swaps, but the audit a tenant can't
 tamper with is the server-side one: every mint, refresh, revocation, and
 manifest write/read lands in `vend_audit`. The audit row carries
-`box_id` — the tenant identity #280's per-tenant-box decision makes 1:1
-with the tenant; box identity itself comes from the #844 box bearer.
+`box_id` — the record-level key within the tenant plane's D1
+(per-tenant-box, #280/#850; consistency touch for D-MT1 — the plane is
+the tenant, so `box_id` is no longer described as the tenant identity);
+box identity itself comes from the #844 box bearer.
 It never carries a secret value.
 
 **Read path.** `vend_audit` rows are readable only with an owner key
@@ -254,10 +268,11 @@ this answer the design is a trust relocation, not a trust improvement:
 
 - **At rest:** encrypted. `vend_values.ciphertext` is AES-256-GCM with a
   random nonce per value. The data key lives as a **Cloudflare Worker
-  secret** — never in D1, never in the repo, never in logs, never in an
-  audit row. Key rotation is an operator procedure (re-encrypt
-  `vend_values` under the new key; the old key is retained only for the
-  rotation window).
+  secret — one per tenant plane** (D-MT1, 2026-10-09: one plane per
+  tenant; provisioned per plane at plane deploy time, D-VD3) — never in
+  D1, never in the repo, never in logs, never in an audit row. Key
+  rotation is an operator procedure (re-encrypt `vend_values` under the
+  new key; the old key is retained only for the rotation window).
 - **In flight:** plaintext exists only in worker memory while assembling a
   mint/refresh response, over TLS, to the authenticated box.
 - **Who can read a value:** exactly one API path — the box's own
@@ -285,10 +300,17 @@ this answer the design is a trust relocation, not a trust improvement:
 - **Key-rotation bound.** The old data key is destroyed ≤ 24 h after a
   rotation completes; during the window both keys decrypt (dual-key
   read). Fresh random nonce per encryption operation, including
-  rotations — GCM nonce reuse is catastrophic. Stated plainly: one data
-  key protects all tenants' values, so one key compromise exposes every
-  vended value. That is why the key lives in a Worker secret and rotates
-  as an operator procedure.
+  rotations — GCM nonce reuse is catastrophic. Retired (D-MT1, 2026-10-09):
+  the older claim that "one data key protects all tenants' values, so one
+  key compromise exposes every vended value." Under one-plane-per-tenant,
+  each tenant plane has its own data key protecting only that tenant's
+  `vend_values.ciphertext`; the rotation bound applies per plane,
+  unchanged in shape. Blast radius shrinks from every tenant to one
+  tenant by construction — which is why the key lives in a Worker secret
+  and rotates as an operator procedure. Honest limit: per-plane keys
+  protect only while the operator provisions genuinely distinct keys per
+  plane — the same key value pasted across planes would silently widen
+  the blast radius again.
 - **Scope.** Secret material delivered outside the vend path (e.g.
   smuggled as an opaque #848 durable-command payload, stored verbatim in
   D1) is outside this custody story — this section covers vended
