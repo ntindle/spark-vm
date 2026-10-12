@@ -231,6 +231,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   truncation — the message stays operator-readable, nothing raw reaches
   the log. (#1359)
 
+- Deploy driver now refuses negative rollout-wave numbers (2026-10-12):
+  the wave machine's own reader failed closed on a negative wave, but the
+  deploy driver's reader accepted one — a hand-edited wave file with a
+  negative wave would have let a plane deploy as "in" wave -1. Both
+  readers now refuse a negative wave or assignment, so the two halves of
+  the rollout controller agree on the same wave contract. (#1373)
+
 ### Fixed
 
 - The agent-jail rebuild flag is now atomic (2026-10-12) (#1371): the
