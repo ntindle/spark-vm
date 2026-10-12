@@ -1485,3 +1485,26 @@ def test_1359_error_anomaly_truncation_survives_escaping(conn, owner,
     note = next(a for a in summary.anomalies if "RuntimeError" in a)
     assert ("x" * 400) in note      # the bound is not over-eager
     assert ("x" * 500) not in note   # the 500-char truncation holds
+
+
+# ---------------------------------------------------------------------------
+# Clock boundary (D73): non-finite epoch inputs are ValueError
+# ---------------------------------------------------------------------------
+
+def test_utcnow_rejects_bad_epoch():
+    # Finding A (security turn, slot 20261012-1500): inf/-inf raised
+    # OverflowError from datetime.fromtimestamp, violating the
+    # documented ValueError contract ("a tick must never run on an
+    # untrusted clock reading"). NaN happened to raise ValueError
+    # already; pin all six as ValueError.
+    for bad in (float("inf"), float("-inf"), float("nan"),
+                1e300, -1e300, 10**400):
+        with pytest.raises(ValueError):
+            push_send_loop._utcnow(bad)
+
+
+def test_utcnow_accepts_finite_epoch():
+    # The finite check must not reject ordinary epoch inputs.
+    assert push_send_loop._utcnow(0.0) == datetime(1970, 1, 1,
+                                                  tzinfo=timezone.utc)
+    assert push_send_loop._utcnow(1700000000).year == 2023

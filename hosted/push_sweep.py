@@ -83,6 +83,7 @@ writes exactly one idempotent `suppressed_terminal` audit row (D61).
 
 from __future__ import annotations
 
+import math
 import sys
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -122,14 +123,27 @@ def _utcnow(now=None):
 
     Accepts an aware/naive datetime (naive assumed UTC) or epoch
     seconds as int/float. Anything else is a ValueError — a sweep must
-    never run on an untrusted clock reading.
+    never run on an untrusted clock reading. Non-finite epoch floats
+    (NaN, ±inf) are rejected by the `math.isfinite` guard, and
+    finite-but-out-of-range epochs by the `fromtimestamp` wrap below
+    (`datetime.fromtimestamp` raises OverflowError — or OSError,
+    depending on the platform — on those). Both become ValueError so
+    callers that `except ValueError` around the clock boundary catch
+    every bad reading (the D96 NaN/inf discipline).
     """
     if now is None:
         return datetime.now(timezone.utc)
     if isinstance(now, bool):
         raise ValueError("now must be a datetime or epoch seconds")
     if isinstance(now, (int, float)):
-        return datetime.fromtimestamp(now, tz=timezone.utc)
+        if isinstance(now, float) and not math.isfinite(now):
+            raise ValueError("now must be a finite datetime or epoch "
+                             "seconds, not %r" % (now,))
+        try:
+            return datetime.fromtimestamp(now, tz=timezone.utc)
+        except (OverflowError, OSError) as exc:
+            raise ValueError("epoch seconds out of range: %r"
+                             % (now,)) from exc
     if isinstance(now, datetime):
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
