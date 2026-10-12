@@ -73,10 +73,11 @@ transport it didn't have.
   `phone_home_events` — phone-home session events now have a
   plane-side journal. Under one-plane-per-tenant, that journal lives
   on the tenant's plane, not on a shared plane.
-- **#1261 per-tenant-plane rollout controller (shipped, complete
-  2026-10-11):** S1/S3/S4/S2/S5 landed — gate decisions now have a
-  reader (`events` read path) and a trust story. G25's "gate
-  decisions" ingested-record class has a concrete source.
+- **#1348 (plane update-event reporting, #1288 S5) shipped 2026-10-11:**
+  plane-side event journal + `read_plane_events` reader — G25's "gate
+  decisions" ingested-record class has a concrete source. (#1261
+  itself remains open; the S5 slice landed under #1288/#1348, not as
+  a #1261 close-out.)
 
 ## 3. G25 — sentinel feed: vision vs state
 
@@ -86,12 +87,14 @@ transport it didn't have.
   is now pinned by the plane boundary.** The 2026-10-01 analysis
   decomposed the vision into three unbuilt pieces: (a) the signing
   story, (b) the transport, (c) the sentinel-side consumption
-  contract. Since then, D-MT4 placed the sentinel role on the
-  operator plane ("the sentinel role runs on the operator plane"),
-  and D-OP1's trust boundary generalizes the summons rule:
-  tenant-adjacent compute never holds operator-plane credentials.
-  The transport leg (b) is therefore tenant-plane → operator-plane
-  shipment — the box never ships to the operator plane directly
+  contract. Since then, the operator-plane build-path analysis
+  placed the sentinel role on the operator plane ("Sentinel (H5, via
+  #464): the sentinel role runs on the operator plane" — §2, resting
+  on D-MT4), and D-OP1's trust boundary generalizes the summons
+  rule: tenant-adjacent compute never holds operator-plane
+  credentials. The transport leg (b) is therefore tenant-plane →
+  operator-plane shipment — the box never ships to the operator
+  plane directly
   (that would be a new box-side channel contradicting the G18
   no-new-inbound-listener posture); the tenant plane aggregates
   box-local telemetry and ships it. The #799 issue body predates
@@ -129,17 +132,21 @@ transport it didn't have.
   operator plane, the interim feed's trust label is the
   provisioner's: the tenant plane's journals arrive as
   operator-observed records, tamper-evident-not-tamper-proof (the
-  D-OP2 credential proves the voice, not the bytes). The tenant
-  human's own owner access to their plane is the documented reason
-  the label stops at tamper-evident. This replaces the vaguer
-  "operator-attested-only" with the mechanism.
+  D-OP2 credential proves the voice, not the bytes). The label stops
+  at tamper-evident because a tenant with owner access to their own
+  plane can forge the journal the operator observes — the signing
+  half of the vision stays with the G13 channel. This replaces the
+  vaguer "operator-attested-only" with the mechanism.
 - **D-25-2 — One shipment channel, `kind`-discriminated.** The
   tenant-plane→operator-plane shipment rides the D-OP2 envelope
   channel: one credential class to review (F-MT2's economics apply),
   one intake, with a `kind` discriminator (`meter` | `event`) in the
   record. A second channel would double the review surface for no
   trust gain — the envelope credential is already verify-only voice
-  material for exactly this direction.
+  material for exactly this direction. Replay protection and
+  fail-closed-on-seq-regression live in #1349's intake scope, not in
+  the channel: the intake refuses a record whose `seq` regresses
+  within its `epoch`.
 - **D-25-3 — Seq gaps are fail-visible, always.** Per-surface
   monotonic counters with restart epochs (A2's prescription) on the
   shipper; the operator-plane intake raises a seq-gap alert on any
@@ -186,7 +193,18 @@ transport it didn't have.
   folded into #1048's ingestion slice: the record contract must
   exist before the reader, and #1258's auth must bind to a named
   schema version. #1048's acceptance criteria reference the schema
-  instead of inventing their own fields.
+  instead of inventing their own fields. **Lineage:** #1350's schema
+  EXTENDS the metering doc's canonical envelope grammar (`v`, `seq`,
+  `epoch`, `ts_ns`, `tenant`, `source`, `event`, `trust`, allowlisted
+  `attrs`, `mac` reserved — `docs/USAGE_METERING_DESIGN.md` §3) —
+  adopting, not re-deriving, it — adding the tenant-stamping rule
+  (#798 S1), plane identity, the D-MT1 infra-cost line,
+  batching/TTL/retention bounds, and the `kind` (`meter`|`event`)
+  discriminator story with #1349's event records. #1349's event
+  records ride the same extended envelope with `kind: event` (not a
+  parallel envelope) — one channel, one grammar, per D-25-2; the
+  metering consumer reads `kind: meter` records, the sentinel intake
+  reads `kind: event` records.
 - **D-26-2 — Maintenance-minute accounting waits on G14 events.**
   Until the maintenance enter/exit kinds exist, G26's S1 answers the
   maintenance-minute question as "unmappable — no producer", not as a
@@ -236,10 +254,11 @@ decisions and the new issue numbers.
 ## 7. Honest limits
 
 - D-25-2's one-channel call is a review-economics judgment (F-MT2),
-  not a security proof: if the design spec (#1257) finds a reason the
-  event records need a separate channel (e.g., different retention or
-  a different failure mode than metering), it overturns D-25-2 with
-  the reasoning recorded.
+  not a security proof: if the #1349 transport spec (filed against
+  #1257's shipped pins) finds a reason the event records need a
+  separate channel (e.g., different retention or a different failure
+  mode than metering), it overturns D-25-2 with the reasoning
+  recorded.
 - D-25-1's "operator-attested" label is only as strong as the
   provisioning story: a tenant who can write their plane's journal
   directly (owner access) can forge what the operator observes. The
