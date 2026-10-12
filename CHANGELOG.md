@@ -70,7 +70,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   an explicit error naming the not-yet-wired slice-2 supervisor routing
   rather than the confusing attach refusal; routing decisions through
   the supervisor is the #1372 follow-up slice.
-  (#TBD)
+  (#1377)
 
 - The rollout controller's `assign` command gains a `--dry-run` mode
   (2026-10-12): it prints the would-be wave map — wave buckets, canary
