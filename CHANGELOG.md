@@ -69,6 +69,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   retention question still gates the S3 plane endpoint's migration.
   (#1364) (#1366)
 
+- Vend-lane convergence pin after the contract amendment (2026-10-12):
+  post-#1364 vision-vs-state for the #850 credential-vending lane —
+  the filed S2-contract amendment is verified landed, the sweep's stale
+  "not landed" lines are corrected, and one genuinely-new gap is filed:
+  the push lane's schema contract carries the same retired "one data
+  key protects all tenants" claim (#1375). (#1376)
+
 - Operator runbook for the D9 reminder/digest sweep (2026-10-12): the
   "I'm holding the pager" half of the push lane's sweep scheduler — how
   to run it, the summary's disposition vocabulary, the three passes'

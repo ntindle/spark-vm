@@ -200,7 +200,9 @@ are filed as follow-ups.
   direction under 1:N), but the contract's "1:1 with the tenant"
   claim is retired. Filed as the S2-contract amendment follow-up
   (new issue, §6) — the amendment itself is not landed in this
-  analysis turn.
+  analysis turn. **[2026-10-12 convergence note: LANDED 2026-10-12
+  ~06:29 CDT as #1364 (PR #1371, main `f9aca52`) — see
+  docs/VEND_LANE_CONVERGENCE_2026-10-12.md §3.]**
 - **D-VD3 — Custody amended: one data key per tenant plane.**
   G50.9's "one key protects all tenants" becomes one key per plane;
   the NEEDS_USER data-key entry is amended to per-plane provisioning
@@ -243,7 +245,9 @@ are filed as follow-ups.
 - **New issue** (p3, docs): S2-contract D-MT1 amendment — retire the
   §1 "tenant = box_id, 1:1" claim and the §3 "one data key protects
   all tenants" claim per D-VD2/D-VD3. Filed as **#1364** by this turn
-  (P42 fill).
+  (P42 fill). **[2026-10-12 convergence note: #1364 LANDED 2026-10-12
+  ~06:29 CDT (PR #1371, main `f9aca52`); issue closed via Closes
+  keyword — see docs/VEND_LANE_CONVERGENCE_2026-10-12.md §3.]**
 - **New issue** (p2): first-manifest-write actor on signup-provisioned
   tenant planes (F-VD8/D-VD6) — the S2 contract §4 bootstrap leg has
   no actor under D-MT1. Filed as **#1365** by this turn (P42 fill).
