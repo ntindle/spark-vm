@@ -33,6 +33,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/msp_view.py` | `/home/ntindle/bin/msp_view.py` (view/liveness layer for the cutover; same import path) |
 | `bin/msp_events.py` | `/home/ntindle/bin/msp_events.py` (event-stream view layer the status/watch path reads; hard-required; same import path) |
 | `bin/msp_recovery.py` | `/home/ntindle/bin/msp_recovery.py` (dead-turn recovery ladder; hard-required; same import path) |
+| `bin/msp_approval.py` | `/home/ntindle/bin/msp_approval.py` (approval/user-input plane for the cutover; same import path) |
 | `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → user-scope plugin: `muse plugins install ./muse-job/plugin` (run from `~/spark-vm`), then `muse plugins approve` (`--force` on reinstall) |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
