@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   Object alarms land. A verification script asserts every contracted
   trigger is actually registered on the worker (read-only, token from
   the environment, never logged) — catching the silently-unwired
-  failure where the handler deploys but nothing ever ticks. (#TBD)
+  failure where the handler deploys but nothing ever ticks. (#1385)
 
 ### Fixed
 
