@@ -182,6 +182,12 @@ def _read_waves(store_dir):
     # not wave True.
     if isinstance(live_wave, bool) or not isinstance(live_wave, int):
         _fail(f"waves file at {path}: 'live_wave' is not an integer — refusing deploys")
+    # The S2 writer contract pins wave numbers as non-negative integers
+    # (CANARY_WAVE = 0); the S2 reader fails closed on a negative
+    # live_wave — mirror it here so the two readers of the same file
+    # cannot disagree (#1342).
+    if live_wave < 0:
+        _fail(f"waves file at {path}: 'live_wave' is negative — refusing deploys")
     return live_wave, assignments
 
 
@@ -196,11 +202,15 @@ def _gates(store_dir, plane_id):
         assigned = assignments.get(plane_id)
         # The bool trap: JSON true == 1 in Python, so a boolean assignment
         # must not pass as wave 1 — fail closed on a non-integer
-        # assignment, per the file's corrupt-waves philosophy.
+        # assignment, per the file's corrupt-waves philosophy. The S2
+        # reader also fails closed on a negative per-plane wave; mirror it
+        # here — a negative assignment for this plane is a corrupt wave
+        # file, not a wave the plane can be "in" (#1342).
         if assigned is not None and (isinstance(assigned, bool)
-                                     or not isinstance(assigned, int)):
+                                     or not isinstance(assigned, int)
+                                     or assigned < 0):
             _fail(f"waves file: assignment for plane {plane_id!r} is not "
-                  "an integer — refusing deploys")
+                  "a non-negative integer wave — refusing deploys")
         if assigned != live_wave:
             _fail(f"plane {plane_id!r} is not in the live wave {live_wave} — "
                   "action refused (D-RC-5)")
