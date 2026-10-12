@@ -9,7 +9,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 
 | Path | What it is |
 |---|---|
-| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
+| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch/approvals/decide/answer`. Single-file Python, stdlib only. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the default transport (the #228 cutover has landed). |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
@@ -148,6 +148,64 @@ the `--tmux` path never hits. Note the retry advice below still names
 `--tmux` for the *new* slug path — the old spawn error's wording is kept
 verbatim so the watchdog's stillborn short-circuit and the spawn failure
 stay consistent.
+
+### Pending approvals (issue #1372)
+
+A job whose turn is waiting on the operator reads as `blocked` in
+`status`; the approval/user-input plane behind that state is drivable
+from the CLI:
+
+- `muse-job approvals <slug>` lists the job's pending tool approvals
+  and open user-input prompts. Default output is **redacted**: approval
+  subjects/rawArgs and prompt answers are withheld (they may carry real
+  secrets — the answer to a workspace-trust question is exactly such a
+  value), and every agent-influenced string is terminal-sanitized before
+  printing. `--json` gives the same redacted shape as JSON;
+  `--show-secrets` (only with `--json`) prints the raw wire params and
+  warns on stderr on every invocation — unredacted output is one pipe or
+  paste away from somewhere an agent can read, so treat it as live
+  secret material. Each approval line prints its choices plus the
+  `decide` invocation to resolve it; each prompt line prints its
+  questions plus the `answer` invocation to answer it.
+- `muse-job decide <slug> --approval-id <id> --choice-id <id>
+  [--feedback]` resolves one pending approval. The approval is re-read
+  from `approval/listPending` immediately before deciding, so the
+  requirementId race guard is fresh; a stale stage fails server-side
+  (-32053) instead of landing on the wrong decision. `--feedback` only
+  applies to choices whose `acceptsFeedback` is true. The admission ack
+  is printed from a key whitelist (`approvalId`, `choiceId`, `status`,
+  `terminal`) — never the server's verbatim response, whose shape is the
+  server's to extend.
+- `muse-job answer <slug> --user-input-id <id> --answers '<json>'`
+  answers one open user-input prompt. Each answer dict carries
+  `questionId` plus exactly one of `selectedLabel` (single-select —
+  must be one of the question's options), `selectedLabels`
+  (multi-select — all in the options, within min/max), or `freeText`.
+  Answers are never echoed back: they may carry secrets. The prompt must
+  be explicitly classified with exactly one of `--trust-policy-opt-in`
+  (this IS a trust prompt — passes the explicit TrustPolicy opt-in) or
+  `--classified-not-trust-prompt` (this is NOT a trust prompt — answered
+  directly); the CLI refuses to guess (the recorded #211 decision: the
+  absence of the word "trust" in a prompt proves nothing, so no heuristic
+  classification). `approvals` flags prompts that look like trust prompts
+  so you know which flag you need.
+
+Two boundaries to know:
+
+- **MSP transport only.** The prompt plane exists only on `muse serve`
+  sessions, so on a `--tmux` job these commands fail with a clear usage
+  error rather than an empty list.
+- **Supervisor-held sessions can't be driven yet.** While a job's
+  supervisor holds the session (the whole turn, including
+  `blocked_approval`/`blocked_input` — the supervise loop only exits on
+  terminal events), a fresh `muse serve` cannot attach (MSP
+  single-attach), and stealing it would SIGTERM the supervisor's turn.
+  `approvals`/`decide`/`answer` fail with an explicit error naming the
+  not-yet-wired slice-2 supervisor routing. The pending items stay
+  visible in `muse-job status`: the counts are fetched best-effort, and a
+  failing approval plane degrades to a `pending check failed` line instead
+  of breaking the overview. Routing decisions through a supervised
+  session is the #1372 slice-2 follow-up.
 
 ### TUI auto-update policy (issue #699)
 

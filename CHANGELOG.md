@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Operator guide for the approval/user-input surface (2026-10-12): the
+  muse-job README now documents the `approvals` / `decide` / `answer`
+  subcommands — how to inspect and resolve a job's pending tool approvals
+  and user-input prompts, the redacted-by-default output posture, the
+  explicit trust-prompt classification `answer` requires, and the two
+  known boundaries (MSP transport only; supervised sessions not yet
+  drivable). (#TBD)
+
 - `muse-job approvals` / `decide` / `answer` operator subcommands
   (2026-10-12, #1372 slice 1): MSP jobs' pending tool approvals and
   user-input prompts are now inspectable and answerable from the CLI
