@@ -513,8 +513,10 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
     a due reminder produces exactly one `queued` disposition; a
     decided/expired approval is never a candidate, so it produces zero
     pages and zero audit rows; a pending approval terminal only by the
-    clock writes exactly one idempotent `superseded_terminal` audit
-    row (D61).
+    clock writes exactly one idempotent `suppressed_terminal` audit row
+    (D61) — the summary reports the matching `superseded_terminal`
+    disposition; the names split deliberately (see §12 of
+    docs/D9_PUSH_SWEEP_OPERATOR_GUIDE.md).
     """
     moment = _utcnow(now)
     rem = sweep_reminders(
