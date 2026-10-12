@@ -20,8 +20,8 @@ journal sink and S4b-1 hello/identity/generation fence shipped and
 deployed; S4b-2's emit half (2a) is pinned in the wire spec and
 landed in the deployed worker checkout; S4b-2b (socket `command_ack`
 consume-half) SHIPPED 2026-10-08 (#1001 closed, PR #1188 — see §2);
-S4b-3 (ping/alarm revocation re-verify + hibernation) is open under
-#1002; #960 (S6) is the
+S4b-3 (ping/alarm revocation re-verify + hibernation) **SHIPPED
+2026-10-09** (#1002 closed — see §7); #960 (S6) is the
 integration gate. The lane's standing degradation contract, from the
 wire doc: a carrier failure degrades to **fetch-path latency, never
 loss** — the every-minute HTTPS cron ingest (`spark-pair.py ingest`,
@@ -148,10 +148,10 @@ builds.
 | Build | Issue | State after this doc |
 |---|---|---|
 | S4b-2b socket `command_ack` consume-half (hoisted shared ack helper) | #1001 | **SHIPPED 2026-10-08 (PR #1188, #1001 closed).** |
-| S4b-3 ping/alarm revocation re-verify + hibernation (D17/D18) | #1002 | Open — unchanged; its 90 s pong-timeout rule is the other bound on session life. |
+| S4b-3 ping/alarm revocation re-verify + hibernation (D17/D18) | #1002 | **SHIPPED 2026-10-09 (#1002 closed).** BoxDO on the Hibernation WebSocket API (`ctx.acceptWebSocket` + `webSocketMessage`/`webSocketClose` + 10-min alarm); per-frame credential re-classification before dispatch; terminal verdicts close `revoked`/`expired` + journal. Honest bound ≤30s (compliant box) / ≤10min (silent socket). |
 | Gap-hold wedge → cursor fast-forward build | #1143 | **SHIPPED 2026-10-08 — D-GH1 as #1154.** The four candidate designs and D-GH2's interim are superseded; D-GH3 wire tombstones stay deferred. |
 | S6 live acceptance | #960 | Open — consumes all of the above. |
-| Live 500 on `/commands/pending` when an expired approval exists (#873 B2 path) | #1187 | **Open (p1).** Pre-existing on the pre-2b deploy (reproduced, not a 2b regression); follow-up of the 2b lane. |
+| Live 500 on `/commands/pending` when an expired approval exists (#873 B2 path) | #1187 | **CLOSED 2026-10-09 (#1187 closed independently).** |
 
 No new issues filed: the one genuinely-new gap (F-S4b-8) already has
 its item (#1143), and F-S4b-9's wire-doc caveat rides the #1143 build
@@ -173,8 +173,29 @@ approval exists — pre-existing, reproduced on the pre-2b deploy, not a
 2b regression). The §5 table above is re-pinned to this state; the
 deployed 2b checkout is not re-read by this refresh.
 
-## 7. Explicit non-scope
+## 7. 2026-10-11 refresh (S4b-3 shipped, #1002 closed; #1187 closed)
 
-Stream/input frame classes (#853/#919), approval decisions (#873 — the same durable queue on both carriers, not a socket-exempt channel; not re-litigated here), any write to liveness (§8 —
+Movement since the 2026-10-08 pin: **S4b-3 shipped 2026-10-09**
+(#1002 closed, ship comment on the issue — BoxDO on the Hibernation
+WebSocket API with the D17 10-min alarm re-verify, per-frame credential
+re-classification, and the honest bound ≤30s (compliant box) / ≤10min
+(silent socket) per the re-pinned §5 row; harness
+201/201, live hello→welcome→ping→pong and per-frame revoke→close
+verified, deployed bytes SHA-256 byte-verified). The 2026-10-11
+readiness pin (`docs/PHONE_HOME_S6_READINESS_2026-10-11.md`, verified
+against this turn) already records S4a/S4b-1/S4b-2/S4b-3/S4b-4 as
+closed-and-deployed. The §5 table above is re-pinned to this state
+(S4b-3 row → SHIPPED).
+
+The lane's remaining open build is **S6 live acceptance (#960)** — the
+integration gate this doc always named; every remaining lane unknown
+is inside #960's explicit scope. #1187 (the 2b lane's p1 follow-up)
+closed independently. #958 stays OPEN for S6; #847 stays OPEN as the
+vision tracker. §6's "remaining open builds are S4b-3" and §1's
+"S4b-3 is open under #1002" are superseded by this refresh.
+
+## 8. Explicit non-scope
+
+Stream/input frame classes (#853/#919), approval decisions (#873 — the same durable queue on both carriers, not a socket-exempt channel; not re-litigated here), any write to liveness (§1 —
 the socket never touches it), the S6 live acceptance itself (#960),
 and the push lane's sender loop (#1094 — a different D-series).
