@@ -1123,6 +1123,15 @@ def cmd_release(args):
     store_dir = _ensure_store(args.store)
     template = _check_template(args.template)
     channel = _check_id(args.channel, "--channel") if args.channel else "stable"
+    # #1343 item 5: D-RC-7 (S2) keys on the exact spelling "security" —
+    # a miscapitalized channel (Security/SECURITY) passes the id grammar
+    # but silently travels normal waves, the bad failure direction. Refuse
+    # mixed case at release time so the operator fixes the spelling
+    # instead of shipping a "security" release that is not one.
+    if channel != channel.lower():
+        _fail(f"--channel must be lowercase (the expedited channel is "
+              f"exactly \"security\" — D-RC-7 keys on the spelling), "
+              f"got {channel!r}")
     deployment_id = _check_id(args.deployment_id, "--deployment-id")
     worker_sha256 = _check_sha256(args.worker_sha256)
 
@@ -1254,7 +1263,14 @@ def build_parser():
 
     p_rel = sub.add_parser("release", help="pin a template release (D-RC-2 manifest)")
     p_rel.add_argument("--template", required=True)
-    p_rel.add_argument("--channel", default="stable")
+    # #1343 item 5: the expedited security channel is the exact spelling
+    # "security", lowercase — D-RC-7 keys on it, and mixed case is
+    # refused at release time (cmd_release) so a miscapitalized release
+    # cannot silently travel normal waves.
+    p_rel.add_argument("--channel", default="stable",
+                       help="release channel (default stable; the expedited "
+                            "security channel is exactly \"security\", "
+                            "lowercase)")
     p_rel.add_argument("--deployment-id", required=True)
     p_rel.add_argument("--worker-sha256", required=True)
     p_rel.add_argument("--notes", default="")

@@ -531,3 +531,26 @@ def test_s1_deploy_and_retire_preserve_artifact_identity(store):
     assert rec["deployment_id"] == "dep-9"
     assert rec["worker_sha256"] == "cc" * 32
     assert rec["status"] == "retired"
+
+
+def test_release_rejects_non_lowercase_channel(store):
+    # #1343 item 5: D-RC-7 keys on the exact spelling "security" — a
+    # miscapitalized channel (Security/SECURITY) passes the id grammar
+    # but would silently travel normal waves, the bad failure direction,
+    # so release refuses it at the boundary.
+    # Neuter: deleting the lowercase check must flip the "Security"
+    # assertion below.
+    p = _release(store, channel="Security")
+    assert p.returncode == 2
+    assert "lowercase" in p.stderr
+    p = _release(store, channel="SECURITY")
+    assert p.returncode == 2
+    assert "lowercase" in p.stderr
+    p = _release(store, channel="Canary")
+    assert p.returncode == 2
+    # The exact spellings still pin releases.
+    assert _release(store, channel="security").returncode == 0
+    p = _release(store, template="t-stable-2", channel="stable",
+                 deployment_id="dpl_stable2")
+    assert p.returncode == 0, p.stderr
+    assert _json(p)["channel"] == "stable"

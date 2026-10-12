@@ -293,6 +293,60 @@ def test_waves_live_wave_bool_fails_closed(store):
     assert "refusing deploys" in p.stderr
 
 
+def test_waves_negative_live_wave_fails_closed_on_deploy_and_rollback(store):
+    # A negative live_wave is a corrupt wave file the S2 reader refuses;
+    # the S4 reader must refuse it too — otherwise the two readers of the
+    # same file disagree and the S4 gate would deploy the plane as "in"
+    # wave -1 (assigned == live_wave passes the old gate). The queried
+    # plane's assignment is a valid wave on purpose: only the _read_waves
+    # guard can fire here, so the test pins that guard, not the _gates
+    # backstop.
+    # Neuter: deleting the negativity guard in _read_waves must flip both
+    # refusal assertions below (without it the file reads clean and the
+    # plane refuses only as "not in the live wave", which carries neither
+    # asserted phrase).
+    _register_release(store)
+    _plant_waves(store, -1, {"plane-1": 1})
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "refusing deploys" in p.stderr
+    assert "'live_wave' is negative" in p.stderr
+    p = _cli(store, "rollback", "--plane-id", "plane-1", "--dry-run")
+    assert p.returncode == 2
+    assert "refusing deploys" in p.stderr
+    assert "'live_wave' is negative" in p.stderr
+
+
+def test_waves_canary_zero_admits(store):
+    # The negativity guards pin wave 0 (canary) as the lower bound: wave 0
+    # must keep admitting planes in S4 exactly as S2 promotes them.
+    # Neuter: changing either guard to `<= 0` must flip this (canary
+    # deploys would refuse while S2 kept promoting them).
+    _register_release(store)
+    _plant_waves(store, 0, {"plane-1": 0})
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 0, p.stderr
+    assert _json(p)["gates"]["live_wave"] == 0
+
+
+def test_waves_negative_assignment_fails_closed_as_corrupt_not_placement(store):
+    # The S2 reader fails closed on a negative per-plane wave; the S4
+    # per-plane gate must match. Without the guard the plane would refuse
+    # with "not in the live wave" — misreading a corrupt file as a
+    # placement decision.
+    # Neuter: deleting the negativity predicate in _gates must flip the
+    # message assertion (the refusal would read as a placement refusal).
+    _register_release(store)
+    _plant_waves(store, 1, {"plane-1": -1})
+    p = _cli(store, "deploy", "--plane-id", "plane-1", "--template", "w@v1",
+             "--dry-run")
+    assert p.returncode == 2
+    assert "refusing deploys" in p.stderr
+    assert "non-negative integer wave" in p.stderr
+
+
 def test_deploy_retired_plane_refused(store):
     # The controller must not promote into retired planes: the driver
     # refuses the push (S1's inventory `deploy` keeps the intentional

@@ -65,17 +65,24 @@ box. No new box-side daemon, no new inbound port, no control plane.
   designated canary tenants' planes, via `canary-tenants` (takes effect
   on the next `assign`, not on a live rollout); the rest use
   the box lane's `sha256(plane_id) mod buckets` rule; single-plane
-  estates get no automatic canary) and opens the rollout; `promote`
+  estates get no automatic canary) and opens the rollout; `assign
+  --dry-run` prints the would-be wave map and writes nothing (all
+  refusals fire as in a real assign); `assign` warns on stderr about
+  degraded assigned planes (a degraded plane in the live wave refuses
+  promotion); `promote`
   advances the live wave when the D-RC-4 gate passes (every live-wave
   plane on the template, fresh, operator-observed healthy — never
   self-reported health) and stamps each landed plane's `last_known_good`
   rollback pin (F-RC-6's only writer; pins come from the release record,
-  never invented); `halt` stops a bad rollout with an audited reason
+  never invented); gate refusals are audited (action `promote_refused`,
+  carrying the reason, wave, and staleness window) and successful
+  promotions record the staleness window they were gated on; `halt` stops a bad rollout with an audited reason
   (resume by re-assigning the same template after a false alarm —
   landed waves re-verify instantly — or a new template carrying the
   fix);
   `status` reports the rollout read-only. Security releases (release
-  `channel: security`) travel compressed waves — canary + one wave —
+  `channel: security`, exactly lowercase — mixed case is refused at
+  release time) travel compressed waves — canary + one wave —
   never ungated (D-RC-7's answer to F-RC-9: convergence identity is the
   template version alone; the expedited path rides the release's channel
   field, not a separate flag). Writes `waves.json` (the S4 driver's

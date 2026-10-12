@@ -59,6 +59,35 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- `muse-job approvals` / `decide` / `answer` operator subcommands
+  (2026-10-12, #1372 slice 1): MSP jobs' pending tool approvals and
+  user-input prompts are now inspectable and answerable from the CLI
+  instead of only through the `msp_approval.py` smoke CLI — `approvals`
+  lists them (redacted by default; `--show-secrets` with `--json`
+  prints raw wire params with the standard stderr warning), `decide`
+  resolves one approval with the requirementId race guard read fresh,
+  `answer` takes answers as JSON and requires the operator to explicitly
+  classify the prompt (`--trust-policy-opt-in` for trust prompts,
+  carrying the recorded #211 fail-closed policy, or
+  `--classified-not-trust-prompt`); `muse-job status` now shows pending
+  approval/user-input counts so a job blocked on operator input says so
+  on the primary overview. Honest scope: the commands drive a session
+  over a fresh `muse serve` connection, so while the job's supervisor
+  holds the session (the whole turn, MSP single-attach) they fail with
+  an explicit error naming the not-yet-wired slice-2 supervisor routing
+  rather than the confusing attach refusal; routing decisions through
+  the supervisor is the #1372 follow-up slice.
+  (#1377)
+
+- The rollout controller's `assign` command gains a `--dry-run` mode
+  (2026-10-12): it prints the would-be wave map — wave buckets, canary
+  planes, the opening wave — and writes nothing, so a misconfigured
+  canary set can be checked before opening a rollout that would need a
+  terminal halt to redo; refusals (frozen store, live rollout, unpinned
+  template) fire exactly as in a real assign. `assign` also warns on
+  stderr when an assigned plane is degraded, since a degraded plane in
+  the live wave refuses promotion. (#1374)
+
 - Credential-vending lane re-derived against the one-plane-per-tenant
   model (2026-10-12): a consequence sweep of the #850 lane's open items
   after the tenancy decision — the vend tables need no tenant column on
@@ -66,6 +95,22 @@ codified as rule 6 so future watch bullets arrive compliant.)
   data key are superseded (one key per tenant plane), and the audit
   retention question still gates the S3 plane endpoint's migration.
   (#1364) (#1366)
+
+- Vend-lane convergence pin after the contract amendment (2026-10-12):
+  post-#1364 vision-vs-state for the #850 credential-vending lane —
+  the filed S2-contract amendment is verified landed, the sweep's stale
+  "not landed" lines are corrected, and one genuinely-new gap is filed:
+  the push lane's schema contract carries the same retired "one data
+  key protects all tenants" claim (#1375). (#1376)
+
+- Operator runbook for the D9 reminder/digest sweep (2026-10-12): the
+  "I'm holding the pager" half of the push lane's sweep scheduler — how
+  to run it, the summary's disposition vocabulary, the three passes'
+  verified behaviors, capacity sizing, the honest trigger-ownership
+  model, the DO-alarm retirement flag, the full failure catalog, and
+  verification probes; every behavioral claim probed against the real
+  module. Also corrects one sweep docstring that named the terminal
+  audit row with the summary's disposition word. (#1368)
 
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the
@@ -229,7 +274,63 @@ codified as rule 6 so future watch bullets arrive compliant.)
   truncation — the message stays operator-readable, nothing raw reaches
   the log. (#1359)
 
+- Deploy driver now refuses negative rollout-wave numbers (2026-10-12):
+  the wave machine's own reader failed closed on a negative wave, but the
+  deploy driver's reader accepted one — a hand-edited wave file with a
+  negative wave would have let a plane deploy as "in" wave -1. Both
+  readers now refuse a negative wave or assignment, so the two halves of
+  the rollout controller agree on the same wave contract. (#1373)
+
 ### Fixed
+
+- Push-lane convergence doc re-pinned to post-ship state (2026-10-12):
+  `docs/PUSH_LANE_CONVERGENCE_2026-10-10.md` was pinned to main `08422db`
+  and still showed "Retention + GC | OPEN (#1058)" after #1058 shipped
+  (`hosted/push_gc.py`, PR #1300). The GC row now records the shipped
+  module (D91 deletion predicates; D95 LIMIT-batched idempotent rounds
+  with per-table counts; D92 `queued`-immortal and D93 subscriptions-never
+  exclusions), the sender-loop row carries the post-pin hardening
+  (D96/D97 tick bounds + poison-suspect #1360, digest-count validation
+  #1358, repr-escaped anomalies #1361), the D9 sweep row points at the
+  operator guide (PR #1368), §3's unbuilt list drops GC, and a dated §6
+  refresh note folds the rest of the post-pin ships. (#1378)
+
+- Promotion-gate refusals in the rollout controller are now audited
+  (2026-10-12): a refused `promote` (bad wave signal or unconverged
+  wave) appends a refusal record — template, wave, refusal reason, and
+  the staleness window it was gated on — to the wave audit journal, so
+  a refused promotion that does not lead to a halt leaves a trace for
+  the wave-health reporting; successful promotions also record the
+  staleness window they were gated on. (#1374)
+
+- The rollout controller's release command now refuses mixed-case
+  channels (2026-10-12): the expedited security channel is exactly
+  `security`, lowercase — a miscapitalized `Security`/`SECURITY`
+  release previously passed validation but silently traveled normal
+  waves instead of the compressed security waves. (#1374)
+
+- The agent-jail rebuild flag is now atomic (2026-10-12) (#1371): the
+  fresh install is built into a staging directory while the jail keeps
+  serving, then the jail is stopped (a failed stop aborts the build
+  loudly rather than swapping a live tree), the directories are
+  rename-swapped, and the jail restarted. Previously an aborted rebuild
+  could strand the box with no root filesystem at all; now a failed
+  install leaves the old tree intact, and jail downtime shrinks from
+  minutes to seconds.
+
+- The credential-vending contract's hosted tenancy claims now match the
+  decided one-plane-per-tenant model (2026-10-12) (#1371): the retired
+  "box_id is 1:1 with the tenant" claim becomes the record-level key
+  within the tenant plane's own database (the plane is the tenant), and
+  the retired single-global data key becomes one key per tenant plane —
+  each protecting only its own tenant's values, with the rotation bound
+  applying per plane. No endpoint, schema, or behavior change.
+
+- The agent-jail rebuild flag now stops a running jail before deleting
+  its root filesystem (2026-10-12): previously a rebuild requested while
+  the jail was running left the old container executing on the deleted
+  tree and the fresh install unused — the rebuild silently did nothing
+  until the next reboot. (#1369)
 
 - The push-sender tick now bounds its own work (2026-10-12, #1360): an
   optional per-tick time budget stops the loop from claiming new pages
@@ -1691,6 +1792,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - muse-job v2 (MSP cutover): the CLI now drives jobs over the protocol — `muse-job spawn` starts a job as a `muse serve` session by default (`--tmux` opts back into the legacy tmux TUI pane), and `steer`, `status`, `log`, `kill`, `resume`, `close`, and `watch` all branch on the job's recorded transport, so MSP and tmux jobs can run side by side. Status and the watchdog fold the serve event stream into job states (working, blocked on approval or input, stalled, turn failed); the watchdog runs the dead-turn recovery ladder automatically on stalled jobs; `log` shows the redacted signal journal rather than transcript text. The tmux path is unchanged as the `--tmux` fallback; the Muse Code delegation playbook documents both transports. (#227)
 
 - muse-job v2 (MSP cutover): the view-plane layer is now implemented and hermetically tested — job liveness and state (working, blocked on approval or input, stalled, idle, turn failed) now derive from the `muse serve` event stream instead of scraping a terminal, with gapless replay from a per-job cursor and automatic re-seeding when the server reports dropped events. The status/watch rewire stays a later cutover slice (#227). (#224)
+
+- muse-job v2 (MSP cutover): the approval/user-input plane is now implemented and hermetically tested — pending tool approvals are listed and decided over the protocol with the requirement-id race guard, and user-input prompts (including workspace trust) are answered with explicit structured answers validated client-side before they touch the wire. Trust prompts stay fail-closed by default: auto-answering one requires an explicit operator opt-in, and the standing `--yolo` posture (which only governs tool approvals) never answers them implicitly. The legacy tmux-path prompt handling is unchanged. (#789)
 
 - Contributor DX: the pre-deploy gate's test-file coverage pin now leads with the fix when it fails — both mismatch failures state the actionable fix site on the failure's first line instead of after unittest's list-diff output, so the next contributor sees what to edit without scrolling past the diff. (#781)
 - Tenant-box update channel, cluster close-out (G11–G20): a composition audit across the ten update-channel design docs finds no contradictions — fail-closed gating, the two-part freeze bound, the pinned provisioned trust root, chain-safe journal retention, and never-interrupt-an-arc are stated identically everywhere they appear — and closes the five design issues that had shipped with pointer comments (#555 trust model, #556 idle/suspend, #606 rollout controller, #609 release-gating channel, #660 audit retention). The remaining work is tracked on five new implementation issues: trust-model slices (#775), idle/suspend slices (#776), rollout controller plus gate channel (#777), retention GC plus the tenant read path (#778), and the orphaned fleet inventory and event-reporting slices (#779) — implementation-only except one design remainder, the signed box-to-control-plane channel mechanism, which is designed inside #775's S3. (#780)
