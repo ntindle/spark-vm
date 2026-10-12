@@ -276,6 +276,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Push-lane convergence doc re-pinned to post-ship state (2026-10-12):
+  `docs/PUSH_LANE_CONVERGENCE_2026-10-10.md` was pinned to main `08422db`
+  and still showed "Retention + GC | OPEN (#1058)" after #1058 shipped
+  (`hosted/push_gc.py`, PR #1300). The GC row now records the shipped
+  module (D91 deletion predicates; D95 LIMIT-batched idempotent rounds
+  with per-table counts; D92 `queued`-immortal and D93 subscriptions-never
+  exclusions), the sender-loop row carries the post-pin hardening
+  (D96/D97 tick bounds + poison-suspect #1360, digest-count validation
+  #1358, repr-escaped anomalies #1361), the D9 sweep row points at the
+  operator guide (PR #1368), §3's unbuilt list drops GC, and a dated §6
+  refresh note folds the rest of the post-pin ships. (#TBD)
+
 - Promotion-gate refusals in the rollout controller are now audited
   (2026-10-12): a refused `promote` (bad wave signal or unconverged
   wave) appends a refusal record — template, wave, refusal reason, and

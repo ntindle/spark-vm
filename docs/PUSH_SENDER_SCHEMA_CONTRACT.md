@@ -137,8 +137,8 @@ attempts" implementable: a page that is retried three times then
 accepted holds one reservation and lands four rows (three `retry` +
 one `accepted`) but consumes one unit of budget; a page that
 dead-letters releases its reservation, consuming zero. Stale hour
-buckets are never read again; GC of buckets older than 90 days is
-filed follow-up #1058 (see §4).
+buckets are never read again; GC of buckets older than 90 days shipped
+as `hosted/push_gc.py` (#1058 — see §4).
 
 ### 1.3 `push_send_results` — the record #428's §4 criterion consumes
 
