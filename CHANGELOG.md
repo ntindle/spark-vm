@@ -233,7 +233,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
-- The agent-jail rebuild flag is now atomic (2026-10-12) (#TBD): the
+- The agent-jail rebuild flag is now atomic (2026-10-12) (#1371): the
   fresh install is built into a staging directory while the jail keeps
   serving, then the jail is stopped (a failed stop aborts the build
   loudly rather than swapping a live tree), the directories are
@@ -243,7 +243,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   minutes to seconds.
 
 - The credential-vending contract's hosted tenancy claims now match the
-  decided one-plane-per-tenant model (2026-10-12) (#TBD): the retired
+  decided one-plane-per-tenant model (2026-10-12) (#1371): the retired
   "box_id is 1:1 with the tenant" claim becomes the record-level key
   within the tenant plane's own database (the plane is the tenant), and
   the retired single-global data key becomes one key per tenant plane —
