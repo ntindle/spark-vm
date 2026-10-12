@@ -313,9 +313,18 @@ def _build_pin(store_dir, template):
     return _check_pin_shape(pin)
 
 
-def _stamp_landed_pins(store_dir, plane_ids, template):
+def _stamp_landed_pins_locked(store_dir, plane_ids, template):
     """Write last_known_good for each landed plane (F-RC-6's writer: ONLY
     the S2 promotion step writes these pins; S1/S3/S4 preserve them).
+
+    Caller must hold events.journal_lock: the stamps are part of the
+    promotion's critical section — after the in-lock freeze check and
+    re-gate — so a freeze landing mid-promote (#1345) cannot leave pins
+    on a refused rollout, and no plane record can change between its
+    gate read and its pin write. The lock cannot nest (journal_lock
+    raises JournalLockError on re-entry), hence the
+    record_plane_observation_locked variant — one lock acquisition, one
+    critical section.
 
     Idempotent: a plane already pinned to this exact (template,
     deployment, sha256) is skipped, so re-running promote after a crash
@@ -338,7 +347,7 @@ def _stamp_landed_pins(store_dir, plane_ids, template):
             continue
         record = dict(current)
         record["last_known_good"] = pin
-        plane_inventory.record_plane_observation(store_dir, record)
+        plane_inventory.record_plane_observation_locked(store_dir, record)
         stamped.append(plane_id)
     return stamped
 
@@ -511,19 +520,19 @@ def cmd_promote(args):
     live_wave = waves["live_wave"]
 
     # Frozen means nothing changes: refuse before the gate and before any
-    # pin write. (The in-lock check below stays authoritative against a
-    # freeze that lands mid-promote.)
+    # pin write. The in-lock check below stays authoritative against a
+    # freeze that lands mid-promote — and the pin stamps now happen inside
+    # the same lock acquisition, after it (#1345), so the whole promotion
+    # is atomic with respect to the freeze.
     if plane_inventory.read_controller_freeze(store_dir):
         _fail("controller store is frozen — promotion refused (D-RC-5)")
 
-    ok, reason, landed = _wave_gate(store_dir, waves, template, stale_hours)
+    # Pre-lock gate: fast refusal without contending the store lock. The
+    # in-lock re-gate below is authoritative; this one's landed-plane
+    # list is advisory only (the stamps use the re-gated list).
+    ok, reason, _landed = _wave_gate(store_dir, waves, template, stale_hours)
     if not ok:
         _fail(f"promotion refused: {reason}")
-
-    # F-RC-6: the promotion step writes each landed plane's
-    # last_known_good pin. Idempotent (see _stamp_landed_pins), so a
-    # crash between here and the wave advance is safe to re-run.
-    stamped = _stamp_landed_pins(store_dir, landed, template)
 
     with events.journal_lock(store_dir):
         fresh = _read_waves(store_dir)
@@ -540,10 +549,14 @@ def cmd_promote(args):
             _fail("rollout state changed during promotion — re-run promote")
         if plane_inventory.read_controller_freeze(store_dir):
             _fail("controller store is frozen — promotion refused (D-RC-5)")
-        ok2, reason2, _landed2 = _wave_gate(store_dir, fresh, template,
-                                            stale_hours)
+        ok2, reason2, landed2 = _wave_gate(store_dir, fresh, template,
+                                           stale_hours)
         if not ok2:
             _fail(f"promotion refused: {reason2}")
+        # F-RC-6: the promotion step writes each landed plane's
+        # last_known_good pin. Idempotent (see _stamp_landed_pins_locked),
+        # so a crash between here and the wave advance is safe to re-run.
+        stamped = _stamp_landed_pins_locked(store_dir, landed2, template)
         remaining = sorted(
             {wave for wave in fresh["assignments"].values()
              if wave > live_wave}
@@ -561,7 +574,7 @@ def cmd_promote(args):
         _audit_locked(
             store_dir, "promote", template_version=template,
             from_wave=live_wave, to_wave=new_live,
-            landed_planes=landed, pins_written=stamped,
+            landed_planes=landed2, pins_written=stamped,
             notes=args.notes or "",
         )
     result = {
