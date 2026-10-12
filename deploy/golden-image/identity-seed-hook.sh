@@ -31,12 +31,14 @@
 #   boot sequence.
 # - Ownership (#1220 Option B): on the golden image (sparkpair home
 #   present) the hook enrolls into the box-service user's state dir and
-#   chown -R's it to sparkpair after a successful request — the five
-#   pairing entrypoints run as sparkpair under supervisord, and the
-#   ingest/upload-filings ticks enforce that DAC ownership. The manual
-#   `redeem` command the hook logs runs as sparkpair too. Off-image the
-#   ownership handoff is skipped with a loud warning (the user does not
-#   exist there) and the hook keeps its historical state-dir default.
+#   chown -R's it to sparkpair after a successful request — the three
+#   wired pairing entrypoints (heartbeat, rotate, phone-home) run as
+#   sparkpair under supervisord (ingest/upload-filings stay unwired
+#   pending #1363's store-access design), and the ingest/upload-filings
+#   ticks enforce that DAC ownership. The manual `redeem` command the
+#   hook logs runs as sparkpair too. Off-image the ownership handoff is
+#   skipped with a loud warning (the user does not exist there) and the
+#   hook keeps its historical state-dir default.
 #
 # Operator mode: `identity-seed-hook.sh --propagate-plane-push-signal`
 # re-derives only the #1268 plane-push signal from existing pairing state
