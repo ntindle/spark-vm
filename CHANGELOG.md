@@ -279,6 +279,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The push lane's clock boundary now rejects non-finite clock readings
+  (2026-10-12): the reminder sweep and the sender loop both document
+  that a bad clock reading is a loud `ValueError`, but an infinite
+  epoch reading escaped as a different exception type that
+  fail-closed callers didn't catch — the reading now fails closed as
+  documented. (#TBD)
 - Wave assignment now reads the fleet inventory under the store lock
   (2026-10-12): the rollout controller previously computed wave
   assignments from a pre-lock inventory read, so a plane retired (or a

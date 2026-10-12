@@ -608,3 +608,22 @@ def test_bad_clock_fails_loud(conn):
     reg = _registry({"box-1": "owner-1"})
     with pytest.raises(ValueError):
         push_sweep.sweep_once(conn, now="soon", resolve_owner=reg)
+
+
+def test_utcnow_rejects_bad_epoch():
+    # Finding A (security turn, slot 20261012-1500): inf/-inf raised
+    # OverflowError from datetime.fromtimestamp, violating the
+    # documented ValueError contract ("a sweep must never run on an
+    # untrusted clock reading"). NaN happened to raise ValueError
+    # already; pin all six as ValueError.
+    for bad in (float("inf"), float("-inf"), float("nan"),
+                1e300, -1e300, 10**400):
+        with pytest.raises(ValueError):
+            push_sweep._utcnow(bad)
+
+
+def test_utcnow_accepts_finite_epoch():
+    # The finite check must not reject ordinary epoch inputs.
+    assert push_sweep._utcnow(0.0) == datetime(1970, 1, 1,
+                                              tzinfo=timezone.utc)
+    assert push_sweep._utcnow(1700000000).year == 2023
