@@ -52,6 +52,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet-consumption lane, part 2: sentinel feed + metering as the
+  fourth source (2026-10-11): a vision-vs-state analysis of the two
+  remaining unanalyzed fleet consumers after the one-plane-per-tenant
+  decision — the sentinel's audit-log feed now has a placement (the
+  operator plane) and a transport leg (tenant-plane-to-operator-plane
+  shipment, one channel with kind-discriminated records, sequence
+  gaps fail-visible), and metering's fleet-stream source now has its
+  dependencies named honestly (the meter-envelope record schema, the
+  missing maintenance-window producer). Three genuinely-new gaps
+  filed: the sentinel feed transport spec, the meter-envelope schema,
+  and the maintenance-window event kinds. (#1349, #1350, #1351)
+
 - Tenant-plane rollout controller: plane update-event reporting
   (2026-10-11): the wave-health signal promotion gates consume — an
   operator-observed journal of deploy started/landed/deferred/failed and
