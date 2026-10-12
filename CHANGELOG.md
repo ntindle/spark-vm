@@ -204,7 +204,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   produced a rollout file naming the retired plane — the downstream
   gates refused to act on it, but the rollout contradicted the
   inventory until the operator re-ran. Assignments are now computed
-  from inputs re-read inside the lock, closing the window. (#TBD)
+  from inputs re-read inside the lock, closing the window. (#1362)
 
 - Push-sender tick summaries no longer interpolate raw exception text
   (2026-10-12): the per-tick `error` anomaly escaped only the work item,
