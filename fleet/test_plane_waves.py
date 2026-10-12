@@ -650,7 +650,7 @@ def test_promote_freeze_mid_promote_writes_no_pins(store):
     @contextlib.contextmanager
     def freezing_lock(store_dir, timeout_s=None):
         # Freeze the store in the window the bug lived in: after the
-        # pre-lock gate, before the critical section's lock acquisition.
+        # pre-lock reads, before the critical section's lock acquisition.
         if not frozen["done"]:
             frozen["done"] = True
             with open(os.path.join(store_dir, "freeze.json"), "w",
@@ -762,3 +762,205 @@ def test_corrupt_observed_at_fails_closed_loudly(store):
     assert p.returncode == 2
     assert "stale-record" not in p.stderr
     assert "internal error" in p.stderr
+
+
+def test_promote_refused_bad_signal_is_audited(store):
+    # #1343 item 1: a promote refusal (bad-signal) must land in
+    # waves_journal.jsonl — a refused promotion that does not lead to a
+    # halt leaves no trace otherwise, and these are exactly the
+    # wave-health signals the S5 reporting consumes.
+    # Neuter: deleting the _audit_locked call on the refusal path must
+    # flip the "promote_refused" assertion.
+    _estate(store, n=2, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    _deploy(store, "plane-0", "w@v1", status="degraded")
+    p = _cli(store, "promote")
+    assert p.returncode == 2
+    assert "bad-signal" in p.stderr
+    journal = [json.loads(ln) for ln in
+               open(os.path.join(store, "waves_journal.jsonl"),
+                    encoding="utf-8") if ln.strip()]
+    refused = [r for r in journal if r["action"] == "promote_refused"]
+    assert len(refused) == 1
+    rec = refused[0]
+    assert rec["template_version"] == "w@v1"
+    assert rec["from_wave"] == 0
+    assert "bad-signal" in rec["reason"]
+    # Item 2: the refusal carries the staleness window it was gated on.
+    assert rec["stale_hours"] == plane_inventory.DEFAULT_STALE_HOURS
+    # The rollout did not advance: the audit is a trace, not a promotion.
+    assert _waves_json(store)["live_wave"] == 0
+
+
+def test_promote_refused_not_converged_is_audited(store):
+    # #1343 item 1, second refusal class: not-converged refusals are
+    # audited too, with the effective (explicit) staleness window.
+    _estate(store, n=2, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    p = _cli(store, "promote", "--stale-hours", "5")
+    assert p.returncode == 2
+    assert "has not landed" in p.stderr
+    journal = [json.loads(ln) for ln in
+               open(os.path.join(store, "waves_journal.jsonl"),
+                    encoding="utf-8") if ln.strip()]
+    refused = [r for r in journal if r["action"] == "promote_refused"]
+    assert len(refused) == 1
+    assert refused[0]["stale_hours"] == 5.0
+    assert "has not landed" in refused[0]["reason"]
+
+
+def test_promote_audit_records_stale_hours(store):
+    # #1343 item 2: the successful-promote audit records the staleness
+    # window the wave was promoted on — default and explicit alike.
+    # Neuter: dropping stale_hours from the promote audit must flip
+    # both assertions below.
+    _estate(store, n=2, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    _deploy(store, "plane-0", "w@v1", status="healthy")
+    assert _cli(store, "promote").returncode == 0
+
+    def _journal():
+        return [json.loads(ln) for ln in
+                open(os.path.join(store, "waves_journal.jsonl"),
+                     encoding="utf-8") if ln.strip()]
+
+    promoted = [r for r in _journal() if r["action"] == "promote"]
+    assert len(promoted) == 1
+    assert promoted[0]["stale_hours"] == plane_inventory.DEFAULT_STALE_HOURS
+    # Promote the rest of the rollout on an explicit window.
+    waves = _waves_json(store)
+    rest = [pid for pid, w in waves["assignments"].items() if w != 0]
+    for pid in rest:
+        _deploy(store, pid, "w@v1", status="healthy")
+    while _waves_json(store)["live_wave"] is not None:
+        assert _cli(store, "promote", "--stale-hours", "5").returncode == 0
+    promoted = [r for r in _journal() if r["action"] == "promote"]
+    assert len(promoted) >= 2
+    assert promoted[-1]["stale_hours"] == 5.0
+
+
+def test_assign_dry_run_writes_nothing(store):
+    # #1343 item 3: --dry-run prints the would-be wave map and writes
+    # nothing — no waves.json, no journal record.
+    # Neuter: removing the dry-run early return must flip the
+    # waves.json-absence assertion.
+    _register(store, "plane-1", tenant_id="t1")
+    _release(store)
+    p = _cli(store, "assign", "--template", "w@v1", "--dry-run")
+    assert p.returncode == 0, p.stderr
+    out = _json(p)
+    assert out["dry_run"] is True
+    assert out["action"] == "assign"
+    assert out["template_version"] == "w@v1"
+    assert out["assignments"] == {"plane-1": 1}
+    assert out["live_wave"] == 1
+    assert not os.path.exists(os.path.join(store, "waves.json"))
+    journal_path = os.path.join(store, "waves_journal.jsonl")
+    actions = []
+    if os.path.exists(journal_path):
+        actions = [json.loads(ln)["action"] for ln in
+                   open(journal_path, encoding="utf-8") if ln.strip()]
+    assert "assign" not in actions
+    # A real assign afterwards still works — the dry run changed nothing.
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 0, p.stderr
+    assert _waves_json(store)["live_wave"] == 1
+
+
+def test_assign_dry_run_refusals(store):
+    # #1343 item 3: a dry run is a check, not a bypass — refusals fire
+    # exactly as in a real assign.
+    # Neuter: skipping the refusal checks in dry-run mode must flip the
+    # frozen assertion (exit 0 instead of 2).
+    _register(store, "plane-1", tenant_id="t1")
+    _release(store)
+    assert _deploy_cli(store, "freeze", "--on").returncode == 0
+    p = _cli(store, "assign", "--template", "w@v1", "--dry-run")
+    assert p.returncode == 2
+    assert "frozen" in p.stderr
+    assert not os.path.exists(os.path.join(store, "waves.json"))
+    assert _deploy_cli(store, "freeze", "--off").returncode == 0
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    p = _cli(store, "assign", "--template", "w@v1", "--dry-run")
+    assert p.returncode == 2
+    assert "live at wave" in p.stderr or "already live" in p.stderr
+
+
+def test_assign_warns_on_degraded_planes(store):
+    # #1343 item 4: assign warns (stderr, never stdout's JSON) when an
+    # assigned plane is degraded — the wave cannot promote until it is
+    # healthy or re-observed.
+    # Neuter: deleting the warning print must flip the stderr assertion.
+    _register(store, "plane-1", tenant_id="t1")
+    _register(store, "plane-2", tenant_id="t2")
+    _release(store)
+    _deploy(store, "plane-2", "w@v1", status="degraded")
+    p = _cli(store, "assign", "--template", "w@v1", "--dry-run")
+    assert p.returncode == 0, p.stderr
+    assert "warning" in p.stderr
+    assert "plane-2" in p.stderr
+    # stdout stays pure JSON — the warning goes to stderr.
+    out = _json(p)
+    assert out["dry_run"] is True
+    assert out["degraded_planes"] == ["plane-2"]
+    # And the warning fires on a real assign too (not dry-run-only).
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 0, p.stderr
+    assert "warning" in p.stderr
+    assert "plane-2" in p.stderr
+
+
+def test_assign_refuses_legacy_mixed_case_channel(store):
+    # #1374 round-1 (Security B1): the release-time spelling refusal only
+    # guards NEW releases — a record pinned BEFORE the guard (mixed-case
+    # channel, e.g. "Security") still reads back, misses the D-RC-7 exact
+    # match, and would silently travel normal waves: the same
+    # bad-failure-direction hole. cmd_assign fails closed on a
+    # non-lowercase stored channel; the recovery path is a re-release
+    # with the exact spelling (never silent normalization).
+    # Neuter: deleting the cmd_assign lowercase check must flip the
+    # assertions below (the assign would succeed with normal waves).
+    _estate(store, canary_tenants=("ct1", "ct2"))
+    # Seed a legacy record directly into journal + snapshot, bypassing
+    # cmd_release (which now refuses mixed case) — this is exactly what
+    # a pre-guard record looks like on disk. Journal and snapshot carry
+    # the whole record identically (whole-record consistency check).
+    record = {
+        "schema": "plane-template-release/1",
+        "template_version": "w@v1",
+        "channel": "Security",
+        "deployment_id": "dep-legacy",
+        "worker_sha256": _SHA_A,
+        "released_at": "2026-10-01T00:00:00+00:00",
+        "reporter": "operator",
+        "notes": "",
+    }
+    with open(os.path.join(store, "releases_journal.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with open(os.path.join(store, "releases.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema": "plane-template-releases-snapshot/1",
+                   "releases": {"w@v1": record}}, fh, sort_keys=True)
+        fh.write("\n")
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 2
+    assert "lowercase" in p.stderr
+    # No rollout opened: the mixed-case record cannot travel normal
+    # waves (nor compressed ones) silently.
+    assert not os.path.exists(os.path.join(store, "waves.json"))
+    # A properly spelled legacy record is still assignable.
+    record["channel"] = "security"
+    with open(os.path.join(store, "releases_journal.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with open(os.path.join(store, "releases.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema": "plane-template-releases-snapshot/1",
+                   "releases": {"w@v1": record}}, fh, sort_keys=True)
+        fh.write("\n")
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 0, p.stderr
