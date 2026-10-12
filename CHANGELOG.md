@@ -162,6 +162,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Rollout-controller promotion is now atomic with respect to the freeze
+  (2026-10-11, #1345): the wave-advance step used to write each landed
+  plane's rollback pin before taking the store lock, so a freeze landing
+  mid-promotion left pins on a refused rollout even though the advance
+  itself was refused. The pin writes now happen inside the same lock
+  acquisition as the freeze check and the re-verified promotion gate, so
+  a frozen store sees no promotion side effects at all. (#1347)
+
 - Fleet dashboard sync hardening (2026-10-11, #1339): the dashboard
   page's re-inline step and its test suite now refuse page sources that
   contain raw control bytes. The control-plane worker's hand-pasted

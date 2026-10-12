@@ -33,6 +33,7 @@ sys.path.insert(0, _HERE)
 import plane_deploy  # noqa: E402  (proves S2's waves.json satisfies S4's reader)
 import plane_inventory  # noqa: E402  (reads the S1 store in assertions)
 import plane_waves  # noqa: E402  (pin-shape unit tests)
+import events  # noqa: E402  (lock-behavior tests hold the store lock directly)
 
 
 def _run(cli, store, *argv):
@@ -468,6 +469,8 @@ def test_pin_never_invented_without_release(store):
 def test_pin_write_idempotent(store):
     # A second pin write for the same landing stamps nothing new: the
     # journal is append-only, so idempotency is "no new record".
+    # (#1345: the stamper is the in-lock variant; the unit test holds
+    # the store lock itself.)
     _register(store, "plane-1", tenant_id="t1")
     _release(store)
     _deploy(store, "plane-1", "w@v1", status="healthy")
@@ -478,10 +481,12 @@ def test_pin_write_idempotent(store):
             return [ln for ln in fh if ln.strip()]
 
     before = len(_journal_lines())
-    stamped = plane_waves._stamp_landed_pins(store, ["plane-1"], "w@v1")
+    with events.journal_lock(store):
+        stamped = plane_waves._stamp_landed_pins_locked(store, ["plane-1"], "w@v1")
     assert stamped == ["plane-1"]
     assert len(_journal_lines()) == before + 1
-    stamped = plane_waves._stamp_landed_pins(store, ["plane-1"], "w@v1")
+    with events.journal_lock(store):
+        stamped = plane_waves._stamp_landed_pins_locked(store, ["plane-1"], "w@v1")
     assert stamped == []
     assert len(_journal_lines()) == before + 1
 
@@ -574,6 +579,54 @@ def test_promote_frozen_writes_no_pins(store):
     assert "frozen" in p.stderr
     after = len([ln for ln in open(journal, encoding="utf-8") if ln.strip()])
     assert after == before
+
+
+def test_promote_freeze_mid_promote_writes_no_pins(store):
+    # #1345: the pin stamps must happen inside the store lock, after the
+    # in-lock freeze check — a freeze landing between the pre-lock gate
+    # and the lock acquisition must leave zero pins. (Previously the
+    # pre-lock _stamp_landed_pins wrote them before the in-lock check
+    # could refuse: the in-lock freeze check was authoritative for the
+    # wave advance but not for the pins.)
+    # Neuters that must flip this test: (a) revert _stamp_landed_pins_locked
+    # to the pre-lock call -> pins present; (b) skip the mid-promote
+    # freeze -> promote succeeds and pins are written.
+    import contextlib
+    from unittest import mock
+    _register(store, "plane-1", tenant_id="t1")
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    _deploy(store, "plane-1", "w@v1", status="healthy")
+    real_lock = events.journal_lock
+    frozen = {"done": False}
+
+    @contextlib.contextmanager
+    def freezing_lock(store_dir, timeout_s=None):
+        # Freeze the store in the window the bug lived in: after the
+        # pre-lock gate, before the critical section's lock acquisition.
+        if not frozen["done"]:
+            frozen["done"] = True
+            with open(os.path.join(store_dir, "freeze.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump({"schema": "plane-controller-freeze/1",
+                           "frozen": True,
+                           "set_at": "2026-10-11T21:00:00+00:00",
+                           "reporter": "operator",
+                           "notes": "mid-promote freeze"}, fh)
+        with real_lock(store_dir, timeout_s=timeout_s) as guard:
+            yield guard
+
+    with mock.patch.object(events, "journal_lock", freezing_lock):
+        with pytest.raises(SystemExit) as exc:
+            plane_waves.cmd_promote(
+                plane_waves.build_parser().parse_args(
+                    ["--store", store, "promote"]))
+    assert exc.value.code == 2
+    assert frozen["done"]
+    rec = plane_inventory.read_planes(store)["plane-1"]
+    assert rec["last_known_good"] is None
+    # The rollout did not advance either.
+    assert plane_waves._read_waves(store)["live_wave"] == 1
 
 
 def test_canary_tenants_invalid_id_fails_closed(store):

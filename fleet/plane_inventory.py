@@ -465,6 +465,26 @@ def read_planes(store_dir):
     return _snapshot(store_dir)["planes"]
 
 
+def _record_plane_observation_locked(store_dir, record):
+    """Append one plane observation record. Caller must hold events.journal_lock.
+
+    The lock-free half of record_plane_observation: lets a caller that
+    already holds the store lock (the S2 promotion step, #1345) write
+    observations inside its own critical section — journal_lock cannot
+    nest (a second flock on a new fd raises JournalLockError), so the
+    lock must be acquired once, by the outermost caller.
+    """
+    plane_id = record.get("plane_id")
+    if not plane_id:
+        _fail("record_plane_observation: record has no plane_id")
+    snap = _snapshot(store_dir)
+    if plane_id not in snap["planes"]:
+        _fail(f"plane {plane_id!r} is not registered (register first)")
+    _append_records_locked(store_dir, [record])
+    snap["planes"][plane_id] = record
+    _publish_snapshot(store_dir, snap["planes"])
+
+
 def record_plane_observation(store_dir, record):
     """Append one plane observation record: journal (source of truth) + derived snapshot.
 
@@ -483,16 +503,15 @@ def record_plane_observation(store_dir, record):
     This CLI is operator-run (single writer in practice); a future
     multi-writer controller should rebuild the record inside the lock.
     """
-    plane_id = record.get("plane_id")
-    if not plane_id:
-        _fail("record_plane_observation: record has no plane_id")
     with events.journal_lock(store_dir):
-        snap = _snapshot(store_dir)
-        if plane_id not in snap["planes"]:
-            _fail(f"plane {plane_id!r} is not registered (register first)")
-        _append_records_locked(store_dir, [record])
-        snap["planes"][plane_id] = record
-        _publish_snapshot(store_dir, snap["planes"])
+        _record_plane_observation_locked(store_dir, record)
+
+
+# Public alias for the S2 wave machine (fleet/plane_waves.py): the
+# promotion step stamps pins inside its own lock acquisition (the lock
+# cannot nest — see _record_plane_observation_locked), so it needs the
+# lock-free half directly.
+record_plane_observation_locked = _record_plane_observation_locked
 
 
 def append_cost_event(store_dir, plane_id, event, duration_s=None,
