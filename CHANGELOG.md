@@ -195,6 +195,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the convergence-check gate for rollout-wave promotion, and cost events
   with the D-MT5 operational-cost measurement. (#1293)
 
+### Security
+
+- Push-sender tick summaries no longer interpolate raw exception text
+  (2026-10-12): the per-tick `error` anomaly escaped only the work item,
+  so a hostile exception string carrying newlines or ANSI escapes could
+  inject fake lines into the operator-visible summary. Exception text is
+  now repr-escaped at the anomaly choke point, keeping the 500-character
+  truncation — the message stays operator-readable, nothing raw reaches
+  the log. (#1359)
+
 ### Fixed
 
 - The push-sender tick now bounds its own work (2026-10-12, #1360): an

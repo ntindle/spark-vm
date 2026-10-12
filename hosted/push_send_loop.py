@@ -742,11 +742,18 @@ def _note_tick_error(conn, summary, at, owner_principal, box_col,
             pass
     # %r on the item: the event key may carry newlines from a
     # plane bug — no raw log injection into the operator-visible
-    # anomaly. The exception text is truncated: a hostile
-    # multi-MB value must not become a multi-MB anomaly every
-    # tick.
+    # anomaly. The exception text is repr-escaped (#1359) and
+    # truncated: a hostile multi-MB value must not become a
+    # multi-MB anomaly every tick.
+    # #1359: the exception text was interpolated raw — a hostile
+    # exception string carrying newlines could inject fake lines into
+    # the operator-visible tick summary. repr-escape it, mirroring the
+    # %r-on-item precedent; the 500-char truncation applies to the
+    # escaped text, so a hostile multi-MB value still cannot become a
+    # multi-MB anomaly.
+    exc_text = "%r" % (str(exc),)
     summary.note("error", "%r (%s: %.500s)"
-                 % (item, type(exc).__name__, exc))
+                 % (item, type(exc).__name__, exc_text))
 
 
 def _release_reservation_statements(conn, box_id, owner_principal,
