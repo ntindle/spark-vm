@@ -1440,3 +1440,48 @@ def test_d97_error_bookkeeping_never_kills_the_tick(conn, owner, vapid):
     assert summary.dispositions["error"] == 1
     assert summary.dispositions["completed"] == 1
     assert any("aid-1" in r[5] for r in rows(conn) if r[6] == "error")
+
+
+def test_1359_error_anomaly_escapes_exception_text(conn, owner, vapid):
+    # #1359: the tick-error anomaly must not carry raw exception text —
+    # a hostile exception string with newlines / ANSI escapes / NUL
+    # would inject fake lines into the operator-visible summary. The
+    # exception is repr-escaped (the %r-on-item precedent); the
+    # exception class is still named and the message stays readable.
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+
+    hostile = "boom\nFAKE-LINE-INJECTED\x1b[31mred\x00trail"
+
+    def hostile_reader(box_id, aid):
+        raise ValueError(hostile)
+
+    summary = make_tick(conn, owner, vapid,
+                        record_reader=hostile_reader)()
+
+    assert summary.dispositions["error"] == 1
+    for note in summary.anomalies:
+        assert "\n" not in note
+        assert "\x1b" not in note
+        assert "\x00" not in note
+    # The escaped message is operator-readable; the class is named.
+    assert any("boom\\nFAKE-LINE-INJECTED\\x1b[31mred\\x00trail" in a
+               for a in summary.anomalies)
+    assert any("ValueError" in a for a in summary.anomalies)
+
+
+def test_1359_error_anomaly_truncation_survives_escaping(conn, owner,
+                                                         vapid):
+    # #1359: the 500-char bound applies to the escaped text — a hostile
+    # multi-KB exception must not become a multi-KB anomaly every tick.
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+
+    def long_reader(box_id, aid):
+        raise RuntimeError("x" * 5000)
+
+    summary = make_tick(conn, owner, vapid,
+                        record_reader=long_reader)()
+
+    assert summary.dispositions["error"] == 1
+    note = next(a for a in summary.anomalies if "RuntimeError" in a)
+    assert ("x" * 400) in note      # the bound is not over-eager
+    assert ("x" * 500) not in note   # the 500-char truncation holds
