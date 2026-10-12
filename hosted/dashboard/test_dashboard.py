@@ -254,11 +254,39 @@ def test_sync_refuses_triple_quote_html(tmp_path, monkeypatch):
     assert _inline_html(w) == _html()
 
 
+def test_sync_refuses_raw_control_bytes_html(tmp_path, monkeypatch):
+    # A canonical file carrying literal control bytes (the hand-paste
+    # corruption class) must be refused before any worker write.
+    bad = str(tmp_path / "bad.html")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<p>x\x00y\x7fz</p>\n")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", bad)
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    with pytest.raises(SyncError, match="control byte"):
+        sync_dashboard.sync(w)
+    # The worker is untouched — the refusal happened before any write.
+    assert _inline_html(w) == _html()
+
+
 # --- static ------------------------------------------------------------
 
 def test_no_triple_quote():
     assert '"""' not in _html(), \
         '""" would terminate the inlined Python string in worker.py'
+
+
+def test_no_raw_control_bytes():
+    # Observed 2026-10-11: the control-plane worker's hand-pasted inlined
+    # copy had the XSS neutralization regex's \xNN escapes converted to
+    # literal control bytes (incl. a raw NUL inside the inlined Python
+    # string). Semantically equivalent that time; the next paste may not
+    # be. The canonical file must never carry that corruption — and the
+    # tempting wrong repair for a drifted worker copy (pasting the inlined
+    # block back into dashboard.html) is refused by the sync guard too.
+    bad = sync_dashboard.raw_control_bytes(_html())
+    assert not bad, \
+        "raw control byte(s) %s — use \\xNN escapes, never literal bytes" % \
+        ", ".join("U+%04X" % ord(c) for c in bad)
 
 
 def test_required_views_and_ids():
