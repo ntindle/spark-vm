@@ -1164,3 +1164,279 @@ def test_digest_parked_does_not_reset_count(conn, owner, vapid):
     row = _digest_state_row(conn, owner, window)
     assert row is not None and row[0] == 3  # not reset
     assert row[1] == NOW.isoformat()  # fired-marker untouched
+
+
+# ---------------------------------------------------------------------------
+# (D96) per-tick work bounds (#1355) / (D97) poison-suspect escalation (#1357)
+# ---------------------------------------------------------------------------
+
+def _seed_error_rows_d97(conn, owner, n, at=NOW.isoformat()):
+    # The production audit key: the D61/D77 suffixed shape.
+    audit_key = "box-1\x00aid-1\x00error"
+    for _ in range(n):
+        conn.execute(
+            "INSERT INTO push_send_results"
+            " (at, owner_principal, box_id, device, event_kind,"
+            "  event_key, outcome)"
+            " VALUES (?, ?, 'box-1', '', 'approval_filed', ?, 'error')",
+            (at, owner, audit_key))
+    conn.commit()
+
+
+def _error_count_d97(conn):
+    return conn.execute(
+        "SELECT COUNT(*) FROM push_send_results WHERE outcome = 'error'"
+    ).fetchone()[0]
+
+
+def _poisoned_tick_d97(conn, owner, vapid, **kw):
+    # A deterministically-failing item: the approvals row carries a
+    # corrupt status, so make_record_reader raises ValueError inside
+    # _process_one on every tick — the #1357 poison shape.
+    seed_approval(conn, "box-1", "aid-1", owner, status="bogus")
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+    return make_tick(conn, owner, vapid)(**kw)
+
+
+def test_d96_time_budget_zero_claims_nothing(conn, owner, vapid):
+    # (D96) with the budget already spent, the tick claims nothing — the
+    # break is before _process_one, so the row and its D10 reservation
+    # stay untouched for the next tick.
+    seed_subscription(conn, owner, "box-1", "phone")
+    seed_approval(conn, "box-1", "aid-1", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+
+    tick = make_tick(conn, owner, vapid)
+    summary = tick(time_budget_s=0)
+
+    assert tick.service.calls == []
+    assert outcomes(conn) == ["queued"]
+    assert budget(conn, "box", "box-1", WINDOW) == 1
+    assert summary.dispositions["budget_exhausted"] == 1
+    assert any("1 of 1" in a for a in summary.anomalies)
+
+
+def test_d96_time_budget_absent_processes_normally(conn, owner, vapid):
+    # The D96 neuter guard: without a budget the same page sends (the
+    # budget check must not break the default path).
+    seed_subscription(conn, owner, "box-1", "phone")
+    seed_approval(conn, "box-1", "aid-1", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert "queued" not in outcomes(conn)
+    assert summary.dispositions["budget_exhausted"] == 0
+
+
+def test_d96_time_budget_stops_mid_queue(conn, owner, vapid):
+    # (D96) a partially-spent budget processes some items and leaves the
+    # rest queued — cursor-free restart (C3): the next tick picks up
+    # from id ASC.
+    import time as _time
+
+    seed_subscription(conn, owner, "box-1", "phone")
+    for i in range(3):
+        seed_approval(conn, "box-1", "aid-%d" % i, owner)
+        enqueue(conn, "approval_filed", owner, "box-1", "aid-%d" % i)
+
+    class Slow(FakePushService):
+        def transport(self, **kw):
+            _time.sleep(0.05)
+            return super().transport(**kw)
+
+    tick = make_tick(conn, owner, vapid, service=Slow())
+    summary = tick(time_budget_s=0.07)
+
+    assert summary.dispositions["budget_exhausted"] == 1
+    remaining = outcomes(conn).count("queued")
+    assert remaining >= 1  # the budget stopped the tick mid-queue
+    assert remaining == 3 - summary.dispositions["completed"]
+
+
+def test_d96_tick_overrun_anomaly(conn, owner, vapid):
+    # (D96) a tick that exceeds the schedule interval raises the
+    # operator-visible alarm (and always records duration_s).
+    import time as _time
+
+    seed_subscription(conn, owner, "box-1", "phone")
+    seed_approval(conn, "box-1", "aid-1", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+
+    class Slow(FakePushService):
+        def transport(self, **kw):
+            _time.sleep(0.05)
+            return super().transport(**kw)
+
+    summary = make_tick(conn, owner, vapid, service=Slow())(
+        tick_interval_s=0.001)
+
+    assert any(a.startswith("tick_overrun") for a in summary.anomalies)
+    assert summary.dispositions["tick_overrun"] == 1
+    assert isinstance(summary.duration_s, float) and summary.duration_s > 0
+    assert summary.as_dict()["duration_s"] == summary.duration_s
+
+
+def test_d96_summary_duration_always_present(conn, owner, vapid):
+    # (D96) every tick records its duration, budget/interval or not.
+    summary = make_tick(conn, owner, vapid)()
+    assert isinstance(summary.as_dict()["duration_s"], float)
+    assert summary.as_dict()["duration_s"] >= 0
+
+
+def test_d96_no_overrun_when_fast(conn, owner, vapid):
+    # The D96 neuter guard: a fast tick under a generous interval must
+    # NOT alarm (the comparison must be duration > interval, not >=).
+    summary = make_tick(conn, owner, vapid)(tick_interval_s=3600)
+    assert summary.dispositions["tick_overrun"] == 0
+
+
+def test_d96_budget_params_validated(conn, owner, vapid):
+    # Fail-closed: a bound is a finite non-negative number or None.
+    # NaN would silently disable the bound (`elapsed >= nan` is
+    # always False); inf has no legitimate use None doesn't serve —
+    # a JSON config's NaN/Infinity literals are the realistic vector.
+    tick = make_tick(conn, owner, vapid)
+    for bad in (-1, "60", True, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            tick(time_budget_s=bad)
+        with pytest.raises(ValueError):
+            tick(tick_interval_s=bad)
+
+
+def test_d97_error_row_written_per_tick(conn, owner, vapid):
+    # (D97) a tick-error writes one 'error' audit row — the count's home.
+    summary = _poisoned_tick_d97(conn, owner, vapid)
+
+    assert _error_count_d97(conn) == 1
+    assert summary.dispositions["error"] == 1
+    assert outcomes(conn) == ["queued", "error"]  # the page stays queued
+    assert budget(conn, "box", "box-1", WINDOW) == 1  # reservation held
+
+
+def test_d97_error_rows_never_wedge_reenqueue(conn, owner, vapid):
+    # (D97)'s D53 claim (the D77 wedge class): orphaned error rows must
+    # not make the outcome-blind dedup fast-path report a later
+    # re-enqueue of the same event as "duplicate" — the audit key is
+    # suffixed, so the page's exact key stays clean.
+    _seed_error_rows_d97(conn, owner, 10)
+    seed_approval(conn, "box-1", "aid-1", owner)
+    r = push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal=owner,
+        box_id="box-1", key_material="aid-1", now=NOW)
+    assert r.disposition == "queued", r
+    # And the suffixed error rows never trip the D57 page-once index
+    # either (the predicate covers only the three page-level outcomes).
+    assert outcomes(conn).count("error") == 10
+    assert "queued" in outcomes(conn)
+
+
+def test_d97_poison_suspect_escalates_at_threshold(conn, owner, vapid):
+    # (D97) the 10th consecutive error tick escalates — one
+    # poison_suspect anomaly, operator-visible.
+    _seed_error_rows_d97(conn, owner, 9)
+    summary = _poisoned_tick_d97(conn, owner, vapid)
+
+    assert _error_count_d97(conn) == 10
+    assert summary.dispositions["poison_suspect"] == 1
+    assert any("10 consecutive ticks" in a for a in summary.anomalies)
+    # The page is NOT quarantined (D97 decline): still queued, still loud.
+    assert "queued" in outcomes(conn)
+    assert summary.dispositions["error"] == 1
+
+
+def test_d97_escalation_repeats_and_caps_storage(conn, owner, vapid):
+    # (D97) past the threshold, no 11th error row (storage cap) — but the
+    # poison_suspect escalation stays in every tick's summary (D59
+    # loudness: the operator reads the current tick, not old ones),
+    # alongside the per-tick "error" anomaly.
+    _seed_error_rows_d97(conn, owner, 10)
+    summary = _poisoned_tick_d97(conn, owner, vapid)
+
+    assert _error_count_d97(conn) == 10  # saturated, not growing
+    assert summary.dispositions["poison_suspect"] == 1
+    assert summary.dispositions["error"] == 1  # still loud every tick
+
+
+def test_d97_error_count_resets_per_incarnation(conn, owner, vapid):
+    # (D97) error rows older than the queued row's at (a previous
+    # incarnation of the same event key) do not count toward the
+    # threshold.
+    old_at = (NOW - timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    _seed_error_rows_d97(conn, owner, 9, at=old_at)
+    summary = _poisoned_tick_d97(conn, owner, vapid)
+
+    assert summary.dispositions["poison_suspect"] == 0
+    assert _error_count_d97(conn) == 10  # 9 old + 1 new
+    assert summary.dispositions["error"] == 1
+
+
+def test_d97_corrupt_row_at_still_escalates(conn, owner, vapid):
+    # (D97) a corrupt queued-row `at` is itself the poison
+    # (_window_start_of raises) — the `at >=` bound degrades to the
+    # whole audit key rather than a silently-empty scan, so the
+    # escalation still fires.
+    _seed_error_rows_d97(conn, owner, 9)
+    seed_approval(conn, "box-1", "aid-1", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+    conn.execute("UPDATE push_send_results SET at = 'garbage'"
+                 " WHERE outcome = 'queued'")
+    conn.commit()
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert _error_count_d97(conn) == 10
+    assert summary.dispositions["poison_suspect"] == 1
+    assert summary.dispositions["error"] == 1
+
+
+def test_d97_escalation_survives_count_overshoot(conn, owner, vapid):
+    # (D97) the count can overshoot the threshold — two ticks reading 9
+    # and both inserting (the D96 race), or the degraded whole-key
+    # count sweeping in a previous incarnation's rows. An ==
+    # predicate would silence the escalation forever on an 11th row;
+    # >= keeps the alarm graceful when the invariant breaks.
+    _seed_error_rows_d97(conn, owner, 11)
+    summary = _poisoned_tick_d97(conn, owner, vapid)
+
+    assert _error_count_d97(conn) == 11  # no 12th row (cap holds)
+    assert summary.dispositions["poison_suspect"] == 1
+    assert summary.dispositions["error"] == 1
+
+
+def test_d97_error_row_write_failure_contained(conn, owner, vapid,
+                                              monkeypatch):
+    # (D97) "bookkeeping must not kill the tick" — if the error-row
+    # write itself fails, the tick still survives, the per-tick
+    # "error" anomaly still fires, and the good item still completes.
+    def boom(*args, **kwargs):
+        raise RuntimeError("D1 is having a moment")
+
+    monkeypatch.setattr(push_send_loop, "_insert_audit_row", boom)
+    seed_subscription(conn, owner, "box-1", "phone")
+    seed_approval(conn, "box-1", "aid-1", owner, status="bogus")
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+    seed_approval(conn, "box-1", "aid-2", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-2")
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["error"] == 1
+    assert summary.dispositions["completed"] == 1
+    assert _error_count_d97(conn) == 0  # the write failed; nothing persisted
+
+
+def test_d97_error_bookkeeping_never_kills_the_tick(conn, owner, vapid):
+    # (D97) a poisoned first item must not wedge the tick — the second
+    # page still sends (tick-survives-one-bad-item, extended).
+    seed_subscription(conn, owner, "box-1", "phone")
+    seed_approval(conn, "box-1", "aid-1", owner, status="bogus")
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
+    seed_approval(conn, "box-1", "aid-2", owner)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-2")
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["error"] == 1
+    assert summary.dispositions["completed"] == 1
+    assert any("aid-1" in r[5] for r in rows(conn) if r[6] == "error")

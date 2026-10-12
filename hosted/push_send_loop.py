@@ -199,6 +199,81 @@ New pins this slice (continuing the global D-series):
   per-candidate isolation pin (docs/PUSH_SWEEP_SCHEDULER_DESIGN.md) —
   so the content-scope position got its own number.)
 
+- **D96 — per-tick work bounds (#1355, interim).** The claim design
+  (``docs/PUSH_SENDER_CLAIM_DESIGN.md``, #1094) owns the structural
+  fix for overlapping ticks (C1: the DO singleton with a held input
+  gate; C3: at most N rows or T seconds per drain). This slice is the
+  interim defense that ships *in the loop body itself* — the drain
+  runs under no fence yet, so it must bound itself:
+
+  - ``time_budget_s``: the tick stops claiming new work items once
+    ``elapsed >= time_budget_s`` (the claim design's C3 ``T`` bound,
+    injected, not hard-coded). Rows claimed but not reached stay
+    ``'queued'`` untouched — the break happens *before*
+    ``_process_one``, so there is no partial state and the next tick
+    re-scans from ``id`` ASC (cursor-free, C3's restart rule).
+  - ``tick_interval_s`` + ``duration_s``: the tick's wall-clock
+    duration is measured and recorded on the summary; when it exceeds
+    the schedule interval, a ``tick_overrun`` anomaly fires —
+    operator-visible before the next tick can overlap (under serial
+    scheduling — it detects long ticks, not overlap itself; a second
+    concurrent instance with short ticks is invisible to it, and D56a
+    still rests entirely on the external singleton).
+
+  Stated residuals: the budget bounds *claiming*, not drain
+  duration — worst case per tick is the budget plus one in-flight
+  item (devices × 30 s ``RESPONSE_DEADLINE_S`` against a dripping
+  peer); the overrun alarm is the backstop for the actual drain
+  duration. And this slice ships the mechanism dormant: no in-repo
+  caller passes these parameters yet (the scheduler lives in the
+  external control-plane workspace), so production ticks stay
+  unbounded until that scheduler wires them — read this PR as the
+  bound's implementation, not as "production is now bounded".
+
+  The D1 tick-heartbeat candidate is **rejected**, not deferred: the
+  claim design's §2 already evaluated it (a real double-claim race
+  across the expiry window; a new D1 table against the frozen #988
+  schema; heartbeat/renewal failure surface with no upside over the
+  platform primitive). Rebuilding it here would contradict the pinned
+  design. The still-running-vs-crashed disambiguation #1355 names as
+  "#1121 input" is already answered: C2 queues a timed-out drain's
+  successor (the orphaned tick is harmless), and C4's crash posture
+  (re-deliverable, never half-released) is what the input gate must
+  preserve — no new code owes it.
+
+- **D97 — poison-suspect escalation, not quarantine (#1357).** A
+  deterministically-failing work item (corrupt ``at``, a malformed
+  event key, a ``record_reader`` raising on a corrupt approvals row)
+  errors once per tick forever — one ``"error"`` anomaly and one
+  burned claim slot per tick. True quarantine is **declined**: the
+  sweep lane's #1103 already settled the position — parking without a
+  repair path and without an operator alert sink beyond the handler
+  log is a silent drop that violates D59 worse than per-tick retry —
+  and the sender lane has neither yet. Instead the loop escalates:
+  each tick-error writes one ``'error'`` outcome row (the
+  boundary-extension shape — ``device=''``, send columns NULL; the
+  count's home under the frozen schema) under the suffixed audit key
+  (page key + U+0000 + ``"error"`` — the D61/D77 pattern, because the
+  enqueue boundary's D53 dedup fast-path is outcome-blind and an
+  error row on the exact key would wedge a later re-enqueue as
+  "duplicate"), ``at >=`` the queued row's ``at`` so only this
+  incarnation counts (a corrupt ``at`` degrades the filter to the
+  whole audit key — stated, absorbed by the threshold margin).
+  From ``POISON_ERROR_THRESHOLD`` (10) consecutive error ticks on,
+  every tick's summary carries a ``poison_suspect`` anomaly —
+  operator-visible in the current tick, distinguishing a poisoned
+  item from a transiently-failing one without digging through old
+  summaries; the per-tick ``"error"`` anomalies continue (D59
+  loudness). The error-row write stops at the threshold (storage
+  cap — the count saturates; a repair, i.e. the operator deleting
+  the queued row, orphans the rows for the 90-day GC). A poisoned
+  item still burns one claim slot per tick — stated residual, not
+  hidden. The ``'error'`` outcome is the schema
+  contract's fourth extension (§1.3): the D57 page-once predicate
+  covers only ``('queued', 'suppressed_budget',
+  'suppressed_terminal')``, so error rows never collide with the
+  queued row they count for.
+
 Plane seams (injected — the module never sees a Worker secret, a data
 key, or a box token):
 
@@ -229,8 +304,10 @@ module does not import sqlite3 at all.
 """
 
 import json
+import math
 import os
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -473,7 +550,9 @@ class SendLoopSummary:
     operator-visible list (tombstones, dead-letters, suppressions, parks,
     errors — each a short human string, never an endpoint or secret);
     ``retry_hint_s`` is the minimum ``retry_after_s`` returned this tick
-    (D82: informational for the plane scheduler).
+    (D82: informational for the plane scheduler); ``duration_s`` is the
+    tick's measured wall-clock duration (D96 — the overrun alarm's
+    input), set by ``send_loop`` before returning.
     """
 
     def __init__(self, tick_at):
@@ -482,6 +561,7 @@ class SendLoopSummary:
         self.attempts = 0
         self.anomalies = []
         self.retry_hint_s = None
+        self.duration_s = None
 
     def note(self, disposition, detail=None):
         self.dispositions[disposition] += 1
@@ -501,6 +581,7 @@ class SendLoopSummary:
             "attempts": self.attempts,
             "anomalies": list(self.anomalies),
             "retry_hint_s": self.retry_hint_s,
+            "duration_s": self.duration_s,
         }
 
 
@@ -556,6 +637,116 @@ def _insert_audit_row(conn, at, owner_principal, box_col, event_kind,
 
 def _delete_queued(conn, row_id):
     conn.execute("DELETE FROM push_send_results WHERE id = ?", (row_id,))
+
+
+#: (D97) consecutive per-tick errors before the poison-suspect escalation.
+#: Tuning, not physics: a deterministically-poisoned item errors every
+#: tick (per-minute per the claim design's C2), so 10 is ~10 minutes of
+#: consecutive failure — long enough to ride out a transient blip,
+#: short enough for an operator watching the tick summary.
+POISON_ERROR_THRESHOLD = 10
+
+#: (D97) the error-audit key suffix (page key + U+0000 + "error"). The
+#: D61/D77 pattern: audit rows must not share the page's exact key,
+#: because the enqueue boundary's D53 dedup fast-path is outcome-blind
+#: — an error row on the exact key would report a later re-enqueue of
+#: the same event as "duplicate" (the D77 wedge, same class). The D57
+#: page-once predicate does not cover 'error' anyway; the suffix is
+#: what keeps the fast-path honest.
+_ERROR_AUDIT_SUFFIX = "error"
+
+
+def _row_at_comparable(row_at):
+    """True when the queued row's ``at`` can bound the D97 scan.
+
+    The bound needs a string that actually parses as a timestamp —
+    a garbage *string* would make the lexicographic ``at >=``
+    filter silently empty (real ``at`` values start with "2…", so
+    ``'2…' >= 'garbage'`` is false and the count would never
+    escalate). A corrupt ``row_at`` degrades to the whole audit key
+    instead (stated; the threshold margin absorbs the rare
+    double-count of a previous incarnation's errors).
+    """
+    if not isinstance(row_at, str) or not row_at:
+        return False
+    try:
+        datetime.fromisoformat(row_at)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _consecutive_error_count(conn, box_id, event_kind, audit_key, row_at):
+    """Error ticks since this queued row was enqueued (D97).
+
+    Counts ``'error'`` rows for the item's (box, kind, audit key)
+    stamped at or after the queued row's own ``at`` — only this
+    incarnation counts, so a previous incarnation's errors (same
+    event, older ``at``) never inflate it. See ``_row_at_comparable``
+    for the corrupt-``row_at`` degradation.
+    """
+    params = [box_id, event_kind, audit_key]
+    sql = ("SELECT COUNT(*) FROM push_send_results"
+           " WHERE box_id = ? AND event_kind = ? AND event_key = ?"
+           " AND outcome = 'error'")
+    if _row_at_comparable(row_at):
+        sql += " AND at >= ?"
+        params.append(row_at)
+    return conn.execute(sql, params).fetchone()[0]
+
+
+def _note_tick_error(conn, summary, at, owner_principal, box_col,
+                     event_kind, event_key, row_at, item, exc):
+    """One bad item's tick-error bookkeeping (D97; never kills the tick).
+
+    Rolls back the item's partial work, writes the tick's ``'error'``
+    audit row under the suffixed audit key (the consecutive-error
+    count's home — the schema's boundary-extension shape:
+    ``device=''``, send columns NULL), and escalates to
+    ``poison_suspect`` when the count reaches the threshold. The
+    error-row write stops at the threshold (storage cap — the count
+    saturates; a repair, i.e. the operator deleting the queued row,
+    orphans the rows for the 90-day GC). The per-tick ``"error"``
+    summary anomaly fires either way (D59 loudness). A poisoned item
+    keeps its ``'queued'`` row and its reservation — true quarantine
+    stays declined per the D97 position.
+    """
+    audit_key = event_key + "\x00" + _ERROR_AUDIT_SUFFIX
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001 — rollback itself must not kill the tick
+        pass
+    try:
+        count = _consecutive_error_count(conn, box_col, event_kind,
+                                         audit_key, row_at)
+        if count < POISON_ERROR_THRESHOLD:
+            _insert_audit_row(conn, at, owner_principal, box_col,
+                              event_kind, audit_key, "error")
+            conn.commit()
+            count += 1
+        # >=, not ==: the cap's steady-state invariant is count ==
+        # threshold, but a race (two ticks reading 9 and both
+        # inserting) or the degraded whole-key count can overshoot —
+        # an == predicate would silence the escalation forever on an
+        # 11th row. The alarm must be graceful when the invariant
+        # breaks, not just when it holds.
+        if count >= POISON_ERROR_THRESHOLD:
+            summary.note("poison_suspect",
+                         "%r failed %d consecutive ticks — inspect or"
+                         " delete the queued row" % (item,
+                                                     POISON_ERROR_THRESHOLD))
+    except Exception:  # noqa: BLE001 — bookkeeping must not kill the tick
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    # %r on the item: the event key may carry newlines from a
+    # plane bug — no raw log injection into the operator-visible
+    # anomaly. The exception text is truncated: a hostile
+    # multi-MB value must not become a multi-MB anomaly every
+    # tick.
+    summary.note("error", "%r (%s: %.500s)"
+                 % (item, type(exc).__name__, exc))
 
 
 def _release_reservation_statements(conn, box_id, owner_principal,
@@ -687,12 +878,21 @@ def _maybe_complete(conn, summary, item, row_id, box_id, owner_principal,
 
 def send_loop(conn, *, list_subscriptions, vapid_keys, vapid_subject,
               record_reader=None, transport=None, now=None,
-              max_claims=100):
+              max_claims=100, time_budget_s=None, tick_interval_s=None):
     """Run one sender tick: claim ``'queued'`` rows and drive them.
 
     D56a — exactly one instance per D1 store; rows claimed in ``id`` ASC,
     at most ``max_claims`` per tick. Every injected seam is validated
     fail-closed before the first row is touched.
+
+    D96 — ``time_budget_s`` (the claim design's C3 ``T`` bound,
+    injected): the tick stops claiming new work items once its elapsed
+    wall-clock time reaches the budget; unreached rows stay
+    ``'queued'`` for the next tick. ``None`` (the default) keeps the
+    unbounded behavior. ``tick_interval_s`` (the schedule interval):
+    when set and the measured tick duration exceeds it, a
+    ``tick_overrun`` anomaly fires on the summary — the operator sees
+    the overrun before the next tick can overlap.
     """
     if not callable(list_subscriptions):
         raise ValueError("list_subscriptions must be callable")
@@ -704,11 +904,31 @@ def send_loop(conn, *, list_subscriptions, vapid_keys, vapid_subject,
     if not isinstance(max_claims, int) or isinstance(max_claims, bool) \
             or max_claims < 1:
         raise ValueError("max_claims must be a positive int")
+    for name, value in (("time_budget_s", time_budget_s),
+                        ("tick_interval_s", tick_interval_s)):
+        # math.isfinite: NaN and inf must not pass — `elapsed >=
+        # nan` is always False, so a NaN budget would silently disable
+        # the bound while appearing configured (the opposite of
+        # fail-closed; a JSON config's NaN/Infinity literals are the
+        # realistic vector). A bound is a finite non-negative number
+        # or None (unbounded, the documented default) — nothing else.
+        if value is not None and (isinstance(value, bool)
+                                  or not isinstance(value, (int, float))
+                                  or not math.isfinite(value)
+                                  or value < 0):
+            raise ValueError(
+                "%s must be a finite non-negative number or None" % name)
 
     moment = _utcnow(now)
     at = push_enqueue.utc_iso(moment)
     sent_at = moment.timestamp()
     summary = SendLoopSummary(moment)
+
+    # (D96) wall-clock, not the injected logical clock: the budget and
+    # the overrun alarm measure how long the tick *ran*, which is
+    # time.monotonic() regardless of what `now` the caller injected
+    # (mixing them would compare real time against a fixture date).
+    tick_start = time.monotonic()
 
     rows = conn.execute(
         "SELECT id, owner_principal, box_id, event_kind, event_key, at"
@@ -716,7 +936,19 @@ def send_loop(conn, *, list_subscriptions, vapid_keys, vapid_subject,
         " ORDER BY id ASC LIMIT ?",
         (OUTCOME_QUEUED, max_claims)).fetchall()
 
+    processed = 0
     for row in rows:
+        if (time_budget_s is not None
+                and time.monotonic() - tick_start >= time_budget_s):
+            # (D96) C3's T bound: stop claiming; the break is before
+            # _process_one, so there is no partial state and the next
+            # tick re-scans from id ASC.
+            summary.note("budget_exhausted",
+                         "%d of %d queued rows unclaimed"
+                         " (time budget %.1fs reached)"
+                         % (len(rows) - processed, len(rows),
+                            time_budget_s))
+            break
         row_id, owner_principal, box_col, event_kind, event_key, row_at = row
         item = "id=%s %s/%s" % (row_id, event_kind, event_key)
         try:
@@ -725,17 +957,20 @@ def send_loop(conn, *, list_subscriptions, vapid_keys, vapid_subject,
                          row_at, list_subscriptions, vapid_keys,
                          vapid_subject, record_reader, transport)
         except Exception as exc:  # noqa: BLE001 — the tick survives one bad item
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001 — rollback itself must not kill the tick
-                pass
-            # %r on the item: the event key may carry newlines from a
-            # plane bug — no raw log injection into the operator-visible
-            # anomaly. The exception text is truncated: a hostile
-            # multi-MB value must not become a multi-MB anomaly every
-            # tick.
-            summary.note("error", "%r (%s: %.500s)"
-                         % (item, type(exc).__name__, exc))
+            _note_tick_error(conn, summary, at, owner_principal, box_col,
+                             event_kind, event_key, row_at, item, exc)
+        processed += 1
+
+    duration_s = time.monotonic() - tick_start
+    summary.duration_s = duration_s
+    if tick_interval_s is not None and duration_s > tick_interval_s:
+        # (D96) the tick overran its schedule interval: the next tick
+        # may have overlapped, which is a double-buzz incident, not a
+        # performance note.
+        summary.note("tick_overrun",
+                     "tick ran %.1fs, exceeding the %.1fs schedule"
+                     " interval — the next tick may have overlapped"
+                     % (duration_s, tick_interval_s))
     return summary
 
 

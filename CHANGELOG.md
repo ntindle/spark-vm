@@ -197,6 +197,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The push-sender tick now bounds its own work (2026-10-12, #1360): an
+  optional per-tick time budget stops the loop from claiming new pages
+  once it has run long enough to threaten the schedule interval, and a
+  tick that still overruns its interval raises an operator-visible alarm
+  instead of silently overlapping the next tick (an overlap is a
+  double-page incident, not a performance note). (#1355)
+- A push page whose data is corrupt no longer fails silently every tick
+  (2026-10-12, #1360): the loop now records each per-item error in the
+  outbox history and, after ten consecutive error ticks, escalates the
+  page for operator attention — while true quarantine stays declined
+  until the lane has a repair path and an alert sink beyond the handler
+  log. (#1357)
 - Push digest pages no longer trust a corrupt coalescing count
   (2026-10-12, #1356): the sender loop used to fail closed only when
   the digest's hourly state row was missing — a present row with a
