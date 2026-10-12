@@ -103,7 +103,7 @@ transport it didn't have.
   boundary.** confirmd `audit.log` lives on tenant boxes; fleet
   events live on operator estates (box/operator-side JSONL) AND on
   tenant-plane D1 (`phone_home_events`, #999); gate decisions have
-  a reader after #1261. The sentinel's "what it ingests" question
+  a reader after #1348/#1288's S5. The sentinel's "what it ingests" question
   has two halves: estate-side records the operator plane can read
   from the estate dir (the G21 read-API pattern), and tenant-plane
   records that must be *shipped*. No slice owns the second half.
