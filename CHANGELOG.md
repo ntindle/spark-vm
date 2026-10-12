@@ -52,6 +52,26 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- `muse-job approvals` / `decide` / `answer` operator subcommands
+  (2026-10-12, #1372 slice 1): MSP jobs' pending tool approvals and
+  user-input prompts are now inspectable and answerable from the CLI
+  instead of only through the `msp_approval.py` smoke CLI — `approvals`
+  lists them (redacted by default; `--show-secrets` with `--json`
+  prints raw wire params with the standard stderr warning), `decide`
+  resolves one approval with the requirementId race guard read fresh,
+  `answer` takes answers as JSON and requires the operator to explicitly
+  classify the prompt (`--trust-policy-opt-in` for trust prompts,
+  carrying the recorded #211 fail-closed policy, or
+  `--classified-not-trust-prompt`); `muse-job status` now shows pending
+  approval/user-input counts so a job blocked on operator input says so
+  on the primary overview. Honest scope: the commands drive a session
+  over a fresh `muse serve` connection, so while the job's supervisor
+  holds the session (the whole turn, MSP single-attach) they fail with
+  an explicit error naming the not-yet-wired slice-2 supervisor routing
+  rather than the confusing attach refusal; routing decisions through
+  the supervisor is the #1372 follow-up slice.
+  (#TBD)
+
 - The rollout controller's `assign` command gains a `--dry-run` mode
   (2026-10-12): it prints the would-be wave map — wave buckets, canary
   planes, the opening wave — and writes nothing, so a misconfigured
