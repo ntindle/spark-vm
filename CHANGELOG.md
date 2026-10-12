@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Credential-vending lane re-derived against the one-plane-per-tenant
+  model (2026-10-12): a consequence sweep of the #850 lane's open items
+  after the tenancy decision — the vend tables need no tenant column on
+  a tenant plane, the contract's per-box tenant claim and single global
+  data key are superseded (one key per tenant plane), and the audit
+  retention question still gates the S3 plane endpoint's migration.
+  (#1364)
+
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the
   repo, and the test suite fails on GitHub Actions when the dashboard
