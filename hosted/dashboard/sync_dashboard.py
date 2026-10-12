@@ -57,6 +57,18 @@ def resolve_worker_path():
     return os.environ.get("SPARKVM_WORKER_PATH", DEFAULT_WORKER_PATH)
 
 
+def raw_control_bytes(html):
+    """Raw C0/C1 control characters in the page, tab/LF/CR excluded.
+
+    Shared by the sync guard and the static test. The page's own
+    control-byte handling is written with \\xNN *escape sequences* in its
+    JS source — literal control bytes are never legitimate content.
+    """
+    return sorted({c for c in html
+                   if (ord(c) < 32 and c not in "\t\n\r")
+                   or 0x7F <= ord(c) <= 0x9F})
+
+
 def _load_html():
     with open(HTML_PATH, encoding="utf-8") as f:
         html = f.read()
@@ -65,6 +77,12 @@ def _load_html():
     if '"""' in html:
         raise SyncError('dashboard.html contains """ — it would terminate '
                         "the inlined Python string in worker.py")
+    bad = raw_control_bytes(html)
+    if bad:
+        raise SyncError("dashboard.html contains raw control byte(s) %s — "
+                        "the page must use \\xNN escape sequences, never "
+                        "literal control bytes" %
+                        ", ".join("U+%04X" % ord(c) for c in bad))
     trailing_bs = len(html) - len(html.rstrip("\\"))
     if trailing_bs % 2 == 1:
         raise SyncError("dashboard.html ends with an odd number of "

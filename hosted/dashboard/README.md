@@ -63,8 +63,10 @@ BEGIN/END markers — no manual copy-paste. It only touches the marked
 region, writes atomically, keeps the END marker line byte-for-byte
 (indentation included), and refuses loudly on missing or duplicated
 markers, a BEGIN marker stranded on the file's last line, a `"""`
-sequence in the HTML, or an odd number of trailing backslashes in the
-HTML (either would break the inlined Python string). It is idempotent
+sequence in the HTML, raw control bytes in the HTML (the page's `\xNN`
+escapes must stay escapes — literal bytes mean a hand-paste corrupted
+the source), or an odd number of trailing backslashes in the HTML
+(either would break the inlined Python string). It is idempotent
 (a second run changes nothing).
 
     ./sync_dashboard.py                          # default worker checkout
