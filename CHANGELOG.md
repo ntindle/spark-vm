@@ -197,6 +197,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Doc freshness: two pinned convergence docs re-pinned to current
+  state (2026-10-11). The rollout-controller convergence doc said the
+  deploy driver, wave machine, and update-event journal were still
+  unbuilt — all three shipped this week — and now records the lane as
+  complete with its remaining findings and tracked follow-ups. The
+  socket remaining-builds doc still listed the ping/alarm
+  re-verification slice as open; it shipped October 9, leaving the
+  live-acceptance checklist as the phone-home lane's only remaining
+  build. (#1354)
+
 - Rollout-controller promotion is now atomic with respect to the freeze
   (2026-10-11, #1345): the wave-advance step used to write each landed
   plane's rollback pin before taking the store lock, so a freeze landing
