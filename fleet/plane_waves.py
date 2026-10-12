@@ -64,12 +64,18 @@ Design pins (docs/TENANT_PLANE_ROLLOUT_CONTROLLER_GAP_ANALYSIS.md §4):
   crash between the pin writes and the wave advance is safe to re-run.
 
 Subcommands:
-  assign         --store DIR --template V [--buckets N] [--notes T]
+  assign         --store DIR --template V [--buckets N] [--dry-run] [--notes T]
       Compute wave assignments for template V and open the rollout at the
       first non-empty wave. The rollout target is ONLY a pinned release
       (D-RC-2(b)) — an unpinned template fails closed. Refuses when a
       rollout is already live or the store is frozen. A halted rollout
       may be superseded by a fresh assign (recorded in the audit).
+      --dry-run prints the would-be wave map and writes nothing — no
+      waves.json, no journal record — so the operator checks a
+      misconfigured canary set before opening a rollout that would need
+      a terminal halt to redo. All refusals fire exactly as in a real
+      assign. Degraded assigned planes are warned about on stderr (the
+      wave cannot promote until they are healthy or re-observed).
   promote        --store DIR [--stale-hours H] [--notes T]
       Advance the live wave when the D-RC-4 gate passes: stamp
       last_known_good on the landed wave's planes, then move live_wave to
@@ -77,6 +83,11 @@ Subcommands:
       Refuses on a bad wave signal, an unconverged wave, a frozen store,
       or a halted rollout. Re-runnable: pins are idempotent and the
       advance re-verifies the rollout state under the store lock.
+      Gate refusals (bad-signal, not-converged) are audited to
+      waves_journal.jsonl (action promote_refused, carrying the refusal
+      reason, the live wave, and the staleness window) — a refused
+      promotion that does not lead to a halt leaves a trace; the
+      successful-promote record carries stale_hours as well.
   halt           --store DIR --reason R [--notes T]
       Stop the live rollout (bad wave signal). Already-landed waves stay;
       the halt is recorded with its reason for the audit trail.
@@ -550,6 +561,38 @@ def cmd_assign(args):
                   f"live at wave {existing['live_wave']} — halt it before "
                   "assigning a new rollout")
         superseded = existing.get("halted") if existing else None
+        # #1343 item 4: a degraded assigned plane is a wave that cannot
+        # promote — warn, don't refuse (the plane may recover, and the
+        # gate refuses promotion on bad signal anyway). stderr, so the
+        # JSON result on stdout stays parseable. Fires in --dry-run too:
+        # checking the wave map before opening the rollout is exactly
+        # when the operator wants to hear this.
+        degraded = sorted(pid for pid in eligible
+                          if planes[pid].get("status") == "degraded")
+        if degraded:
+            names = ", ".join(degraded)
+            print(f"plane_waves: warning: {len(degraded)} assigned plane(s) "
+                  f"degraded ({names}) — a degraded plane in the live wave "
+                  f"refuses promotion now; degraded planes in later waves "
+                  f"refuse promotion when their wave goes live. Re-assign "
+                  f"or halt if they will not recover.",
+                  file=sys.stderr)
+        if args.dry_run:
+            # #1343 item 3: print the would-be wave map, write nothing —
+            # no waves.json, no journal record. Every refusal above fired
+            # exactly as in a real assign; the only difference is the
+            # side effects are skipped.
+            print(json.dumps({
+                "ok": True, "action": "assign", "dry_run": True,
+                "template_version": template, "channel": channel,
+                "buckets": buckets, "live_wave": live_wave,
+                "assignments": assignments, "planes": len(eligible),
+                "canary_planes": sum(1 for w in assignments.values()
+                                     if w == CANARY_WAVE),
+                "degraded_planes": degraded,
+                "superseded_halt": superseded, "notes": notes,
+            }))
+            return 0
         state = {
             "schema": WAVES_SCHEMA,
             "template_version": template,
@@ -616,13 +659,15 @@ def cmd_promote(args):
     if plane_inventory.read_controller_freeze(store_dir):
         _fail("controller store is frozen — promotion refused (D-RC-5)")
 
-    # Pre-lock gate: fast refusal without contending the store lock. The
-    # in-lock re-gate below is authoritative; this one's landed-plane
-    # list is advisory only (the stamps use the re-gated list).
-    ok, reason, _landed = _wave_gate(store_dir, waves, template, stale_hours)
-    if not ok:
-        _fail(f"promotion refused: {reason}")
-
+    # #1343 item 1: the gate's refusal is audited, not just printed. The
+    # pre-lock gate used to fail here without contending the store lock;
+    # the audit record must be written under the lock, so every refusal
+    # falls through to the in-lock re-gate below, which audits the
+    # refusal before failing. A refused promotion that does not lead to
+    # a halt otherwise leaves no trace — and bad-signal/not-converged
+    # refusals are exactly the wave-health signals the S5 reporting
+    # consumes. The in-lock re-gate is authoritative; its landed-plane
+    # list is what the stamps use.
     with events.journal_lock(store_dir):
         fresh = _read_waves(store_dir)
         # The advance is authoritative only on the rollout we gated.
@@ -638,14 +683,19 @@ def cmd_promote(args):
             _fail("rollout state changed during promotion — re-run promote")
         if plane_inventory.read_controller_freeze(store_dir):
             _fail("controller store is frozen — promotion refused (D-RC-5)")
-        ok2, reason2, landed2 = _wave_gate(store_dir, fresh, template,
-                                           stale_hours)
-        if not ok2:
-            _fail(f"promotion refused: {reason2}")
+        ok, reason, landed = _wave_gate(store_dir, fresh, template,
+                                       stale_hours)
+        if not ok:
+            _audit_locked(
+                store_dir, "promote_refused",
+                template_version=template, from_wave=live_wave,
+                reason=reason, stale_hours=stale_hours,
+            )
+            _fail(f"promotion refused: {reason}")
         # F-RC-6: the promotion step writes each landed plane's
         # last_known_good pin. Idempotent (see _stamp_landed_pins_locked),
         # so a crash between here and the wave advance is safe to re-run.
-        stamped = _stamp_landed_pins_locked(store_dir, landed2, template)
+        stamped = _stamp_landed_pins_locked(store_dir, landed, template)
         remaining = sorted(
             {wave for wave in fresh["assignments"].values()
              if wave > live_wave}
@@ -663,8 +713,8 @@ def cmd_promote(args):
         _audit_locked(
             store_dir, "promote", template_version=template,
             from_wave=live_wave, to_wave=new_live,
-            landed_planes=landed2, pins_written=stamped,
-            notes=args.notes or "",
+            landed_planes=landed, pins_written=stamped,
+            stale_hours=stale_hours, notes=args.notes or "",
         )
     result = {
         "ok": True, "action": "promote", "template_version": template,
@@ -799,6 +849,10 @@ def build_parser():
     p_as.add_argument("--buckets", type=int, default=None,
                       help="non-canary wave buckets, 1..8 "
                            f"(default {DEFAULT_BUCKETS}; refused for security releases)")
+    p_as.add_argument("--dry-run", action="store_true",
+                      help="print the would-be wave map and write nothing "
+                           "(#1343): no waves.json, no journal record; "
+                           "refusals fire exactly as in a real assign")
     p_as.add_argument("--notes", default="")
     p_as.set_defaults(func=cmd_assign)
 

@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The rollout controller's `assign` command gains a `--dry-run` mode
+  (2026-10-12): it prints the would-be wave map — wave buckets, canary
+  planes, the opening wave — and writes nothing, so a misconfigured
+  canary set can be checked before opening a rollout that would need a
+  terminal halt to redo; refusals (frozen store, live rollout, unpinned
+  template) fire exactly as in a real assign. `assign` also warns on
+  stderr when an assigned plane is degraded, since a degraded plane in
+  the live wave refuses promotion. (#TBD)
+
 - Credential-vending lane re-derived against the one-plane-per-tenant
   model (2026-10-12): a consequence sweep of the #850 lane's open items
   after the tenancy decision — the vend tables need no tenant column on
@@ -239,6 +248,20 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the rollout controller agree on the same wave contract. (#1373)
 
 ### Fixed
+
+- Promotion-gate refusals in the rollout controller are now audited
+  (2026-10-12): a refused `promote` (bad wave signal or unconverged
+  wave) appends a refusal record — template, wave, refusal reason, and
+  the staleness window it was gated on — to the wave audit journal, so
+  a refused promotion that does not lead to a halt leaves a trace for
+  the wave-health reporting; successful promotions also record the
+  staleness window they were gated on. (#TBD)
+
+- The rollout controller's release command now refuses mixed-case
+  channels (2026-10-12): the expedited security channel is exactly
+  `security`, lowercase — a miscapitalized `Security`/`SECURITY`
+  release previously passed validation but silently traveled normal
+  waves instead of the compressed security waves. (#TBD)
 
 - The agent-jail rebuild flag is now atomic (2026-10-12) (#1371): the
   fresh install is built into a staging directory while the jail keeps
