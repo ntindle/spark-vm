@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   terminal halt to redo; refusals (frozen store, live rollout, unpinned
   template) fire exactly as in a real assign. `assign` also warns on
   stderr when an assigned plane is degraded, since a degraded plane in
-  the live wave refuses promotion. (#TBD)
+  the live wave refuses promotion. (#1374)
 
 - Credential-vending lane re-derived against the one-plane-per-tenant
   model (2026-10-12): a consequence sweep of the #850 lane's open items
@@ -255,13 +255,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the staleness window it was gated on — to the wave audit journal, so
   a refused promotion that does not lead to a halt leaves a trace for
   the wave-health reporting; successful promotions also record the
-  staleness window they were gated on. (#TBD)
+  staleness window they were gated on. (#1374)
 
 - The rollout controller's release command now refuses mixed-case
   channels (2026-10-12): the expedited security channel is exactly
   `security`, lowercase — a miscapitalized `Security`/`SECURITY`
   release previously passed validation but silently traveled normal
-  waves instead of the compressed security waves. (#TBD)
+  waves instead of the compressed security waves. (#1374)
 
 - The agent-jail rebuild flag is now atomic (2026-10-12) (#1371): the
   fresh install is built into a staging directory while the jail keeps
