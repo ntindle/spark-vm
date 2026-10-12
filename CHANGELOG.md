@@ -286,7 +286,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (D96/D97 tick bounds + poison-suspect #1360, digest-count validation
   #1358, repr-escaped anomalies #1361), the D9 sweep row points at the
   operator guide (PR #1368), §3's unbuilt list drops GC, and a dated §6
-  refresh note folds the rest of the post-pin ships. (#TBD)
+  refresh note folds the rest of the post-pin ships. (#1378)
 
 - Promotion-gate refusals in the rollout controller are now audited
   (2026-10-12): a refused `promote` (bad wave signal or unconverged
