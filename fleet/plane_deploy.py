@@ -100,8 +100,13 @@ import tempfile
 import events
 import plane_inventory
 
-FREEZE_SCHEMA = "plane-controller-freeze/1"
-FREEZE_NAME = "freeze.json"
+# The controller-freeze contract (D-RC-5) is defined once, in
+# plane_inventory's public-alias block, and shared with the S2 wave
+# machine (fleet/plane_waves.py) — one definition, never duplicated
+# (#21's centralize-trust-validation follow-up). The names below stay so
+# the freeze file contract and this module's references are unchanged.
+FREEZE_SCHEMA = plane_inventory.FREEZE_SCHEMA
+FREEZE_NAME = plane_inventory.FREEZE_NAME
 WAVES_SCHEMA = "plane-controller-waves/1"
 WAVES_NAME = "waves.json"
 
@@ -127,27 +132,9 @@ def _default_deployer(plane_id, deployment_id, worker_sha256):
 DEPLOYER = _default_deployer
 
 
-def _read_freeze(store_dir):
-    """True when the controller store is frozen (D-RC-5).
-
-    Missing file = not frozen (fresh store). Corrupt file, wrong schema,
-    or a non-boolean `frozen` fails closed — a tampered freeze file must
-    never silently unfreeze the controller.
-    """
-    path = os.path.join(store_dir, FREEZE_NAME)
-    if not os.path.exists(path):
-        return False
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as exc:
-        _fail(f"freeze file at {path} is unreadable ({exc}) — refusing deploys")
-    if not isinstance(data, dict) or data.get("schema") != FREEZE_SCHEMA:
-        _fail(f"freeze file at {path} has an unexpected schema — refusing deploys")
-    frozen = data.get("frozen")
-    if not isinstance(frozen, bool):
-        _fail(f"freeze file at {path}: 'frozen' is not a boolean — refusing deploys")
-    return frozen
+# Shared with the S2 wave machine: one definition in
+# plane_inventory.read_controller_freeze (see its docstring).
+_read_freeze = plane_inventory.read_controller_freeze
 
 
 def _read_waves(store_dir):

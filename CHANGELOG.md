@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Tenant-plane rollout controller: wave assignment + promotion (2026-10-11):
+  the rollout controller's brain for per-tenant planes — operators assign
+  a pinned template release to waves (the canary wave holds only planes
+  whose tenants are explicitly designated canary tenants; single-plane
+  estates get no automatic canary), promote wave-by-wave gated on
+  operator-observed state only (never self-reported plane health), and
+  halt bad rollouts with an audited reason. Promotion stamps each landed
+  plane's rollback pin from the release record; security releases travel
+  compressed waves (canary + one wave), never ungated. (#1344)
+
 - Waitlist durability gap analysis (2026-10-11): a consolidated pin of the
   waitlist daemon's crash-recovery, persistence, and erasure story — the
   ten open architecture findings on the store re-verified against the

@@ -59,6 +59,32 @@ box. No new box-side daemon, no new inbound port, no control plane.
   D-RC-5 refusals, and fail-closed pin reads, plus in-process tests that
   inject a fake deployer for the push seam (run with `python3 -m pytest
   fleet/test_plane_deploy.py`).
+- `plane_waves.py` — rollout-controller wave assignment + promotion: the
+  controller's brain (S2, #1285). `assign` computes wave assignments for
+  a pinned template release (wave 0 is the canary — only explicitly
+  designated canary tenants' planes, via `canary-tenants` (takes effect
+  on the next `assign`, not on a live rollout); the rest use
+  the box lane's `sha256(plane_id) mod buckets` rule; single-plane
+  estates get no automatic canary) and opens the rollout; `promote`
+  advances the live wave when the D-RC-4 gate passes (every live-wave
+  plane on the template, fresh, operator-observed healthy — never
+  self-reported health) and stamps each landed plane's `last_known_good`
+  rollback pin (F-RC-6's only writer; pins come from the release record,
+  never invented); `halt` stops a bad rollout with an audited reason
+  (resume by re-assigning the same template after a false alarm —
+  landed waves re-verify instantly — or a new template carrying the
+  fix);
+  `status` reports the rollout read-only. Security releases (release
+  `channel: security`) travel compressed waves — canary + one wave —
+  never ungated (D-RC-7's answer to F-RC-9: convergence identity is the
+  template version alone; the expedited path rides the release's channel
+  field, not a separate flag). Writes `waves.json` (the S4 driver's
+  reader contract) and an audit journal; refuses promotion and new
+  rollouts while the controller store is frozen (D-RC-5, same
+  `freeze.json`). Stdlib only.
+- `test_plane_waves.py` — hermetic suite: subprocess CLI tests for
+  assign/promote/halt/status/canary-tenants (run with `python3 -m pytest
+  fleet/test_plane_waves.py`).
 
 ## Release gating (G18 / #777, S1a)
 
