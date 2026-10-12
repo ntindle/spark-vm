@@ -278,6 +278,38 @@ def _wave_for_plane(plane_id, buckets):
     return int(digest, 16) % buckets + 1
 
 
+def _compute_assignments(planes, canary_tenants, buckets):
+    """Compute wave assignments from the inventory + canary designations
+    (D-RC-3). Pure computation: returns (assignments, eligible,
+    single_estate).
+
+    #1346: this runs inside the store lock, over inputs re-read inside
+    the same lock acquisition, so a concurrent retire (or
+    canary-designation change) landing between the command's start and
+    the lock cannot leave stale assignments in waves.json. Never call it
+    with pre-lock inputs for anything authoritative.
+    """
+    eligible = sorted(
+        pid for pid, rec in planes.items() if rec.get("status") != "retired"
+    )
+    single_estate = len(eligible) == 1
+    assignments = {}
+    for plane_id in eligible:
+        # D-RC-3: no automatic canary on a single-plane estate — the
+        # designation is ignored and the one plane is wave 1, even when
+        # its tenant is canary-designated. A canary of one plane is a
+        # canary in name only: zero signal before committing the fleet.
+        # The wave is pinned (not hashed): with one plane the bucket
+        # count is meaningless, and wave 1 is the least surprise.
+        if single_estate:
+            assignments[plane_id] = 1
+        elif planes[plane_id].get("tenant_id") in canary_tenants:
+            assignments[plane_id] = CANARY_WAVE
+        else:
+            assignments[plane_id] = _wave_for_plane(plane_id, buckets)
+    return assignments, eligible, single_estate
+
+
 def _check_pin_shape(pin):
     """Validate the last_known_good pin at write time (advisory
     #1285/6107294719, QA): required keys + ISO-8601 recorded_at, so a
@@ -484,38 +516,31 @@ def cmd_assign(args):
         if buckets < 1 or buckets > MAX_BUCKETS:
             _fail(f"--buckets must be 1..{MAX_BUCKETS}, got {buckets}")
 
-    planes = plane_inventory.read_planes(store_dir)
-    eligible = sorted(
-        pid for pid, rec in planes.items() if rec.get("status") != "retired"
-    )
-    if not eligible:
-        _fail("no eligible planes: every plane is retired (or none registered)")
-    canary_tenants = _read_canary_tenants(store_dir)
-    single_estate = len(eligible) == 1
-    assignments = {}
-    for plane_id in eligible:
-        # D-RC-3: no automatic canary on a single-plane estate — the
-        # designation is ignored and the one plane is wave 1, even when
-        # its tenant is canary-designated. A canary of one plane is a
-        # canary in name only: zero signal before committing the fleet.
-        # The wave is pinned (not hashed): with one plane the bucket
-        # count is meaningless, and wave 1 is the least surprise.
-        if single_estate:
-            assignments[plane_id] = 1
-        elif planes[plane_id].get("tenant_id") in canary_tenants:
-            assignments[plane_id] = CANARY_WAVE
-        else:
-            assignments[plane_id] = _wave_for_plane(plane_id, buckets)
-    # Waves with no planes are never live: the empty canary is skipped,
-    # not promoted through, and a single-plane estate opens at wave 1.
-    live_wave = min(assignments.values())
     notes = args.notes or ""
-    if single_estate:
-        flag = ("single-plane estate: no automatic canary (D-RC-3); "
-                "promotion is an explicit operator command")
-        notes = f"{notes} {flag}".strip()
 
     with events.journal_lock(store_dir):
+        # #1346: the assignment inputs are read and the assignments
+        # computed inside the store lock — there is intentionally no
+        # pre-lock computation. The earlier revision read planes +
+        # canary designations outside the lock and wrote waves.json from
+        # the stale inputs: a retire (or canary-designation change)
+        # landing between the reads and the lock was absorbed silently.
+        # The freeze and live-rollout checks below were always re-verified
+        # in-lock; now the inputs are too.
+        planes = plane_inventory.read_planes(store_dir)
+        canary_tenants = _read_canary_tenants(store_dir)
+        assignments, eligible, single_estate = _compute_assignments(
+            planes, canary_tenants, buckets)
+        if not eligible:
+            _fail("no eligible planes: every plane is retired (or none registered)")
+        # Waves with no planes are never live: the empty canary is
+        # skipped, not promoted through, and a single-plane estate opens
+        # at wave 1.
+        live_wave = min(assignments.values())
+        if single_estate:
+            flag = ("single-plane estate: no automatic canary (D-RC-3); "
+                    "promotion is an explicit operator command")
+            notes = f"{notes} {flag}".strip()
         if plane_inventory.read_controller_freeze(store_dir):
             _fail("controller store is frozen — unfreeze before starting "
                   "a rollout (D-RC-5)")
@@ -797,7 +822,9 @@ def build_parser():
 
     p_ct = sub.add_parser("canary-tenants",
                           help="designate canary tenants (D-RC-3); "
-                               "takes effect on the next assign, not on a live rollout")
+                               "takes effect on the next assign — a change "
+                               "racing an in-flight assign is absorbed by "
+                               "it (#1346) — never on a live rollout")
     p_ct.add_argument("--add", default=None, metavar="TENANT",
                       help="designate a tenant's planes for the canary wave")
     p_ct.add_argument("--remove", default=None, metavar="TENANT",

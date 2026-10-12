@@ -197,6 +197,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Wave assignment now reads the fleet inventory under the store lock
+  (2026-10-12): the rollout controller previously computed wave
+  assignments from a pre-lock inventory read, so a plane retired (or a
+  canary designation changed) in the window before the locked write
+  produced a rollout file naming the retired plane — the downstream
+  gates refused to act on it, but the rollout contradicted the
+  inventory until the operator re-ran. Assignments are now computed
+  from inputs re-read inside the lock, closing the window. (#1362)
+
 - Push-sender tick summaries no longer interpolate raw exception text
   (2026-10-12): the per-tick `error` anomaly escaped only the work item,
   so a hostile exception string carrying newlines or ANSI escapes could
