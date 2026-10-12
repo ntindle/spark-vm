@@ -243,6 +243,17 @@ if [ -f "$STATE_DIR/pairing.json" ]; then
     fi
     log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: $_redeem_cmd, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
     unset _redeem_cmd
+    # Ownership check (#1220), mirroring the enrolled-skip branch: this
+    # branch is reachable on every boot after an interrupted enrollment
+    # (request succeeded, box rebooted before the manual redeem). The
+    # state files are still root-owned then, so the logged
+    # `sudo -u sparkpair ... redeem` would fail with EACCES — say so
+    # loudly instead of leaving a bare permission failure, and print the
+    # remediation. Warn, don't repair (same rationale as the skip path).
+    if [ -n "$_OWN_PAIR_STATE" ] \
+        && [ "$(stat -c '%U' "$STATE_DIR" 2>/dev/null || echo '?')" != "$_OWN_PAIR_STATE" ]; then
+        log "WARNING: $STATE_DIR is not owned by $_OWN_PAIR_STATE — the logged redeem runs as $_OWN_PAIR_STATE and cannot read it; fix with: chown -R $_OWN_PAIR_STATE:$_OWN_PAIR_STATE \"$STATE_DIR\""
+    fi
     clear_plane_signal
     exit 0
 fi

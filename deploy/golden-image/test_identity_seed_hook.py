@@ -636,3 +636,29 @@ def test_ownership_handoff_chown_is_present_and_gated():
     chown = text.find('chown -R "$_OWN_PAIR_STATE:$_OWN_PAIR_STATE" "$STATE_DIR"')
     assert chown != -1, "ownership handoff chown missing"
     assert gate < chown, "the chown must sit inside the user-exists gate"
+
+
+def test_inflight_pairing_warns_on_ownership_drift(harness, tmp_path):
+    """Security B1 (slot 20261012-0229 review): the pairing-in-flight branch
+    is reachable on every boot after an interrupted enrollment (request
+    succeeded, box rebooted before the manual redeem) — the state files
+    are still root-owned then, so the logged `sudo -u sparkpair ... redeem`
+    would fail with EACCES. The branch must warn loudly (mirroring the
+    enrolled-skip branch) instead of leaving a bare permission failure.
+    Non-vacuity: the warning names the remediation chown."""
+    svc_home = tmp_path / "svchome"
+    state = svc_home / ".config" / "spark-pair"
+    state.mkdir(parents=True)
+    (state / "pairing.json").write_text(json.dumps({"code": "abc123"}))
+    r = harness["run"](
+        env_extra={
+            "SPARKVM_BOX_SERVICE_USER": "sparkpair-test-absent",
+            "SPARKVM_BOX_SERVICE_USER_HOME": str(svc_home),
+        },
+        env_remove=("SVM_PAIR_DIR",),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not owned by sparkpair-test-absent" in r.stderr
+    assert "chown -R sparkpair-test-absent:sparkpair-test-absent" in r.stderr
+    # the client is never invoked on the in-flight path
+    assert _argv_lines(harness) == []
