@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a tenant plane, the contract's per-box tenant claim and single global
   data key are superseded (one key per tenant plane), and the audit
   retention question still gates the S3 plane endpoint's migration.
-  (#1364)
+  (#1364) (#1366)
 
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the
