@@ -58,11 +58,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   recorded in the estate's `.gate_sync_state/` for the operator to
   read against the TTL bound, cleared on the next successful sync),
   while estate misconfiguration (an invalid ssh target) still fails
-  loudly. (#1326, #TBD)
+  loudly. (#1326, #1381)
 - The push-sender schema contract's data-key decision (D45) no longer
   claims one data key protects every tenant's subscription secrets: one
   plane per tenant means one key per tenant plane, with the rotation
-  bound applied per plane. (#1375, #TBD)
+  bound applied per plane. (#1375, #1381)
 - The local merge gate's shellcheck step now lints the same set of shell
   files CI lints, on every run: previously it checked only changed `*.sh`
   files, so deleting a shell script failed the gate on the missing file
