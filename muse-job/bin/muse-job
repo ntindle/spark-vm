@@ -13,6 +13,10 @@ Same vocabulary as the other agents this operator manages:
   resume - recover a dead tmux session via `muse resume`
   close  - terminal: archive the job, remove its worktree
   watch  - watchdog pass over active jobs (cron: JSON lines)
+  approvals - list a job's pending MSP approvals and user-input prompts
+           (issue #1372)
+  decide - decide one pending MSP approval (issue #1372)
+  answer - answer one open MSP user-input prompt (issue #1372)
 
 Turn/state detection comes from the `muse-job` Muse plugin's Stop/SessionEnd
 hooks, which append machine-readable events to
@@ -4468,6 +4472,15 @@ def _msp_status(job, slug, args):
             "dir_bytes": _cached_dir_bytes(job, slug),
             **_msp_view_summary(view),
         }
+        # Issue #1372: surface blocked approvals/user-input prompts on
+        # the operator's primary overview. Additive, best-effort -- a
+        # failing listPending degrades to 'unknown', never breaks status.
+        pending = _msp_pending_for_status(host, _msp_require_sid(job, slug))
+        if pending is None:
+            st["pending_approvals"] = None
+            st["pending_user_inputs"] = None
+        else:
+            st["pending_approvals"], st["pending_user_inputs"] = pending
         try:
             pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
             st["progress_age_s"] = time.time() - pm
@@ -4491,6 +4504,22 @@ def _msp_status(job, slug, args):
                   f"(supervisor holds the session)")
         if st["pending"]:
             print(f"  pending: {_clean_text(st['pending'])[:200]}")
+        if "pending_approvals" not in st:
+            # Snapshot path (the supervisor holds the session):
+            # listPending was never attempted, so there is no check to
+            # report. The view's own pending summary (printed above) is
+            # the honest signal -- printing a "check failed" line here
+            # would falsely imply server drift on every live overview.
+            pass
+        elif st["pending_approvals"] is None:
+            print("  approvals: pending check failed "
+                  "(server may predate approval/listPending)")
+        elif st["pending_approvals"] or st["pending_user_inputs"]:
+            # Issue #1372: a job blocked on operator input should say so
+            # on the primary overview, with the command that unblocks it.
+            na, np_ = st["pending_approvals"], st["pending_user_inputs"]
+            print(f"  approvals: {na} pending, user-input: {np_} pending "
+                  f"-- `muse-job approvals {st['slug']}` to inspect")
         if st["progress_age_s"] is not None:
             print(f"  PROGRESS.md age: {st['progress_age_s']/60:.0f}m  "
                   f"elapsed: {st['elapsed_h']:.1f}h / budget {st['budget_hours']}h")
@@ -4925,6 +4954,336 @@ def _watch_msp_job(slug, job, events, now):
             pass
 
 
+# --- MSP approval operator surface (issue #1372, slice 1) -------------------
+# The msp_approval library module (#225) owns the wire shapes, parsing,
+# the trust-policy gate, and the redacted smoke CLI. This section is the
+# operator surface on `muse-job` itself: approvals/decide/answer
+# subcommands plus pending-approval surfacing in `status` (the issue's
+# ship-order slice 1 -- operator value now). The supervise-path wiring
+# and the standing trust-policy opt-in shape are follow-up slices on the
+# same issue.
+
+_MSP_APPROVAL = None
+
+
+def _msp_approval():
+    """Import the msp_approval sibling module (cached).
+
+    Separate from _msp_imports' 5-tuple: the approval surface is
+    operator-only, and the tuple is positionally unpacked everywhere --
+    extending it would touch every call site for no benefit.
+    """
+    global _MSP_APPROVAL
+    if _MSP_APPROVAL is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        try:
+            import msp_approval
+        except ImportError as e:
+            raise RuntimeError(
+                "approvals need msp_approval.py deployed beside muse-job "
+                f"(the README deploy map lists it): {e}")
+        _MSP_APPROVAL = msp_approval
+    return _MSP_APPROVAL
+
+
+def _msp_require_msp_job(job, slug):
+    """This command needs an MSP-transport job with a recorded session.
+
+    tmux jobs have no prompt plane: the approval surface exists only on
+    `muse serve` sessions, so a tmux record is a clear usage error, not
+    a silent empty list.
+    """
+    if not _msp_transport(job):
+        raise RuntimeError(
+            f"job {slug}: approvals need an MSP-transport job (this one "
+            "is tmux; the approval/user-input plane exists only on "
+            "`muse serve` sessions)")
+    return _msp_require_sid(job, slug)
+
+
+def _msp_warn_unredacted():
+    """The smoke-CLI posture, on every unredacted invocation: unredacted
+    output lands on stdout, one pipe or paste away from somewhere an
+    agent can read it."""
+    print("muse-job: WARNING: --show-secrets: this output is NOT redacted "
+          "and may contain real secret values (approval subjects, raw tool "
+          "args, prompt answers) -- do not paste it where agents can read "
+          "it.", file=sys.stderr)
+
+
+def _approval_public(a):
+    """Operator-safe dict for an Approval: structure, no secret values.
+
+    Approval subjects/rawArgs may carry real secrets; the operator reads
+    only ids, the derived title, and choice structure. Every
+    agent-influenced string is terminal-sanitized (issue #23 B6: the
+    agent can influence titles/labels through tool subjects).
+    """
+    return {
+        "approvalId": a.approval_id,
+        "title": _clean_text(a.title or ""),
+        "choices": [
+            {"choiceId": c.choice_id,
+             "label": _clean_text(c.label or ""),
+             "decision": c.decision,
+             "scope": c.scope,
+             "acceptsFeedback": c.accepts_feedback}
+            for c in a.choices
+        ],
+    }
+
+
+def _prompt_public(p):
+    """Operator-safe dict for a UserInputPrompt: structure, no answers.
+
+    Questions render so the operator can compose answers; answers are
+    NEVER printed (they may carry secrets -- the trust-prompt answer to
+    a workspace-trust question is exactly such a value).
+    """
+    msp_approval = _msp_approval()
+    return {
+        "userInputId": p.user_input_id,
+        "looksLikeTrustPrompt": msp_approval.looks_like_trust_prompt(p),
+        "questions": [
+            {"questionId": q.question_id,
+             "mode": q.mode,
+             "prompt": _clean_text(q.prompt_text or ""),
+             "options": [_clean_text(o) for o in q.options],
+             "minSelections": q.min_selections,
+             "maxSelections": q.max_selections}
+            for q in p.questions
+        ],
+    }
+
+
+def _msp_pending_for_status(host, sid):
+    """Best-effort pending approval/user-input fetch for `status`.
+
+    Returns (n_approvals, n_prompts) on success, None on any failure:
+    the approval plane is additive information, and a failing
+    listPending (server drift, shape drift) must degrade to 'unknown',
+    never fail the operator's overview. The import itself lives inside
+    the try: a deployment missing msp_approval.py degrades the same way
+    instead of hard-breaking status.
+    """
+    try:
+        msp_approval = _msp_approval()
+        approvals = msp_approval.list_pending_approvals(host, sid)
+        prompts = msp_approval.list_pending_user_inputs(host, sid)
+    except Exception:
+        return None
+    return (len(approvals), len(prompts))
+
+
+def _msp_supervisor_held_error(slug, action):
+    """Truthful error when the job's supervisor holds the session.
+
+    MSP sessions are single-attach: while the supervisor holds the
+    session (the whole turn, including blocked_approval/blocked_input
+    states -- the supervise loop only exits on terminal events), a
+    fresh `muse serve` cannot resume it, and stealing it would SIGTERM
+    the supervisor's turn. Routing decisions through the supervisor is
+    the #1372 slice-2 work; until then, say so plainly instead of the
+    confusing "held by another host" line.
+    """
+    return RuntimeError(
+        f"job {slug}: cannot {action} -- the session is held by the "
+        f"job's supervisor (the turn is still running; MSP sessions are "
+        f"single-attach). Routing {action} through a supervised session "
+        f"is not wired yet (issue #1372 slice 2); the pending approvals "
+        f"stay visible in `muse-job status` while the turn is blocked.")
+
+
+def cmd_approvals(args):
+    """List a job's pending approvals and user-input prompts (issue #1372).
+
+    Default output is redacted: approval subjects/rawArgs and prompt
+    answers are withheld (they may carry real secrets). --show-secrets
+    (with --json) prints the full raw wire params, with the stderr
+    warning on every invocation (the msp_approval smoke-CLI posture).
+
+    The session must be directly resumable: when the job's supervisor
+    holds it (the turn still running), the commands fail with an
+    explicit error naming the not-yet-wired slice-2 routing instead of
+    the confusing single-attach refusal.
+    """
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_msp_job(job, slug)
+    msp_approval = _msp_approval()
+    if args.show_secrets and not args.json:
+        print("muse-job: warning: --show-secrets has no effect without "
+              "--json (human-readable output is always redacted)",
+              file=sys.stderr)
+
+    def go(host):
+        return (msp_approval.list_pending_approvals(host, sid),
+                msp_approval.list_pending_user_inputs(host, sid))
+
+    try:
+        approvals, prompts = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        raise _msp_supervisor_held_error(slug, "list approvals")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        # Serve-side and client-side failures surface as a clean
+        # `muse-job: error:` line (main()'s handler), not a traceback.
+        raise RuntimeError(str(e))
+    pub_approvals = [_approval_public(a) for a in approvals]
+    pub_prompts = [_prompt_public(p) for p in prompts]
+    if args.json:
+        if args.show_secrets:
+            _msp_warn_unredacted()
+            out = {"approvals": [a.raw for a in approvals],
+                   "userInputs": [p.raw for p in prompts]}
+        else:
+            out = {"approvals": pub_approvals, "userInputs": pub_prompts}
+        print(json.dumps(out, indent=2, default=str))
+        return 0
+    if not approvals and not prompts:
+        print(f"job {slug}: no pending approvals or user-input prompts")
+        return 0
+    for a in pub_approvals:
+        choices = ", ".join(
+            f"{c['choiceId']} ({c['decision']})" for c in a["choices"])
+        print(f"approval {a['approvalId']}: {a['title']}")
+        print(f"  decide: muse-job decide {slug} "
+              f"--approval-id {a['approvalId']} --choice-id <id>")
+        print(f"  choices: {choices}")
+    for p in pub_prompts:
+        tag = (" [looks like a trust prompt]"
+               if p["looksLikeTrustPrompt"] else "")
+        print(f"user-input {p['userInputId']}{tag}:")
+        for q in p["questions"]:
+            print(f"  [{q['mode']}] {q['questionId']}: "
+                  f"{q['prompt'][:160]}")
+            if q["options"]:
+                print(f"    options: {', '.join(q['options'][:8])}")
+        print(f"  answer: muse-job answer {slug} "
+              f"--user-input-id {p['userInputId']} "
+              f"--answers '[{{\"questionId\": ..., ...}}]' "
+              f"--classified-not-trust-prompt|--trust-policy-opt-in")
+    if not args.show_secrets:
+        print("(redacted; pass --show-secrets to print raw wire params)")
+    return 0
+
+
+def cmd_decide(args):
+    """Decide one pending approval (issue #1372).
+
+    The approval is re-read from approval/listPending immediately before
+    deciding, so the requirementId race guard is fresh; a stale stage
+    still fails server-side (-32053) instead of landing on the wrong one.
+    """
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_msp_job(job, slug)
+    msp_approval = _msp_approval()
+
+    def go(host):
+        approvals = msp_approval.list_pending_approvals(host, sid)
+        approval = next((a for a in approvals
+                         if a.approval_id == args.approval_id), None)
+        if approval is None:
+            raise msp_approval.MSPApprovalError(
+                f"no pending approval {args.approval_id!r} on job {slug} "
+                f"(pending: {[a.approval_id for a in approvals]!r})")
+        return msp_approval.decide_approval(
+            host, sid, approval, args.choice_id, feedback=args.feedback)
+
+    try:
+        result = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        raise _msp_supervisor_held_error(slug, "decide an approval")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        # Client-side validation (ValueError), wire drift
+        # (MSPApprovalError), and serve-side refusals (e.g. a stale
+        # requirementId, -32053) all surface as a clean `muse-job:
+        # error:` line (main()'s handler), not a traceback.
+        raise RuntimeError(str(e))
+    # The admission ack is printed with a key whitelist, not verbatim:
+    # unvetted server fields must never reach the operator's terminal
+    # unexamined (the ack shape is the server's to extend). The echoed
+    # ids are ours, not the server's.
+    print(json.dumps({"approvalId": args.approval_id,
+                      "choiceId": args.choice_id,
+                      "status": result.get("status"),
+                      "terminal": result.get("terminal")},
+                     indent=2, default=str))
+    return 0
+
+
+def cmd_answer(args):
+    """Answer one open user-input prompt (issue #1372).
+
+    The operator must explicitly classify the prompt -- exactly one of
+    --trust-policy-opt-in (this IS a trust prompt: pass the explicit
+    TrustPolicy opt-in) or --classified-not-trust-prompt (this is NOT a
+    trust prompt: answer it directly). The CLI never classifies by
+    itself: the recorded #211 decision forbids auto-answering trust
+    prompts on heuristic absence alone (a trust prompt need not contain
+    the word "trust").
+    """
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_msp_job(job, slug)
+    msp_approval = _msp_approval()
+    trust_opt_in = args.trust_policy_opt_in
+    not_trust = args.classified_not_trust_prompt
+    if trust_opt_in and not_trust:
+        raise RuntimeError("pass only one of --trust-policy-opt-in and "
+                           "--classified-not-trust-prompt")
+    if not trust_opt_in and not not_trust:
+        raise RuntimeError(
+            "answering a prompt requires explicit classification: "
+            "--trust-policy-opt-in (this IS a trust prompt) or "
+            "--classified-not-trust-prompt (this is NOT a trust prompt)")
+    try:
+        answers = json.loads(args.answers)
+    except ValueError as e:
+        raise RuntimeError(f"--answers is not valid JSON: {e}")
+
+    def go(host):
+        prompts = msp_approval.list_pending_user_inputs(host, sid)
+        prompt = next((p for p in prompts
+                       if p.user_input_id == args.user_input_id), None)
+        if prompt is None:
+            raise msp_approval.MSPApprovalError(
+                f"no pending user input {args.user_input_id!r} on job "
+                f"{slug} (pending: "
+                f"{[p.user_input_id for p in prompts]!r})")
+        if trust_opt_in:
+            policy = msp_approval.TrustPolicy(auto_answer_trust=True)
+            return msp_approval.answer_trust_prompt(
+                host, sid, prompt, answers, policy=policy)
+        return msp_approval.answer_user_input(host, sid, prompt, answers)
+
+    try:
+        result = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        raise _msp_supervisor_held_error(slug, "answer a prompt")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        # Client-side validation (ValueError), wire drift
+        # (MSPApprovalError), and serve-side refusals (e.g. a stale
+        # requirementId, -32053) all surface as a clean `muse-job:
+        # error:` line (main()'s handler), not a traceback.
+        raise RuntimeError(str(e))
+    # Answers are never echoed: they may carry secrets (the trust-prompt
+    # answer is exactly such a value). The admission ack prints with the
+    # same key whitelist as decide; the echoed id is ours.
+    print(json.dumps({"userInputId": args.user_input_id,
+                      "status": result.get("status")},
+                     indent=2, default=str))
+    return 0
+
+
 def main():
     # --version before argparse: subparsers are required, so argparse alone
     # would reject a bare --version. Only the bare flag counts, so a steer
@@ -4986,6 +5345,40 @@ def main():
 
     s = sub.add_parser("watch", help="watchdog pass over active jobs")
     s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("approvals",
+                       help="list a job's pending MSP approvals and "
+                       "user-input prompts (#1372)")
+    s.add_argument("slug")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--show-secrets", action="store_true",
+                   help="print raw wire params (NOT redacted; may carry "
+                   "real secrets) -- only with --json")
+    s.set_defaults(fn=cmd_approvals)
+
+    s = sub.add_parser("decide", help="decide one pending MSP approval (#1372)")
+    s.add_argument("slug")
+    s.add_argument("--approval-id", required=True)
+    s.add_argument("--choice-id", required=True)
+    s.add_argument("--feedback", default=None,
+                   help="feedback note (only on choices whose "
+                   "acceptsFeedback is true)")
+    s.set_defaults(fn=cmd_decide)
+
+    s = sub.add_parser("answer",
+                       help="answer one open MSP user-input prompt (#1372)")
+    s.add_argument("slug")
+    s.add_argument("--user-input-id", required=True)
+    s.add_argument("--answers", required=True,
+                   help="JSON list of answer dicts, e.g. "
+                   "'[{\"questionId\":\"q1\",\"selectedLabel\":\"Yes\"}]'")
+    s.add_argument("--trust-policy-opt-in", action="store_true",
+                   help="declare this IS a trust prompt and pass the "
+                   "explicit TrustPolicy opt-in")
+    s.add_argument("--classified-not-trust-prompt", action="store_true",
+                   help="declare this is NOT a trust prompt and answer it "
+                   "directly")
+    s.set_defaults(fn=cmd_answer)
 
     s = sub.add_parser("_msp_supervise", help=argparse.SUPPRESS)
     s.add_argument("slug")
