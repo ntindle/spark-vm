@@ -138,14 +138,23 @@ Pairing state is owned by the dedicated box-service user `sparkpair`
 (#1220 **Option B**, decided 2026-10-12): the recipe bakes the user
 (locked password, no login, home `/home/sparkpair`), the identity-seed
 hook (root) enrolls into `/home/sparkpair/.config/spark-pair` and hands
-ownership over after a successful request, and all five pairing
-entrypoints run as `sparkpair` under supervisord — `pair-tick` (the
-every-minute loop: heartbeat, ingest, upload-filings), `pair-rotate` (the
-hourly loop: `rotate --auto`), and `pair-phone-home` (the persistent WSS
-daemon, restarted only on unexpected exits). This matches
-pairing/README.md's "box-service user" and the DAC ownership discipline
-the ingest/upload-filings ticks enforce (Finding 50) — root never runs
-the box's plane client.
+ownership over after a successful request, and the pure-pairing-state
+entrypoints run as `sparkpair` under supervisord — `pair-heartbeat` (the
+every-minute heartbeat loop), `pair-rotate` (the hourly `rotate --auto`
+loop), and `pair-phone-home` (the persistent WSS daemon, restarted only
+on unexpected exits). This matches pairing/README.md's "box-service
+user" and the DAC ownership discipline the ingest/upload-filings ticks
+enforce (Finding 50) — root never runs the box's plane client.
+
+Deliberately NOT wired yet (#1363): `ingest` and `upload-filings` need
+swapd-owned stores (pending/ filings, answered/, consumed/, audit.log,
+grant-writer) that the sparkpair split cannot reach, and the pairing
+client's 0600-forced credentials cannot be group-shared — so neither the
+all-sparkpair nor the split-user shape works without a store-access
+design. #1363 tracks the design (group surgery vs credential bridge vs
+narrow sudo); until it lands, the durable-command and filing-upload legs
+stay systemd/self-hosted-only on provisioned boxes. The box still gets
+fleet visibility (heartbeat), token rotation, and the WSS lane.
 
 Scheduler decision (also #1219): supervisord loops, not a cron package.
 The image deliberately ships no cron (the recipe installs none); the
@@ -166,7 +175,8 @@ the boot sequence); cold-stop state persistence is #1205's `/data` contract
 boot presents the token again — the plane 403s the consumed-token replay
 and the hook logs loudly instead of retry-looping); live-box end-to-end
 verification of the wired runtime is still owed (#1219 remaining slice);
-the healthy-box verification + alerting contract is #1273's slice.
+`ingest` + `upload-filings` wiring waits on the store-access design
+(#1363); the healthy-box verification + alerting contract is #1273's slice.
 
 ## Plane-push signal for the push worker (#1268)
 

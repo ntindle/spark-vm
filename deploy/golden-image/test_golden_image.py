@@ -220,7 +220,7 @@ def test_supervisord_program_set():
         "cua-stack",
         "cua-bridge",
         "cua-keepalive",
-        "pair-tick",
+        "pair-heartbeat",
         "pair-rotate",
         "pair-phone-home",
     }, programs
@@ -251,7 +251,7 @@ def test_supervisord_privilege_split():
         "cua-stack": "agent",
         "cua-bridge": "agent",
         "cua-keepalive": "agent",
-        "pair-tick": "sparkpair",
+        "pair-heartbeat": "sparkpair",
         "pair-rotate": "sparkpair",
         "pair-phone-home": "sparkpair",
     }
@@ -279,19 +279,20 @@ def test_dockerfile_creates_sparkpair_service_user():
 
 
 def test_supervisord_pairing_runtime_wiring():
-    """The three pairing programs cover all five entrypoints
-    (pairing/README.md ### Inventory) as the box-service user (#1219,
-    #1220 Option B): the minute tick loop (heartbeat, ingest,
-    upload-filings), the hourly rotate loop, and the phone-home daemon
+    """The three pairing programs cover the pure-pairing-state entrypoints
+    as the box-service user (#1219, #1220 Option B): the every-minute
+    heartbeat loop, the hourly rotate loop, and the phone-home daemon
     with the documented exit-code restart policy (exit 2 = crash ->
-    restart; 0/1 = clean/human-attention -> no restart)."""
+    restart; 0/1 = clean/human-attention -> no restart). The store-coupled
+    entrypoints (ingest, upload-filings) are deliberately NOT wired here —
+    #1363's store-access design must land first (wiring them as sparkpair
+    would break on swapd-owned stores); this test pins that deferral."""
     cfg = _supervisord()
-    tick = cfg["program:pair-tick"]
-    assert tick["user"] == "sparkpair"
-    assert tick["environment"] == 'HOME="/home/sparkpair"'
-    for entry in ("heartbeat", "ingest", "upload-filings"):
-        assert f"spark_pair.py {entry}" in tick["command"], entry
-    assert "sleep 60" in tick["command"]
+    beat = cfg["program:pair-heartbeat"]
+    assert beat["user"] == "sparkpair"
+    assert beat["environment"] == 'HOME="/home/sparkpair"'
+    assert "spark_pair.py heartbeat" in beat["command"]
+    assert "sleep 60" in beat["command"]
     rotate = cfg["program:pair-rotate"]
     assert rotate["user"] == "sparkpair"
     assert "spark_pair.py rotate --auto" in rotate["command"]
@@ -302,6 +303,13 @@ def test_supervisord_pairing_runtime_wiring():
     # exit-code restart policy: only exits outside {0,1} are "unexpected"
     assert daemon["autorestart"] == "unexpected"
     assert daemon["exitcodes"] == "0,1"
+    # #1363 deferral pin: no pair-* program may invoke the store-coupled
+    # entrypoints until the store-access design lands.
+    for s in cfg.sections():
+        if s.startswith("program:pair-"):
+            cmd = cfg[s]["command"]
+            assert "spark_pair.py ingest" not in cmd, s
+            assert "spark_pair.py upload-filings" not in cmd, s
 
 
 def test_dataprep_pairing_dir_owned_by_sparkpair():

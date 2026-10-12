@@ -53,15 +53,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 
 - Golden-image pairing runtime is wired (2026-10-12): provisioned boxes
-  now run the pairing client's five entrypoints under the dedicated
-  box-service user `sparkpair` — the every-minute tick loop (heartbeat,
-  ingest, upload-filings), the hourly token-rotation loop, and the
-  persistent phone-home daemon (restarted only on unexpected exits).
-  Pairing state is owned by `sparkpair`, never root, and the first-boot
-  identity hook enrolls into that user's state dir and hands ownership
-  over. Before this, a provisioned box enrolled and then went silent —
-  no heartbeats, no approval decisions, no filing uploads, and its
-  bearer <redacted> expired within a day. (#1219, #1220, #TBD)
+  now run the pairing client's pure-state entrypoints under the dedicated
+  box-service user `sparkpair` — the every-minute heartbeat loop, the
+  hourly token-rotation loop, and the persistent phone-home daemon
+  (restarted only on unexpected exits). Pairing state is owned by
+  `sparkpair`, never root, and the first-boot identity hook enrolls into
+  that user's state dir and hands ownership over. The store-coupled
+  entrypoints (`ingest`, `upload-filings`) stay unwired pending a
+  store-access design (#1363) — wiring them as `sparkpair` would break on
+  swapd-owned stores, and the client's 0600-forced credentials cannot be
+  group-shared. Before this change, a provisioned box enrolled and then
+  went silent — no heartbeats, and its bearer <redacted> expired within a
+  day. (#1219, #1220, #1363, #TBD)
 
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the

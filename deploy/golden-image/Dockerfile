@@ -74,10 +74,12 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 # `agent` is the skeleton tenant user: first boot instantiates real tenant
 # users from /etc/skel (populated from /home/agent below).
 # `sparkpair` is the box-service user (#1220 Option B): it owns pairing
-# state (/home/sparkpair/.config/spark-pair, 0700) and runs the five
-# pairing entrypoints — pairing/README.md's "box-service user", the DAC
-# ownership discipline the ingest/upload-filings ticks enforce. Locked
-# password, no SSH login: a service identity, never an operator.
+# state (/home/sparkpair/.config/spark-pair, 0700) and runs the pairing
+# entrypoints — pairing/README.md's "box-service user", the DAC ownership
+# discipline the ingest/upload-filings ticks enforce. Locked password, no
+# SSH login: a service identity, never an operator. (The store-coupled
+# entrypoints ingest/upload-filings stay unwired pending #1363's
+# store-access design; the pure-pairing-state entrypoints are wired.)
 RUN useradd --system --create-home --home-dir /home/swapd --shell /bin/bash swapd \
  && useradd --create-home --home-dir /home/agent --shell /bin/bash --password '*' agent \
  && passwd -l agent \
