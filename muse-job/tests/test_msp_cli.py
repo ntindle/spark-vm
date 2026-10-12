@@ -56,9 +56,17 @@ class FakeHost:
         self.log_path = log_path
         self.calls = []
         self.handlers = {}
+        self.request_handlers = {}
         self.opened = False
         self.closed = False
         FakeHost.instances.append(self)
+
+    def set_request_handler(self, method, handler):
+        # Mirrors the real MSPHost's registration-before-open contract
+        # (issue #1372 slice 2): late registration is a test failure.
+        if self.opened:
+            raise AssertionError("request handler registered after open()")
+        self.request_handlers[method] = handler
 
     def open(self):
         self.opened = True
@@ -94,11 +102,21 @@ def fakes(monkeypatch):
     ns = types.SimpleNamespace(calls=[])
 
     m_host = types.ModuleType("msp_host")
+
+    class MSPError(Exception):
+        pass
+
+    class ServerError(MSPError):
+        pass
+
+    m_host.MSPError = MSPError
+    m_host.ServerError = ServerError
     m_host.MSPHost = FakeHost
 
     m_session = types.ModuleType("msp_session")
     m_session.YOLO_APPROVAL_MODE = "allowAll"
     m_session.new_command_id = lambda: "cmd-1"
+    m_session.check_command_id = lambda value, what="command_id": value
     started = {}
 
     def start_session(host, workspace_root, *, approval_mode=None,

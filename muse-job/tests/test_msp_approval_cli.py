@@ -527,8 +527,11 @@ def _held_elsewhere_error():
 
 def test_approvals_held_elsewhere_truthful_error(cli, fakes):
     # A live supervised turn holds the session single-attach: the
-    # command must fail with the truthful slice-2 pointer, not the raw
-    # "held by another host" refusal.
+    # command must fail with the truthful message, not the raw
+    # "held by another host" refusal. (Slice 1 pointed at the not-yet
+    # wired slice 2; slice 2 shipped, so the message names the current
+    # residual: listing still needs direct access, decide/answer route
+    # through the supervisor.)
     slug = "job1"
     _make_job(cli, slug)
     fakes.resume_error = _held_elsewhere_error()
@@ -537,32 +540,52 @@ def test_approvals_held_elsewhere_truthful_error(cli, fakes):
     try:
         cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
     except RuntimeError as e:
-        assert "slice 2" in str(e)
+        assert "Listing through a supervised session is not wired yet" \
+            in str(e)
+        assert "decide/answer route through the supervisor" in str(e)
     else:
         raise AssertionError("expected RuntimeError")
 
 
-def test_decide_held_elsewhere_truthful_error(cli, fakes):
+def test_decide_held_elsewhere_routes_via_supervisor(cli, fakes,
+                                                     monkeypatch):
+    # Slice 2: decide no longer fails on a supervisor-held session --
+    # the held-elsewhere race queues the decision for the supervisor
+    # instead (the _msp_steer pattern).
     slug = "job1"
     _make_job(cli, slug)
     fakes.resume_error = _held_elsewhere_error()
-    with pytest.raises(RuntimeError, match="held by the.*supervisor"):
-        cli.cmd_decide(_ns(slug=slug, approval_id="ap-1",
-                           choice_id="deny", feedback=None))
-    assert "slice 2" in str(pytest.raises(
-        RuntimeError, cli.cmd_decide,
-        _ns(slug=slug, approval_id="ap-1", choice_id="deny",
-            feedback=None)).value)
+    routed = []
+    monkeypatch.setattr(
+        cli, "_msp_decide_via_supervisor",
+        lambda args, kind, fields: routed.append((kind, fields)) or 0)
+    rc = cli.cmd_decide(_ns(slug=slug, approval_id="ap-1",
+                            choice_id="deny", feedback=None))
+    assert rc == 0
+    assert len(routed) == 1
+    assert routed[0][0] == "decide"
+    assert routed[0][1]["approval_id"] == "ap-1"
 
 
-def test_answer_held_elsewhere_truthful_error(cli, fakes):
+def test_answer_held_elsewhere_routes_via_supervisor(cli, fakes,
+                                                     monkeypatch):
+    # Slice 2: answer no longer fails on a supervisor-held session --
+    # the held-elsewhere race queues the answer (with its trust
+    # classification) for the supervisor instead.
     slug = "job1"
     _make_job(cli, slug)
     fakes.resume_error = _held_elsewhere_error()
-    with pytest.raises(RuntimeError, match="held by the.*supervisor"):
-        cli.cmd_answer(_ns(slug=slug, user_input_id="ui-1", answers="[]",
-                           trust_policy_opt_in=False,
-                           classified_not_trust_prompt=True))
+    routed = []
+    monkeypatch.setattr(
+        cli, "_msp_decide_via_supervisor",
+        lambda args, kind, fields: routed.append((kind, fields)) or 0)
+    rc = cli.cmd_answer(_ns(slug=slug, user_input_id="ui-1", answers="[]",
+                            trust_policy_opt_in=False,
+                            classified_not_trust_prompt=True))
+    assert rc == 0
+    assert len(routed) == 1
+    assert routed[0][0] == "answer"
+    assert routed[0][1]["trust"] is False
 
 
 def test_status_snapshot_path_no_bogus_check_failed(cli, fakes, capsys):

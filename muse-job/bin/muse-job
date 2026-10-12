@@ -37,6 +37,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Best-effort: a missing/invalid VERSION must never break the CLI.
@@ -3522,11 +3523,18 @@ def _msp_require_sid(job, slug):
     return sid
 
 
-def _msp_host_for(slug):
+def _msp_host_for(slug, request_handlers=None):
     """Open an MSPHost on `muse serve` for one job. Caller must close().
 
     Issue #212: MUSE_NO_AUTO_UPDATE=1 -- the serve host must not self-update
-    mid-job; an in-place binary swap would desync the protocol mid-turn."""
+    mid-job; an in-place binary swap would desync the protocol mid-turn.
+
+    request_handlers maps server->client request methods to handlers and
+    is registered BEFORE open(): registration is not synchronized, so
+    registering from a single thread pre-open is the only race-free
+    shape (issue #1372 slice 2 wires approval/request + userInput/request
+    on the supervisor's host so prompts surface to the operator).
+    """
     msp_host, _, _, _, _ = _msp_imports()
     os.environ["MUSE_NO_AUTO_UPDATE"] = "1"
     host = msp_host.MSPHost(
@@ -3534,6 +3542,8 @@ def _msp_host_for(slug):
         client_name="muse_job",
         log_path=os.path.join(job_dir(slug), "tmp", "msp-serve.log"),
     )
+    for method, handler in (request_handlers or {}).items():
+        host.set_request_handler(method, handler)
     host.open()
     return host
 
@@ -3647,6 +3657,12 @@ def _msp_supervisor_files(slug):
         "heartbeat": os.path.join(md, "supervisor.heartbeat"),
         "view": os.path.join(md, "supervisor.view.json"),
         "queue": os.path.join(md, "steer-queue.jsonl"),
+        # Issue #1372 slice 2: the decide/answer queue the supervisor
+        # drains (plus per-request result files the CLI rendezvouses on),
+        # and the server-issued request ledger `status` renders.
+        "decide_queue": os.path.join(md, "decision-queue.jsonl"),
+        "decide_results": os.path.join(md, "decision-results"),
+        "requests": os.path.join(md, "requests.json"),
         "prompt": os.path.join(md, "supervisor.prompt.md"),
         "log": os.path.join(md, "msp-supervise.log"),
     }
@@ -4085,6 +4101,14 @@ def _msp_supervise_loop(slug, job, host, sid, tid, stop):
             _msp_drain_steer_queue(slug, host, sid, tid, view)
         except Exception:
             pass
+        # Issue #1372 slice 2: the decision queue is drained in the same
+        # position -- poll + drain happens BEFORE the terminal break, so a
+        # decision queued in the race window is executed (or refused with
+        # a terminal result) rather than leaking to a later supervisor.
+        try:
+            _msp_drain_decision_queue(slug, host, sid, tid)
+        except Exception:
+            pass
         if terminal_hit:
             break
         if view.active_turn_id is None and (saw_active or polls >= 3):
@@ -4130,7 +4154,19 @@ def _msp_supervise_cmd(args):
         raise RuntimeError("supervisor: no prompt found")
     work, _, _ = trusted_job_paths(slug, job)
     msp_host, msp_session, msp_turn, msp_events, _ = _msp_imports()
-    host = _msp_host_for(slug)
+    # Issue #1372 slice 2: wire the approval/user-input request handlers
+    # on the supervisor's host -- prompts the server issues surface to
+    # the operator (journal + request ledger) the moment they are
+    # requested instead of stalling invisibly. Registered before open()
+    # (the only race-free shape); the callbacks run on the reader
+    # thread and only journal/record, never touching the transport.
+    msp_approval = _msp_approval()
+    host = _msp_host_for(slug, request_handlers={
+        "approval/request": msp_approval.handle_approval_request(
+            lambda approval: _msp_on_approval_requested(slug, approval)),
+        "userInput/request": msp_approval.handle_user_input_request(
+            lambda prompt: _msp_on_user_input_requested(slug, prompt)),
+    })
     stop = {"flag": False}
 
     def _on_term(signum, frame):
@@ -4138,6 +4174,7 @@ def _msp_supervise_cmd(args):
 
     signal.signal(signal.SIGTERM, _on_term)
     signal.signal(signal.SIGINT, _on_term)
+    tid = None  # for the refuse-only drain below when startup fails early
     try:
         # Resume the recorded session when it still exists (steer/resume
         # relaunches); otherwise start fresh on the same worktree.
@@ -4176,6 +4213,13 @@ def _msp_supervise_cmd(args):
         with open(files["started"], "w") as f:
             json.dump({"session_id": sid, "turn_id": tid}, f)
         _msp_supervise_loop(slug, job, host, sid, tid, stop)
+        # Issue #1372 slice 2: the turn is over and the host is about to
+        # close -- anything queued in the race window after the loop's
+        # last drain must get a terminal result (refused), never an
+        # orphaned queue entry the CLI would rendezvous on until timeout.
+        # refuse_only never touches the transport, so host/sid may be
+        # unusable here; it only needs the turn id for the staleness tag.
+        _msp_drain_decision_queue(slug, host, sid, tid, refuse_only=True)
     finally:
         # Closing the host SIGTERMs the serve child: the turn's teardown.
         # The SIGTERM/SIGINT handler above routes through the loop's stop
@@ -4502,6 +4546,12 @@ def _msp_status(job, slug, args):
         if st.get("snapshot"):
             print(f"  snapshot: {st['snapshot_age_s']:.0f}s old "
                   f"(supervisor holds the session)")
+            # Issue #1372 slice 2: requests the server issued that the
+            # operator has not decided/answered yet, with the full
+            # runnable command for each -- `muse-job approvals` cannot
+            # list on a supervisor-held session, so `status` carries the
+            # choices/questions the operator needs to act.
+            _msp_status_render_requested(st)
         if st["pending"]:
             print(f"  pending: {_clean_text(st['pending'])[:200]}")
         if "pending_approvals" not in st:
@@ -4563,6 +4613,59 @@ def _read_bounded_tail(path, limit):
             text = text[first_nl + 1:]
     return text.splitlines(keepends=True)
 
+def _msp_status_render_requested(st):
+    """Render ledgered requests like cmd_approvals' direct-path output.
+
+    Every string was _clean_text'ed at ledger-append time, but the
+    ledger is re-read from disk: sanitize again at render (issue #23
+    B6 -- terminal escapes in agent-influenced titles/labels must never
+    reach the operator's terminal).
+    """
+    slug = st["slug"]
+    for r in st.get("requested") or []:
+        if not isinstance(r, dict):
+            continue
+        rid = _clean_text(str(r.get("id") or ""))[:40]
+        d = r.get("detail")
+        if not isinstance(d, dict):
+            d = {}
+        ts = _safe_hhmm(r.get("ts"))
+        if r.get("kind") == "approval":
+            title = _clean_text(str(d.get("title") or ""))[:120]
+            print(f"  approval {rid}: {title} ({ts})")
+            # (d.get("choices") or []): a null on disk (hand-edit,
+            # corruption) must degrade, never kill `status` (issue #23
+            # H3 -- a forged ledger must not persistently break the
+            # overview).
+            choices = ", ".join(
+                "%s (%s)" % (_clean_text(str(c.get("choiceId") or "")),
+                             _clean_text(str(c.get("decision") or "")))
+                for c in (d.get("choices") or [])
+                if isinstance(c, dict))
+            print(f"    decide: muse-job decide {slug} "
+                  f"--approval-id {rid} --choice-id <id>")
+            if choices:
+                print(f"    choices: {choices[:200]}")
+        elif r.get("kind") == "user_input":
+            tag = (" [looks like a trust prompt]"
+                   if d.get("looksLikeTrustPrompt") else "")
+            print(f"  user-input {rid}{tag} ({ts}):")
+            for q in (d.get("questions") or []):
+                if not isinstance(q, dict):
+                    continue
+                print(f"    [{_clean_text(str(q.get('mode') or ''))}] "
+                      f"{_clean_text(str(q.get('questionId') or ''))}: "
+                      f"{_clean_text(str(q.get('prompt') or ''))[:160]}")
+                options = [_clean_text(str(o))
+                           for o in (q.get("options") or [])[:8]]
+                if options:
+                    print(f"      options: {', '.join(options)[:200]}")
+            print(f"    answer: muse-job answer {slug} "
+                  f"--user-input-id {rid} "
+                  f"--answers '[{{\"questionId\": ..., ...}}]' "
+                  f"--classified-not-trust-prompt|--trust-policy-opt-in")
+
+
 def _msp_status_from_snapshot(slug, job):
     """Status from the supervisor's view snapshot (session held elsewhere)."""
     snap = _msp_read_snapshot(slug)
@@ -4594,6 +4697,10 @@ def _msp_status_from_snapshot(slug, job):
         "progress_age_s": progress_age_s,
         "snapshot": True,
         "snapshot_age_s": round(time.time() - snap.get("t", time.time()), 1),
+        # Issue #1372 slice 2: server-issued requests the supervisor's
+        # request handlers surfaced (listPending is unreachable while it
+        # holds the session).
+        "requested": _msp_request_ledger_read(slug),
     }
 
 
@@ -4960,8 +5067,8 @@ def _watch_msp_job(slug, job, events, now):
 # operator surface on `muse-job` itself: approvals/decide/answer
 # subcommands plus pending-approval surfacing in `status` (the issue's
 # ship-order slice 1 -- operator value now). The supervise-path wiring
-# and the standing trust-policy opt-in shape are follow-up slices on the
-# same issue.
+# shipped as slice 2 (below); the standing trust-policy opt-in shape is
+# the remaining follow-up slice on the same issue.
 
 _MSP_APPROVAL = None
 
@@ -5084,16 +5191,17 @@ def _msp_supervisor_held_error(slug, action):
     session (the whole turn, including blocked_approval/blocked_input
     states -- the supervise loop only exits on terminal events), a
     fresh `muse serve` cannot resume it, and stealing it would SIGTERM
-    the supervisor's turn. Routing decisions through the supervisor is
-    the #1372 slice-2 work; until then, say so plainly instead of the
-    confusing "held by another host" line.
+    the supervisor's turn. decide/answer route through the supervisor
+    (issue #1372 slice 2); listing still needs direct access, so say
+    so plainly instead of the confusing "held by another host" line.
     """
     return RuntimeError(
         f"job {slug}: cannot {action} -- the session is held by the "
         f"job's supervisor (the turn is still running; MSP sessions are "
-        f"single-attach). Routing {action} through a supervised session "
-        f"is not wired yet (issue #1372 slice 2); the pending approvals "
-        f"stay visible in `muse-job status` while the turn is blocked.")
+        f"single-attach). Listing through a supervised session is not "
+        f"wired yet (issue #1372); decide/answer route through the "
+        f"supervisor. Server-issued requests stay visible in "
+        f"`muse-job status` while the turn is blocked.")
 
 
 def cmd_approvals(args):
@@ -5105,9 +5213,11 @@ def cmd_approvals(args):
     warning on every invocation (the msp_approval smoke-CLI posture).
 
     The session must be directly resumable: when the job's supervisor
-    holds it (the turn still running), the commands fail with an
-    explicit error naming the not-yet-wired slice-2 routing instead of
-    the confusing single-attach refusal.
+    holds it (the turn still running), listing fails with an explicit
+    error instead of the confusing single-attach refusal. decide/answer
+    do not need direct access -- they route through the supervisor
+    (issue #1372 slice 2); server-issued requests stay visible in
+    `muse-job status` while the turn is blocked.
     """
     slug = args.slug
     job = load_job(slug)
@@ -5182,6 +5292,13 @@ def cmd_decide(args):
     job = load_job(slug)
     sid = _msp_require_msp_job(job, slug)
     msp_approval = _msp_approval()
+    fields = {"approval_id": args.approval_id, "choice_id": args.choice_id,
+              "feedback": args.feedback}
+    if _msp_supervisor_alive(slug):
+        # Issue #1372 slice 2: the supervisor holds the session for the
+        # whole turn (single-attach) -- route the decision through it
+        # (queue-drain + result rendezvous) instead of failing.
+        return _msp_decide_via_supervisor(args, "decide", fields)
 
     def go(host):
         approvals = msp_approval.list_pending_approvals(host, sid)
@@ -5197,7 +5314,10 @@ def cmd_decide(args):
     try:
         result = _msp_call(slug, job, go)
     except _MSPSessionHeldElsewhere:
-        raise _msp_supervisor_held_error(slug, "decide an approval")
+        # Lost the race: the supervisor took the session between the
+        # liveness check and the resume -- queue instead of failing (the
+        # _msp_steer pattern).
+        return _msp_decide_via_supervisor(args, "decide", fields)
     except RuntimeError:
         raise
     except Exception as e:
@@ -5247,6 +5367,15 @@ def cmd_answer(args):
         answers = json.loads(args.answers)
     except ValueError as e:
         raise RuntimeError(f"--answers is not valid JSON: {e}")
+    fields = {"user_input_id": args.user_input_id, "answers": answers,
+              "trust": trust_opt_in}
+    if _msp_supervisor_alive(slug):
+        # Issue #1372 slice 2: route through the supervisor like decide.
+        # The trust classification (the exactly-one-of choice validated
+        # above) travels with the request -- the drain refuses to answer
+        # anything unclassified, so the no-gate primitive is never
+        # reachable from the queue path.
+        return _msp_decide_via_supervisor(args, "answer", fields)
 
     def go(host):
         prompts = msp_approval.list_pending_user_inputs(host, sid)
@@ -5266,7 +5395,10 @@ def cmd_answer(args):
     try:
         result = _msp_call(slug, job, go)
     except _MSPSessionHeldElsewhere:
-        raise _msp_supervisor_held_error(slug, "answer a prompt")
+        # Lost the race: the supervisor took the session between the
+        # liveness check and the resume -- queue instead of failing (the
+        # _msp_steer pattern).
+        return _msp_decide_via_supervisor(args, "answer", fields)
     except RuntimeError:
         raise
     except Exception as e:
@@ -5282,6 +5414,462 @@ def cmd_answer(args):
                       "status": result.get("status")},
                      indent=2, default=str))
     return 0
+
+
+# --- MSP approval supervise-path wiring (issue #1372, slice 2) -------------
+# Slice 1 put decide/answer on the CLI but left a hole: on a
+# supervisor-held session (the turn still running -- which is exactly
+# when a non---yolo job blocks on a prompt) the commands failed with
+# "not wired yet". This slice closes it two ways:
+#
+# 1. The supervisor registers approval/request + userInput/request
+#    handlers (the handle_*_request factories) on its MSPHost, so
+#    prompts surface to the operator (journal signal + request ledger)
+#    the moment the server issues them instead of stalling invisibly.
+# 2. decide/answer route through the supervisor on held sessions: the
+#    CLI enqueues a decision request and rendezvouses on a result file
+#    (queue-drain + result rendezvous, mirroring the steer queue).
+#
+# Trust-policy carriage (owner note on #1372, from the #789 security
+# review): a queued answer MUST carry the operator's trust
+# classification ("trust": true|false -- the --trust-policy-opt-in /
+# --classified-not-trust-prompt choice the CLI already forces). The
+# drain refuses to answer anything unclassified, and trust=true answers
+# go through answer_trust_prompt with an explicit
+# TrustPolicy(auto_answer_trust=True) -- the no-gate answer_user_input
+# primitive is never reachable from the queue path for trust prompts.
+
+
+def _msp_on_approval_requested(slug, approval):
+    """Reader-thread callback for approval/request (supervise path).
+
+    Surfaces the server-issued request to the operator in real time: a
+    redacted journal signal (ids + title only -- rawArgs/subjects may
+    carry secrets) plus the request ledger `status` renders while the
+    supervisor holds the session. The ledger carries the operator-safe
+    shape (ids, title, choices) so the operator can compose the
+    `decide` command from `status` alone -- `muse-job approvals` cannot
+    list on a supervisor-held session. Quick, never raises, never
+    touches the transport (the reader thread forbids host.call()).
+    """
+    try:
+        _, _, _, msp_events, _ = _msp_imports()
+        pub = _approval_public(approval)
+        detail = "approval requested: %s (%s)" % (
+            approval.approval_id, pub["title"][:80])
+        _msp_journal_append(slug, [msp_events.JobSignal(
+            "approval", "approval/requested", detail=detail)])
+        _msp_request_ledger_append(slug, "approval", approval.approval_id,
+                                   pub)
+    except Exception:
+        pass
+
+
+def _msp_on_user_input_requested(slug, prompt):
+    """Reader-thread callback for userInput/request (supervise path).
+
+    Same surface contract as _msp_on_approval_requested: the ledger
+    carries the operator-safe shape (questions, options, the
+    looks-like-trust tag) so the operator can compose the `answer`
+    command -- including the trust classification -- from `status`
+    alone. Answers are never journaled or ledgered (they may be
+    secrets).
+    """
+    try:
+        _, _, _, msp_events, _ = _msp_imports()
+        pub = _prompt_public(prompt)
+        detail = "user input requested: %s (%d question(s))" % (
+            prompt.user_input_id, len(pub["questions"]))
+        _msp_journal_append(slug, [msp_events.JobSignal(
+            "approval", "userInput/requested", detail=detail)])
+        _msp_request_ledger_append(slug, "user_input",
+                                   prompt.user_input_id, pub)
+    except Exception:
+        pass
+
+
+_MSP_REQUEST_LEDGER_MAX = 20
+
+
+def _msp_ledger_update(slug, fn):
+    """Apply fn(entries)->new_entries to the request ledger under LOCK_EX.
+
+    The ledger's reader-thread appends race the drain-thread removes;
+    lock-free read-modify-write could lose an update (Engineering
+    round-2 observation). The window is display-only and self-healing,
+    but the file's own flock convention is cheap to follow, so both
+    writers go through here. In-place update under the lock (no
+    tmp+replace) keeps the inode stable so the lock serializes. Never
+    raises. fn may return None to skip the write.
+    """
+    path = _msp_supervisor_files(slug)["requests"]
+    try:
+        f = open(path, "a+")
+    except OSError:
+        return
+    with f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                entries = json.load(f)
+            except ValueError:
+                entries = []
+            if not isinstance(entries, list):
+                entries = []
+            new_entries = fn(entries)
+            if new_entries is None:
+                return
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(new_entries))
+        except OSError:
+            pass
+        finally:
+            try:
+                fcntl.flock(f, fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def _msp_request_ledger_append(slug, kind, rid, detail):
+    """Append a server-issued request to the ledger.
+
+    The ledger is what `muse-job status` renders on the snapshot path
+    (supervisor holds the session, so listPending is unreachable).
+    `detail` is the operator-safe shape (_approval_public /
+    _prompt_public: ids, titles, choices/questions -- never raw wire
+    params, never answers). Never raises.
+    """
+    def add(entries):
+        entries = [e for e in entries
+                   if isinstance(e, dict)
+                   and e.get("kind") in ("approval", "user_input")]
+        entries.append({"ts": time.time(), "kind": kind, "id": rid,
+                        "detail": detail})
+        return entries[-_MSP_REQUEST_LEDGER_MAX:]
+
+    _msp_ledger_update(slug, add)
+
+
+def _msp_request_ledger_read(slug):
+    """The request ledger entries, or [] on any read failure."""
+    try:
+        with open(_msp_supervisor_files(slug)["requests"]) as f:
+            entries = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def _msp_request_ledger_remove(slug, kind, rid):
+    """Drop a decided/answered request from the ledger. Never raises."""
+    def drop(entries):
+        kept = [e for e in entries
+                if not (isinstance(e, dict)
+                        and e.get("kind") == kind and e.get("id") == rid)]
+        return None if len(kept) == len(entries) else kept
+
+    _msp_ledger_update(slug, drop)
+
+
+_MSP_DECISION_RENDEZVOUS_S = 120
+_MSP_DECISION_RESULT_TTL_S = 3600
+_DECISION_REQUEST_ID_RE = re.compile(r"^dreq-[0-9a-f]{12}$")
+
+
+def _msp_enqueue_decision(slug, kind, fields, turn_id=None):
+    """Queue a decide/answer request for the supervisor; returns request_id.
+
+    The queue lives in the operator-owned metadata dir (#1145); queued
+    answers may carry real secrets, so the file is 0600. Stale result
+    files (orphaned rendezvous from dead CLIs) older than an hour are
+    swept here, at enqueue time.
+    """
+    request_id = "dreq-" + uuid.uuid4().hex[:12]
+    entry = {"ts": time.time(), "request_id": request_id, "kind": kind,
+             "turn_id": turn_id}
+    entry.update(fields)
+    path = _msp_supervisor_files(slug)["decide_queue"]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            os.write(fd, (json.dumps(entry, default=str) + "\n").encode())
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    _msp_sweep_decision_results(slug)
+    return request_id
+
+
+def _msp_sweep_decision_results(slug):
+    """Drop orphaned rendezvous results older than the TTL. Never raises."""
+    try:
+        d = _msp_supervisor_files(slug)["decide_results"]
+        now = time.time()
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                if now - os.path.getmtime(path) > _MSP_DECISION_RESULT_TTL_S:
+                    os.unlink(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _msp_decision_result_path(slug, request_id):
+    """Result-file path; the id whitelist keeps this from becoming a path
+    injection (the id is CLI-generated, but the drain also validates)."""
+    if not _DECISION_REQUEST_ID_RE.match(request_id or ""):
+        raise ValueError("bad decision request id")
+    return os.path.join(_msp_supervisor_files(slug)["decide_results"],
+                        request_id + ".json")
+
+
+def _msp_write_decision_result(slug, request_id, status, detail, ack=None):
+    """Atomically publish a rendezvous result (supervisor side, 0600).
+
+    status is one of decided/answered/refused/error. The ack is the
+    key-whitelisted operator ack -- never answers, never raw server
+    fields. Never raises.
+    """
+    try:
+        path = _msp_decision_result_path(slug, request_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        body = {"request_id": request_id, "status": status,
+                "detail": detail, "t": time.time()}
+        if ack is not None:
+            body["ack"] = ack
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(body, default=str).encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _msp_wait_decision_result(slug, request_id,
+                              timeout_s=_MSP_DECISION_RENDEZVOUS_S):
+    """CLI-side rendezvous: poll for the supervisor's result file."""
+    path = _msp_decision_result_path(slug, request_id)
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+        if time.time() >= deadline:
+            return None
+        time.sleep(1)
+
+
+def _msp_supervisor_decide(msp_approval, host, sid, entry):
+    """Decide a queued approval on the supervisor's host.
+
+    Re-reads approval/listPending immediately before deciding so the
+    requirementId race guard is fresh -- the same wire path as
+    cmd_decide's direct go(), only the host is the supervisor's
+    already-open session host. Returns the key-whitelisted ack.
+    """
+    approval_id = entry.get("approval_id")
+    choice_id = entry.get("choice_id")
+    if not approval_id or not isinstance(approval_id, str):
+        raise msp_approval.MSPApprovalError("queued decide: bad approval_id")
+    approvals = msp_approval.list_pending_approvals(host, sid)
+    approval = next((a for a in approvals
+                     if a.approval_id == approval_id), None)
+    if approval is None:
+        raise msp_approval.MSPApprovalError(
+            "no pending approval %r (pending: %r)"
+            % (approval_id, [a.approval_id for a in approvals]))
+    result = msp_approval.decide_approval(host, sid, approval, choice_id,
+                                          feedback=entry.get("feedback"))
+    return {"approvalId": approval_id, "choiceId": choice_id,
+            "status": result.get("status"), "terminal": result.get("terminal")}
+
+
+def _msp_supervisor_answer(msp_approval, host, sid, entry):
+    """Answer a queued user-input prompt, with the trust gate.
+
+    The entry MUST carry the operator's classification ("trust":
+    true|false). Missing classification refuses fail-closed -- the
+    no-gate answer_user_input primitive is never reachable from the
+    queue path (owner note on #1372, from the #789 security review).
+    trust=true answers go through answer_trust_prompt with an explicit
+    TrustPolicy(opt-in); the library re-checks the policy itself, so
+    the gate holds twice. Returns the key-whitelisted ack (answers are
+    never echoed -- they may be secrets).
+    """
+    trust = entry.get("trust")
+    if trust is True:
+        policy = msp_approval.TrustPolicy(auto_answer_trust=True)
+
+        def use(prompt, answers):
+            return msp_approval.answer_trust_prompt(
+                host, sid, prompt, answers, policy=policy)
+    elif trust is False:
+        def use(prompt, answers):
+            return msp_approval.answer_user_input(host, sid, prompt,
+                                                  answers)
+    else:
+        raise msp_approval.MSPApprovalError(
+            "queued answer carries no trust classification (refusing: "
+            "fail-closed per the #211 trust-policy decision)")
+    user_input_id = entry.get("user_input_id")
+    answers = entry.get("answers")
+    if not user_input_id or not isinstance(user_input_id, str):
+        raise msp_approval.MSPApprovalError("queued answer: bad user_input_id")
+    if not isinstance(answers, list):
+        raise msp_approval.MSPApprovalError(
+            "queued answer: bad answers payload")
+    prompts = msp_approval.list_pending_user_inputs(host, sid)
+    prompt = next((p for p in prompts
+                   if p.user_input_id == user_input_id), None)
+    if prompt is None:
+        raise msp_approval.MSPApprovalError(
+            "no pending user input %r (pending: %r)"
+            % (user_input_id, [p.user_input_id for p in prompts]))
+    result = use(prompt, answers)
+    return {"userInputId": user_input_id, "status": result.get("status")}
+
+
+def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
+    """Execute (or refuse) queued decide/answer requests. Never raises.
+
+    Mirrors _msp_drain_steer_queue's locked read+truncate; unlike
+    steer, every entry gets a terminal result file (the CLI
+    rendezvouses on it), so a queued decision can never hang the
+    operator past the supervisor's own lifecycle. refuse_only=True
+    marks everything refused without executing -- the supervisor is
+    exiting and the session is about to close (host/sid are not
+    touched in that mode).
+    """
+    msp_approval = _msp_approval()
+    _, _, _, msp_events, _ = _msp_imports()
+    path = _msp_supervisor_files(slug)["decide_queue"]
+    try:
+        f = open(path, "r+")
+    except OSError:
+        return
+    with f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            lines = f.readlines()
+            f.seek(0)
+            f.truncate()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        rid = entry.get("request_id")
+        kind = entry.get("kind")
+        if (not _DECISION_REQUEST_ID_RE.match(rid or "")
+                or kind not in ("decide", "answer")):
+            # No valid id to rendezvous on: drop, never execute.
+            continue
+        entry_tid = entry.get("turn_id")
+        refused = None
+        drop_ledger = False
+        if entry_tid and entry_tid != tid:
+            refused = "decision queued for an older turn"
+            # The turn is over: the request can no longer be pending
+            # server-side, so `status` must stop advertising it.
+            drop_ledger = True
+        elif refuse_only:
+            refused = "supervisor exiting; re-run the command"
+            # The session is closing: same terminal reasoning.
+            drop_ledger = True
+        elif kind == "answer" and entry.get("trust") not in (True, False):
+            # The trust gate, checked before anything touches the wire:
+            # an unclassified answer is a policy refusal, not an
+            # execution error (the no-gate primitive is unreachable).
+            # The request is still genuinely pending -- the operator can
+            # re-issue the command with a classification -- so it stays
+            # advertised in `status`.
+            refused = ("queued answer carries no trust classification "
+                       "(refusing: fail-closed per the #211 trust-policy "
+                       "decision)")
+        if refused is not None:
+            _msp_write_decision_result(slug, rid, "refused", refused)
+            _msp_journal_append(slug, [msp_events.JobSignal(
+                "approval", "decision/%s" % kind,
+                detail="decision %s refused: %s" % (rid, refused))])
+            if drop_ledger:
+                ledger_id = (entry.get("approval_id")
+                             if kind == "decide"
+                             else entry.get("user_input_id"))
+                if isinstance(ledger_id, str):
+                    _msp_request_ledger_remove(
+                        slug,
+                        "approval" if kind == "decide" else "user_input",
+                        ledger_id)
+            continue
+        try:
+            if kind == "decide":
+                ack = _msp_supervisor_decide(msp_approval, host, sid, entry)
+                status = "decided"
+                ledger_kind, ledger_id = "approval", entry.get("approval_id")
+            else:
+                ack = _msp_supervisor_answer(msp_approval, host, sid, entry)
+                status = "answered"
+                ledger_kind, ledger_id = ("user_input",
+                                         entry.get("user_input_id"))
+        except Exception as e:
+            _msp_write_decision_result(slug, rid, "error",
+                                       str(e)[:300])
+            _msp_journal_append(slug, [msp_events.JobSignal(
+                "approval", "decision/%s" % kind,
+                detail="decision %s error: %s" % (rid, str(e)[:160]))])
+            continue
+        _msp_write_decision_result(slug, rid, status,
+                                   "%s %s executed" % (kind, rid), ack=ack)
+        _msp_journal_append(slug, [msp_events.JobSignal(
+            "approval", "decision/%s" % kind,
+            detail="decision %s %s" % (rid, status))])
+        # The request is no longer outstanding: drop it from the
+        # ledger so `status` stops advertising it.
+        if isinstance(ledger_id, str):
+            _msp_request_ledger_remove(slug, ledger_kind, ledger_id)
+
+
+def _msp_decide_via_supervisor(args, kind, fields):
+    """Enqueue a decide/answer request and rendezvous on the result."""
+    slug = args.slug
+    snap = _msp_read_snapshot(slug)
+    turn_id = (snap or {}).get("active_turn_id")
+    request_id = _msp_enqueue_decision(slug, kind, fields,
+                                       turn_id=turn_id)
+    result = _msp_wait_decision_result(slug, request_id)
+    if result is None:
+        raise RuntimeError(
+            "job %s: no decision result after %ds -- the supervisor may "
+            "have died between the liveness check and the drain; the "
+            "request stays queued and the next drain refuses it "
+            "terminally; re-run the command" % (
+                slug, _MSP_DECISION_RENDEZVOUS_S))
+    status = result.get("status")
+    if status in ("decided", "answered"):
+        print(json.dumps(result.get("ack") or {}, indent=2, default=str))
+        return 0
+    raise RuntimeError("job %s: supervisor %s %s: %s"
+                       % (slug, kind, status,
+                          result.get("detail")))
 
 
 def main():
