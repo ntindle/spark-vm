@@ -197,6 +197,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Push digest pages no longer trust a corrupt coalescing count
+  (2026-10-12, #1356): the sender loop used to fail closed only when
+  the digest's hourly state row was missing — a present row with a
+  negative, non-integer, or zero count would page a real device with
+  nonsense like "-5 pages coalesced this hour" (or wedge the page on
+  an error every tick). The count is now validated before the page is
+  built, and a corrupt count takes the same fail-closed dead-letter
+  path as the missing row: nothing is sent, the page budget is
+  released, and the failure is operator-visible. (#1358)
+
 - Doc freshness: two pinned convergence docs re-pinned to current
   state (2026-10-11). The rollout-controller convergence doc said the
   deploy driver, wave machine, and update-event journal were still

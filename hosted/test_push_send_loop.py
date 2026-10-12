@@ -691,6 +691,37 @@ def test_digest_missing_state_dead_letters(conn, owner, vapid):
     assert summary.dispositions["dead-letter"] == 1
 
 
+def test_digest_corrupt_state_count_dead_letters(conn, owner, vapid):
+    # #1356: a present row's count is not trusted — a negative,
+    # non-integer, or zero count beside a queued row is corruption (the
+    # DDL's INTEGER NOT NULL is SQLite type affinity only, and the only
+    # writer that zeroes is _complete_page, atomically with the
+    # queued-row DELETE). Fail-closed exactly like the missing-row case:
+    # nothing is sent, the reservation is released, and the anomaly is
+    # operator-visible. Without the fix, -3 pages nonsense, 0 pages
+    # nonsense, and "abc" wedges the item on a TypeError every tick.
+    seed_subscription(conn, owner, "box-a", "phone")
+    for corrupt in (-3, 0, "abc"):
+        enqueue(conn, "digest", owner, None, WINDOW)
+        conn.execute(
+            "INSERT OR REPLACE INTO push_digest_state (owner_principal,"
+            " window_start, count, enqueued_at) VALUES (?, ?, ?, ?)",
+            (owner, WINDOW, corrupt, NOW.isoformat()))
+        conn.commit()
+        tick = make_tick(conn, owner, vapid)
+
+        summary = tick()
+
+        assert tick.service.calls == []
+        assert outcomes(conn) == ["dead-letter"]
+        assert budget(conn, "owner", owner, WINDOW) == 0
+        assert summary.dispositions["dead-letter"] == 1
+        # The loop deleted the queued row and wrote the dead-letter
+        # audit row — clear both before the next corrupt value.
+        conn.execute("DELETE FROM push_send_results")
+        conn.commit()
+
+
 def test_no_live_subscriptions_parks_the_page(conn, owner, vapid):
     seed_approval(conn, "box-1", "aid-1", owner)
     enqueue(conn, "approval_filed", owner, "box-1", "aid-1")
