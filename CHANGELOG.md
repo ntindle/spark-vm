@@ -80,7 +80,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   instead of failing, and prompts the model raises now appear right
   away in `muse-job log` and `muse-job status` together with the exact
   command that answers each one. Answering a workspace-trust prompt
-  still requires the explicit per-command opt-in flag. (#TBD)
+  still requires the explicit per-command opt-in flag. (#1382)
 - `muse-job approvals` / `decide` / `answer` operator subcommands
   (2026-10-12, #1372 slice 1): MSP jobs' pending tool approvals and
   user-input prompts are now inspectable and answerable from the CLI
