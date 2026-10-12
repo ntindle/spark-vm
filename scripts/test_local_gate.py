@@ -15,14 +15,18 @@ Non-vacuity: every test below is sensitive to its contract — neuter the
 corresponding script behavior and the test fails (verified by hand during
 development).
 """
-import fnmatch
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+# The standalone shellcheck CI job's file selection lives in
+# scripts/ci_shellcheck_files.py — the single source of truth shared with
+# local-gate.sh step 5. Imported here (not redefined) so the suite's
+# repo-wide pin and the gate step can never drift apart. (issue #1379)
+from ci_shellcheck_files import ci_shellcheck_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE = REPO_ROOT / "scripts" / "local-gate.sh"
@@ -65,16 +69,66 @@ def test_inventory_every_item_named_in_gate_script():
 
 
 def test_shellcheck_step_approximates_ci_job():
-    """The script's shellcheck step must use the CONTRIBUTING-documented
-    severity and diff base (approximation of the standalone shellcheck job).
-    The -z/-0 pair is pinned too: without it, a *.sh filename containing
-    whitespace would split into two arguments and fail a diff CI passes."""
+    """The script's shellcheck step must replicate the standalone
+    shellcheck CI job: severity=error over the CI job's whole-checkout
+    file selection (via scripts/ci_shellcheck_files.py — the shared
+    selection helper), on every run. It must NOT be a changed-files-only
+    `*.sh` glob: that was a strict subset of the job's selection, which
+    (a) failed shellcheck on deleted paths (the CI job's find-based
+    selection never sees deletions), and (b) let docs-only PRs adding
+    non-`*.sh` shell files pass locally while CI went red (the suite's
+    repo-wide pin is skipped on docs-only verdicts). (issue #1379)
+
+    The -z/-0 pair is pinned too: without it, a filename containing
+    whitespace would split into two arguments and fail a diff CI passes.
+    """
     script = GATE.read_text()
     assert "shellcheck -S error" in script
-    assert "origin/main...HEAD" in script
-    assert "-- '*.sh'" in script
-    assert "git diff -z" in script
+    assert "ci_shellcheck_files.py" in script
     assert "xargs -r -0" in script
+    # The old changed-file plumbing must be gone from the shellcheck step:
+    # a `-- '*.sh'` glob or an `origin/main...HEAD` diff feeding the step
+    # would reintroduce the subset selection. (origin/main still appears
+    # elsewhere in the script — the changed-paths gate — so scope the
+    # check to the shellcheck step's own block.)
+    step_block = _shellcheck_step_block(script)
+    assert "-- '*.sh'" not in step_block, "changed-*.sh glob reintroduced"
+    assert "origin/main" not in step_block, "diff-base plumbing reintroduced"
+    assert "git diff" not in step_block, "diff plumbing reintroduced"
+
+
+def _shellcheck_step_block(script):
+    """The local-gate.sh text from its shellcheck `step` line through the
+    next `step` line (or the MODE==quick branch), i.e. the step's own
+    implementation block."""
+    lines = script.splitlines()
+    start = next(i for i, l in enumerate(lines)
+                 if re.match(r'^\s*step "shellcheck', l))
+    end = next((i for i, l in enumerate(lines[start + 1:], start + 1)
+                if re.match(r'^\s*step "', l) or 'MODE' in l and 'quick' in l),
+               len(lines))
+    return "\n".join(lines[start:end])
+
+
+def test_shellcheck_step_selection_matches_ci_job():
+    """The gate step's selection is the CI job's selection, by
+    construction: the step pipes scripts/ci_shellcheck_files.py (the
+    module pinning the action's find expression) into shellcheck. This
+    test pins the other direction — the module's output on the real repo
+    still contains the extension-less shebang tools CI lints but a
+    `*.sh`-only glob would miss, so a future narrowing of the helper
+    fails loudly. (issue #1379)"""
+    files = ci_shellcheck_files(REPO_ROOT)
+    assert files, "selection is empty — the scan is vacuous"
+    extensionless = [f for f in files if "." not in Path(f).name]
+    assert any("proxy/cred-registry-set" in f for f in extensionless), (
+        "proxy/cred-registry-set (extension-less #!/bin/bash tool) dropped "
+        "from the CI selection")
+    # Every selected path exists: the CI job's find-based selection never
+    # names deleted files, so the gate can never fail shellcheck on a path
+    # that no longer exists (the deleted-*.sh false FAIL).
+    missing = [f for f in files if not Path(f).is_file()]
+    assert not missing, f"selection names missing files: {missing}"
 
 
 def test_changed_paths_case_arms_match_ci_yml():
@@ -382,70 +436,16 @@ def test_docs_index_step_matches_ci_job_invocation():
             f"local-gate invocation {files} != CI docs-index job {ci_files}")
 
 
-# File selection of the standalone shellcheck CI job
-# (ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca —
-# the SHA pinned in .github/workflows/ci.yml), replicated in Python:
-#
-#  Pass 1 — named shell files: the basename matches the action's -name
-#  list (*.sh, *.bash, *.ksh, *.zsh, *.shlib, .bashrc, ...), shebang or not.
-#  Pass 2 — extension-less executables: no '.' in the basename, any exec
-#  bit set (find -perm /111), whose FIRST line matches the action's
-#  shebang regex ^#! */[^ ]*/(env *)?[abk]*sh.
-#
-# Excludes (mirroring the action): .git, *.go, */mvnw. Keep this helper in
-# sync with the pinned action version — if the SHA moves, re-read the
-# action's find expression and update both passes.
-_ACTION_SHELL_NAME_PATTERNS = (
-    "*.bash", ".bashrc", "bashrc", ".bash_aliases", ".bash_completion",
-    ".bash_login", ".bash_logout", ".bash_profile", "bash_profile",
-    "*.ksh", "suid_profile", "*.zsh", ".zlogin", "zlogin", ".zlogout",
-    "zlogout", ".zprofile", "zprofile", ".zsenv", "zsenv", ".zshrc",
-    "zshrc", "*.sh", "*.shlib",
-)
-# The action's -path patterns '*/.profile' and '*/profile', evaluated
-# against '/'-prefixed relative paths the way find sees './profile'.
-_ACTION_PROFILE_PATH_SUFFIXES = ("/.profile", "/profile")
-_ACTION_SHEBANG_RE = re.compile(r"^#![ ]*/[^ ]*/(env[ ]*)?[abk]*sh")
-
-
-def _ci_shellcheck_files():
-    """Replicate the standalone shellcheck CI job's file selection."""
-    files = []
-    for p in REPO_ROOT.rglob("*"):
-        # Both of the action's finds carry `-type f`, and under find's
-        # default -P that never matches symlinks or directories — gate both
-        # passes identically (a symlinked *.sh is selected by neither CI
-        # nor this helper).
-        if p.is_symlink() or not p.is_file():
-            continue
-        rel = p.relative_to(REPO_ROOT).as_posix()
-        if "/.git/" in f"/{rel}":
-            continue
-        if rel.endswith(".go") or rel == "mvnw" or rel.endswith("/mvnw"):
-            continue  # the action's -path excludes, mirrored for parity
-        name = p.name
-        if ("/" + rel).endswith(_ACTION_PROFILE_PATH_SUFFIXES) or any(
-            fnmatch.fnmatchcase(name, pat) for pat in _ACTION_SHELL_NAME_PATTERNS
-        ):
-            files.append(p)  # pass 1: named shell file, shebang or not
-            continue
-        if "." in name or not (p.stat().st_mode & 0o111):
-            continue  # pass 2 needs an extension-less executable
-        try:
-            # First line only, like the action's `head -n1`.
-            with p.open("rb") as fh:
-                first = fh.readline().decode("ascii", "replace")
-        except OSError:
-            continue  # CI's -exec head|grep silently skips unreadable files
-        if _ACTION_SHEBANG_RE.match(first):
-            files.append(p)
-    return sorted(str(p) for p in files)
+# (The standalone shellcheck CI job's file selection used to be replicated
+# inline here; it now lives in scripts/ci_shellcheck_files.py — the single
+# source of truth shared with local-gate.sh step 5. See the import above.
+# issue #1379)
 
 
 def test_repo_shell_scripts_pass_shellcheck_error():
     """The standalone shellcheck CI job runs severity=error over the shell
-    scripts it selects (see _ci_shellcheck_files: named shell files plus
-    extension-less executables with a shell shebang, e.g.
+    scripts it selects (see scripts/ci_shellcheck_files.py: named shell
+    files plus extension-less executables with a shell shebang, e.g.
     proxy/cred-registry-set).
     A comment line beginning `# shellcheck` that is not a valid directive
     (e.g. `# shellcheck CI job's ...`) fails the whole job with SC1073 —
@@ -455,7 +455,7 @@ def test_repo_shell_scripts_pass_shellcheck_error():
     import shutil
     if shutil.which("shellcheck") is None:
         pytest.skip("shellcheck not installed — CI's standalone job does not skip")
-    shell_files = _ci_shellcheck_files()
+    shell_files = ci_shellcheck_files(REPO_ROOT)
     assert shell_files, "no shell files found — the scan is vacuous"
     out = subprocess.run(["shellcheck", "-S", "error", *shell_files],
                          capture_output=True, text=True)
@@ -466,7 +466,7 @@ def test_shellcheck_scan_covers_extensionless_shebang_tools():
     """Pin the widened scan: the CI job's second pass covers extension-less
     executables with a shell shebang (the proxy/* tools). A *.sh-only
     selection must fail this test. (dx follow-up 20261009-0729.)"""
-    files = _ci_shellcheck_files()
+    files = ci_shellcheck_files(REPO_ROOT)
     extensionless = [f for f in files if "." not in Path(f).name]
     assert extensionless, (
         "no extension-less shebang tools selected — the shebang pass is vacuous")

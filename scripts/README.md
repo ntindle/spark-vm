@@ -11,8 +11,9 @@ rituals honest.
 points here. One command runs the six locally-replicable CI checks in
 order — the shard-plan check, the changelog ritual lint, the changed-paths
 evaluation (docs-only diffs skip the test suite like CI does; uncommitted
-changes count as code), docs index coverage, shellcheck severity=error on
-changed `*.sh` files, then the full test suite — stopping at the first
+changes count as code), docs index coverage, shellcheck severity=error over
+the CI job's shell-file selection on the whole checkout (like CI's
+standalone job — no docs-only carve-out), then the full test suite — stopping at the first
 failure. (CI's merge gate is eight checks; the two the script can't run —
 the markdown link check and the PNG screenshot smoke test — are named in
 its output, not run.)
@@ -29,7 +30,7 @@ shard plan
 changelog ritual lint
 changed-paths gate
 docs index coverage
-shellcheck (severity=error, changed *.sh)
+shellcheck (severity=error, CI job selection)
 python tests
 <!-- gate-steps:end -->
 
