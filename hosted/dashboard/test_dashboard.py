@@ -7,6 +7,10 @@
   control-plane checkout default — set the env to point the test at a
   real worker instead of relying on the skip. Skipped only when no
   worker source is reachable (e.g. CI on a fork).
+- snapshot (#1339 F1): the committed dashboard.inlined.txt is the exact
+  block sync writes between the markers; the freshness test needs no
+  worker checkout, so the canonical-copy rule is CI-visible. An edit to
+  dashboard.html without --write-snapshot fails the suite.
 - sync: sync_dashboard.py mechanically rewrites the inlined block; the
   sync tests pin its contract (idempotent, --check detects drift,
   refusals are loud).
@@ -21,6 +25,7 @@
   templates with hostile box-controlled inputs — a template that drops
   an esc() must fail them (pinned by test_xss_tests_catch_a_dropped_esc).
 """
+import io
 import json
 import os
 import re
@@ -77,6 +82,106 @@ def test_worker_serves_dashboard_at_root():
     assert '"Content-Type": "text/html' in src
     assert '"X-Content-Type-Options": "nosniff"' in src
     assert '"X-Frame-Options": "DENY"' in src
+
+
+# --- snapshot (CI-visible half of the canonical-copy rule) ---------------
+
+def _snapshot():
+    with open(sync_dashboard.SNAPSHOT_PATH, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_snapshot_matches_rendered_block():
+    # #1339 F1: the canonical-copy rule used to be enforced only where a
+    # worker checkout was reachable (the loop VM) — on CI the
+    # byte-identity test always skipped. The committed snapshot is the
+    # exact block sync writes between the markers, derived from
+    # dashboard.html, so this assertion needs no worker: editing the page
+    # without regenerating the snapshot (./sync_dashboard.py
+    # --write-snapshot) fails the suite on GitHub Actions.
+    assert _snapshot() == \
+        sync_dashboard.render_inline_block(sync_dashboard._load_html())
+
+
+def test_snapshot_fails_when_html_edited_without_snapshot_regen(
+        tmp_path, monkeypatch):
+    # Non-vacuity pin: the exact failure mode the snapshot closes (page
+    # edited, snapshot not regenerated) must make the freshness assertion
+    # fail — a test that passes with a stale snapshot is decoration.
+    mutated = str(tmp_path / "mutated.html")
+    with open(mutated, "w", encoding="utf-8") as f:
+        f.write(_html() + "\n<!-- un-synced edit -->\n")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", mutated)
+    assert _snapshot() != \
+        sync_dashboard.render_inline_block(sync_dashboard._load_html())
+
+
+def test_rewrite_region_equals_snapshot(tmp_path):
+    # Pins the snapshot's byte definition: the region _rewrite actually
+    # emits between the marker lines (minus the boundary newlines) is
+    # exactly the committed snapshot. If _rewrite's output shape and the
+    # snapshot ever diverge, the worker copy and the CI check would be
+    # enforcing different blocks.
+    w = _scratch_worker(str(tmp_path / "worker.py"), html="<!-- stale -->")
+    assert sync_dashboard.sync(w) is False  # rewrote
+    src = open(w, encoding="utf-8").read()
+    region = src.split(sync_dashboard.BEGIN)[1].split(sync_dashboard.END)[0]
+    assert region == "\n" + _snapshot() + "\n"
+
+
+def test_write_snapshot_regenerates(tmp_path, monkeypatch):
+    # --write-snapshot derives the snapshot from the current canonical
+    # page through the same _load_html guards the sync path uses, so a
+    # corrupt page fails the regeneration instead of minting a corrupt
+    # snapshot.
+    out = str(tmp_path / "snapshot.txt")
+    monkeypatch.setattr(sync_dashboard, "SNAPSHOT_PATH", out)
+    assert sync_dashboard.main(["--write-snapshot"]) == 0
+    assert open(out, encoding="utf-8").read() == \
+        sync_dashboard.render_inline_block(sync_dashboard._load_html())
+    # Idempotent: a second run writes identical bytes.
+    before = open(out, encoding="utf-8").read()
+    assert sync_dashboard.main(["--write-snapshot"]) == 0
+    assert open(out, encoding="utf-8").read() == before
+
+
+def test_write_snapshot_refuses_corrupt_html(tmp_path, monkeypatch):
+    # A page carrying the F2 hand-paste corruption (literal control
+    # bytes) must not produce a snapshot: regenerate refuses loudly and
+    # leaves any existing snapshot untouched.
+    bad = str(tmp_path / "bad.html")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<p>x\x00y</p>\n")
+    out = str(tmp_path / "snapshot.txt")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("pre-existing")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", bad)
+    monkeypatch.setattr(sync_dashboard, "SNAPSHOT_PATH", out)
+    assert sync_dashboard.main(["--write-snapshot"]) == 2
+    assert open(out, encoding="utf-8").read() == "pre-existing"
+
+
+def test_extract_writes_worker_block_to_stdout(tmp_path, monkeypatch):
+    # #1339 F3: --extract is read-only forensics for a worker copy that
+    # was hand-edited on the plane. It emits the inlined block's exact
+    # bytes on stdout so the operator can diff it against the canonical
+    # page; the worker file is untouched, and nothing is written back to
+    # the repo (the paste-back direction stays refused by rule).
+    drifted = "<!-- hand-edited on the plane -->\n" + _html()
+    w = _scratch_worker(str(tmp_path / "worker.py"), html=drifted)
+    before = open(w, encoding="utf-8").read()
+    fake = io.TextIOWrapper(io.BytesIO())
+    monkeypatch.setattr(_sys, "stdout", fake)
+    assert sync_dashboard.main(["--worker", w, "--extract"]) == 0
+    assert fake.buffer.getvalue().decode("utf-8") == drifted
+    assert open(w, encoding="utf-8").read() == before  # read-only
+
+
+def test_extract_refuses_worker_without_block(tmp_path):
+    w = str(tmp_path / "worker.py")
+    with open(w, "w", encoding="utf-8") as f:
+        f.write("# no markers here\n")
+    assert sync_dashboard.main(["--worker", w, "--extract"]) == 2
 
 
 # --- sync --------------------------------------------------------------
