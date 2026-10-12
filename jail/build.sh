@@ -65,10 +65,24 @@ if [ "$REBUILD_ROOTFS" = 1 ]; then
     # stop the jail and rename-swap. A crash or abort during the
     # minutes-long debootstrap leaves the old tree intact — the in-place
     # `rm -rf` + rebuild this replaces could strand the box with NO rootfs
-    # at all — and downtime shrinks to the seconds the swap takes.
+    # at all — and downtime shrinks to the seconds the stop+swap+restart
+    # takes (the start section below restarts the machine after the swap).
     # A crashed earlier rebuild can strand a partial staging tree or a
-    # leftover .prev: clear both before starting (never the live path).
-    $SUDO rm -rf "$STAGING" "$PREV"
+    # leftover .prev: clear staging, and triage .prev FIRST — a .prev with
+    # no live tree means the crash happened between the two renames, so
+    # restore it (fail-safe); a .prev beside a live tree means the crash
+    # happened during the final rm, so remove it. The unconditional
+    # cleanup the old shape had would have deleted the only surviving
+    # copy of the old tree.
+    $SUDO rm -rf "$STAGING"
+    if $SUDO test -e "$PREV"; then
+        if ! $SUDO test -e "$ROOTFS"; then
+            say "restoring interrupted swap: $PREV -> $ROOTFS"
+            $SUDO mv "$PREV" "$ROOTFS"
+        else
+            $SUDO rm -rf "$PREV"
+        fi
+    fi
     say "debootstrap noble -> $STAGING (a few minutes; the running jail keeps serving)"
     $SUDO mkdir -p /var/lib/machines
     $SUDO debootstrap noble "$STAGING" http://archive.ubuntu.com/ubuntu/
@@ -100,10 +114,9 @@ if [ "$REBUILD_ROOTFS" = 1 ]; then
         fi
     fi
     # Rename-swap: atomic directory renames on the same filesystem. The
-    # old tree survives as .prev until the new tree is live, so even a
-    # crash between the two renames is recoverable (mv .prev back by
-    # hand); the stale-.prev cleanup above keeps a crash during the
-    # final rm from wedging the next rebuild.
+    # old tree survives as .prev until the new tree is live, so a crash
+    # between the renames is fail-safe: the next rebuild's .prev triage
+    # (above) restores it to the live path before staging anything new.
     if $SUDO test -e "$ROOTFS"; then
         $SUDO mv "$ROOTFS" "$PREV"
     fi

@@ -236,10 +236,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The agent-jail rebuild flag is now atomic (2026-10-12) (#TBD): the
   fresh install is built into a staging directory while the jail keeps
   serving, then the jail is stopped (a failed stop aborts the build
-  loudly rather than swapping a live tree) and the directories are
-  rename-swapped. Previously an aborted rebuild could strand the box
-  with no root filesystem at all; now a failed install leaves the old
-  tree intact, and jail downtime shrinks from minutes to seconds.
+  loudly rather than swapping a live tree), the directories are
+  rename-swapped, and the jail restarted. Previously an aborted rebuild
+  could strand the box with no root filesystem at all; now a failed
+  install leaves the old tree intact, and jail downtime shrinks from
+  minutes to seconds.
 
 - The credential-vending contract's hosted tenancy claims now match the
   decided one-plane-per-tenant model (2026-10-12) (#TBD): the retired
