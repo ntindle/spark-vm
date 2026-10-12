@@ -29,6 +29,14 @@
 #   immediately. Redeem completion is #907's box-side half — the hook logs
 #   the exact command and stops; it never polls for approval inside the
 #   boot sequence.
+# - Ownership (#1220 Option B): on the golden image (sparkpair home
+#   present) the hook enrolls into the box-service user's state dir and
+#   chown -R's it to sparkpair after a successful request — the five
+#   pairing entrypoints run as sparkpair under supervisord, and the
+#   ingest/upload-filings ticks enforce that DAC ownership. The manual
+#   `redeem` command the hook logs runs as sparkpair too. Off-image the
+#   ownership handoff is skipped with a loud warning (the user does not
+#   exist there) and the hook keeps its historical state-dir default.
 #
 # Operator mode: `identity-seed-hook.sh --propagate-plane-push-signal`
 # re-derives only the #1268 plane-push signal from existing pairing state
@@ -37,8 +45,10 @@
 # `redeem`:
 #   sudo identity-seed-hook.sh --propagate-plane-push-signal
 #
-# Cold-stop note (arch 2026-10-09, #1203): pairing state lives in
-# SVM_PAIR_DIR (default ~/.config/spark-pair of the hook's user). On an
+# Cold-stop note (arch 2026-10-09, #1203; ownership #1220): pairing state
+# lives in SVM_PAIR_DIR, defaulting on the image to the box-service user's
+# home (~sparkpair/.config/spark-pair) and off-image to ~/.config/spark-pair
+# of the hook's user. On an
 # ephemeral-rootfs machine without a persisted state dir (#1205's /data
 # contract, still open), a cold stop wipes the state and the next boot
 # presents the token again; the plane 403s the replay (consumed token, per
@@ -63,9 +73,32 @@ set -euo pipefail
 
 HOOK="identity-seed-hook"
 PAIR_CLIENT="${SPARKVM_PAIR_CLIENT:-/opt/sparkvm/pairing/spark_pair.py}"
-# Mirrors the pairing client's own default (~/.config/spark-pair); /root is
-# the fallback because supervisord children are not guaranteed a HOME.
-STATE_DIR="${SVM_PAIR_DIR:-${HOME:-/root}/.config/spark-pair}"
+# Box-service user (#1220 Option B): pairing state is owned by the
+# dedicated `sparkpair` service user, never root — pairing/README.md's
+# "box-service user", the DAC ownership discipline the ingest and
+# upload-filings ticks enforce (Finding 50). On the golden image the
+# recipe bakes the user with home /home/sparkpair; the hook (root) enrolls
+# into that user's state dir and hands ownership over at the end, and the
+# scheduled entrypoints run as sparkpair via supervisord (see
+# supervisord.conf [program:pair-*]). The home-dir gate below is what makes
+# this dev-safe: off-image the dir does not exist and the hook keeps its
+# historical default (~/.config/spark-pair of the invoking user), so
+# proxy/deploy.sh flows are untouched.
+# Test seams (documented, test-only): SPARKVM_BOX_SERVICE_USER overrides
+# the user name; SPARKVM_BOX_SERVICE_USER_HOME overrides its home (tests
+# point it at a tmp dir — production must never set it).
+BOX_SERVICE_USER="${SPARKVM_BOX_SERVICE_USER:-sparkpair}"
+_SVC_HOME="${SPARKVM_BOX_SERVICE_USER_HOME:-/home/$BOX_SERVICE_USER}"
+_OWN_PAIR_STATE=""
+if [ -z "${SVM_PAIR_DIR:-}" ] && [ -d "$_SVC_HOME" ]; then
+    STATE_DIR="$_SVC_HOME/.config/spark-pair"
+    _OWN_PAIR_STATE="$BOX_SERVICE_USER"
+else
+    # Mirrors the pairing client's own default (~/.config/spark-pair); /root
+    # is the fallback because supervisord children are not guaranteed a HOME.
+    STATE_DIR="${SVM_PAIR_DIR:-${HOME:-/root}/.config/spark-pair}"
+fi
+unset _SVC_HOME
 PYTHON="${SPARKVM_PYTHON:-/usr/bin/python3}"
 # The plane-push signal file (#1268): root-owned, world-readable, consumed
 # by the swapd push worker (confirm/push.py _image_plane_signal), which
@@ -175,6 +208,14 @@ fi
 # branches never touch the token, so the single-use guarantee is unchanged.
 if [ -f "$STATE_DIR/enrollment.json" ]; then
     log "enrollment state present — already enrolled, skipping (token never re-presented)"
+    # Ownership check (#1220): the state dir must belong to the box-service
+    # user. A mismatch is loud but never auto-repaired here — the hook is
+    # one-shot and a repair on every boot could mask an operator's manual
+    # layout; the fresh-enroll path below is the one that sets ownership.
+    if [ -n "$_OWN_PAIR_STATE" ] \
+        && [ "$(stat -c '%U' "$STATE_DIR" 2>/dev/null || echo '?')" != "$_OWN_PAIR_STATE" ]; then
+        log "WARNING: $STATE_DIR is not owned by $_OWN_PAIR_STATE — pairing entrypoints run as $_OWN_PAIR_STATE and may not read it; fix with: chown -R $_OWN_PAIR_STATE:$_OWN_PAIR_STATE \"$STATE_DIR\""
+    fi
     # Plane-push signal (#1268): propagate the #1135 handoff to the image's
     # push worker env. The worker runs as swapd and can never read the
     # pairing record itself, so auto-detect always fails open to box-local
@@ -191,7 +232,17 @@ if [ -f "$STATE_DIR/enrollment.json" ]; then
     exit 0
 fi
 if [ -f "$STATE_DIR/pairing.json" ]; then
-    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: \"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
+    # redeem must run as the pairing-state owner (#1220): the state dir is
+    # sparkpair-owned on the image, so the operator completes enrollment as
+    # sparkpair, not root. The propagate step re-derives the plane-push
+    # signal from the hook's own state dir afterwards.
+    if [ -n "$_OWN_PAIR_STATE" ]; then
+        _redeem_cmd="sudo -u $_OWN_PAIR_STATE \"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem"
+    else
+        _redeem_cmd="\"$PYTHON\" \"$PAIR_CLIENT\" --dir \"$STATE_DIR\" redeem"
+    fi
+    log "pairing already in flight (pairing.json present) — not re-presenting the attestation token; complete enrollment with: $_redeem_cmd, then propagate the plane-push signal (#1268) with: sudo \"$0\" --propagate-plane-push-signal"
+    unset _redeem_cmd
     clear_plane_signal
     exit 0
 fi
@@ -295,4 +346,26 @@ while :; do
     sleep "$_request_backoff"
 done
 
-log "attestation token presented; complete enrollment with: python3 $PAIR_CLIENT redeem (unattended completion is #907's box-side half)"
+# Ownership handoff (#1220 Option B): the hook enrolls as root, but pairing
+# state belongs to the box-service user — the scheduled entrypoints run as
+# that user and the ingest/upload-filings ticks enforce its DAC ownership.
+# The chown is guarded by the user existing: on the image it always does
+# (the recipe bakes it); off-image (dev/test, where the home-dir gate
+# above left _OWN_PAIR_STATE empty) the absence is a loud warning, not a
+# failure — the hook must stay usable outside the image.
+if [ -n "$_OWN_PAIR_STATE" ]; then
+    if id -u "$_OWN_PAIR_STATE" >/dev/null 2>&1; then
+        chown -R "$_OWN_PAIR_STATE:$_OWN_PAIR_STATE" "$STATE_DIR"
+        log "pairing state handed to $_OWN_PAIR_STATE ($STATE_DIR)"
+    else
+        log "WARNING: box-service user $_OWN_PAIR_STATE does not exist — skipping ownership handoff; pairing entrypoints expect it"
+    fi
+fi
+
+if [ -n "$_OWN_PAIR_STATE" ]; then
+    _redeem_cmd="sudo -u $_OWN_PAIR_STATE $PYTHON $PAIR_CLIENT --dir \"$STATE_DIR\" redeem"
+else
+    _redeem_cmd="python3 $PAIR_CLIENT redeem"
+fi
+log "attestation token presented; complete enrollment with: $_redeem_cmd (unattended completion is #907's box-side half)"
+unset _redeem_cmd

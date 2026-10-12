@@ -73,9 +73,16 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 # locked password, no SSH login — the narrow writers run via `sudo -u swapd`.
 # `agent` is the skeleton tenant user: first boot instantiates real tenant
 # users from /etc/skel (populated from /home/agent below).
+# `sparkpair` is the box-service user (#1220 Option B): it owns pairing
+# state (/home/sparkpair/.config/spark-pair, 0700) and runs the five
+# pairing entrypoints — pairing/README.md's "box-service user", the DAC
+# ownership discipline the ingest/upload-filings ticks enforce. Locked
+# password, no SSH login: a service identity, never an operator.
 RUN useradd --system --create-home --home-dir /home/swapd --shell /bin/bash swapd \
  && useradd --create-home --home-dir /home/agent --shell /bin/bash --password '*' agent \
  && passwd -l agent \
+ && useradd --system --create-home --home-dir /home/sparkpair --shell /bin/bash --password '*' sparkpair \
+ && passwd -l sparkpair \
  && mkdir -p /etc/sparkvm /run/sshd
 
 # --- repo tree -------------------------------------------------------------

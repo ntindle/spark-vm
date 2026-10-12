@@ -220,13 +220,18 @@ def test_supervisord_program_set():
         "cua-stack",
         "cua-bridge",
         "cua-keepalive",
+        "pair-tick",
+        "pair-rotate",
+        "pair-phone-home",
     }, programs
 
 
 def test_supervisord_privilege_split():
     """The full program→user mapping: sshd is the only root *daemon*; the
     proxy daemons run as swapd (mirroring the systemd units), the UI/CUA
-    stack as agent. identity-seed and data-prep are the other root
+    stack as agent, and the pairing runtime as the box-service user
+    sparkpair (#1220 Option B — pairing state is sparkpair-owned, never
+    root). identity-seed and data-prep are the other root
     programs, deliberately: they write machine-identity state (the pairing
     enrollment; the /data layout + sshd host-key indirection) before any
     tenant user exists, and both are one-shots (autorestart=false,
@@ -246,6 +251,9 @@ def test_supervisord_privilege_split():
         "cua-stack": "agent",
         "cua-bridge": "agent",
         "cua-keepalive": "agent",
+        "pair-tick": "sparkpair",
+        "pair-rotate": "sparkpair",
+        "pair-phone-home": "sparkpair",
     }
     programs = {
         s.split(":", 1)[1]: cfg[s].get("user")
@@ -253,6 +261,58 @@ def test_supervisord_privilege_split():
         if s.startswith("program:")
     }
     assert programs == expected, programs
+
+
+def test_dockerfile_creates_sparkpair_service_user():
+    """The recipe bakes the box-service user (#1220 Option B): a system
+    user with a locked password and no login — a service identity, never
+    an operator. Non-vacuity: the useradd line must name sparkpair with
+    --system, a home, and the '*' locked password."""
+    text = _dockerfile_text()
+    m = re.search(
+        r"useradd\s+--system\s+--create-home\s+--home-dir\s+/home/sparkpair\s+"
+        r"--shell\s+/bin/bash\s+--password\s+'\*'\s+sparkpair",
+        text,
+    )
+    assert m, "sparkpair useradd line missing or malformed"
+    assert "passwd -l sparkpair" in text, "sparkpair password not locked"
+
+
+def test_supervisord_pairing_runtime_wiring():
+    """The three pairing programs cover all five entrypoints
+    (pairing/README.md ### Inventory) as the box-service user (#1219,
+    #1220 Option B): the minute tick loop (heartbeat, ingest,
+    upload-filings), the hourly rotate loop, and the phone-home daemon
+    with the documented exit-code restart policy (exit 2 = crash ->
+    restart; 0/1 = clean/human-attention -> no restart)."""
+    cfg = _supervisord()
+    tick = cfg["program:pair-tick"]
+    assert tick["user"] == "sparkpair"
+    assert tick["environment"] == 'HOME="/home/sparkpair"'
+    for entry in ("heartbeat", "ingest", "upload-filings"):
+        assert f"spark_pair.py {entry}" in tick["command"], entry
+    assert "sleep 60" in tick["command"]
+    rotate = cfg["program:pair-rotate"]
+    assert rotate["user"] == "sparkpair"
+    assert "spark_pair.py rotate --auto" in rotate["command"]
+    assert "sleep 3600" in rotate["command"]
+    daemon = cfg["program:pair-phone-home"]
+    assert daemon["user"] == "sparkpair"
+    assert "spark_pair.py phone-home" in daemon["command"]
+    # exit-code restart policy: only exits outside {0,1} are "unexpected"
+    assert daemon["autorestart"] == "unexpected"
+    assert daemon["exitcodes"] == "0,1"
+
+
+def test_dataprep_pairing_dir_owned_by_sparkpair():
+    """data-prep.sh's /data/pairing chown follows #1220 (lockstep note in
+    the script): sparkpair-owned, never root — the ingest/upload-filings
+    ticks enforce that DAC ownership."""
+    p = os.path.join(GOLDEN_DIR, "data-prep.sh")
+    with open(p, encoding="utf-8") as f:
+        text = f.read()
+    assert re.search(r"^mkpair pairing sparkpair$", text, re.M)
+    assert "mkpair pairing root" not in text
 
 
 def test_supervisord_no_public_listener():

@@ -73,10 +73,12 @@ if ! mountpoint -q "$DATA_ROOT"; then
 fi
 
 # subdir -> owner, per docs/DATA_VOLUME_CONTRACT.md inventory.
-# pairing/ stays root-owned: the pairing-state ownership decision is
-# #1220's (Options A/B); the contract pins the path, not the owner.
-# NOTE: the every-boot chown root:root on pairing/ will silently revert a
-# future #1220 ownership relaxation — keep this in lockstep with #1220.
+# pairing/ is sparkpair-owned per #1220 Option B (box-service user): the
+# pairing-state ownership decision is settled — the contract pins the path,
+# the wiring pins the owner. (Prior note kept for the record: this line
+# used to chown root:root while #1220 was open, with a warning that the
+# every-boot chown would silently revert a future ownership relaxation —
+# the lockstep with #1220 is honored by this change.)
 mkpair() { # dir owner
     local dir="$DATA_ROOT/$1" owner="$2"
     if [ ! -d "$dir" ]; then
@@ -91,7 +93,7 @@ mkpair() { # dir owner
     fi
 }
 
-mkpair pairing root
+mkpair pairing sparkpair
 mkpair approvals swapd
 mkpair confirmd swapd
 mkpair ssh root
