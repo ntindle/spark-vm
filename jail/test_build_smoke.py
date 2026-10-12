@@ -83,6 +83,23 @@ class TestContract:
         # rootfs is root-owned); pin that the guard is not weakened.
         assert '$SUDO test -x "$ROOTFS/bin/bash"' in active
 
+    def test_rebuild_stops_running_jail_before_rm(self, active):
+        # A running jail survives `rm -rf` on unlinked inodes: the
+        # container keeps executing the OLD tree while the fresh
+        # debootstrap lands unused, and the `machinectl show` start check
+        # later sees a running machine and skips the restart — a rebuild
+        # without a stop silently rebuilds nothing. Pin the ordering:
+        # the rebuild block must stop the machine before removing the
+        # rootfs (a failed stop aborts loudly under set -e).
+        rebuild_idx = active.find('if [ "$REBUILD_ROOTFS" = 1 ]; then')
+        assert rebuild_idx != -1, "rebuild block not found"
+        tail = active[rebuild_idx:]
+        stop_idx = tail.find("machinectl stop")
+        rm_idx = tail.find('rm -rf "$ROOTFS"')
+        assert stop_idx != -1, "rebuild does not stop the machine"
+        assert rm_idx != -1, "rebuild does not remove the rootfs"
+        assert stop_idx < rm_idx, "machine stop must precede rootfs removal"
+
 
 class TestHelp:
     """`build.sh --help` / `-h` must render the header doc and exit 0

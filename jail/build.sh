@@ -3,7 +3,7 @@
 #
 # The jail is a persistent systemd-nspawn container ("jail") where the
 # agent's SSH login lands. Properties (owner decision 2, 2026-09-15):
-#   - rootful inside, guest root is NOT host root (PrivateUsers=yes)
+#   - rootful inside, guest root is NOT host root (PrivateUsers=2000000:65536)
 #   - its own rootfs at /var/lib/machines/jail, package installs free
 #   - veth whose ONLY egress is the swap proxy on the host
 #     (10.99.0.1:18080/18081 via DNAT to the host's 127.0.0.1 listener)
@@ -13,7 +13,7 @@
 #   - no DNS in the jail (name resolution happens in the host proxy);
 #     direct-IP/UDP/ping/git-over-SSH do not work by design
 #
-# Run on the host as the agent user (passwordless sudo). Re-running is safe:
+# Run on the host as ntindle (passwordless sudo). Re-running is safe:
 # the rootfs step is skipped when present (pass --rebuild-rootfs to
 # force), everything else is re-applied idempotently.
 set -euo pipefail
@@ -57,6 +57,29 @@ $SUDO apt-get install -y -q systemd-container debootstrap >/dev/null
 # ---------------------------------------------------------------- rootfs
 if [ "$REBUILD_ROOTFS" = 1 ]; then
     say "removing existing rootfs (--rebuild-rootfs)"
+    # A running jail survives `rm -rf` on unlinked inodes: the container
+    # keeps executing the OLD tree while the fresh debootstrap lands
+    # unused, and the `machinectl show` start check below then sees a
+    # running machine and skips the restart — the "rebuild" silently does
+    # nothing until the next reboot. Stop first; a failed stop aborts the
+    # build loudly (set -e) instead of deleting a live rootfs.
+    if $SUDO machinectl show $MACHINE >/dev/null 2>&1; then
+        say "stopping $MACHINE before rootfs removal"
+        $SUDO machinectl stop $MACHINE
+        # machinectl stop returns once the shutdown signal is delivered,
+        # not when teardown completes: wait (bounded) for machined to
+        # unregister the container, so rm -rf never races a dying jail —
+        # and a stuck shutdown fails loudly here instead of hiding
+        # behind the debootstrap's minutes.
+        for _ in $(seq 1 30); do
+            $SUDO machinectl show $MACHINE >/dev/null 2>&1 || break
+            sleep 2
+        done
+        if $SUDO machinectl show $MACHINE >/dev/null 2>&1; then
+            echo "ERROR: $MACHINE did not stop; refusing to remove a live rootfs" >&2
+            exit 1
+        fi
+    fi
     $SUDO rm -rf "$ROOTFS"
 fi
 # NOTE: the test must run under sudo — the rootfs is root-owned and not

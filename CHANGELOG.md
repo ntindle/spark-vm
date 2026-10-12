@@ -233,6 +233,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The agent-jail rebuild flag now stops a running jail before deleting
+  its root filesystem (2026-10-12): previously a rebuild requested while
+  the jail was running left the old container executing on the deleted
+  tree and the fresh install unused — the rebuild silently did nothing
+  until the next reboot. (#1369)
+
 - The push-sender tick now bounds its own work (2026-10-12, #1360): an
   optional per-tick time budget stops the loop from claiming new pages
   once it has run long enough to threaten the schedule interval, and a
