@@ -136,6 +136,7 @@ never drift from what's on disk.
 | `test_apply_rulesets.py` | rulesets-as-code deliverables (issue #174) |
 | `test_basename_uniqueness.py` | repo-wide test-file basename uniqueness (pytest import contract) |
 | `test_bounded_http.py` | `bounded_http.py` bounded threading server |
+| `test_ci_job_timeouts.py` | CI workflow job `timeout-minutes` pins (issue #1367) |
 | `test_ci_md_link_excludes.py` | `docs/CI.md` link-check exclusion inventory |
 | `test_ci_md_suite_inventory.py` | CI python-tests suite inventory |
 | `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
