@@ -55,32 +55,60 @@ say "host packages"
 $SUDO apt-get install -y -q systemd-container debootstrap >/dev/null
 
 # ---------------------------------------------------------------- rootfs
+# Staging/prev paths for atomic rebuilds (#1370). machined registers the
+# machine by name ("jail"), not by directory — the dot-name staging dir
+# is never a machine path while the build owns it.
+STAGING=/var/lib/machines/.jail-new
+PREV=/var/lib/machines/.jail-prev
 if [ "$REBUILD_ROOTFS" = 1 ]; then
-    say "removing existing rootfs (--rebuild-rootfs)"
-    # A running jail survives `rm -rf` on unlinked inodes: the container
-    # keeps executing the OLD tree while the fresh debootstrap lands
-    # unused, and the `machinectl show` start check below then sees a
-    # running machine and skips the restart — the "rebuild" silently does
-    # nothing until the next reboot. Stop first; a failed stop aborts the
-    # build loudly (set -e) instead of deleting a live rootfs.
+    # Atomic rebuild (#1370): debootstrap into a staging dir first, then
+    # stop the jail and rename-swap. A crash or abort during the
+    # minutes-long debootstrap leaves the old tree intact — the in-place
+    # `rm -rf` + rebuild this replaces could strand the box with NO rootfs
+    # at all — and downtime shrinks to the seconds the swap takes.
+    # A crashed earlier rebuild can strand a partial staging tree or a
+    # leftover .prev: clear both before starting (never the live path).
+    $SUDO rm -rf "$STAGING" "$PREV"
+    say "debootstrap noble -> $STAGING (a few minutes; the running jail keeps serving)"
+    $SUDO mkdir -p /var/lib/machines
+    $SUDO debootstrap noble "$STAGING" http://archive.ubuntu.com/ubuntu/
+    # Fresh machine-id: debootstrap stamps one; never boot two machines
+    # with the same id. First boot regenerates it. Clear it on the staging
+    # tree now so the swap can never carry a stale one into the live path
+    # (the rm on $ROOTFS below re-runs on every build, belt and braces).
+    $SUDO rm -f "$STAGING/etc/machine-id"
+    # Stop the jail before touching the live path: machined registers the
+    # machine by name, and a rename under a running container is undefined
+    # behavior. A failed stop aborts the build loudly (set -e) instead of
+    # swapping a live rootfs (#1369's fail-closed stop, now guarding the
+    # swap instead of the rm -rf).
     if $SUDO machinectl show $MACHINE >/dev/null 2>&1; then
-        say "stopping $MACHINE before rootfs removal"
+        say "stopping $MACHINE before rootfs swap"
         $SUDO machinectl stop $MACHINE
         # machinectl stop returns once the shutdown signal is delivered,
         # not when teardown completes: wait (bounded) for machined to
-        # unregister the container, so rm -rf never races a dying jail —
-        # and a stuck shutdown fails loudly here instead of hiding
-        # behind the debootstrap's minutes.
+        # unregister the container, so the swap never races a dying jail —
+        # and a stuck shutdown fails loudly here instead of stranding a
+        # half-swapped rootfs.
         for _ in $(seq 1 30); do
             $SUDO machinectl show $MACHINE >/dev/null 2>&1 || break
             sleep 2
         done
         if $SUDO machinectl show $MACHINE >/dev/null 2>&1; then
-            echo "ERROR: $MACHINE did not stop; refusing to remove a live rootfs" >&2
+            echo "ERROR: $MACHINE did not stop; refusing to swap a live rootfs" >&2
             exit 1
         fi
     fi
-    $SUDO rm -rf "$ROOTFS"
+    # Rename-swap: atomic directory renames on the same filesystem. The
+    # old tree survives as .prev until the new tree is live, so even a
+    # crash between the two renames is recoverable (mv .prev back by
+    # hand); the stale-.prev cleanup above keeps a crash during the
+    # final rm from wedging the next rebuild.
+    if $SUDO test -e "$ROOTFS"; then
+        $SUDO mv "$ROOTFS" "$PREV"
+    fi
+    $SUDO mv "$STAGING" "$ROOTFS"
+    $SUDO rm -rf "$PREV"
 fi
 # NOTE: the test must run under sudo — the rootfs is root-owned and not
 # traversable by the invoking user, so an unprivileged -x test always

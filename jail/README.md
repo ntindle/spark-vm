@@ -74,8 +74,12 @@ confirmation page live on the host.
   boot. Everything about it is produced by `jail/build.sh` in this
   repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
   fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
-  Passing `--rebuild-rootfs` to `build.sh` stops the jail for the
-  duration of the rebuild (a few minutes while debootstrap runs).
+  Passing `--rebuild-rootfs` to `build.sh` debootstraps the fresh tree
+  into a staging dir (`/var/lib/machines/.jail-new`) while the jail keeps
+  serving, then stops the jail and rename-swaps the trees (#1370) —
+  downtime is the seconds the stop+swap takes, and a failed debootstrap
+  leaves the old tree intact (a failed stop aborts the build loudly
+  rather than swapping a live rootfs).
   The jail tree is **not** self-contained: `build.sh` installs the swapd CA
   into the guest through `../proxy/build_ca_bundle.py` (which in turn
   imports `proxy/safe_install.py`) and fails closed if the helper is absent
