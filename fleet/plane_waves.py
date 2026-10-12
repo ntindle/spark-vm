@@ -28,7 +28,13 @@ Design pins (docs/TENANT_PLANE_ROLLOUT_CONTROLLER_GAP_ANALYSIS.md §4):
   healthy. The controller never trusts self-reported plane health for
   promotion (plane-signed health events are S5's named later scope). A
   degraded plane in the live wave is a bad wave signal: promotion
-  refuses and the operator halts.
+  refuses and the operator halts. S5 extends the signal: the
+  operator-observed update-event journal is the wave-health signal the
+  gates consume — a live-wave plane whose latest event since the wave
+  went live is an unresolved deploy-failed refuses promotion as a
+  bad-signal; the operator records a fresh landing (or reassigns) to
+  clear it. Missing journal (pre-S5 stores) carries no signal: D-RC-6's
+  "missing events do not block promotion" holds.
 - D-RC-5 — Freeze is a local refusal, honestly bounded. The controller
   reads the same freeze.json the S4 driver reads
   (plane_inventory.read_controller_freeze — one definition, shared);
@@ -357,7 +363,8 @@ def _wave_gate(store_dir, waves, template, stale_hours):
 
     ok=False carries "not-converged: ..." (the wave has not landed — the
     operator waits or investigates) or "bad-signal: ..." (a degraded
-    plane in the live wave — promotion refuses; the operator halts).
+    plane in the live wave, or an unresolved deploy-failed event in the
+    S5 update-event journal — promotion refuses; the operator halts).
     Structural problems fail closed (raise): a missing record or a
     retired plane in the live wave means the operator must reassign —
     the gate never silently routes around it.
@@ -391,10 +398,67 @@ def _wave_gate(store_dir, waves, template, stale_hours):
         return (False,
                 f"bad-signal: planes {names} degraded on template "
                 f"{template!r} — promotion refused; halt the rollout", [])
+    # S5 (#1288): the operator-observed update-event journal is the
+    # wave-health signal the gates consume. A live-wave plane whose
+    # latest event since the wave went live is an unresolved
+    # deploy-failed is a bad signal — the wave did not land cleanly even
+    # if the records look converged. The operator clears it by recording
+    # a fresh landing (S4 deploy / S1 `deploy` / `event --kind
+    # deploy-landed`) or by reassigning the rollout (a fresh assign
+    # re-baselines the event window). Missing journal = no signal
+    # (D-RC-6: missing events do not block promotion).
+    failed = _unresolved_deploy_failures(store_dir, wave_planes, waves)
+    if failed:
+        detail = ", ".join(
+            f"{pid} (failed {at})" for pid, at in failed)
+        return (False,
+                f"bad-signal: planes with unresolved deploy-failed events "
+                f"since wave {live_wave} went live: {detail} — promotion "
+                f"refused; record a fresh landing or reassign the rollout",
+                [])
     if not_converged:
         detail = ", ".join(f"{pid} ({why})" for pid, why in not_converged)
         return (False, f"wave {live_wave} has not landed: {detail}", [])
     return True, "", wave_planes
+
+
+def _unresolved_deploy_failures(store_dir, wave_planes, waves):
+    """Latest update-event per live-wave plane since the wave went live.
+
+    Returns [(plane_id, observed_at)] for planes whose latest event in
+    the window is deploy-failed. Events before the wave's updated_at
+    belong to an earlier rollout and never block a fresh wave. The
+    journal reader fails closed on corruption; a missing journal yields
+    no signal.
+    """
+    try:
+        wave_since = datetime.fromisoformat(waves.get("updated_at"))
+    except (TypeError, ValueError):
+        _fail("waves file: 'updated_at' is missing or unparseable — "
+              "refusing to evaluate the update-event gate")
+    if wave_since.tzinfo is None:
+        wave_since = wave_since.replace(tzinfo=timezone.utc)
+    wave_set = set(wave_planes)
+    latest = {}
+    for ev in plane_inventory.read_plane_events(store_dir):
+        if ev["plane_id"] not in wave_set:
+            continue
+        try:
+            at = datetime.fromisoformat(ev["observed_at"])
+        except ValueError:
+            _fail("plane event journal: unparseable observed_at "
+                  f"{ev['observed_at']!r} — refusing to evaluate the "
+                  "update-event gate")
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at < wave_since:
+            continue
+        prev = latest.get(ev["plane_id"])
+        if prev is None or at >= prev[1]:
+            latest[ev["plane_id"]] = (ev["kind"], at)
+    return sorted(
+        (pid, at.isoformat()) for pid, (kind, at) in latest.items()
+        if kind == "deploy-failed")
 
 
 def cmd_assign(args):
