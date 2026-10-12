@@ -60,6 +60,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   retention question still gates the S3 plane endpoint's migration.
   (#1364) (#1366)
 
+- Operator runbook for the D9 reminder/digest sweep (2026-10-12): the
+  "I'm holding the pager" half of the push lane's sweep scheduler — how
+  to run it, the summary's disposition vocabulary, the three passes'
+  verified behaviors, capacity sizing, the honest trigger-ownership
+  model, the DO-alarm retirement flag, the full failure catalog, and
+  verification probes; every behavioral claim probed against the real
+  module. Also corrects one sweep docstring that named the terminal
+  audit row with the summary's disposition word. (#1368)
+
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the
   repo, and the test suite fails on GitHub Actions when the dashboard
