@@ -71,6 +71,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The contributor test suite no longer emits warnings on a clean run: two
+  test files and one product docstring with invalid escape sequences in
+  their prose are now raw strings, and a test that set an environment
+  variable to a bytes value now decodes it first (the implicit conversion
+  was the repr, not the bytes' content). A new machine-checked pin guards
+  these two wart classes going forward so contributors stop learning to
+  ignore test output. (#TBD)
 - The operator gate-sync loop no longer turns the operator's cron
   permanently red when a single box is down: unreachable or
   unprovisioned boxes are now transient warnings (per-box staleness

@@ -1293,7 +1293,7 @@ def test_reconcile_skips_consumed_active_token():
 def test_cli_reconcile_exactly_one_of(monkeypatch):
     """--reconcile combined with --send-wave exits 2 before any work."""
     service, tmp, clock = make_service()
-    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY)
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.decode("ascii"))
     monkeypatch.setenv("WAITLIST_DATA", tmp)
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
                        "https://waitlist.example.invalid")

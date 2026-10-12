@@ -1119,7 +1119,7 @@ def _with_proxy_heredoc_body(src):
 
 
 def _render_with_proxy(body):
-    """Emulate the two expansion layers that produce the jail artifact.
+    r"""Emulate the two expansion layers that produce the jail artifact.
 
     1. Host shell (build.sh): the ``'"$HOST_VETH_IP"'`` splice is
        double-quoted between single-quoted segments, so the host expands it

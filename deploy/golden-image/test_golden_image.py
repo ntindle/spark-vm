@@ -939,7 +939,7 @@ def _rendered_driver_default_tag():
 
 
 def test_image_tag_templates_render_valid_docker_tags():
-    """Both tag-composing sites must render a valid Docker tag with the
+    r"""Both tag-composing sites must render a valid Docker tag with the
     #1271 release values (and no '+' anywhere in the rendered tag). The
     Docker tag alphabet ([\w][\w.-]{0,127}) applies to the tag component
     after the name: separator, so the repository name is pinned separately."""
