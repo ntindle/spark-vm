@@ -143,10 +143,11 @@ filed follow-up #1058 (see §4).
 ### 1.3 `push_send_results` — the record #428's §4 criterion consumes
 
 Every send attempt lands exactly one row. The outcome vocabulary is
-the sender's verbatim (`hosted/push_sender.py::OUTCOMES`), plus three
+the sender's verbatim (`hosted/push_sender.py::OUTCOMES`), plus four
 documented *extensions* for enqueue-boundary decisions (not part of
 #989's taxonomy) — D50 added the third, the `'queued'` outbox work
-item (documented here by #1061). The table preserves `acceptance_fields()`' pinned
+item (documented here by #1061); D97 adds the fourth, the `'error'`
+per-item tick-error audit. The table preserves `acceptance_fields()`' pinned
 fields (`outcome`, `http_status`, `sent_at`, `latency_ms`),
 decomposing its opaque `subscription_ref` into the key columns so the
 D13 dedup keys and the fanout queries work without parsing.
@@ -174,6 +175,8 @@ CREATE TABLE IF NOT EXISTS push_send_results (
                                  -- enqueue-boundary extensions:
                                  -- suppressed_budget | suppressed_terminal
                                  -- | queued (D50, the outbox work item)
+                                 -- | error (D97, the per-item tick-error
+                                 -- audit)
   http_status     INTEGER,        -- the push-service status (NULL for
                                  -- suppressed_* and queued — nothing was
                                  -- sent)
@@ -196,7 +199,8 @@ CREATE INDEX IF NOT EXISTS idx_push_send_results_tenant
 -- outside this repo): page-once is a DB invariant — one row per event
 -- across the enqueue boundary, enforced at the database layer. The
 -- predicate excludes the sender loop's per-attempt rows (which
--- legitimately share the event key and must not collide), so D50's
+-- legitimately share the event key and must not collide) and the D97
+-- 'error' audit rows (same reason), so D50's
 -- "every send attempt lands exactly one row" is untouched.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
   ON push_send_results(box_id, event_kind, event_key)
@@ -251,6 +255,25 @@ boundary's extensions):
   is one row per (device × attempt), D56c; the `queued` row is gone by
   the time the row-count is read). Holds the D10 reservation for the
   whole outbox wait; the terminal outcome's §1.2 rule resolves it.
+  (Extension, not a sender outcome.)
+- `error` — D97: the per-item tick-error audit, not a send result.
+  A work item that raises inside `_process_one` (corrupt row, a
+  `record_reader` refusing a corrupt approvals row) leaves no send
+  attempt, so the tick writes this boundary-extension row instead
+  (`device=''`, send columns NULL — nothing was sent). It is the
+  consecutive-error count's home: the loop counts `'error'` rows
+  for the item's audit key since the queued row's `at` and escalates
+  to a `poison_suspect` summary anomaly after ten consecutive error
+  ticks (true quarantine stays declined per D97's position). The row
+  carries the suffixed audit key (page key + U+0000 + `"error"` —
+  the D61/D77 pattern): the D53 dedup fast-path is outcome-blind,
+  so an error row on the page's exact key would report a later
+  re-enqueue of the same event as "duplicate" and wedge it — the
+  suffix keeps the audit from ever shadowing the page. Not a
+  page-level outcome — the D57 page-once predicate does **not**
+  cover `'error'` — and the GC treats them like every non-`'queued'`
+  row (90-day retention; the loop stops writing at the D97
+  threshold, so storage is bounded).
   (Extension, not a sender outcome.)
 
 **D57 — the predicate covers `suppressed_terminal` too.** The
