@@ -159,7 +159,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   literal bytes (including a raw NUL inside the inlined script), and this
   guard makes that corruption class — and the tempting wrong repair of
   pasting the worker copy back into the page source — fail loudly instead
-  of silently. (#TBD)
+  of silently. (#1340)
 
 - Wire-protocol doc accuracy (2026-10-11, #1320): the phone-home re-drive
   pin no longer says the DO scopes re-drive rows by "epoch equal to the
