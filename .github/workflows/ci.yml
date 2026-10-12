@@ -4,6 +4,14 @@
 # shellcheck, link check, changelog lint, docs-guard, and PNG are the
 # docs-only merge gate.
 #
+# Every job carries an explicit timeout-minutes (policy: fast jobs 15,
+# network/browser-bound jobs 30, suite/docker-build jobs 60 — all far above
+# observed healthy durations and far below the 6-hour GHA default, so a
+# wedged job fails fast instead of burning the budget; the shard-integration
+# hang at 47+ min on 2026-10-11 and the python-tests hang on 2026-10-03 are
+# the reason). When a job's healthy duration grows, bump its bound with a
+# comment citing the new observation — never delete a bound.
+#
 # Run locally with (from the repo root — the one-liner in CONTRIBUTING.md):
 #   python3 -m pytest
 # (`pytest.ini` testpaths enumerate every suite; CI runs exactly this, so a
@@ -40,6 +48,7 @@ jobs:
   changes:
     name: changed-paths gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # git-diff-only job; fails fast if the runner stalls
     outputs:
       code_changed: ${{ steps.diff.outputs.code_changed }}
     steps:
@@ -85,6 +94,7 @@ jobs:
   plan:
     name: shard plan
     needs: changes
+    timeout-minutes: 15  # one python script; fails fast if the runner stalls
     # P138: docs-only diffs skip the suite entirely, so the plan has
     # nothing to emit for them.
     if: needs.changes.outputs.code_changed == 'true'
@@ -116,6 +126,10 @@ jobs:
   python-tests-shard:
     name: python tests (${{ matrix.shard }})
     needs: [changes, plan]
+    # Full suite ran ~40 min pre-shard; shards partition it, and a shard
+    # wedged 47+ min on 2026-10-11. 60 fails a hung shard without
+    # false-failing a slow-but-healthy runner.
+    timeout-minutes: 60
     # P138: docs-only diffs skip the ~40-min suite; the docs-only gate is
     # the four other jobs plus the docs-index coverage guard (docs-guard).
     if: needs.changes.outputs.code_changed == 'true'
@@ -189,6 +203,7 @@ jobs:
 
   python-tests:
     name: python tests
+    timeout-minutes: 15  # aggregate gate only polls shard results
     # The aggregate gate. Branch-protection ruleset 23971329 requires the
     # `python tests` context by name, so this job keeps that exact name and
     # the shard children (`python tests (<shard>)`) stay unrequired: the
@@ -225,6 +240,7 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - name: Run shellcheck on all shell scripts
@@ -238,6 +254,7 @@ jobs:
   changelog-ritual:
     name: changelog ritual lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
@@ -252,6 +269,7 @@ jobs:
 
   docs-guard:
     name: docs index coverage
+    timeout-minutes: 15
     # Always runs, even on docs-only diffs where python-tests is skipped
     # (P138): scripts/test_docs_index_coverage.py lives in the python suite,
     # so without this carve-out a new docs/*.md file without an index row
@@ -278,6 +296,8 @@ jobs:
   markdown-links:
     name: markdown link check
     runs-on: ubuntu-latest
+    # Network-bound (lychee fetches external links; 429s/timeouts observed)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - name: Check links in all markdown docs
@@ -578,6 +598,8 @@ jobs:
   png-check:
     name: PNG screenshot smoke test
     runs-on: ubuntu-latest
+    # Browser-bound (playwright downloads + installs chromium)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned

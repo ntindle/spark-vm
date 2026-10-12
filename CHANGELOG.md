@@ -50,6 +50,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Fixed
+
+- CI jobs now fail fast on hangs: every workflow job carries an explicit
+  timeout (15 min for fast jobs, 30 for network/browser-bound, 60 for the
+  test shards and image builds), so a wedged job fails in under an hour
+  instead of burning the 6-hour runner default. (#1367)
+
 ### Added
 
 - Credential-vending lane re-derived against the one-plane-per-tenant

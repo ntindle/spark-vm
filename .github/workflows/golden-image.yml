@@ -49,6 +49,8 @@ jobs:
   build-and-gate:
     name: build recipe + baked-secrets scan + manifest preflight
     runs-on: ubuntu-latest
+    # docker build + baked-secrets scan of the full image
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
