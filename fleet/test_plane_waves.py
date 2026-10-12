@@ -212,6 +212,53 @@ def test_assign_no_eligible_planes(store):
     assert "no eligible planes" in p.stderr
 
 
+def test_assign_retire_mid_assign_uses_fresh_inputs(store):
+    # #1346: assign read the inventory outside the store lock and wrote
+    # waves.json from the stale inputs — a retire landing between the
+    # reads and the lock produced assignments naming a retired plane
+    # (the downstream gates fail closed, so the blast radius was a
+    # wasted assign + operator re-run, but waves.json contradicted the
+    # inventory: a broken trust contract for the S4 reader). The inputs
+    # are now read and the assignments computed inside the lock.
+    # The seam retires plane-3 in the window the bug lived in: after the
+    # pinned-release check, before the in-lock computation.
+    # Neuters that must flip this test: (a) revert cmd_assign to the
+    # pre-lock computation -> the retired plane appears in
+    # waves.json; (b) skip the mid-assign retire -> assign succeeds and
+    # includes plane-3.
+    import contextlib
+    from unittest import mock
+    for i in range(4):
+        _register(store, f"plane-{i}", tenant_id="t1")
+    _release(store)
+    real_lock = events.journal_lock
+    retired = {"done": False}
+
+    @contextlib.contextmanager
+    def retiring_lock(store_dir, timeout_s=None):
+        if not retired["done"]:
+            retired["done"] = True
+            assert _inv(store_dir, "retire", "--plane-id",
+                        "plane-3").returncode == 0
+        with real_lock(store_dir, timeout_s=timeout_s) as guard:
+            yield guard
+
+    with mock.patch.object(events, "journal_lock", retiring_lock):
+        rc = plane_waves.cmd_assign(
+            plane_waves.build_parser().parse_args(
+                ["--store", store, "assign", "--template", "w@v1"]))
+    assert rc == 0
+    assert retired["done"]
+    waves = _waves_json(store)
+    assert "plane-3" not in waves["assignments"]
+    assert set(waves["assignments"]) == {"plane-0", "plane-1", "plane-2"}
+    journal_path = os.path.join(store, "waves_journal.jsonl")
+    journal = [json.loads(ln) for ln in open(journal_path, encoding="utf-8")
+               if ln.strip()]
+    assign_recs = [r for r in journal if r["action"] == "assign"]
+    assert assign_recs and assign_recs[-1]["planes"] == 3
+
+
 def test_assign_buckets_bounds(store):
     _register(store, "plane-1", tenant_id="t1")
     _release(store)
