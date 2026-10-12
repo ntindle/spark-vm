@@ -331,6 +331,13 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
     (tmp / "scripts" / "test_contributing_ci_gates.py").write_text(
         "def test_stub_ok():\n    assert True\n")
     shutil.copy(str(GATE), str(tmp / "scripts" / "local-gate.sh"))
+    # Step 5 shells out to the shared selection helper — the scratch repo
+    # needs it too, or the step dies with "can't open file" wherever
+    # shellcheck is installed (locally the missing helper hid behind the
+    # shellcheck-not-installed loud skip; CI installs shellcheck, so the
+    # step runs and the absence is fatal). (issue #1379 follow-up fix)
+    shutil.copy(str(REPO_ROOT / "scripts" / "ci_shellcheck_files.py"),
+                str(tmp / "scripts" / "ci_shellcheck_files.py"))
     git("add", ".")
     git("commit", "-qm", "base")
     base = git("rev-parse", "HEAD").stdout.strip()
