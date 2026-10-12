@@ -307,10 +307,10 @@ this answer the design is a trust relocation, not a trust improvement:
   `vend_values.ciphertext`; the rotation bound applies per plane,
   unchanged in shape. Blast radius shrinks from every tenant to one
   tenant by construction — which is why the key lives in a Worker secret
-  and rotates as an operator procedure. Honest limit, mirroring the
-  manifest caveat above: per-plane keys protect only while the operator
-  provisions genuinely distinct keys per plane — the same key value
-  pasted across planes would silently widen the blast radius again.
+  and rotates as an operator procedure. Honest limit: per-plane keys
+  protect only while the operator provisions genuinely distinct keys per
+  plane — the same key value pasted across planes would silently widen
+  the blast radius again.
 - **Scope.** Secret material delivered outside the vend path (e.g.
   smuggled as an opaque #848 durable-command payload, stored verbatim in
   D1) is outside this custody story — this section covers vended
