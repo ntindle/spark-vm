@@ -49,6 +49,14 @@ Design pins (docs/TENANT_PLANE_ROLLOUT_CONTROLLER_GAP_ANALYSIS.md §4):
   cost event — the acceptance path for a lane with zero tenant planes
   today. The gates (freeze, wave, pin) still run: dry-run exercises the
   full path.
+- S5 (#1288) producer (b): every non-dry-run deploy attempt emits its
+  lifecycle into the operator-observed update-event journal —
+  deploy-started before the push, deploy-landed on verified landing,
+  deploy-failed on failure (a rollback emits rolled-back on success,
+  deploy-failed on failure). The emission happens at the operator's
+  command, inheriting S1's operator-recorded discipline; the S2
+  promotion gate consumes unresolved deploy-failed events as a
+  bad-signal refusal per D-RC-4.
 
 The Cloudflare push itself is a seam: DEPLOYER is a callable
 (plane_id, deployment_id, worker_sha256) ->
@@ -117,8 +125,18 @@ def _fail(msg):
     raise SystemExit(2)
 
 
+class _DeployerFailure(Exception):
+    """The Cloudflare push failed. Raised (not exited) by _run_deployer so
+    the caller can record the failure in the S5 update-event journal
+    before failing the command — the operator's stderr and exit code are
+    unchanged (the caller _fail()s with the same message)."""
+
+
 def _default_deployer(plane_id, deployment_id, worker_sha256):
-    _fail(
+    # Raises _DeployerFailure (not SystemExit): an unwired driver is a
+    # failed deploy attempt like any other — the caller records the
+    # S5 deploy-failed event with this message and exits 2.
+    raise _DeployerFailure(
         "no deployer configured: the S4 driver pushes through the Cloudflare "
         "tooling — wire a deployer via plane_deploy.DEPLOYER (a callable "
         "(plane_id, deployment_id, worker_sha256) -> "
@@ -232,29 +250,64 @@ def _run_deployer(plane_id, deployment_id, worker_sha256):
     """Invoke the wired deployer and fail-closed verify the observed bytes.
 
     Returns the deployer's result dict. Any failure — no deployer, an
-    exception, a malformed result, a digest mismatch — fails closed with
-    no journal write and no cost event: nothing is recorded that did not
-    verifiably land.
+    exception, a malformed result, a digest mismatch — raises
+    _DeployerFailure (not SystemExit): the caller records the failure in
+    the S5 update-event journal and then _fail()s, so nothing is recorded
+    that did not verifiably land AND the failure itself is recorded. A
+    deployer that raises SystemExit itself (argparse/click-based
+    wrappers) propagates unchanged — the caller records deploy-failed
+    and re-raises to preserve the deployer's exit code.
     """
     try:
         result = DEPLOYER(plane_id, deployment_id, worker_sha256)
+    except _DeployerFailure:
+        raise
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - operator contract: one-line error
-        _fail(f"deployer failed for plane {plane_id!r}: {exc}")
+        raise _DeployerFailure(
+            f"deployer failed for plane {plane_id!r}: {exc}")
     if not isinstance(result, dict):
-        _fail(f"deployer for plane {plane_id!r} returned a non-object — "
-              "refusing to record the landing")
+        raise _DeployerFailure(
+            f"deployer for plane {plane_id!r} returned a non-object — "
+            "refusing to record the landing")
     observed = result.get("worker_sha256_observed")
     if not plane_inventory.is_sha256_pin(observed):
-        _fail(f"deployer for plane {plane_id!r} returned malformed "
-              f"worker_sha256_observed {observed!r} — refusing to record "
-              "the landing")
+        raise _DeployerFailure(
+            f"deployer for plane {plane_id!r} returned malformed "
+            f"worker_sha256_observed {observed!r} — refusing to record "
+            "the landing")
     if observed != worker_sha256:
-        _fail(f"deployer for plane {plane_id!r} reports worker_sha256 "
-              f"{observed} != pinned {worker_sha256} — refusing to record "
-              "the landing")
+        raise _DeployerFailure(
+            f"deployer for plane {plane_id!r} reports worker_sha256 "
+            f"{observed} != pinned {worker_sha256} — refusing to record "
+            "the landing")
     return result
+
+
+def _emit_deploy_event(store_dir, plane_id, kind, template, deployment_id,
+                       worker_sha256, notes):
+    """S5 producer (b): the S4 driver's lifecycle emission. The journal is
+    the wave-health signal's trust root, so a failure to append must fail
+    the command loudly rather than silently dropping the event."""
+    plane_inventory.append_plane_event(
+        store_dir, plane_id, kind, template_version=template,
+        deployment_id=deployment_id, worker_sha256=worker_sha256,
+        notes=notes)
+
+
+def _emit_failed_event(store_dir, plane_id, template, deployment_id,
+                       worker_sha256, notes):
+    """Emit deploy-failed, preserving the deployer's message even when the
+    journal write itself fails (M2, #1348 review): a failed append
+    _fail()s with its own one-line stderr, so chain both messages into
+    the command's failure rather than discarding the deployer's."""
+    try:
+        _emit_deploy_event(store_dir, plane_id, "deploy-failed", template,
+                           deployment_id, worker_sha256, notes)
+    except SystemExit as journal_failure:
+        _fail(f"{notes} — and the failure event could not be journaled "
+              f"(journal exit {journal_failure.code})")
 
 
 def _deployer_duration(result, flag_value, what):
@@ -335,7 +388,29 @@ def cmd_deploy(args):
         }, indent=2))
         return 0
 
-    result = _run_deployer(plane_id, deployment_id, worker_sha256)
+    # S5 producer (b): the push begins — deploy-started enters the
+    # operator-observed update-event journal before the deployer is
+    # invoked. A dry-run writes no journal (same rule as the D-MT5 cost
+    # events). A deployer failure is recorded as deploy-failed with the
+    # failure message, then fails the command — the failure is evidence,
+    # and the operator's stderr/exit code are unchanged. A deployer that
+    # exits itself (SystemExit — argparse/click wrappers do this) is
+    # recorded the same way, then re-raised untouched so its exit code
+    # survives; without this the journal would dangle at deploy-started
+    # and the S2 gate would not see the failure (B1, #1348 review).
+    _emit_deploy_event(store_dir, plane_id, "deploy-started", template,
+                       deployment_id, worker_sha256, args.notes or "")
+    try:
+        result = _run_deployer(plane_id, deployment_id, worker_sha256)
+    except _DeployerFailure as exc:
+        _emit_failed_event(store_dir, plane_id, template, deployment_id,
+                           worker_sha256, str(exc))
+        _fail(str(exc))
+    except SystemExit as exc:
+        _emit_failed_event(store_dir, plane_id, template, deployment_id,
+                           worker_sha256,
+                           f"deployer exited with code {exc.code}")
+        raise
     duration_s = _deployer_duration(result, duration_s, "duration_s")
     record = _deploy_record(prev, template, deployment_id, worker_sha256,
                             status, args.notes)
@@ -343,6 +418,10 @@ def cmd_deploy(args):
     # D-RC-6: the driver is the ledger's first writer.
     plane_inventory.append_cost_event(store_dir, plane_id, "update",
                                       duration_s, cost_usd, args.notes or "")
+    # S5 producer (b): the verified landing joins the operator-observed
+    # update-event journal (deploy-started was emitted before the push).
+    _emit_deploy_event(store_dir, plane_id, "deploy-landed", template,
+                       deployment_id, worker_sha256, args.notes or "")
     print(json.dumps({
         "ok": True, "action": "deploy", "plane_id": plane_id,
         "template_version": template, "deployment_id": deployment_id,
@@ -418,13 +497,35 @@ def cmd_rollback(args):
         }, indent=2))
         return 0
 
-    result = _run_deployer(plane_id, deployment_id, worker_sha256)
+    # A failed rollback push is a deploy-failed event with the rollback
+    # context in notes (the closed #1288 vocabulary has no
+    # rollback-failed; a rollback IS a deploy of the last_known_good pin).
+    # A self-exiting deployer is recorded and re-raised like in
+    # cmd_deploy (B1, #1348 review).
+    try:
+        result = _run_deployer(plane_id, deployment_id, worker_sha256)
+    except _DeployerFailure as exc:
+        _emit_failed_event(store_dir, plane_id, template, deployment_id,
+                           worker_sha256,
+                           f"rollback attempt failed: {exc}")
+        _fail(str(exc))
+    except SystemExit as exc:
+        _emit_failed_event(store_dir, plane_id, template, deployment_id,
+                           worker_sha256,
+                           f"rollback attempt failed: deployer exited with "
+                           f"code {exc.code}")
+        raise
     duration_s = _deployer_duration(result, duration_s, "duration_s")
     record = _deploy_record(prev, template, deployment_id, worker_sha256,
                             status, args.notes)
     plane_inventory.record_plane_observation(store_dir, record)
     plane_inventory.append_cost_event(store_dir, plane_id, "rollback",
                                       duration_s, cost_usd, args.notes or "")
+    # S5 producer (b): a verified rollback joins the update-event journal
+    # as rolled-back (the closed #1288 vocabulary has no rollback-started;
+    # the rollback IS the recovery action the journal records).
+    _emit_deploy_event(store_dir, plane_id, "rolled-back", template,
+                       deployment_id, worker_sha256, args.notes or "")
     print(json.dumps({
         "ok": True, "action": "rollback", "plane_id": plane_id,
         "template_version": template, "deployment_id": deployment_id,

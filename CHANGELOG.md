@@ -52,6 +52,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Tenant-plane rollout controller: plane update-event reporting
+  (2026-10-11): the wave-health signal promotion gates consume — an
+  operator-observed journal of deploy started/landed/deferred/failed and
+  rolled-back events for each tenant plane. Events are recorded by the
+  operator's own entry, by the deploy driver at the operator's command
+  (before the push, on verified landing, on failure), and when the
+  operator records a landing; timestamps are always the operator's
+  clock, never backfilled from plane claims. Promotion now refuses a
+  wave whose planes have an unresolved deploy failure since the wave
+  went live, and a new query command answers "what happened in the
+  last window?". The plane-signed health-event upgrade stays named
+  future scope with its trust story written down first. (#1348)
+
 - Tenant-plane rollout controller: wave assignment + promotion (2026-10-11):
   the rollout controller's brain for per-tenant planes — operators assign
   a pinned template release to waves (the canary wave holds only planes

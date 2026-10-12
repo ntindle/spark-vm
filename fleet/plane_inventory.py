@@ -41,6 +41,17 @@ Subcommands:
   cost-summary --store DIR [--plane-id ID]
       D-MT5 input: per-plane and total provision vs update cost, with
       event counts and median durations.
+  event    --store DIR --plane-id ID
+             --kind deploy-landed|deploy-deferred|deploy-failed|rolled-back
+             [--template V] [--deployment-id D] [--worker-sha256 S] [--notes T]
+      Append one operator-observed update event to the S5 event journal
+      (stage-1 producer (a): the operator's own entry — e.g. a deferral
+      or an out-of-band failure the operator observed). deploy-started
+      is the S4 driver's alone and is not accepted here.
+  events   --store DIR [--plane-id ID] [--kind K] [--since-hours H]
+      The controller's "what happened in the last window?" read path over
+      the event journal — the wave-health signal the S2 promotion gate
+      consumes per D-RC-4.
   release --store DIR --template V --channel C --deployment-id D --worker-sha256 S [--notes T]
       Pin a template release (D-RC-2 pick (b), S3 #1286): bind template
       version V to exactly one (deployment_id, worker_sha256) — the pinned
@@ -56,6 +67,7 @@ Store layout:
   <store>/planes.json          derived snapshot: latest record per plane_id
   <store>/planes_journal.jsonl append-only observation records
   <store>/costs.jsonl          append-only cost events
+  <store>/plane_events.jsonl   append-only operator-observed update events (S5)
   <store>/releases.json       derived snapshot: pinned release per template
   <store>/releases_journal.jsonl append-only release pins
 
@@ -87,6 +99,28 @@ Release-record schema (S3):
 Cost-event schema (S1):
   {schema, plane_id, event{provision,update,rollback},
    at, duration_s, cost_usd, notes}
+Update-event schema (S5, #1288 — the operator-observed event journal):
+  {schema, plane_id, kind{deploy-started,deploy-landed,deploy-deferred,
+   deploy-failed,rolled-back}, template_version, deployment_id,
+   worker_sha256, observed_at, reporter, notes}
+  Stage-1 producers, named explicitly (advisory #1288/6105124730):
+  (a) the operator's own entry (`event` subcommand), (b) the S4 deploy
+  driver emitting lifecycle events at the operator's command
+  (deploy-started before the push, deploy-landed on verified landing,
+  deploy-failed on failure, rolled-back on verified rollback), (c) the
+  S1 `deploy` subcommand, which records an operator-observed landing and
+  emits deploy-landed for it (the operator-correctable path that clears
+  an unresolved deploy-failed). All three inherit S1's
+  operator-recorded discipline: observed_at is stamped by the writer
+  from the operator's clock and is never backfilled from a plane claim;
+  nothing plane-self-reported enters the journal in the shipped slices.
+  The S2 promotion gate consumes the journal per D-RC-4: a live-wave
+  plane whose latest event since the wave went live is an unresolved
+  deploy-failed is a bad signal and refuses promotion. Missing journal
+  (pre-S5 stores) carries no signal — D-RC-6's "missing events do not
+  block promotion" holds. Stage 2 (plane-signed health events) is named
+  scope only: the trust story is written in
+  docs/PLANE_UPDATE_EVENT_REPORTING.md, with no code.
 
 Rules the code follows (from the issue, summarized here so the behavior
 is auditable at the call site):
@@ -151,7 +185,7 @@ import statistics
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Sibling module (fleet/events.py): the store-scoped journal lock. Imported
 # as a sibling because the fleet modules are script-run (python3
@@ -560,6 +594,118 @@ def _read_costs(store_dir):
     return rows
 
 
+# --- Plane update-event journal (S5, #1288) ---------------------------------
+# Operator-observed update events for the plane layer: the wave-health
+# signal the S2 promotion gate consumes per D-RC-4. Stage-1 producers are
+# named explicitly (advisory #1288/6105124730):
+#   (a) the operator's own entry — the `event` subcommand;
+#   (b) the S4 deploy driver emitting lifecycle events at the operator's
+#       command (deploy-started before the Cloudflare push, deploy-landed
+#       on verified landing, deploy-failed on failure, rolled-back on a
+#       verified rollback);
+#   (c) the S1 `deploy` subcommand, which records an operator-observed
+#       landing and emits deploy-landed for it — the operator-correctable
+#       path: re-recording a landing clears an unresolved deploy-failed.
+# Nothing plane-self-reported enters the journal in the shipped slices;
+# plane-signed health events are the named Stage-2 scope (trust story in
+# docs/PLANE_UPDATE_EVENT_REPORTING.md, no code).
+#
+# Collector-side discipline (S1's trust root, transferred): observed_at is
+# stamped by the writer from the operator's clock — there is no flag,
+# argument, or code path that backfills it from a plane claim.
+PLANE_EVENT_SCHEMA = "plane-event/1"
+PLANE_EVENTS_JOURNAL_NAME = "plane_events.jsonl"
+# Closed vocabulary from #1288: deploy started/landed/deferred/failed and
+# rolled-back. Deferred is the operator's explicit deferral decision (a
+# D-RC-5 refusal is not an event — refusals stay local). Started is the
+# S4 driver's alone: an operator `event --kind deploy-started` would
+# claim a push the driver never made.
+PLANE_EVENT_KINDS = ("deploy-started", "deploy-landed", "deploy-deferred",
+                     "deploy-failed", "rolled-back")
+_PLANE_EVENT_REQUIRED = ("schema", "plane_id", "kind", "observed_at",
+                         "reporter")
+
+
+def append_plane_event(store_dir, plane_id, kind, template_version=None,
+                       deployment_id=None, worker_sha256=None, notes=""):
+    """Append one operator-observed plane update event (S5).
+
+    The shared event writer for the operator's `event` command, the S4
+    deploy driver's lifecycle emission, and the S1 `deploy` landing
+    record — one path stamps observed_at and appends, so no producer can
+    drift from the collector-side discipline. Fails closed on an unknown
+    kind, a malformed field, or an unregistered plane: the journal is the
+    wave-health signal's trust root, and an event about a plane the
+    controller does not know is exactly the class of thing that must not
+    enter it silently.
+    """
+    plane_id = _check_id(plane_id, "plane_id")
+    if kind not in PLANE_EVENT_KINDS:
+        _fail(f"kind must be one of {','.join(PLANE_EVENT_KINDS)}, "
+              f"got {kind!r}")
+    if template_version is not None:
+        _check_template(template_version)
+    if deployment_id is not None:
+        _check_id(deployment_id, "deployment_id")
+    if worker_sha256 is not None:
+        _check_sha256(worker_sha256)
+    with events.journal_lock(store_dir):
+        snap = _snapshot(store_dir)
+        if plane_id not in snap["planes"]:
+            _fail(f"plane {plane_id!r} is not registered (register first)")
+    record = {
+        "schema": PLANE_EVENT_SCHEMA,
+        "plane_id": plane_id,
+        "kind": kind,
+        "template_version": template_version,
+        "deployment_id": deployment_id,
+        "worker_sha256": worker_sha256,
+        "observed_at": _now_iso(),
+        "reporter": "operator",
+        "notes": notes or "",
+    }
+    # _append_journal takes the store lock itself (same discipline as
+    # the D-MT5 cost events: the registration check above and the append
+    # are separate acquisitions, last-writer-wins).
+    _append_journal(store_dir, PLANE_EVENTS_JOURNAL_NAME, [record])
+    return record
+
+
+def read_plane_events(store_dir):
+    """Fail-closed read of the operator-observed update-event journal.
+
+    Missing journal = no events (pre-S5 stores; D-RC-6's "missing events
+    do not block promotion" makes the S2 gate treat this as no signal).
+    Any corrupt line — unparseable JSON, wrong schema, missing field,
+    unknown kind — fails closed: the journal is the wave-health signal's
+    trust root, so a tampered line must never launder into an empty
+    history. Returns the events in journal (append) order.
+    """
+    path = os.path.join(store_dir, PLANE_EVENTS_JOURNAL_NAME)
+    rows = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rows.append((lineno, json.loads(line)))
+        except (OSError, ValueError) as exc:
+            _fail(f"cannot read plane event journal at {path}: {exc}")
+    events_out = []
+    for lineno, row in rows:
+        if (not isinstance(row, dict)
+                or row.get("schema") != PLANE_EVENT_SCHEMA
+                or not all(isinstance(row.get(k), str)
+                           for k in _PLANE_EVENT_REQUIRED)
+                or row.get("kind") not in PLANE_EVENT_KINDS):
+            _fail(f"plane event journal at {path}:{lineno} has a corrupt "
+                  f"event — refusing to read the journal")
+        events_out.append(row)
+    return events_out
+
+
 def _record_is_fresh(record, stale_hours):
     # One definition: the S2 promotion gate shares this rule via the
     # public is_record_fresh alias above.
@@ -651,6 +797,14 @@ def cmd_deploy(args):
         }
     )
     record_plane_observation(store_dir, record)
+    # S5 producer (c): recording a landing is an operator-observed
+    # landing — emit it into the update-event journal with the artifact
+    # identity the record carries (None for pre-S4 records). This is the
+    # operator-correctable path: a fresh `deploy` here clears an
+    # unresolved deploy-failed the S2 gate is refusing on.
+    append_plane_event(store_dir, plane_id, "deploy-landed", template,
+                       record.get("deployment_id"),
+                       record.get("worker_sha256"), args.notes or "")
     print(json.dumps({"ok": True, "plane_id": plane_id, "template_version": template,
                       "status": status}))
     return 0
@@ -789,6 +943,64 @@ def cmd_cost_summary(args):
                       for pid, rs in sorted(per_plane.items())},
     }
     print(json.dumps(summary, indent=2))
+    return 0
+
+
+def cmd_event(args):
+    """Stage-1 producer (a): the operator's own event entry (S5, #1288)."""
+    store_dir = _ensure_store(args.store)
+    record = append_plane_event(
+        store_dir, args.plane_id, args.kind,
+        template_version=args.template,
+        deployment_id=args.deployment_id,
+        worker_sha256=args.worker_sha256,
+        notes=args.notes or "")
+    print(json.dumps({"ok": True, "plane_id": record["plane_id"],
+                      "kind": record["kind"],
+                      "observed_at": record["observed_at"]}))
+    return 0
+
+
+def _parse_event_ts(value, what):
+    """Parse an event/journal ISO timestamp; fail closed, never naive."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        _fail(f"{what} is not a parseable ISO timestamp: {value!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def cmd_events(args):
+    """The controller's "what happened in the last window?" read path (S5).
+
+    Queryable event history over the operator-observed update-event
+    journal — the wave-health signal the S2 promotion gate consumes per
+    D-RC-4. Prints the matching events in journal (append) order.
+    """
+    store_dir = _ensure_store(args.store)
+    if args.kind is not None and args.kind not in PLANE_EVENT_KINDS:
+        _fail(f"--kind must be one of {','.join(PLANE_EVENT_KINDS)}, "
+              f"got {args.kind!r}")
+    plane_filter = args.plane_id
+    if plane_filter:
+        _check_id(plane_filter, "--plane-id")
+    since = None
+    if args.since_hours is not None:
+        hours = _check_nonneg_number(args.since_hours, "--since-hours")
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = []
+    for ev in read_plane_events(store_dir):
+        if plane_filter is not None and ev["plane_id"] != plane_filter:
+            continue
+        if args.kind is not None and ev["kind"] != args.kind:
+            continue
+        if since is not None and _parse_event_ts(
+                ev["observed_at"], "event observed_at") < since:
+            continue
+        rows.append(ev)
+    print(json.dumps({"events": rows, "count": len(rows)}, indent=2))
     return 0
 
 
@@ -1011,6 +1223,34 @@ def build_parser():
     p_cs = sub.add_parser("cost-summary", help="D-MT5 operational-cost measurement")
     p_cs.add_argument("--plane-id", default=None)
     p_cs.set_defaults(func=cmd_cost_summary)
+
+    p_ev = sub.add_parser("event", help="append an operator-observed update event (S5)")
+    p_ev.add_argument("--plane-id", required=True)
+    # deploy-started is the S4 driver's alone (it claims a push the
+    # driver made): the operator's entry excludes it, so a stray
+    # operator-emitted started can never become "latest" and silently
+    # clear the S2 gate's bad-signal (M1, #1348 review).
+    p_ev.add_argument("--kind", required=True,
+                      choices=[k for k in PLANE_EVENT_KINDS
+                               if k != "deploy-started"],
+                      help="update-event kind (closed vocabulary, #1288; "
+                           "deploy-started is emitted by the S4 driver only)")
+    p_ev.add_argument("--template", default=None,
+                      help="template version the event concerns")
+    p_ev.add_argument("--deployment-id", default=None,
+                      help="pinned deployment id (S3 grammar)")
+    p_ev.add_argument("--worker-sha256", default=None,
+                      help="pinned worker sha256 (64 lowercase hex)")
+    p_ev.add_argument("--notes", default="")
+    p_ev.set_defaults(func=cmd_event)
+
+    p_evs = sub.add_parser("events", help="query the operator-observed update-event journal (S5)")
+    p_evs.add_argument("--plane-id", default=None)
+    p_evs.add_argument("--kind", default=None,
+                       help="filter to one update-event kind")
+    p_evs.add_argument("--since-hours", default=None,
+                       help="only events observed within the last N hours")
+    p_evs.set_defaults(func=cmd_events)
 
     p_rel = sub.add_parser("release", help="pin a template release (D-RC-2 manifest)")
     p_rel.add_argument("--template", required=True)
