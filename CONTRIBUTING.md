@@ -126,8 +126,8 @@ red on CI if you skip the ones you can run. The one-shot way to run them:
 It runs the shard-plan check, the changelog ritual lint, the changed-paths
 evaluation (docs-only diffs skip the python suite, like CI — your
 uncommitted changes count as code, so the suite still runs until you
-commit them), docs index coverage, shellcheck severity=error on your
-changed `*.sh` files, and then the full python suite — failing on the
+commit them), docs index coverage, shellcheck severity=error over the CI
+job's shell-file selection on the whole checkout, and then the full python suite — failing on the
 first failure.
 `./scripts/local-gate.sh --quick` runs only the cheap checks (no suite);
 `./scripts/local-gate.sh --plan` prints the steps without running them.
@@ -200,14 +200,20 @@ it locally and the suite exercises the same gates; if CI's and your local
 shellcheck versions diverge, the warning sets can too — treat a local
 green as necessary but not sufficient.
 
-One CI job has no suite equivalent: the standalone `shellcheck` job runs
-`severity=error` over the repo's shell scripts — scripts the suite never
-covers (e.g. `harness/`, `fleet/`, `scripts/`). The closest local
-approximation for a PR that touches shell scripts:
+One CI job has no suite equivalent on docs-only diffs: the standalone
+`shellcheck` job runs `severity=error` over the repo's shell scripts on
+every PR (it has no changed-paths carve-out), while the suite's repo-wide
+pin is skipped on docs-only verdicts. The exact local form — what
+`local-gate.sh` step 5 runs:
 
 ```bash
-git diff --name-only origin/main...HEAD -- '*.sh' | xargs -r shellcheck -S error
+python3 scripts/ci_shellcheck_files.py | xargs -r -0 shellcheck -S error
 ```
+
+(`scripts/ci_shellcheck_files.py` is the shared selection helper: it
+replicates the pinned action's file selection — named shell files plus
+extension-less executables with a shell shebang — and is the single
+source of truth for both the gate step and the suite's pin.)
 
 The PNG screenshot smoke test is locally runnable too — CI's own steps are the
 recipe: `pip install playwright`, then the one-time

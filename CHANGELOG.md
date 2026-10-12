@@ -52,6 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The local merge gate's shellcheck step now lints the same set of shell
+  files CI lints, on every run: previously it checked only changed `*.sh`
+  files, so deleting a shell script failed the gate on the missing file
+  (CI never sees deletions) and a docs-only change adding a shell script
+  with a different name passed locally while CI failed it. (#1380)
 - CI jobs now fail fast on hangs: every workflow job carries an explicit
   timeout (15 min for fast jobs, 30 for network/browser-bound, 60 for the
   test shards and image builds), so a wedged job fails in under an hour

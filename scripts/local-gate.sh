@@ -32,9 +32,10 @@
 #                             scripts/test_contributing_ci_gates.py — the
 #                             CI job's exact three-file invocation; runs on
 #                             every PR like CI, docs-only included)
-#   5. shellcheck            (severity=error on changed *.sh — approximates
-#                             the standalone shellcheck CI job; the suite's
-#                             own shellcheck gates live inside the python suite)
+#   5. shellcheck            (severity=error over the CI job's shell-file
+#                             selection on the whole checkout — replicates
+#                             the standalone shellcheck CI job, which has
+#                             no docs-only carve-out)
 #   6. python tests          (python3 -m pytest, unless docs-only or --quick)
 #   7. markdown link check   (no local equivalent — named, not run)
 #   8. PNG screenshot smoke  (manual — recipe named, not run; needs a browser install)
@@ -146,8 +147,10 @@ local-gate plan (nothing executed):
   4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
                              (CI's exact three-file invocation; runs on every
                              PR like CI, docs-only included)
-  5. shellcheck            — severity=error on *.sh files changed vs origin/main
-                             (skipped loudly if shellcheck is not installed)
+  5. shellcheck            — severity=error over the CI job's shell-file
+                             selection on the whole checkout (like CI's
+                             standalone job; skipped loudly if shellcheck
+                             is not installed)
   6. python tests          — python3 -m pytest (skipped on --quick or docs-only)
   7. markdown link check   — no local equivalent (see CONTRIBUTING.md); check
                              the CI run on your PR instead
@@ -190,22 +193,21 @@ step "docs index coverage"
 python3 -m pytest scripts/test_docs_index_coverage.py \
   scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
 
-step "shellcheck (severity=error, changed *.sh)"
+step "shellcheck (severity=error, CI job selection)"
 if ! command -v shellcheck >/dev/null 2>&1; then
   echo "local-gate: shellcheck not installed — skipping (CI's standalone job does not skip; install it to replicate)"
-elif git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  # Approximation of the standalone CI job documented in CONTRIBUTING.md
-  # (severity=error over the repo's shell scripts, including ones the
-  # suite's gates never see).
-  # NB: no --no-renames here — unlike the changed-paths gate, rename
-  # detection is what we want: a renamed *.sh reports the surviving path,
-  # while --no-renames would also list the deleted path and shellcheck
-  # would fail on the file that no longer exists.
-  # -z/-0: filenames with spaces must survive as single arguments.
-  git diff -z --name-only origin/main...HEAD -- '*.sh' \
-    | xargs -r -0 shellcheck -S error
 else
-  echo "local-gate: no origin/main to diff against — skipping changed-file shellcheck"
+  # The standalone shellcheck CI job runs severity=error over the CI job's
+  # shell-file selection on the whole checkout, on every PR — it has no
+  # `if:` gate in ci.yml, so there is no docs-only carve-out. Replicate it
+  # exactly here via scripts/ci_shellcheck_files.py, the single source of
+  # truth shared with the suite's repo-wide pin. (issue #1379: the old
+  # changed-`*.sh`-only selection was a strict subset — a deleted `*.sh`
+  # failed shellcheck on a path that no longer exists, and a docs-only PR
+  # adding a non-`*.sh` shell file passed locally while CI went red.)
+  # -z/-0: filenames with spaces must survive as single arguments.
+  python3 "$SCRIPT_DIR/ci_shellcheck_files.py" \
+    | xargs -r -0 shellcheck -S error
 fi
 
 if [[ "$MODE" == "quick" ]]; then
