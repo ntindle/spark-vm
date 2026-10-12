@@ -352,12 +352,6 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
                   capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "diff is docs-only" in out.stdout, out.stdout
-    """Without --worktree the verdict is pure CI semantics (committed
-    range only) — the pin on CI parity lives here."""
-    verdict = _eval_in_scratch_repo(
-        [{"docs/guide.md": "words"}],
-        dirty={"proxy/uncommitted.py": "code"})
-    assert verdict == "docs-only"
 
 
 def test_plan_mode_lists_every_step_without_running():

@@ -3619,7 +3619,7 @@ class SwapAddon:
 
     @staticmethod
     def _redirect_target_host(location):
-        """Host a redirect Location points at, else None.
+        r"""Host a redirect Location points at, else None.
 
         Parsed with browser (WHATWG) semantics, because the check must
         agree with what the client actually follows: ASCII tab/newline
