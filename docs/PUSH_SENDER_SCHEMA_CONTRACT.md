@@ -331,11 +331,22 @@ decisions here, not follow-ups.
   answer is encryption, not the parent doc's default. Key rotation is
   an operator procedure (re-encrypt under the new key, discriminated
   by `data_key_version`; old key destroyed ≤ 24 h after the rotation
-  completes, the vend lane's bound). Stated plainly, as the vend
-  contract states it: one data key protects all tenants'
-  subscription secrets, so one key compromise exposes every
-  `p256dh`/`auth` — which is why the key lives in a Worker secret
-  and rotates as an operator procedure. (A D1-only reader still
+  completes, the vend lane's bound). Retired (D-MT1, 2026-10-09 — #1364
+  class, #1375): the older claim that, "as the vend contract states
+  it," one data key protects all tenants' subscription secrets, so one
+  key compromise exposes every `p256dh`/`auth`. Under one-plane-per-tenant
+  (D-MT1, decided 2026-10-09) the push subscriptions live on the tenant
+  plane ("subscriptions stay owner-keyed on the tenant plane" — the
+  2026-10-10 push convergence), the sender/sweep run against the tenant
+  plane, and the data key is a Cloudflare Worker secret — one per tenant
+  plane's Worker, the D-VD3 shape. One key now protects one tenant's
+  subscription secrets; the rotation bound applies per plane, unchanged in
+  shape. Blast radius shrinks from every tenant to one tenant by
+  construction — which is why the key lives in a Worker secret and
+  rotates as an operator procedure. Honest limit: per-plane keys protect
+  only while the operator provisions genuinely distinct keys per plane —
+  the same key value pasted across planes would silently widen the blast
+  radius again. (A D1-only reader still
   needs the *separate* VAPID private key to actually send — §3 —
   so finding 2's "buzz every device" framing is the D1+Worker-secret
   compromise case, not the D1-only case; the D1-only case gets

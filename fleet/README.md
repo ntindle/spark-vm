@@ -198,8 +198,23 @@ python3 fleet/gate_publish.py --registry registry.json --manifest waves.json \
 
 # 2. Distribute (operator cron, <=5 min for the 600s S1 TTL)
 GATE=gate.json ESTATE=~/fleet-estate fleet/gate_sync.sh
-# Point your cron alerting at gate_sync.sh's exit code: a failed sync is
-# the fleet-freeze signal, and a missed loop freezes the fleet by design.
+# Cron alerting (two-tier, #1326):
+#   - Exit nonzero = LOUD: estate misconfiguration (invalid ssh-target) or
+#     an overlapping run. This is the operator-facing incident.
+#   - Exit 0 with WARNING lines on stderr = transient: a box was
+#     unreachable or its gate dir unprovisioned. The loop kept syncing the
+#     rest of the estate and recorded per-box staleness in
+#     $ESTATE/.gate_sync_state/<box> (contents: "<epoch> <phase>"). Alert
+#     on the *bound*, not the warning: a box whose staleness epoch is
+#     older than TTL (600s default) is past its last valid document and
+#     frozen by design — read it with e.g.
+#       for f in ~/fleet-estate/.gate_sync_state/*; do
+#         read -r epoch phase < "$f" || continue
+#         [ "$(( $(date +%s) - epoch ))" -gt 600 ] && \
+#           echo "FROZEN: $(basename "$f") ($phase)"
+#       done
+#     A missed loop freezes the fleet by design; per-box staleness keeps
+#     one down box from hiding inside a permanently red cron.
 
 # 3. Box side (tick-time query — the enforcement point)
 python3 fleet/gate_query.py state --box-id box-07        # key=value answer

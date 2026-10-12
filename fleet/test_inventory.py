@@ -128,6 +128,25 @@ def _snapshot(store):
 # --- collect -------------------------------------------------------------
 
 
+def test_collect_ignores_dot_directories(env):
+    # #1326: gate_sync.sh records per-box staleness in the estate's
+    # .gate_sync_state/ dir; the collector must not census it as a
+    # phantom box (the sync loop's own "$ESTATE"/*/ glob already
+    # ignores dot-dirs — the collector must agree).
+    estate, store = env
+    state_dir = os.path.join(estate, ".gate_sync_state")
+    os.makedirs(state_dir)
+    with open(os.path.join(state_dir, "tower"), "w") as fh:
+        fh.write("1760295600 scp-failed\n")
+    _collect(env, {
+        "tower": {"status": _status_json(), "audit": [],
+                  "snapshot": _snapshot_json(COMMIT_A)},
+    })
+    records = _journal(store)
+    assert {r["box_id"] for r in records} == {"tower"}
+    assert ".gate_sync_state" not in _snapshot(store)["boxes"]
+
+
 def test_collect_one_record_per_box(env):
     _collect(env, {
         "tower": {"status": _status_json(), "audit": [], "snapshot":

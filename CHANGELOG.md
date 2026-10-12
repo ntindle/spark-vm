@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The operator gate-sync loop no longer turns the operator's cron
+  permanently red when a single box is down: unreachable or
+  unprovisioned boxes are now transient warnings (per-box staleness
+  recorded in the estate's `.gate_sync_state/` for the operator to
+  read against the TTL bound, cleared on the next successful sync),
+  while estate misconfiguration (an invalid ssh target) still fails
+  loudly. (#1326, #TBD)
+- The push-sender schema contract's data-key decision (D45) no longer
+  claims one data key protects every tenant's subscription secrets: one
+  plane per tenant means one key per tenant plane, with the rotation
+  bound applied per plane. (#1375, #TBD)
 - The local merge gate's shellcheck step now lints the same set of shell
   files CI lints, on every run: previously it checked only changed `*.sh`
   files, so deleting a shell script failed the gate on the missing file

@@ -7,6 +7,19 @@
 # by design and the fleet freezes loudly (gate-stale), rather than
 # releasing itself — that is the fail-closed direction G15 §5 chose.
 #
+# Failure classes (§4, #1326): per-box failures are TRANSIENT by default —
+# the loop warns, keeps syncing the rest of the estate, records per-box
+# staleness in $ESTATE/.gate_sync_state/<box> (epoch + phase), and exits 0.
+# A single down box no longer keeps the operator's cron permanently red
+# (alert fatigue hid real failures inside the permanent red). Only
+# estate-MISCONFIGURED boxes (an invalid ssh-target — operator data under
+# local control) fail loudly with exit 1. The TTL backstop (600s default)
+# bounds how long a stale box honors its last document, so the loop
+# reports staleness against that bound: the record's epoch tells the
+# operator whether the box is inside its TTL window or already frozen.
+# The staleness record is cleared on the box's next successful sync, so
+# transient outages self-heal out of the estate state.
+#
 # This is the delivery path that §4's latency contract names: a box holds
 # the frozen document within sync_cadence of publish; effectuation completes
 # within sync_cadence + tick_interval.
@@ -52,7 +65,55 @@ if ! flock -n 9; then
     exit 2
 fi
 
-fail=0
+fail=0        # estate-misconfigured boxes (loud fail: exit 1)
+stale_count=0 # transient remote failures (warn only: exit stays 0, #1326)
+synced_count=0 # boxes that received the document this run
+STATE_DIR="$ESTATE/.gate_sync_state"
+
+# _mark_stale <box> <phase>: record per-box staleness (epoch + phase) so
+# the operator sees per-box staleness instead of one binary red/green.
+# Advisory telemetry — a state-write failure must never turn the cron red,
+# so it degrades to a warning, not a fail (#1326).
+_mark_stale() {
+    local box="$1" phase="$2"
+    if [ "$DRY_RUN" = 1 ]; then
+        return 0
+    fi
+    if mkdir -p "$STATE_DIR" && \
+        printf '%s %s\n' "$(date -u +%s)" "$phase" > "$STATE_DIR/$box"; then
+        return 0
+    fi
+    echo "WARNING: could not record staleness for $box (phase $phase)" >&2
+    return 0
+}
+
+# _clear_stale <box>: a successful sync clears the box's staleness record —
+# transient outages self-heal out of the estate state. Best-effort: the
+# `|| true` keeps this fail-open on the success path — a state-dir
+# pathology (permissions, STATE_DIR replaced by a file) must never turn a
+# successful sync into a red cron under `set -e` (#1326).
+_clear_stale() {
+    local box="$1"
+    if [ "$DRY_RUN" = 1 ]; then
+        return 0
+    fi
+    rm -f "$STATE_DIR/$box" || true
+    return 0
+}
+
+# _warn_transient <box> <detail>: the remote side of a box failed. The
+# ssh test -d probe, scp, and install can all fail because the box is
+# down — a provisioning gap (missing dir on an up box) is the same
+# remote failure class. Warn, mark stale, keep syncing the rest of the
+# estate. The fail-closed direction holds: the box keeps its last
+# document until TTL (600s default), then freezes loudly by design.
+_warn_transient() {
+    local box="$1" detail="$2" phase="$3"
+    echo "WARNING: $box: $detail (transient — will retry next tick; staleness recorded)" >&2
+    _mark_stale "$box" "$phase"
+    stale_count=$((stale_count + 1))
+}
+
 for boxdir in "$ESTATE"/*/; do
     [ -d "$boxdir" ] || continue
     box="$(basename "$boxdir")"
@@ -82,12 +143,15 @@ for boxdir in "$ESTATE"/*/; do
         echo "would sync $GATE -> $dest"
         continue
     fi
-    # The remote gate dir must exist before we write: a missing dir is a
-    # provisioning gap, not a sync gap — fail loudly.
+    # The remote gate dir must exist before we write. A failed probe is
+    # the transient class: the box may be down, or the dir may genuinely
+    # be unprovisioned — the loop cannot tell them apart, and both are
+    # recovered by retrying next tick, not by a permanently red cron.
+    # (The old "provisioning gap — fail loudly" reading of this branch
+    # kept one down box red forever; #1326 moves it to warn + stale.)
     # shellcheck disable=SC2086
     if ! ssh $SSH_OPTS "${GATE_USER}@${target}" "test -d '$GATE_DIR'"; then
-        echo "ERROR: $box has no $GATE_DIR (provision it first: G18 §5)" >&2
-        fail=1
+        _warn_transient "$box" "gate dir $GATE_DIR unreachable (box down or not provisioned)" "probe-failed"
         continue
     fi
     # Atomic, mode-preserving delivery: scp to a temp name, then install -m
@@ -99,14 +163,13 @@ for boxdir in "$ESTATE"/*/; do
     tmp_remote="$GATE_DIR/.gate.json.tmp.$$"
     # shellcheck disable=SC2086
     if ! scp $SSH_OPTS "$GATE" "${GATE_USER}@${target}:${tmp_remote}"; then
-        echo "ERROR: scp to $box failed" >&2
         # A failed scp can leave a partial tmp_remote behind — same litter
         # class as a failed install (the tmp name is ours, so the leftover
         # is always ours to remove). Best-effort: if the box is down this
         # ssh fails too, which is fine.
         # shellcheck disable=SC2086
         ssh $SSH_OPTS "${GATE_USER}@${target}" "rm -f '$tmp_remote'" || true
-        fail=1
+        _warn_transient "$box" "scp failed" "scp-failed"
         continue
     fi
     # The tmp file is removed by a remote EXIT trap, so an install failure
@@ -116,9 +179,11 @@ for boxdir in "$ESTATE"/*/; do
     if ssh $SSH_OPTS "${GATE_USER}@${target}" \
         "trap \"rm -f '$tmp_remote'\" EXIT; install -m 600 '$tmp_remote' '$GATE_DIR/gate.json'"; then
         echo "synced $box"
+        _clear_stale "$box"
+        synced_count=$((synced_count + 1))
     else
-        echo "ERROR: atomic install on $box failed" >&2
-        fail=1
+        _warn_transient "$box" "atomic install failed" "install-failed"
     fi
 done
+echo "gate_sync done: $synced_count synced, $stale_count stale (transient), misconfigured-fail=$fail" >&2
 exit "$fail"
