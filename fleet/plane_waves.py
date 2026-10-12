@@ -512,6 +512,17 @@ def cmd_assign(args):
     # controller cannot deploy are exactly what S3's gate was for.
     release = plane_inventory.read_release(store_dir, template)
     channel = release["channel"]
+    # #1374 round-1 (Security B1): the release-time spelling refusal only
+    # guards NEW releases — a record pinned before it (e.g. channel
+    # "Security"/"SECURITY") still reads back, misses the D-RC-7 exact
+    # match below, and silently travels normal waves: the same
+    # bad-failure-direction hole this change claims to close. Fail closed
+    # on a non-lowercase stored channel — the recovery path is a
+    # re-release with the exact spelling (never silent normalization).
+    if channel != channel.lower():
+        _fail(f"release channel must be lowercase (got {channel!r}) — "
+              f're-release with the exact spelling; D-RC-7 keys on '
+              f'"security"')
     buckets = args.buckets
     if channel == SECURITY_CHANNEL:
         # D-RC-7: the expedited security channel rides the release

@@ -911,3 +911,56 @@ def test_assign_warns_on_degraded_planes(store):
     assert p.returncode == 0, p.stderr
     assert "warning" in p.stderr
     assert "plane-2" in p.stderr
+
+
+def test_assign_refuses_legacy_mixed_case_channel(store):
+    # #1374 round-1 (Security B1): the release-time spelling refusal only
+    # guards NEW releases — a record pinned BEFORE the guard (mixed-case
+    # channel, e.g. "Security") still reads back, misses the D-RC-7 exact
+    # match, and would silently travel normal waves: the same
+    # bad-failure-direction hole. cmd_assign fails closed on a
+    # non-lowercase stored channel; the recovery path is a re-release
+    # with the exact spelling (never silent normalization).
+    # Neuter: deleting the cmd_assign lowercase check must flip the
+    # assertions below (the assign would succeed with normal waves).
+    _estate(store, canary_tenants=("ct1", "ct2"))
+    # Seed a legacy record directly into journal + snapshot, bypassing
+    # cmd_release (which now refuses mixed case) — this is exactly what
+    # a pre-guard record looks like on disk. Journal and snapshot carry
+    # the whole record identically (whole-record consistency check).
+    record = {
+        "schema": "plane-template-release/1",
+        "template_version": "w@v1",
+        "channel": "Security",
+        "deployment_id": "dep-legacy",
+        "worker_sha256": _SHA_A,
+        "released_at": "2026-10-01T00:00:00+00:00",
+        "reporter": "operator",
+        "notes": "",
+    }
+    with open(os.path.join(store, "releases_journal.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with open(os.path.join(store, "releases.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema": "plane-template-releases-snapshot/1",
+                   "releases": {"w@v1": record}}, fh, sort_keys=True)
+        fh.write("\n")
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 2
+    assert "lowercase" in p.stderr
+    # No rollout opened: the mixed-case record cannot travel normal
+    # waves (nor compressed ones) silently.
+    assert not os.path.exists(os.path.join(store, "waves.json"))
+    # A properly spelled legacy record is still assignable.
+    record["channel"] = "security"
+    with open(os.path.join(store, "releases_journal.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with open(os.path.join(store, "releases.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"schema": "plane-template-releases-snapshot/1",
+                   "releases": {"w@v1": record}}, fh, sort_keys=True)
+        fh.write("\n")
+    p = _cli(store, "assign", "--template", "w@v1")
+    assert p.returncode == 0, p.stderr
