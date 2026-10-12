@@ -112,8 +112,9 @@ New pins this slice (continuing the global D-series):
   digest            aid=``"digest:" + owner_principal + ":" + window_start``,
                     ttl_s=3600 (covers the hour window), summary=the
                     ``push_digest_state`` count rendered by the plane
-                    ("N pages coalesced this hour"). A missing digest-state
-                    row is corruption: the page dead-letters (fail-closed,
+                    ("N pages coalesced this hour"). A missing or corrupt
+                    digest-state row (count not a positive int — #1356)
+                    is corruption: the page dead-letters (fail-closed,
                     operator-visible) rather than sending a count the loop
                     cannot prove. #1064's content half is D88's design
                     position (count-scoped body per contract §1.4;
@@ -796,9 +797,21 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             "SELECT count FROM push_digest_state"
             " WHERE owner_principal = ? AND window_start = ?",
             (owner_principal, key_material)).fetchone()
-        if drow is None:
-            # Corruption (the sweep only enqueues a digest when count > 0):
-            # fail-closed, operator-visible, reservation released.
+        digest_count = drow[0] if drow else None
+        if (digest_count is None
+                or isinstance(digest_count, bool)
+                or not isinstance(digest_count, int)
+                or digest_count < 1):
+            # Missing (the sweep only enqueues a digest when count > 0)
+            # or corrupt (#1356): the DDL's INTEGER NOT NULL is SQLite
+            # type affinity only — a negative or non-integer count
+            # survives the column, and the only writer that zeroes is
+            # _complete_page, atomically with the queued-row DELETE, so
+            # a zero count beside a queued row is corruption too. A
+            # corrupt count must never page ("-5 pages coalesced this
+            # hour") or wedge the item on a TypeError: fail-closed,
+            # operator-visible, reservation released — the same path as
+            # the missing row.
             _insert_audit_row(conn, at, owner_principal, box_col,
                               event_kind, event_key, "dead-letter")
             _delete_queued(conn, row_id)
@@ -806,9 +819,8 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
                                   owner_principal=owner_principal,
                                   window_start=window_start)
             summary.note("dead-letter",
-                         "%s (digest state row missing)" % item)
+                         "%s (digest state row missing or corrupt)" % item)
             return
-        digest_count = drow[0]
     aid, ttl_s, text = _plaintext_for(
         event_kind, key_material=key_material,
         owner_principal=owner_principal, record=record,
