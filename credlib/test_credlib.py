@@ -368,6 +368,51 @@ class MemoryHygieneTests(unittest.TestCase):
         fill_secret._zero_str(None)
         fill_secret._zero_str(123)
 
+    def test_zero_str_skips_latin1_singleton(self):
+        """1-char latin-1 strings are CPython process-global singletons
+        (unicode_latin1) — scrubbing one would corrupt every future use
+        of that character in the process, so _zero_str must skip them."""
+        s = " x ".strip()  # the cached 'x' singleton, via a realistic path
+        self.assertIs(s, chr(120))
+        fill_secret._zero_str(s)
+        self.assertEqual(chr(120), "x")
+        self.assertEqual("x", "x")  # literal unharmed
+
+    def test_zero_str_scrubs_fresh_single_nonlatin1(self):
+        """A 1-char non-latin-1 string is NOT cached — it is still
+        scrubbed."""
+        s = "".join(["中"])
+        self.assertIsNot(s, chr(ord(s)))
+        pristine = "".join(["中"])
+        fill_secret._zero_str(s)
+        self._assert_zeroed(s, pristine)
+
+    def test_duplicate_entry_first_value_scrubbed(self):
+        """A duplicate entry name must not orphan the overwritten value's
+        buffer."""
+        real_zero = fill_secret._zero_str
+        seen = []
+        def spy(s):
+            span = fill_secret._str_buffer_span(s)
+            snap = (ctypes.string_at(id(s) + span[0], span[1])
+                    if span is not None else None)
+            seen.append((s, snap))
+            real_zero(s)
+        fill_secret._zero_str = spy
+        real_run = self._read_with_stub(
+            b"#hsurr:multi\naccess_token=FIRST-SECRET\n"
+            b"access_token=SECOND-SECRET\n")
+        try:
+            self.assertEqual(
+                fill_secret._read_value("gh", "access_token"),
+                "SECOND-SECRET")
+        finally:
+            fill_secret._zero_str = real_zero
+            fill_secret.subprocess.run = real_run
+        orphans = [o for o, snap in seen if snap == b"FIRST-SECRET"]
+        self.assertEqual(len(orphans), 1)
+        self._assert_zeroed(orphans[0], "FIRST-SECRET")
+
     def test_scrub_bytearray_zeroes(self):
         buf = bytearray(b"s3cr3t-bytes")
         fill_secret._scrub_bytearray(buf)

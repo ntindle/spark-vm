@@ -29,12 +29,17 @@ buffer whose layout it positively verified for that exact object and
 silently skips anything else (non-CPython runtimes, exotic layouts),
 so the worst case is today's behavior, never memory corruption. Honest
 residual: transient temporaries the read path cannot deterministically
-track; the subprocess stdout bytes object itself (the raw store output
-— it may be shared, e.g. by test doubles, so only the owned bytearray
-copy is scrubbed and the original lingers per the pre-#730 behavior);
-the sudo reader child process's own transient memory; copies inside
-Playwright / the browser / the OS; and allocator-level copies are all
-outside this scrubbing.
+track; the layout-verification probe's single encode() bytes temporary
+(one per _zero_str call — the probe reads into scrubbed bytearrays and
+compares without copying, so this is the honest minimum); 1-char
+latin-1 values, which CPython caches process-wide and are therefore
+never scrubbed (scrubbing one would corrupt every future use of that
+character in the process); the subprocess stdout bytes object itself
+(the raw store output — it may be shared, e.g. by test doubles, so only
+the owned bytearray copy is scrubbed and the original lingers per the
+pre-#730 behavior); the sudo reader child process's own transient
+memory; copies inside Playwright / the browser / the OS; and
+allocator-level copies are all outside this scrubbing.
 """
 
 import ctypes
@@ -107,11 +112,22 @@ def _str_buffer_span(s):
         if off <= 0 or data_len <= 0:
             return None
         # Self-verifying probe: the bytes at the computed span must be
-        # exactly the content's encoding. (The probe and the expected
-        # encoding are transient temporaries — see the module docstring's
-        # honest residual.)
-        if ctypes.string_at(id(s) + off, data_len) != s.encode(codec):
-            return None
+        # exactly the content's encoding. Read into a bytearray (not an
+        # immutable bytes temp) and compare without copying, scrubbing
+        # both buffers afterwards — a dropped immutable temp would be
+        # another lingering plaintext copy, the very thing #730
+        # eliminates. One unavoidable temp remains: the encode() bytes
+        # (see the module docstring's honest residual).
+        raw = bytearray(data_len)
+        ctypes.memmove((ctypes.c_char * data_len).from_buffer(raw),
+                       id(s) + off, data_len)
+        expected = bytearray(s.encode(codec))
+        try:
+            if raw != expected:
+                return None
+        finally:
+            _scrub_bytearray(raw)
+            _scrub_bytearray(expected)
         return (off, data_len)
     except Exception:
         return None
@@ -126,9 +142,23 @@ def _zero_str(s):
     shared. The span is verified per object by _str_buffer_span; an
     unverifiable layout is silently skipped, so the worst case is no
     scrubbing, never corruption. Never raises.
+
+    Two hard no-scrub cases, both cheap identity checks: non-str
+    objects (defense in depth — a lying __sizeof__ can't push the
+    probe out of bounds anyway), and 1-char latin-1 strings, which
+    CPython caches process-wide (unicode_latin1) — zeroing one would
+    corrupt every future use of that character in the process.
+
+    Note: a scrubbed object keeps its stale cached hash; harmless —
+    every call site drops the object immediately after scrubbing.
     """
     try:
+        if type(s) is not str:
+            return
         if len(s) == 0:
+            return
+        if len(s) == 1 and s is chr(ord(s)):
+            # Process-global latin-1 cache singleton: shared, never scrub.
             return
         span = _str_buffer_span(s)
         if span is None:
@@ -211,7 +241,13 @@ def _parse_entry_table(text, start):
             if stripped:
                 m = ENTRY_LINE_RE.match(line)
                 if m:
-                    parsed[m.group(1)] = m.group(2)
+                    key, val = m.group(1), m.group(2)
+                    old = parsed.get(key)
+                    if old is not None and old is not val:
+                        # Duplicate entry name: the overwritten value
+                        # would otherwise orphan its buffer unscubbed.
+                        _zero_str(old)
+                    parsed[key] = val
         finally:
             _scrub_temp(stripped, text)
             _scrub_temp(line, text)
