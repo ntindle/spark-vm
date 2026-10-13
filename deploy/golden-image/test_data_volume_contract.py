@@ -137,13 +137,14 @@ def test_data_prep_creates_layout(box):
 def test_data_prep_chown_pins_contract_owners():
     """Structural pin: the script chowns the contract's owner per subdir.
 
-    pairing/ -> root (status quo per #1220), approvals/ + confirmd/ ->
-    swapd, ssh/ -> root. The behavioral tests skip chown (test seam);
-    this pins the intended owner on the exact subdir. Anchored to line
-    start so a commented-out mkpair line cannot pass.
+    pairing/ -> sparkpair (#1220 Option B, decided 2026-10-12 — the
+    pairing-state ownership decision this pin follows), approvals/ +
+    confirmd/ -> swapd, ssh/ -> root. The behavioral tests skip chown
+    (test seam); this pins the intended owner on the exact subdir.
+    Anchored to line start so a commented-out mkpair line cannot pass.
     """
     src = open(DATA_PREP).read()
-    assert re.search(r'^mkpair pairing root$', src, re.MULTILINE)
+    assert re.search(r'^mkpair pairing sparkpair$', src, re.MULTILINE)
     assert re.search(r'^mkpair approvals swapd$', src, re.MULTILINE)
     assert re.search(r'^mkpair confirmd swapd$', src, re.MULTILINE)
     assert re.search(r'^mkpair ssh root$', src, re.MULTILINE)

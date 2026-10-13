@@ -220,13 +220,19 @@ def test_supervisord_program_set():
         "cua-stack",
         "cua-bridge",
         "cua-keepalive",
+        "pair-heartbeat",
+        "pair-rotate",
+        "pair-phone-home",
     }, programs
 
 
 def test_supervisord_privilege_split():
     """The full program→user mapping: sshd is the only root *daemon*; the
     proxy daemons run as swapd (mirroring the systemd units), the UI/CUA
-    stack as agent. identity-seed and data-prep are the other root
+    stack as agent, and the pairing runtime as the dedicated
+    pairing-state service user `sparkpair` (#1220 Option B — pairing state
+    is sparkpair-owned, never
+    root). identity-seed and data-prep are the other root
     programs, deliberately: they write machine-identity state (the pairing
     enrollment; the /data layout + sshd host-key indirection) before any
     tenant user exists, and both are one-shots (autorestart=false,
@@ -246,6 +252,9 @@ def test_supervisord_privilege_split():
         "cua-stack": "agent",
         "cua-bridge": "agent",
         "cua-keepalive": "agent",
+        "pair-heartbeat": "sparkpair",
+        "pair-rotate": "sparkpair",
+        "pair-phone-home": "sparkpair",
     }
     programs = {
         s.split(":", 1)[1]: cfg[s].get("user")
@@ -253,6 +262,74 @@ def test_supervisord_privilege_split():
         if s.startswith("program:")
     }
     assert programs == expected, programs
+
+
+def test_dockerfile_creates_sparkpair_service_user():
+    """The recipe bakes the dedicated pairing-state service user `sparkpair`
+    (#1220 Option B): a system
+    user with a locked password and no login — a service identity, never
+    an operator. Non-vacuity: the useradd line must name sparkpair with
+    --system, a home, and the '*' locked password."""
+    text = _dockerfile_text()
+    m = re.search(
+        r"useradd\s+--system\s+--create-home\s+--home-dir\s+/home/sparkpair\s+"
+        r"--shell\s+/bin/bash\s+--password\s+'\*'\s+sparkpair",
+        text,
+    )
+    assert m, "sparkpair useradd line missing or malformed"
+    assert "passwd -l sparkpair" in text, "sparkpair password not locked"
+
+
+def test_supervisord_pairing_runtime_wiring():
+    """The three pairing programs cover the pure-pairing-state entrypoints
+    as the dedicated pairing-state service user `sparkpair` (#1219, #1220
+    Option B): the every-minute heartbeat loop, the hourly rotate loop, and
+    the phone-home daemon with the documented exit-code restart policy
+    (exit 2 = crash -> restart; 0/1 = clean/human-attention -> no restart).
+    All three run inside pair-tick-wrapper.sh's D-RW5 unenrolled-skip gate —
+    the loop programs in `loop` mode, the daemon in `daemon` mode (B1: the
+    gate sleep-polls for enrollment.json and execs the daemon only once
+    enrolled, so D-RW3's exit-code mapping applies to the daemon proper and
+    the WSS lane re-arms post-redeem). The store-coupled entrypoints
+    (ingest, upload-filings) are deliberately NOT wired here — #1363's
+    store-access design must land first (wiring them as sparkpair would
+    break on swapd-owned stores); this test pins that deferral."""
+    cfg = _supervisord()
+    wrapper = "/usr/local/bin/pair-tick-wrapper.sh"
+    beat = cfg["program:pair-heartbeat"]
+    assert beat["user"] == "sparkpair"
+    assert beat["environment"] == 'HOME="/home/sparkpair"'
+    assert beat["command"].startswith(wrapper + " loop 60 ")
+    assert "spark_pair.py heartbeat" in beat["command"]
+    rotate = cfg["program:pair-rotate"]
+    assert rotate["user"] == "sparkpair"
+    assert rotate["command"].startswith(wrapper + " loop 3600 ")
+    assert "spark_pair.py rotate --auto" in rotate["command"]
+    daemon = cfg["program:pair-phone-home"]
+    assert daemon["user"] == "sparkpair"
+    assert daemon["command"].startswith(wrapper + " daemon ")
+    assert "spark_pair.py phone-home" in daemon["command"]
+    # exit-code restart policy: only exits outside {0,1} are "unexpected"
+    assert daemon["autorestart"] == "unexpected"
+    assert daemon["exitcodes"] == "0,1"
+    # #1363 deferral pin: no pair-* program may invoke the store-coupled
+    # entrypoints until the store-access design lands.
+    for s in cfg.sections():
+        if s.startswith("program:pair-"):
+            cmd = cfg[s]["command"]
+            assert "spark_pair.py ingest" not in cmd, s
+            assert "spark_pair.py upload-filings" not in cmd, s
+
+
+def test_dataprep_pairing_dir_owned_by_sparkpair():
+    """data-prep.sh's /data/pairing chown follows #1220 (lockstep note in
+    the script): sparkpair-owned, never root — the ingest/upload-filings
+    ticks enforce that DAC ownership."""
+    p = os.path.join(GOLDEN_DIR, "data-prep.sh")
+    with open(p, encoding="utf-8") as f:
+        text = f.read()
+    assert re.search(r"^mkpair pairing sparkpair$", text, re.M)
+    assert "mkpair pairing root" not in text
 
 
 def test_supervisord_no_public_listener():
