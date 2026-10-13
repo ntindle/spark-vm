@@ -856,6 +856,113 @@ def test_request_ledger_surfaced_on_snapshot_status(cli, fakes):
     assert st["requested"] == []
 
 
+# -- issue #1437 (F-MSP-7): phantom-ledger fix --------------------------------
+
+def _seed_view(cli, slug):
+    with open(cli._msp_supervisor_files(slug)["view"], "w") as f:
+        json.dump({"t": time.time(), "msp_state": "blocked_approval",
+                   "active_turn_id": "turn-1", "pending": "",
+                   "last_activity_age_s": 1.0}, f)
+
+
+def test_requested_stale_when_supervisor_dead(cli, fakes, monkeypatch):
+    # F-MSP-7's qualify-status half: ledger entries outliving a dead
+    # supervisor must be marked stale, not advertised as actionable.
+    slug = "job1"
+    _make_job(cli, slug)
+    _seed_view(cli, slug)
+    job = cli.load_job(slug)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: False)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "Run shell command"})
+    st = cli._msp_status_from_snapshot(slug, job)
+    assert st["requested_stale"] is True
+    assert [e["id"] for e in st["requested"]] == ["ap-1"]
+
+
+def test_requested_fresh_when_supervisor_alive(cli, fakes, monkeypatch):
+    slug = "job1"
+    _make_job(cli, slug)
+    _seed_view(cli, slug)
+    job = cli.load_job(slug)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "Run shell command"})
+    st = cli._msp_status_from_snapshot(slug, job)
+    assert st["requested_stale"] is False
+
+
+def test_requested_stale_false_on_empty_ledger(cli, fakes, monkeypatch):
+    # No entries: nothing to qualify, supervisor aliveness is
+    # irrelevant -- the key stays False, not None/missing.
+    slug = "job1"
+    _make_job(cli, slug)
+    _seed_view(cli, slug)
+    job = cli.load_job(slug)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: False)
+    st = cli._msp_status_from_snapshot(slug, job)
+    assert st["requested"] == []
+    assert st["requested_stale"] is False
+
+
+def test_status_render_marks_stale_requested(cli, fakes, monkeypatch,
+                                             capsys):
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "Run shell command"})
+    st = {"slug": slug,
+          "requested": cli._msp_request_ledger_read(slug),
+          "requested_stale": True}
+    cli._msp_status_render_requested(st)
+    out = capsys.readouterr().out
+    assert "STALE" in out
+    assert "ap-1 [stale]" in out
+
+
+def test_status_render_unmarked_when_fresh(cli, fakes, capsys):
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "Run shell command"})
+    st = {"slug": slug,
+          "requested": cli._msp_request_ledger_read(slug),
+          "requested_stale": False}
+    cli._msp_status_render_requested(st)
+    out = capsys.readouterr().out
+    assert "STALE" not in out
+    assert "[stale]" not in out
+
+
+def test_ledger_clear_never_raises_on_missing_file(cli, fakes):
+    # _msp_ledger_update's never-raises contract extends to the clear.
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_clear(slug)
+    assert cli._msp_request_ledger_read(slug) == []
+
+
+def test_kill_clears_request_ledger(cli, fakes, monkeypatch):
+    # F-MSP-7's kill-path half: the session is deleted on kill, so
+    # every ledgered request is definitively dead.
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "Run shell command"})
+    cli._msp_request_ledger_append(slug, "user_input", "ui-1",
+                                   {"questions": []})
+    assert len(cli._msp_request_ledger_read(slug)) == 2
+    monkeypatch.setattr(cli, "_msp_kill_supervisor", lambda s: False)
+    monkeypatch.setattr(
+        cli, "_msp_call",
+        lambda slug_, job_, fn, pre_resume=True: (_ for _ in ()).throw(
+            RuntimeError("no serve binary in tests")))
+    rc = cli._msp_kill(_ns(slug=slug))
+    assert rc == 0
+    assert cli._msp_request_ledger_read(slug) == []
+    assert cli.load_job(slug)["state"] == "killed"
+
+
 # -- supervise_cmd wiring (QA B1) --------------------------------------------
 
 def test_supervise_cmd_wires_request_handlers(cli, fakes, monkeypatch):
@@ -1042,7 +1149,8 @@ def _seed_snapshot(cli, slug):
 
 
 def test_status_renders_requested_with_runnable_commands(cli, fakes,
-                                                         capsys):
+                                                         capsys,
+                                                         monkeypatch):
     # The held-path operator story: `status` shows the request with the
     # full decide/answer command, mirroring cmd_approvals' direct-path
     # rendering -- choiceIds, questions, options, and the trust tag the
@@ -1050,6 +1158,10 @@ def test_status_renders_requested_with_runnable_commands(cli, fakes,
     slug = "job1"
     _make_job(cli, slug)
     _seed_snapshot(cli, slug)
+    # The held path means a live supervisor: without this the
+    # aliveness check reads dead and the F-MSP-7 staleness qualifier
+    # (issue #1437) applies instead of the fresh render below.
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
     msp_approval = cli._msp_approval()
     cli._msp_on_approval_requested(
         slug, msp_approval.parse_approval(copy.deepcopy(APPROVAL_WIRE)))

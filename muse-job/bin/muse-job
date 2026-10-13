@@ -4813,6 +4813,16 @@ def _msp_status_render_requested(st):
     reach the operator's terminal).
     """
     slug = st["slug"]
+    # Issue #1437 (F-MSP-7): the supervisor is not alive, so no
+    # decide/answer drain will ever execute these -- say so on the
+    # overview instead of advertising them as actionable requests.
+    stale = st.get("requested_stale", False)
+    if stale and st.get("requested"):
+        print("  requested approvals below are STALE: the supervisor is "
+              "not running, so no decide/answer will execute until a "
+              "supervisor holds the session again (`muse-job steer` or "
+              "`resume` re-attaches; `muse-job kill` clears them).")
+    stale_mark = " [stale]" if stale else ""
     for r in st.get("requested") or []:
         if not isinstance(r, dict):
             continue
@@ -4823,7 +4833,7 @@ def _msp_status_render_requested(st):
         ts = _safe_hhmm(r.get("ts"))
         if r.get("kind") == "approval":
             title = _clean_text(str(d.get("title") or ""))[:120]
-            print(f"  approval {rid}: {title} ({ts})")
+            print(f"  approval {rid}{stale_mark}: {title} ({ts})")
             # (d.get("choices") or []): a null on disk (hand-edit,
             # corruption) must degrade, never kill `status` (issue #23
             # H3 -- a forged ledger must not persistently break the
@@ -4840,7 +4850,7 @@ def _msp_status_render_requested(st):
         elif r.get("kind") == "user_input":
             tag = (" [looks like a trust prompt]"
                    if d.get("looksLikeTrustPrompt") else "")
-            print(f"  user-input {rid}{tag} ({ts}):")
+            print(f"  user-input {rid}{tag}{stale_mark} ({ts}):")
             for q in (d.get("questions") or []):
                 if not isinstance(q, dict):
                     continue
@@ -4872,6 +4882,7 @@ def _msp_status_from_snapshot(slug, job):
         progress_age_s = time.time() - pm
     except OSError:
         progress_age_s = None
+    requested = _msp_request_ledger_read(slug)
     return {
         "slug": slug,
         "transport": "msp",
@@ -4891,7 +4902,19 @@ def _msp_status_from_snapshot(slug, job):
         # Issue #1372 slice 2: server-issued requests the supervisor's
         # request handlers surfaced (listPending is unreachable while it
         # holds the session).
-        "requested": _msp_request_ledger_read(slug),
+        "requested": requested,
+        # Issue #1437 (F-MSP-7): ledger entries outlive a dead supervisor
+        # (crash/SIGKILL -- the graceful exit path already drains them),
+        # so the display must qualify them -- phantom "requested"
+        # approvals otherwise advertise work no live drain will ever
+        # execute. The qualifier is render-time only: no TTL-triggered
+        # clearing here (the #1434 design notes reject heartbeat-TTL as
+        # the tombstone trigger -- false-dead risk). Accepted side
+        # effect, worth noting: _msp_supervisor_alive unlinks a stale
+        # pidfile via _msp_supervisor_forget, so `status` can delete a
+        # stale pidfile (never a live one).
+        "requested_stale": (bool(requested)
+                            and not _msp_supervisor_alive(slug)),
     }
 
 
@@ -4984,6 +5007,13 @@ def _msp_kill(args):
     # longer an MSP phase occupant -- clear the stamp so a deliberate
     # kill does not defer a sibling's auto-recovery for a full TTL.
     _phase_msp_occupancy_note(slug, False)
+    # Issue #1437 (F-MSP-7, the deliberate-kill instance of the
+    # phantom-ledger hazard): the supervisor is torn down above and
+    # the job is marked killed, so no live drain will ever execute a
+    # ledgered request (the session delete is best-effort advisory --
+    # executability needs the supervisor) -- clear the ledger so
+    # `status` stops advertising phantom "requested" approvals.
+    _msp_request_ledger_clear(slug)
     print(json.dumps({"slug": slug, "transport": "msp", "session": "deleted",
                       "state": "killed"}))
     return 0
@@ -5911,6 +5941,23 @@ def _msp_request_ledger_remove(slug, kind, rid):
         return None if len(kept) == len(entries) else kept
 
     _msp_ledger_update(slug, drop)
+
+
+def _msp_request_ledger_clear(slug):
+    """Drop every request-ledger entry. Never raises.
+
+    Called from _msp_kill: the supervisor is torn down there
+    (SIGTERM->SIGKILL ladder in _msp_kill_supervisor) and the job is
+    marked killed, so no live drain will ever execute a ledgered
+    request -- the session delete is best-effort advisory, but
+    executability requires a live supervisor, which no longer exists.
+    Keeping the entries advertised in `status` would be the
+    phantom-ledger hazard (issue #1437, the F-MSP-7 follow-through).
+    Not a TTL-triggered tombstone: the trigger is the deliberate kill,
+    never heartbeat-aliveness (the #1434 design notes reject
+    heartbeat-TTL as the clearing trigger -- false-dead risk).
+    """
+    _msp_ledger_update(slug, lambda entries: [])
 
 
 _MSP_DECISION_RENDEZVOUS_S = 120
