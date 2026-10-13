@@ -2881,7 +2881,10 @@ _publish_managed_targets() {
     # 2-byte sequence C2 85 here — the only record reader is the UTF-8
     # splitlines() parser, and a lone 0x85 byte makes the file invalid
     # UTF-8, which the reader fail-closes to {} (record treated as
-    # missing), so it needs no guard of its own.
+    # missing), so it needs no guard of its own. Issue #1432: that
+    # single-reader assumption is pinned by
+    # scripts/test_self_update.py::test_managed_targets_single_reader_registry —
+    # a second reader must re-derive this guard before it lands.
     case "$CUA_DRIVER_BIN$PLAYWRIGHT_VENV" in
         *[$'\n\r\v\f\x1c\x1d\x1e']*|*$'\xc2\x85'*|*$'\xe2\x80\xa8'*|*$'\xe2\x80\xa9'*)
             echo "ERROR: refusing to publish managed target containing a newline or other line-boundary character" >&2

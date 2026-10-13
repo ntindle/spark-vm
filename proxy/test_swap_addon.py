@@ -225,7 +225,7 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._maybe_reload = lambda: None      # never touch /home/swapd here
     # audit writes are durably recorded; the addon fails closed when
     # they are not (tested separately)
-    a._audit = lambda host, matched: True
+    a._audit = lambda host, matched, flow_id=None: True
     a._current_egress_ip = None
     a._approval_signal = None  # reset per request by request()
     a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
@@ -235,11 +235,11 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
     a.audit_notes = []
-    a._audit_note = lambda host, refused, reason: a.audit_notes.append(
-        (host, refused, reason))
+    a._audit_note = lambda host, refused, reason, flow_id=None: \
+        a.audit_notes.append((host, refused, reason))
     a.ssrf_refused = []
-    a._audit_ssrf_refused = lambda host, ip, reason: a.ssrf_refused.append(
-        (host, ip, reason))
+    a._audit_ssrf_refused = lambda host, ip, reason, flow_id=None: \
+        a.ssrf_refused.append((host, ip, reason))
     return a
 
 
@@ -1552,7 +1552,7 @@ class JsonSwapValidityTests(unittest.TestCase):
         the validated real pass."""
         a = make_addon()
         audits = []
-        a._audit = lambda host, matched: audits.append(
+        a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
         real_resolve = a._resolve
 
@@ -1581,7 +1581,7 @@ class JsonSwapValidityTests(unittest.TestCase):
         `approved:` signal."""
         a = make_addon()
         audits = []
-        a._audit = lambda host, matched: audits.append(
+        a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
         real_resolve = a._resolve
 
@@ -1611,7 +1611,7 @@ class JsonSwapValidityTests(unittest.TestCase):
         the divergence abort leaves zero residue."""
         a = make_addon()
         audits = []
-        a._audit = lambda host, matched: audits.append(
+        a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
         real_resolve = a._resolve
         calls = []
@@ -1646,7 +1646,7 @@ class JsonSwapValidityTests(unittest.TestCase):
         than released with a partial trail — fail closed, with the
         failure itself audited."""
         a = make_addon()
-        a._audit = lambda host, matched: False  # audit log unwritable
+        a._audit = lambda host, matched, flow_id=None: False  # audit log unwritable
         flow = Flow(Request("api.github.com", "/cfg",
                             [("Content-Type", "application/json")],
                             b'{"k": "hsurr:github"}'))
@@ -2145,7 +2145,7 @@ class AuthorityAndPlacementTests(unittest.TestCase):
         """The audit write is part of authorization: when it fails, the
         placeholder is left intact — no secret without a trail."""
         a = make_addon()
-        a._audit = lambda host, matched: False
+        a._audit = lambda host, matched, flow_id=None: False
         req = Request("api.github.com", "/",
                       [("Authorization", "Bearer hsurr:github")])
         a.request(Flow(req))
@@ -2592,17 +2592,96 @@ class AuditFieldSanitizationTests(unittest.TestCase):
 
     def test_audit_well_formed_hosts_unchanged(self):
         """Sanitization is a no-op for well-formed values: the log format
-        for normal traffic is byte-identical to the pre-#17 layout."""
+        for normal traffic is byte-identical to the pre-#17 layout,
+        plus the #16 `flow=` correlator (absent flow renders as "-")."""
         with tempfile.TemporaryDirectory() as d:
             lines = self._audit_in_tmp(
                 d, lambda a: a._audit("api.example.com", "github"))
             line = lines[0]
         self.assertRegex(line,
                          r"^ts=\S+ host=api\.example\.com "
-                         r"swapped=github ip=-$")
+                         r"swapped=github ip=- flow=-$")
         # every interpolated field survives verbatim
         self.assertIn("host=api.example.com", line)
         self.assertIn("swapped=github", line)
+
+
+class Issue16FlowCorrelatorTests(unittest.TestCase):
+    """Issue #16: phantom `swapped=` audit lines.
+
+    For a direct (non-CONNECT) request mitmproxy fires the `request`
+    hook (where swaps are audited) BEFORE `server_connect` (where
+    egress may be refused), so the log can hold `swapped=` lines for a
+    secret that never left the box. Both line types now carry the
+    mitmproxy flow id, so an incident reviewer can join a swap to its
+    egress verdict: a `refused=egress` line with the same flow id
+    proves the earlier `swapped=` lines were phantom.
+    """
+
+    def _real_audit_addon(self):
+        a = make_addon()
+        # make_addon stubs the audit writers; these tests exercise the
+        # real ones (the flow= field lives in the writers).
+        del a._audit
+        del a._audit_ssrf_refused
+        del a._audit_note
+        return a
+
+    def _swap_then_refuse(self, tmp, flow_id):
+        """Swap a header placeholder on a flow, then refuse its egress
+        at server_connect (private-range IP). Returns the log lines."""
+        a = self._real_audit_addon()
+        now = time.time()
+        a._dns_cache["github.com"] = (now + 3600, ["192.168.1.1"])
+        req = Request("github.com", "/gists", method="GET",
+                      headers=[("Authorization",
+                                "Bearer " + "hs" + "urr:github")])
+        flow = Flow(req)
+        if flow_id is not None:
+            flow.id = flow_id
+        elif hasattr(flow, "id"):
+            del flow.id
+        with mock.patch.object(sa, "LOG_FILE", Path(tmp) / "swap.log"):
+            a.request(flow)
+            data = FakeServerConnectData("github.com")
+            # Real mitmproxy exposes the flow on ServerConnectionHookData;
+            # the fake gains it here so the correlator resolves.
+            data.flow = flow
+            asyncio.run(a.server_connect(data))
+        lines = (Path(tmp) / "swap.log").read_text().splitlines()
+        return data, lines
+
+    def test_swap_and_refusal_share_flow_id(self):
+        """The #16 join: the `swapped=` line and the later
+        `refused=egress` line carry the same flow id, and the
+        connection was actually killed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data, lines = self._swap_then_refuse(tmp, "abc123flow")
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (private-range)")
+        swapped = [l for l in lines if "swapped=" in l]
+        refused = [l for l in lines if "refused=egress" in l]
+        self.assertEqual(len(swapped), 1, lines)
+        self.assertEqual(len(refused), 1, lines)
+        self.assertIn("swapped=" + "hs" + "urr:github", swapped[0])
+        self.assertIn("flow=abc123flow", swapped[0])
+        self.assertIn("reason=private-range", refused[0])
+        self.assertIn("flow=abc123flow", refused[0])
+        # the join a reviewer performs: same flow id on both lines
+        self.assertEqual(
+            re.search(r"flow=(\S+)", swapped[0]).group(1),
+            re.search(r"flow=(\S+)", refused[0]).group(1))
+
+    def test_flow_id_absent_renders_dash(self):
+        """Flows without an id (and hook data without a flow) render
+        `flow=-` rather than crashing the audit write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data, lines = self._swap_then_refuse(tmp, None)
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (private-range)")
+        self.assertTrue(all(l.endswith("flow=-") for l in lines), lines)
+        self.assertTrue(any("swapped=" in l for l in lines), lines)
+        self.assertTrue(any("refused=egress" in l for l in lines), lines)
 
 
 class StreamRefusalTests(unittest.TestCase):
@@ -4159,8 +4238,8 @@ class ApprovalSignalTests(unittest.TestCase):
                 # refusal: prove _audit was reached (and failed).
                 calls = []
                 real_audit = a._audit
-                def failing_audit(host, matched):
-                    calls.append((host, matched))
+                def failing_audit(host, matched, flow_id=None):
+                    calls.append((host, matched, flow_id))
                     return False
                 a._audit = failing_audit
                 try:
@@ -4197,8 +4276,8 @@ class ApprovalSignalTests(unittest.TestCase):
                     "approval_id": "grantaid1"}]
                 calls = []
                 real_audit = a._audit
-                def failing_audit(host, matched):
-                    calls.append((host, matched))
+                def failing_audit(host, matched, flow_id=None):
+                    calls.append((host, matched, flow_id))
                     return False
                 a._audit = failing_audit
                 try:

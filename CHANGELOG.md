@@ -153,6 +153,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - `muse-job status` no longer advertises phantom pending approvals: a deliberate `kill` now clears the pending-approval ledger (the deleted session can never execute them), and when the supervisor isn't running, leftover requests render as `[stale]` with an explanation instead of looking actionable. (#1437)
 
+- The credential-swap audit log now stamps every swap line and every
+  refused-egress line with the connection's flow id, so incident review
+  can tell whether a swapped secret actually left the box: a
+  refused-egress verdict carrying the same flow id proves the earlier
+  swap lines were phantom (the swap was audited before the egress
+  decision was known). (#16, #TBD)
+
 - The self-update status inventory now names the winning source when the
   updater's published artifact record overrides an explicit
   `CUA_DRIVER_BIN`/`PLAYWRIGHT_VENV` shell override (previously silent),

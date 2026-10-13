@@ -429,6 +429,43 @@ def test_read_managed_targets_record_empty_and_directory(tmp_path):
     assert self_update._read_managed_targets_record(str(d)) == {}
 
 
+def test_managed_targets_single_reader_registry():
+    """Issue #1432: the `_publish_managed_targets` guard's exactness is
+    DERIVED from the one and only runtime reader of the record —
+    this module's `_read_managed_targets_record` (UTF-8 +
+    `str.splitlines()`). The multi-byte-boundary matching (exact C2 85 /
+    E2 80 A8 / E2 80 A9 sequences) and the lone-0x85 fail-closed
+    argument hold only for that parser: a second reader with different
+    splitting (e.g. a shell `while read` loop, which splits on `\\n`
+    only) would silently invalidate the guard. This test is the
+    registry: it fails when any new runtime file starts reading the
+    record, forcing the guard to be re-derived for that reader before
+    the new reader lands."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    readers = set()
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(root))
+        if rel.startswith(".git/"):
+            continue
+        if path.suffix not in {".py", ".sh"}:
+            continue
+        stem = path.name
+        if (stem.startswith("test_") or stem.endswith("_test.py")
+                or "/tests/" in rel):
+            continue  # tests read fixtures, not the live record
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        if ("_read_managed_targets_record" in text
+                or "_MANAGED_TARGETS_FILE" in text):
+            readers.add(rel)
+    assert readers == {"scripts/self_update.py"}, readers
+
+
 # --- managed-targets override note (issue #1412) -----------------------------
 
 def _reload_with_disagreeing_env(monkeypatch, tmp_path, key, record_value,
