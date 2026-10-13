@@ -471,16 +471,16 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
     accepted (disposition `queued`), `push_digest_state.enqueued_at`
     is stamped with the sweep's clock reading. A budget-suppressed
     digest leaves `enqueued_at` NULL so a later sweep retries; a
-    fired window is never refired because the sweep only scans
-    `count > 0 AND enqueued_at IS NULL` and D87 zeroes the count at
-    completion. Note the enqueue boundary does NOT guard this:
-    digest attempt rows carry the subscription's real box id
-    (D56c/D89) while the digest's queued row carries box_id=''
+    fired window is never refired — the sweep only scans
+    `count > 0 AND enqueued_at IS NULL`, D87 zeroes the count at
+    completion, and a direct `maybe_enqueue_digest` call for a
+    stamped window returns `duplicate` (#1424 — the boundary cannot
+    guard this: digest attempt rows carry the subscription's real box
+    id (D56c/D89) while the digest's queued row carries box_id=''
     (enqueue D51), so neither the D53 outcome-blind fast-path
     (box_id-scoped) nor the D57 partial index (outcome-scoped)
-    sees a completed digest's rows -- a direct `enqueue_page`
-    re-enqueue of a fired window reports `queued` (latent; the
-    sweep is the only caller and never refires -- see #1424).
+    sees a completed digest's rows; the refusal lives here, not at
+    the boundary).
 
     #1096 — the crash gap: `enqueue_page` commits the `queued` row in
     its own transaction and the stamp below is a second commit, so a
@@ -501,6 +501,21 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
     if push_enqueue.get_digest_count(conn, owner_principal,
                                      window) <= 0:
         return MapResult("no_digest_due", None)
+    # #1424 — the fired-window refusal: a digest whose page was already
+    # accepted (enqueued_at stamped) is never refired. The sweep's
+    # pending scan (count > 0 AND enqueued_at IS NULL) is the only
+    # production guard today, and it does not cover direct callers:
+    # with late coalescing present (count > 0 on a stamped window —
+    # the D67 accepted drift) enqueue_page's dedup cannot see a
+    # completed digest — its attempt rows carry the subscription's
+    # real box id (D56c/D89) while the D53 fast-path and the D57
+    # partial index are box_id='' / page-outcome scoped — and would
+    # queue a second page for the same window. The #1096 crash-heal
+    # is untouched by construction: it only runs when enqueued_at is
+    # NULL (crash between the page commit and the stamp), where this
+    # refusal never fires.
+    if _digest_enqueued_at(conn, owner_principal, window) is not None:
+        return MapResult("duplicate", None)
     r = push_enqueue.enqueue_page(
         conn, event_kind="digest", owner_principal=owner_principal,
         box_id=None, key_material=window, now=moment)
@@ -513,6 +528,19 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
             (moment.isoformat(), owner_principal, window))
         conn.commit()
     return MapResult(r.disposition, r)
+
+
+def _digest_enqueued_at(conn, owner_principal, window):
+    """Return push_digest_state.enqueued_at for the window (#1424).
+
+    None when the row is missing or the digest never fired; the
+    stamped ISO clock reading once the digest page was accepted.
+    """
+    row = conn.execute(
+        "SELECT enqueued_at FROM push_digest_state"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner_principal, window)).fetchone()
+    return row[0] if row else None
 
 
 def _digest_page_row_exists(conn, owner_principal, window):

@@ -612,6 +612,86 @@ def test_digest_window_start_fail_closed(conn):
             window_start="2026-10-05T10\x00x")
 
 
+def _complete_digest_page(conn, owner, window, box_id, now):
+    """Simulate the send loop completing a fired digest page.
+
+    Mirrors push_send_loop._complete_page's D87 posture — the queued
+    page row is DELETEd, the per-device attempt row is INSERTed
+    carrying the subscription's REAL box id (D56c/D89), and the digest
+    count is zeroed, all in one transaction — without driving the
+    send loop. The digest state row keeps its enqueued_at
+    fired-marker; the sweep's pending scan never refires it.
+    """
+    key = push_enqueue.event_key_for("digest", owner, None, window)
+    row = conn.execute(
+        "SELECT id FROM push_send_results"
+        " WHERE box_id = '' AND event_kind = 'digest'"
+        " AND event_key = ? AND outcome = 'queued' LIMIT 1",
+        (key,)).fetchone()
+    assert row is not None
+    conn.execute("DELETE FROM push_send_results WHERE id = ?", (row[0],))
+    conn.execute(
+        "INSERT INTO push_send_results"
+        " (at, owner_principal, box_id, device, event_kind, event_key,"
+        "  outcome, http_status, latency_ms, sent_at, vapid_key_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, 'sent', 201, 38.0, ?, NULL)",
+        (now.isoformat(), owner, box_id, "device-1", "digest", key,
+         now.timestamp()))
+    conn.execute(
+        "UPDATE push_digest_state SET count = 0"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner, window))
+    conn.commit()
+
+
+def test_digest_fired_window_with_late_coalescing_refuses_refire(conn):
+    # #1424: the digest fired (enqueued_at stamped) and the send loop
+    # completed it — D87 zeroed the count, the queued page row is
+    # gone, and the attempt row carries the subscription's real box
+    # id (D56c/D89). Late coalescing then lands on the fired window
+    # (count > 0 — the D67 accepted drift). A direct refire must NOT
+    # queue a second page: the enqueue boundary cannot see the
+    # completed digest — the D53 outcome-blind fast-path is
+    # box_id=''-scoped and the D57 partial index is page-outcome
+    # scoped — so the refusal lives in maybe_enqueue_digest itself.
+    # The #1096 heal is preserved by construction: it only runs when
+    # enqueued_at is NULL.
+    now = _utcnow()
+    ws = push_enqueue.hour_bucket(now)
+    for i in range(4):
+        push_enqueue.enqueue_page(
+            conn, event_kind="approval_filed", owner_principal="owner-1",
+            box_id="box-9", key_material="aid-%d" % i, now=now)
+    d1 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d1.disposition == "queued"
+    stamp = _digest_state(conn, "owner-1", ws)[1]
+    assert stamp is not None
+    _complete_digest_page(conn, "owner-1", ws, "box-9", now)
+    assert _digest_state(conn, "owner-1", ws)[1] == stamp
+    # Late coalescing on the fired window (D67 accepted drift):
+    # box-9's per-box budget is already spent (3 queued + 1
+    # suppressed), so this fifth filing goes the suppressed_budget
+    # path and coalesces into the digest.
+    push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal="owner-1",
+        box_id="box-9", key_material="aid-late", now=now)
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 1
+    digest_key = push_enqueue.event_key_for("digest", "owner-1", None, ws)
+    digest_pages = (
+        "SELECT COUNT(*) FROM push_send_results"
+        " WHERE box_id = '' AND event_kind = 'digest'"
+        " AND event_key = ?",
+        (digest_key,))
+    before = conn.execute(*digest_pages).fetchone()[0]
+    d2 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d2.disposition == "duplicate"
+    # No second page was queued and the stamp is untouched.
+    assert conn.execute(*digest_pages).fetchone()[0] == before == 0
+    assert _digest_state(conn, "owner-1", ws)[1] == stamp
+
+
 # --- fail-closed surface -----------------------------------------------------------
 
 def test_no_page_kinds_are_unrepresentable():
