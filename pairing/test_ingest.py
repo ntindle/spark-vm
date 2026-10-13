@@ -1019,7 +1019,8 @@ def test_ingest_decision_holds_xlock(ctx):
             # holds for a path — passing the fixture object here would
             # TypeError on any degrade path instead of logging loudly.
             result["v"] = spark_pair._ingest_approval_decision(
-                ctx.dir, approvals, BOX_ID, TOKEN, 99, payload, ingested, {})
+                ctx.dir, approvals, BOX_ID, TOKEN, 99, payload, ingested, {},
+                spark_pair._CRED_MODE_LOCAL)
             done.set()
 
         t = threading.Thread(target=run, daemon=True)
@@ -1034,3 +1035,141 @@ def test_ingest_decision_holds_xlock(ctx):
         if p.is_alive():
             p.terminate()
             p.join(timeout=5)
+
+
+# --- dual-mode seam (issue #948) ---------------------------------------------
+
+def test_cred_mode_defaults_to_local(monkeypatch):
+    # No vend configuration: the self-hosted default must not break
+    # (contract §6 — a self-hosted box behaves byte-identically to
+    # today).
+    monkeypatch.delenv("SVM_CRED_MODE", raising=False)
+    assert spark_pair._cred_mode() == "local"
+
+
+def test_cred_mode_vend(monkeypatch):
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    assert spark_pair._cred_mode() == "vend"
+
+
+def test_cred_mode_case_and_whitespace_tolerant(monkeypatch):
+    monkeypatch.setenv("SVM_CRED_MODE", "  VEND\t")
+    assert spark_pair._cred_mode() == "vend"
+
+
+def test_cred_mode_invalid_raises(monkeypatch):
+    # A misconfigured mode must fail loud at startup, never silently
+    # local: silently local on a vend-provisioned box would mint local
+    # grants the issue's seam exists to prevent.
+    monkeypatch.setenv("SVM_CRED_MODE", "vending")
+    with pytest.raises(ValueError, match="not a credential mode"):
+        spark_pair._cred_mode()
+
+
+def test_ingest_invalid_cred_mode_fails_loud_at_startup(ctx, monkeypatch,
+                                                        capsys):
+    # Fail-closed before any network or stamping: the plane is never
+    # touched and nothing is acked, so the queue wedges loudly instead
+    # of running in the wrong mode.
+    _file_pending(ctx)
+    monkeypatch.setenv("SVM_CRED_MODE", "bogus")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 1
+    assert plane.calls == []
+    assert plane.acked == []
+    assert _consumed(ctx) is None
+    out = capsys.readouterr()
+    assert "not a credential mode" in out.err
+
+
+def test_ingest_vend_mode_approve_skips_local_mint(ctx, monkeypatch):
+    # The seam's core property: on a vend-mode box the approve path
+    # never touches proxy/grant-writer. The vended lease is the
+    # authorization artifact, so the stamp carries the vend marker and
+    # no grant lifetime.
+    _file_pending(ctx)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+
+    def forbidden_mint(argv):
+        raise AssertionError("grant-writer must not run in vend mode")
+
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=forbidden_mint) == 0
+    rec = _consumed(ctx)
+    assert rec["decision"] == "approve"
+    assert rec["decision_origin"] == "plane"
+    assert rec["vend_mode"] is True
+    assert "grant_ttl_hours" not in rec
+    assert plane.acked == [11]
+
+
+def test_ingest_vend_mode_planted_grant_ttl_stripped(ctx, monkeypatch):
+    # #73 twin: a requester-planted grant_ttl_hours must not survive
+    # into a vend-mode record — vend mints nothing, so the record must
+    # not claim a lifetime.
+    _file_pending(ctx, grant_ttl_hours=99)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 0
+    rec = _consumed(ctx)
+    assert rec["vend_mode"] is True
+    assert "grant_ttl_hours" not in rec
+
+
+def test_ingest_vend_mode_approve_loses_terminal_race(ctx, monkeypatch):
+    # First-terminal-wins is mode-independent: a deny/expired that
+    # landed meanwhile still wins over a vend-mode approve.
+    _file_pending(ctx)
+    with open(os.path.join(ctx.approvals, "consumed", AID + ".json"),
+              "w") as f:
+        json.dump({"id": AID, "decision": "deny"}, f)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 0
+    rec = _consumed(ctx)
+    assert rec["decision"] == "deny"  # the winner stands, not overwritten
+    assert "vend_mode" not in rec
+    assert plane.acked == [11]
+
+
+def test_ingest_vend_mode_expire_stamps_expired(ctx, monkeypatch):
+    # Deny/expire paths never mint, so they are identical in both modes.
+    _file_pending(ctx)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="expire"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 0
+    rec = _consumed(ctx)
+    assert rec["decision"] == "expired"
+    assert "vend_mode" not in rec
+    assert plane.acked == [11]
+
+
+def test_ingest_vend_mode_approve_audit_line_has_no_ttl(ctx, monkeypatch):
+    # The audit trail must not claim a grant lifetime that was never
+    # minted; the sentinel feed ships these lines.
+    _file_pending(ctx)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 0
+    lines = _audit_lines(ctx)
+    assert len(lines) == 1
+    assert "decision=approve" in lines[0]
+    assert "ttl=" not in lines[0]
+    assert "decision_origin=plane" in lines[0]
+
+
+def test_ingest_vend_mode_latched_and_said(ctx, monkeypatch, capsys):
+    # Contract §6 precedent: the latched mode is logged at startup so a
+    # box running in the wrong mode is operator-visible.
+    _file_pending(ctx)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 0
+    out = capsys.readouterr()
+    assert "credential mode latched: vend" in out.out

@@ -258,10 +258,34 @@ attention) rather than wedging the queue; a scoped item whose window
 already lapsed is stamped expired honestly, which drains it.
 
 Mode note: the approve path mints through `proxy/grant-writer` against
-the box's **local secrets dir** — the self-hosted mode, and the only
-mode this implementation supports. Vend-mode boxes (#891) must not run
-the local-mint approve path; the dual-mode seam is #891's scope (see
-`docs/DURABLE_COMMANDS.md`). Every stamped decision — `deny`,
+the box's **local secrets dir** — the self-hosted mode.
+
+### Credential mode (dual-mode seam, #948)
+
+The box's credential source is a config-time decision, read once at
+ingest start and latched for the run (`docs/CREDENTIAL_VEND_CONTRACT.md`
+§6 — a mid-run flip is never a silent switch):
+
+- `SVM_CRED_MODE=local` (default) — the self-hosted shape: secrets live
+  in the box's secrets dir, and `approve` mints the grant through
+  confirmd's single writer (`proxy/grant-writer`). A box with no vend
+  configuration behaves byte-identically to today.
+- `SVM_CRED_MODE=vend` — the hosted shape (#850/#891): credentials are
+  plane-vended short-lived leases held RAM-only. The ingest **never
+  mints a local grant** on plane approve — the vended lease is the
+  authorization artifact, so the stamp carries `vend_mode: true` and no
+  `grant_ttl_hours`, and the audit line has no `ttl=` suffix. The
+  deny/expire paths never mint, so they are mode-independent.
+
+Any other value fails loud at startup (the run exits 1 before any
+network or stamping — a misconfigured mode never runs silently local).
+The same `SVM_CRED_MODE` signal is the one #891's plane-fetch path must
+read, so the two halves of the seam can never disagree. The socket
+ingest (`phone-home`) latches the same mode per session. The latched
+mode is logged at startup so a box running in the wrong mode is
+operator-visible.
+
+Every stamped decision — `deny`,
 `expire`, `approve` — also appends one `answer` line to confirmd's
 audit log (same shape as the local answer path, plus
 `decision_origin=plane`), so plane decisions never bypass the audit

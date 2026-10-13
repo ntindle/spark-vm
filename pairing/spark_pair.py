@@ -1305,6 +1305,42 @@ def _grant_writer():
     return os.environ.get("GRANT_WRITER", _GRANT_WRITER_DEFAULT)
 
 
+# Issue #948 (dual-mode seam): which credential source this box uses.
+# `local` (default) — the self-hosted shape: secrets live in the box's
+# secrets dir and the ingest mints local grants via proxy/grant-writer
+# on plane approve. `vend` — the hosted shape (#850/#891): credentials
+# are plane-vended short-lived leases held RAM-only, so the ingest must
+# never mint a local grant on plane approve (the vended lease is the
+# authorization artifact). Read once at process start and latched for
+# the process lifetime (contract §6: a mid-run mode flip is never a
+# silent switch — and an unlatchable bit is an audit-evasion switch).
+# This is the SAME signal #891's plane-fetch path must read, so the two
+# halves of the seam can never disagree.
+_CRED_MODE_LOCAL = "local"
+_CRED_MODE_VEND = "vend"
+_CRED_MODE_ENV = "SVM_CRED_MODE"
+
+
+def _cred_mode():
+    """Read the box's credential-source mode (issue #948).
+
+    Returns "local" or "vend". The default is "local": a self-hosted box
+    with no vend configuration behaves byte-identically to today
+    (contract §6). Raises ValueError on any other value — a
+    misconfigured mode fails loud at startup, never silently local.
+    """
+    raw = os.environ.get(_CRED_MODE_ENV, "")
+    mode = raw.strip().lower()
+    if not mode:
+        return _CRED_MODE_LOCAL
+    if mode in (_CRED_MODE_LOCAL, _CRED_MODE_VEND):
+        return mode
+    raise ValueError(
+        f"{_CRED_MODE_ENV}={raw!r} is not a credential mode "
+        f"(want {_CRED_MODE_LOCAL!r} or {_CRED_MODE_VEND!r}) — refusing "
+        "to run: fix the box configuration")
+
+
 def _utcnow_iso():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -1673,13 +1709,14 @@ def _ingest_write_answered(approvals, aid, rec):
 
 
 def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
-                              ingested, attention):
+                              ingested, attention, cred_mode):
     """Stamp one plane decision into confirmd's store.
 
     Returns True when the command is consumed (ack it) and False when the
     ingest must retry later (do NOT ack — the command redelivers).
     `attention` collects operator-attention notes for permanently
     unprocessable commands (acked-and-logged, queue advances, exit 1).
+    `cred_mode` is the latched credential-source mode (issue #948).
     """
     shaped = _ingest_decision_payload(box_id, payload)
     if shaped is None:
@@ -1696,13 +1733,19 @@ def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
     with _ingest_aid_xlock(d, approvals, aid):
         return _ingest_approval_decision_guarded(
             d, approvals, box_id, token, seq, aid, decision, dseq, key,
-            ingested, attention)
+            ingested, attention, cred_mode)
 
 
 def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
                                       aid, decision, dseq, key, ingested,
-                                      attention):
-    """The #945-guarded stamp body; the caller holds the per-aid xlock."""
+                                      attention, cred_mode):
+    """The #945-guarded stamp body; the caller holds the per-aid xlock.
+
+    `cred_mode` is the latched credential-source mode (issue #948):
+    "local" mints the grant via proxy/grant-writer on approve;
+    "vend" skips the local mint (the vended lease is the authorization
+    artifact) and stamps the approval with the vend marker instead.
+    """
     def _mark():
         ingested[key] = {"seq": seq, "decision": decision,
                          "ingested_at": _utcnow_iso()}
@@ -1844,6 +1887,41 @@ def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
         _ingest_say(f"seq={seq} aid={aid}: approve arrived inside the "
                     "grant-mint window — stamped expired")
         return True
+    if cred_mode == _CRED_MODE_VEND:
+        # Issue #948 (dual-mode seam): vend-mode boxes must not run the
+        # local-mint approve path below. The vended lease (plane #890
+        # endpoint, #891 fetcher) is the authorization artifact — minting
+        # a local grant would authorize nothing usable (swap fails closed
+        # on the unknown credential) and hold two divergent artifacts for
+        # one owner decision. Stamp approved with the vend marker, never
+        # touching proxy/grant-writer. The terminal re-check stays: a
+        # deny/expired that landed meanwhile wins, mint or no mint.
+        if os.path.exists(os.path.join(approvals, "consumed",
+                                       aid + ".json")):
+            _ingest_say(f"seq={seq} aid={aid}: terminal record appeared "
+                        "before the vend-mode stamp — not stamping "
+                        "(confirmd won the race)")
+            _mark()
+            return True
+        rec = _ingest_answer_record(item, aid, "approve", requester, seq,
+                                    key)
+        # Belt-and-braces (#73 twin): a requester-planted grant_ttl_hours
+        # must not survive into a vend-mode record — vend mints nothing,
+        # so the record must not claim a lifetime.
+        rec.pop("grant_ttl_hours", None)
+        rec["vend_mode"] = True
+        _ingest_write_answered(approvals, aid, rec)
+        _remove_pending()
+        # No mint to resume: a failed move retries the *stamp*, never a
+        # grant — same resume discipline as the local path.
+        if not _ingest_finish_move(d, approvals, aid, rec):
+            return False
+        _ingest_audit(d, aid, "approve", requester, seq)
+        _mark()
+        _ingest_say(f"seq={seq} aid={aid}: stamped approved (vend mode — "
+                    "no local grant minted; the vended lease is the "
+                    f"authorization artifact) (plane_seq={seq})")
+        return True
     ttl_hours = _INGEST_GRANT_TTL_DEFAULT  # wire v1 carries no TTL choice
     # Shrink the approve/terminal race window: re-check the terminal
     # record immediately before the mint (the earlier check at the top of
@@ -1954,11 +2032,12 @@ def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
     return True
 
 
-def _ingest_commands(d, approvals, box_id, token, control):
+def _ingest_commands(d, approvals, box_id, token, control, cred_mode):
     """One fetch-execute-ack pass over the durable command queue.
 
     Returns 0 when the pass completed (every due command acked or the
     queue drained), 1 when it did not (loud log already written).
+    `cred_mode` is the latched credential-source mode (issue #948).
     """
     cursor, epoch, cursor_note = _load_ingest_cursor(d)
     healed = cursor is None
@@ -2067,7 +2146,8 @@ def _ingest_commands(d, approvals, box_id, token, control):
             try:
                 consumed = _ingest_approval_decision(d, approvals, box_id,
                                                      token, seq, payload,
-                                                     ingested, attention)
+                                                     ingested, attention,
+                                                     cred_mode)
             except (OSError, ValueError) as e:
                 # A local I/O failure (disk full, torn state) must fail
                 # closed with a loud log — never a traceback, and never
@@ -2134,6 +2214,16 @@ def cmd_ingest(args):
         _ingest_fail(d, "enrollment.json is missing box_id/token — run "
                         "`request` + `redeem` first")
         return 1
+    # Issue #948 (dual-mode seam): read once, latch for the process
+    # lifetime. A misconfigured mode fails loud before any network or
+    # stamping — never silently local.
+    try:
+        cred_mode = _cred_mode()
+    except ValueError as e:
+        _ingest_fail(d, f"{e}")
+        return 1
+    _ingest_say(f"credential mode latched: {cred_mode} "
+                f"(from {_CRED_MODE_ENV})")
     control, msg = _resolve_control(args, enroll)
     if control is None:
         _ingest_fail(d, msg)
@@ -2169,7 +2259,8 @@ def cmd_ingest(args):
         return 1
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        return _ingest_commands(d, approvals, box_id, token, control)
+        return _ingest_commands(d, approvals, box_id, token, control,
+                                cred_mode)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -3130,6 +3221,12 @@ class _PhoneHomeSession:
         # direct unit construction (which never handles commands) working.
         self.approvals = approvals if approvals is not None \
             else _approvals_dir()
+        # Issue #948 (dual-mode seam): latched once per session — the
+        # socket carrier runs the same _ingest_approval_decision as the
+        # cron ingest, so a vend-mode box must not mint local grants
+        # here either. cmd_phone_home validates the mode at daemon start,
+        # so this read cannot raise in production.
+        self.cred_mode = _cred_mode()
         self.welcomed = False
         # Highest contiguously socket-acked seq on THIS session. The DO's
         # acked_watermark is the durable record; this is the per-session
@@ -3600,7 +3697,7 @@ class _PhoneHomeSession:
                 try:
                     consumed = _ingest_approval_decision(
                         self.d, self.approvals, self.box_id, self.token, seq,
-                        payload, self._ingested, attention)
+                        payload, self._ingested, attention, self.cred_mode)
                     if consumed and not self._save_socket_ingest_state(
                             seq, epoch):
                         # State saves failed loudly: withhold the ack so
@@ -3866,6 +3963,14 @@ def cmd_phone_home(args):
     control, msg = _resolve_control(args, enroll)
     if control is None:
         _phone_home_fail(d, msg, token)
+        return 1
+    # Issue #948 (dual-mode seam): validate the credential-source mode
+    # before the daemon loop starts — a misconfigured box must fail loud
+    # now, not die on a ValueError inside the first session.
+    try:
+        _cred_mode()
+    except ValueError as e:
+        _phone_home_fail(d, f"{e}", token)
         return 1
     # The generation counter must have exactly one writer: a second
     # daemon would fork the counter and fence its own live session.

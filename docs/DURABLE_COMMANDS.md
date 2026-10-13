@@ -276,15 +276,17 @@ no security effects, never the default for this one.
 
 **Mode split (self-hosted vs vend):** the reference executor's approve
 path shells to `proxy/grant-writer`, which records a grant against the
-box's **local secrets dir** — this is the self-hosted mode, and it is
-the only mode the reference implementation supports. On a vend-mode
-box (#891: RAM-only, plane-vended short-lived credentials, "no real
-secret material on the box filesystem" per #850) the ingest would mint
-a grant authorizing nothing usable (swap fails closed on the unknown
-credential) — worse, the box would hold two divergent authorization
-artifacts for one owner decision (local grant at the default TTL +
-vended lease at minutes-to-hours TTL). **Vend-mode boxes must not run
-the local-mint approve path**; the dual-mode seam (config-time source
-selection) is tracked in #948 (within #891's scope). Until it lands,
-approve→local-mint is documented as self-hosted-only, not as
-mode-independent reference behavior.
+box's **local secrets dir** — this is the self-hosted mode
+(`SVM_CRED_MODE=local`, the default). On a vend-mode box
+(`SVM_CRED_MODE=vend`; #891: RAM-only, plane-vended short-lived
+credentials, "no real secret material on the box filesystem" per #850)
+the ingest skips the local mint entirely and stamps the approval with
+`vend_mode: true` and no `grant_ttl_hours` — the vended lease is the
+authorization artifact, so minting a local grant would authorize nothing
+usable (swap fails closed on the unknown credential) and hold two
+divergent artifacts for one owner decision. The mode is read once at
+ingest start and latched for the run (contract §6); any other value
+fails loud before any network or stamping; the deny/expire paths never
+mint and are mode-independent. The dual-mode seam (config-time source
+selection) is #948; #891's plane-fetch path reads the same
+`SVM_CRED_MODE` signal.

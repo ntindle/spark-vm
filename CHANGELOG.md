@@ -63,6 +63,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Box credential-source mode for the hosted credential-vending lane:
+  setting `SVM_CRED_MODE=vend` tells the approval ingest the box runs on
+  plane-vended short-lived credentials, so an owner approve stamps the
+  decision without minting a local grant (the vended lease is the
+  authorization artifact). The default `local` keeps self-hosted boxes
+  byte-identical; any other value fails the run loudly at startup.
+  (#948, #TBD)
+
 - Operator reference for the `muse-job` approvals subcommands
   (`approvals`, `decide`, `answer`): the default-redaction posture and
   the `--show-secrets` warning, decide routing through the
