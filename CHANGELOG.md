@@ -397,7 +397,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   only: Daytona's V0.224.0 (per-call region for sandbox/snapshot
   creates). Both tracked funding rounds (Modal $750M, Baseten ~$26B)
   remain unclosed; still no Vercel sandbox zero-day CVE/write-up;
-  AgentComputer still publishes no egress pricing. (#TBD)
+  AgentComputer still publishes no egress pricing. (#1429)
 
 - Rollout-controller deploy driver (#1287): per-plane template deploys
   land through the pinned release manifest (deployment ID + SHA-256,
