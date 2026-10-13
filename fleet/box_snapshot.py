@@ -56,35 +56,51 @@ def _read_gate_status(path):
 
     Returns (frozen_or_none, answer_age_s_or_none, note_or_none).
     frozen derives from answer.state ("frozen" -> True, "live" -> False);
-    answer_age_s is now - generated_at, floored at 0. Anything unreadable,
-    non-object, or missing the fields -> (None, None, note); the caller
-    keeps the current null+note behavior — never a fabricated answer.
+    answer_age_s is now - generated_at, floored at 0. The two fields are
+    independent: a bad timestamp nulls only the age, a bad state nulls
+    only frozen — per-field nulls with notes, never all-or-nothing
+    (Engineering review). Anything unreadable -> (None, None, note).
+    Never raises.
     """
     try:
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
     except FileNotFoundError:
         return None, None, "gate status file not present: %r" % (path,)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
+        # RecursionError: deeply-nested JSON raises outside (OSError,
+        # ValueError); the module contract is "never raises", so it is
+        # caught here explicitly (Engineering review).
         return None, None, "gate status file unreadable: %s" % (exc,)
     if not isinstance(payload, dict):
         return None, None, "gate status file is not a JSON object"
+    notes = []
     answer = payload.get("answer")
-    if not isinstance(answer, dict):
-        return None, None, "gate status answer missing or not an object"
-    state = answer.get("state")
+    if isinstance(answer, dict):
+        state = answer.get("state")
+    else:
+        state = None
+        notes.append("gate status answer missing or not an object")
     if state == "frozen":
         frozen = True
     elif state == "live":
         frozen = False
     else:
-        return None, None, "gate status answer.state not frozen/live: %r" % (state,)
+        frozen = None
+        notes.append("gate status answer.state not frozen/live: %r" % (state,))
     generated_at, ts_note = _parse_generated_at(payload.get("generated_at"))
+    age_s = None
     if generated_at is None:
-        return None, None, ts_note
-    age_s = (datetime.now(timezone.utc) - generated_at).total_seconds()
-    age_s = int(max(0, age_s))
-    return frozen, age_s, None
+        notes.append(ts_note)
+    else:
+        delta_s = (datetime.now(timezone.utc) - generated_at).total_seconds()
+        if delta_s < 0:
+            # Future timestamp (clock skew): floor at 0 but say so — the
+            # module never fabricates an answer silently (Engineering review).
+            notes.append("gate status generated_at is in the future; "
+                         "answer_age_s floored at 0")
+        age_s = int(max(0, delta_s))
+    return frozen, age_s, "; ".join(notes) or None
 
 
 def _git_head(checkout):
@@ -139,16 +155,23 @@ def main(argv=None):
 
     frozen = None
     answer_age_s = None
+    use_gate_file = True
     if args.frozen is not None:
         value = args.frozen.strip().lower()
         if value in ("frozen", "true", "yes", "1"):
             frozen = True
+            use_gate_file = False
         elif value in ("unfrozen", "false", "no", "0"):
             frozen = False
+            use_gate_file = False
         else:
+            # A typo is not an explicit manual flag — keep the
+            # "unrecognized" note but fall through to the gate file so a
+            # garbage value cannot silently kill the S1b visibility loop
+            # (QA review).
             notes.append("unrecognized --frozen value %r; not reported"
                          % args.frozen)
-    else:
+    if use_gate_file:
         # #1325: the S1b visibility loop — derive from the hook's own
         # status file instead of leaving gate.frozen operator-declared-only.
         frozen, answer_age_s, gate_note = _read_gate_status(args.gate_status)
