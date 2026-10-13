@@ -9,7 +9,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 
 | Path | What it is |
 |---|---|
-| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
+| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch/approvals/decide/answer`. Single-file Python, stdlib only. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the default transport (the #228 cutover has landed). |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
@@ -298,3 +298,54 @@ directories the job navigates to mid-turn, and it does not change the
 library posture: `answer_trust_prompt` still refuses without an
 explicit `TrustPolicy(auto_answer_trust=True)` no matter what the
 `looks_like_trust_prompt` heuristic says.
+
+## MSP approvals — operator surface
+
+Issue #1372 — what the operator does when a job is blocked on an MSP
+approval or a user-input prompt (the decision-side companion to the
+#211 question "who answers"). The full vision-vs-state pin is
+`docs/MUSE_JOB_APPROVALS_OPERATOR_SURFACE_GAP_ANALYSIS.md`; this
+section is the operator reference.
+
+**List: `muse-job approvals <slug>`.** Prints every pending approval —
+with its choice ids and the exact `muse-job decide` invocation — and
+every open user-input prompt — with the exact `muse-job answer`
+invocation, flagged when the prompt looks like a trust prompt. The
+output is redacted by default: approval subjects, raw tool args, and
+prompt answers are withheld, because they may carry real secrets.
+`--json` keeps the same redaction; `--show-secrets` (which only takes
+effect with `--json`) prints the raw wire params and warns on stderr
+on every invocation — the unredacted output lands on stdout, one pipe
+away from somewhere an agent can read it, so treat it like a live
+credential.
+
+**Decide: `muse-job decide <slug> --approval-id <id> --choice-id <id>
+[--feedback <note>]`.** The approval is re-read immediately before
+deciding, so the requirement-id race guard is fresh: a stale approval
+stage fails server-side instead of landing on the wrong one. When the
+job's turn is still running, the decision routes through the
+supervisor (queue + result rendezvous) instead of stealing the
+single-attach session — this is the normal path, not a fallback. The
+admission ack prints only a key whitelist: the server's free-form
+fields never reach the operator's terminal unexamined.
+
+**Answer: `muse-job answer <slug> --user-input-id <id> --answers '<json
+list>' --trust-policy-opt-in | --classified-not-trust-prompt`.** The
+operator must classify the prompt explicitly — exactly one of the two
+flags, enforced by the CLI. A trust prompt is answered only with the
+explicit voucher (`--trust-policy-opt-in`, gated client-side by an
+explicit `TrustPolicy(auto_answer_trust=True)` — the wire call
+(`userInput/answer`) is identical either way, so the classification
+never reaches the server); anything else is answered directly
+(`--classified-not-trust-prompt`). The CLI never classifies by itself:
+the recorded #211 decision forbids auto-answering trust prompts on
+heuristic absence alone, because a trust prompt need not contain the
+word "trust".
+
+**Known limitation.** `approvals` lists only when the job's session is
+directly attachable — while the supervisor holds it (the whole turn,
+including the blocked states), listing fails with an explicit error
+instead of the old confusing refusal. `decide`/`answer` still route
+through the supervisor, and `muse-job status` keeps showing the
+blocked request in the meantime. Wiring listing through the
+supervisor is its own open remainder (issue #1396).
