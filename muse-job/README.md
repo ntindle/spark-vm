@@ -251,3 +251,50 @@ A rotation is reported as an `events-rotated` watch signal.
 - Muse's sqlite session index lags for TUI sessions; use the hook registry (`~/.local/share/muse-job/sessions/`).
 - `muse serve` (NDJSON JSON-RPC over stdio) is the job transport (#228): the 2026-09-17 `Not initialized` mystery was the missing `initialized` notification after `initialize` (verified 2026-09-21 against muse 1.3.0). `bin/msp_host.py` implements the transport + handshake (#221). The tmux path remains as an explicit `--tmux` opt-in fallback.
 - `muse session-message send` fails for exec AND TUI sessions (`external_agent_ingress_closed`); on the legacy `--tmux` path, steering is tmux keystroke injection only (the default MSP path steers via `turn/steer`).
+
+## Standing trust-policy opt-in (`--trust-workspace`)
+
+Issue #1372 slice 3 — the operator-reachable answer to the #211 question
+"who vouches for the workspace".
+
+**The decision.** The opt-in's shape is a spawn flag, not a config value:
+`muse-job spawn --trust-workspace`. muse-job has no config system, and
+inventing one to carry a standing security decision would bury the
+opt-in; the flag is explicit, per-job, and recorded in the job record
+(`trust_workspace: true`) where the operator (and the watchdog) can
+see it. A missing key on older records reads as false.
+
+**What it authorizes.** Auto-answering the workspace-trust gate in the
+job's own slug-derived workdir — the exact #791 scenario: the operator
+chose the repo and branch at spawn, so "Trust and continue" grants the
+job's agent nothing it doesn't already have through its shell; it only
+unblocks the TUI boot. Scope is the job's own workdir and nothing else:
+no other directory, no other trust question. The scope is mechanical,
+not prose — the answer path compares the pane's actual tmux working
+directory against the slug-derived workdir, and a gate parked anywhere
+else (the agent `cd`'d elsewhere mid-turn) fails closed to
+`blocked-trust` instead of spending the voucher.
+
+**Fail-closed default.** Without the flag, the gate is never answered
+for the operator:
+- tmux transport: the post-launch answer and the watchdog recovery both
+  funnel through `_answer_trust_prompt`, which refuses without the
+  opt-in (a missing/unreadable job record also refuses). The gate
+  stays, and the watchdog emits `blocked-trust` — loud and
+  operator-actionable (inspect with `muse-job log`, answer manually,
+  or kill and respawn with the flag).
+- MSP transport: the standing opt-in changes nothing. The supervisor's
+  `userInput/request` handlers stay journal/record-only by design (they
+  never touch the transport), so trust prompts keep surfacing through
+  the request ledger and `muse-job answer` keeps its per-call trust
+  classification (`--trust-policy-opt-in` /
+  `--classified-not-trust-prompt`). Auto-answering on heuristic
+  classification alone would contradict the #211 decision the
+  `msp_approval` library records — the flag is the voucher, and the
+  voucher's MSP half is the explicit per-answer classification.
+
+**Not covered.** The opt-in does not answer trust prompts for
+directories the job navigates to mid-turn, and it does not change the
+library posture: `answer_trust_prompt` still refuses without an
+explicit `TrustPolicy(auto_answer_trust=True)` no matter what the
+`looks_like_trust_prompt` heuristic says.
