@@ -1358,16 +1358,25 @@ _CRED_MODE_PIN_FILE = "credential_mode.json"
 
 def _pin_cred_mode(d, mode):
     """Atomically pin the mode on first run. Returns True when this
-    call created the pin, False when a concurrent first run won."""
+    call created the pin, False when a concurrent first run won.
+    Raises ValueError (fail loud) when the pin cannot be written —
+    an unwritable state dir must not become a silent pass."""
     blob = json.dumps({"mode": mode,
                        "pinned_at": _utcnow_iso()}).encode("utf-8")
+    pin_path = os.path.join(d, _CRED_MODE_PIN_FILE)
     try:
-        fd = os.open(os.path.join(d, _CRED_MODE_PIN_FILE),
+        fd = os.open(pin_path,
                      os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
+    except OSError as e:
+        raise ValueError(
+            f"credential-mode pin not writable ({e}) — refusing to run")
     try:
         os.write(fd, blob)
+    except OSError as e:
+        raise ValueError(
+            f"credential-mode pin write failed ({e}) — refusing to run")
     finally:
         os.close(fd)
     return True
