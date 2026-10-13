@@ -1341,6 +1341,90 @@ def _cred_mode():
         "to run: fix the box configuration")
 
 
+# The pin file is the latched truth both ingest entrypoints (the
+# every-minute cron ingest and the phone-home daemon) and both seam
+# halves (this ingest and #891's plane-fetch path) read. The env var is
+# only the provisioning-time input: the first run pins it, later runs
+# fail loud on drift. Rationale (Security review of #948): failing loud
+# on *invalid* values is not enough — the *absent* value is the most
+# probable misconfiguration (cron's minimal env, a unit without
+# Environment=), and absent-env silently defaulting to local would mint
+# local grants on a vend box: the exact scenario the seam exists to
+# prevent. The pin converts silent drift in either direction, on any
+# entrypoint, into a loud failure; a never-configured box pins the
+# default and stays byte-identical.
+_CRED_MODE_PIN_FILE = "credential_mode.json"
+
+
+def _pin_cred_mode(d, mode):
+    """Atomically pin the mode on first run. Returns True when this
+    call created the pin, False when a concurrent first run won."""
+    blob = json.dumps({"mode": mode,
+                       "pinned_at": _utcnow_iso()}).encode("utf-8")
+    try:
+        fd = os.open(os.path.join(d, _CRED_MODE_PIN_FILE),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+    return True
+
+
+def _read_cred_mode_pin(d):
+    """Read the state-dir pin. Returns the pinned mode, None when no pin
+    exists yet, and raises ValueError (fail loud) on an unreadable or
+    unrecognized pin — a corrupt pin is never silently ignored."""
+    pin_path = os.path.join(d, _CRED_MODE_PIN_FILE)
+    try:
+        with open(pin_path) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ValueError(
+            f"credential-mode pin unreadable ({e}) — refusing to run: "
+            "repair or delete it to re-pin deliberately")
+    mode = doc.get("mode") if isinstance(doc, dict) else None
+    if mode not in (_CRED_MODE_LOCAL, _CRED_MODE_VEND):
+        raise ValueError(
+            f"credential-mode pin holds {mode!r} — refusing to run: "
+            "delete it to re-pin deliberately")
+    return mode
+
+
+def _cred_mode_latched(d, say):
+    """Latch the credential-source mode for this run (issue #948).
+
+    The env-derived mode is reconciled against the state-dir pin: the
+    first run pins it (logged via `say`); a later run whose env resolves
+    differently fails loud instead of silently flipping modes. To change
+    the mode deliberately: stop the ingest entrypoints, delete
+    `credential_mode.json` from the state dir, set `SVM_CRED_MODE`,
+    and let the next run re-pin (the re-pin is logged).
+    """
+    env_mode = _cred_mode()  # ValueError on invalid — fail loud
+    pinned = _read_cred_mode_pin(d)
+    if pinned is None and _pin_cred_mode(d, env_mode):
+        say(f"credential mode pinned: {env_mode} "
+            f"({_CRED_MODE_ENV}={env_mode!r})")
+        return env_mode
+    if pinned is None:
+        # Lost the pin race to a concurrent first run: reconcile
+        # against the winner's pin rather than our env.
+        pinned = _read_cred_mode_pin(d)
+    if pinned != env_mode:
+        raise ValueError(
+            f"credential-mode drift: pinned {pinned!r} but "
+            f"{_CRED_MODE_ENV} resolves to {env_mode!r} — refusing to "
+            "run. To change the mode deliberately, stop the ingest "
+            "entrypoints, delete credential_mode.json from the state "
+            f"dir, set {_CRED_MODE_ENV}, and let the next run re-pin.")
+    return env_mode
+
+
 def _utcnow_iso():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -1909,6 +1993,9 @@ def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
         # must not survive into a vend-mode record — vend mints nothing,
         # so the record must not claim a lifetime.
         rec.pop("grant_ttl_hours", None)
+        # Informational, not a trust signal: any local writer can forge
+        # in-store markers (the file's standing posture) — consumers key
+        # off their own latched mode, never this record.
         rec["vend_mode"] = True
         _ingest_write_answered(approvals, aid, rec)
         _remove_pending()
@@ -2218,7 +2305,7 @@ def cmd_ingest(args):
     # lifetime. A misconfigured mode fails loud before any network or
     # stamping — never silently local.
     try:
-        cred_mode = _cred_mode()
+        cred_mode = _cred_mode_latched(d, _ingest_say)
     except ValueError as e:
         _ingest_fail(d, f"{e}")
         return 1
@@ -3210,7 +3297,7 @@ class _PhoneHomeSession:
     """
 
     def __init__(self, d, sock, reader, box_id, generation, token,
-                 approvals=None):
+                 approvals=None, cred_mode=None):
         self.d = d
         self.sock = sock
         self.reader = reader
@@ -3221,12 +3308,15 @@ class _PhoneHomeSession:
         # direct unit construction (which never handles commands) working.
         self.approvals = approvals if approvals is not None \
             else _approvals_dir()
-        # Issue #948 (dual-mode seam): latched once per session — the
+        # Issue #948 (dual-mode seam): the daemon latches the mode at
+        # start (state-dir pin) and passes it in; the default keeps
+        # direct unit construction working by reading the env once here.
+        # Either way the value is fixed for the session's lifetime — the
         # socket carrier runs the same _ingest_approval_decision as the
         # cron ingest, so a vend-mode box must not mint local grants
-        # here either. cmd_phone_home validates the mode at daemon start,
-        # so this read cannot raise in production.
-        self.cred_mode = _cred_mode()
+        # here either.
+        self.cred_mode = cred_mode if cred_mode is not None \
+            else _cred_mode()
         self.welcomed = False
         # Highest contiguously socket-acked seq on THIS session. The DO's
         # acked_watermark is the durable record; this is the per-session
@@ -3852,7 +3942,7 @@ def _phone_home_request_stop(signum, frame):
 
 # -- Connect + daemon ---------------------------------------------------------------
 
-def _phone_home_connect(d, box_id, token, control, generation):
+def _phone_home_connect(d, box_id, token, control, generation, cred_mode):
     """Upgrade and run one session. Returns (outcome, welcomed)."""
     ws_root = _ws_url_for_control(control)
     u = urllib.parse.urlparse(ws_root)
@@ -3874,7 +3964,7 @@ def _phone_home_connect(d, box_id, token, control, generation):
         raise
     sock.settimeout(_WS_READ_TIMEOUT)
     session = _PhoneHomeSession(d, sock, reader, box_id, generation, token,
-                                _approvals_dir())
+                                _approvals_dir(), cred_mode)
     try:
         return session.run(), session.welcomed
     finally:
@@ -3964,14 +4054,18 @@ def cmd_phone_home(args):
     if control is None:
         _phone_home_fail(d, msg, token)
         return 1
-    # Issue #948 (dual-mode seam): validate the credential-source mode
-    # before the daemon loop starts — a misconfigured box must fail loud
-    # now, not die on a ValueError inside the first session.
+    # Issue #948 (dual-mode seam): latch the credential-source mode
+    # (state-dir pin, fail loud on drift) before the daemon loop starts —
+    # a misconfigured box must fail loud now, not die on a ValueError
+    # inside the first session.
     try:
-        _cred_mode()
+        cred_mode = _cred_mode_latched(
+            d, lambda msg: _phone_home_say(d, msg, token))
     except ValueError as e:
         _phone_home_fail(d, f"{e}", token)
         return 1
+    _phone_home_say(d, f"credential mode latched: {cred_mode} "
+                       f"(from {_CRED_MODE_ENV})", token)
     # The generation counter must have exactly one writer: a second
     # daemon would fork the counter and fence its own live session.
     lock_path = os.path.join(d, ".phone-home.lock")
@@ -4046,7 +4140,7 @@ def cmd_phone_home(args):
                            "the generation on connect", token)
             try:
                 outcome, welcomed = _phone_home_connect(
-                    d, box_id, token, control, generation)
+                    d, box_id, token, control, generation, cred_mode)
             except _WsUpgradeAuth:
                 if rotate_tried:
                     _phone_home_fail(

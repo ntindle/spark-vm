@@ -275,15 +275,27 @@ ingest start and latched for the run (`docs/CREDENTIAL_VEND_CONTRACT.md`
   mints a local grant** on plane approve — the vended lease is the
   authorization artifact, so the stamp carries `vend_mode: true` and no
   `grant_ttl_hours`, and the audit line has no `ttl=` suffix. The
-  deny/expire paths never mint, so they are mode-independent.
+  deny/expire paths never mint, so they are mode-independent. The
+  `vend_mode` marker on the stamp is informational, not a trust signal
+  (any local writer can forge in-store markers — the file's standing
+  posture); future consumers, notably #891's fetcher, must key off their
+  own latched mode, never the record.
 
 Any other value fails loud at startup (the run exits 1 before any
 network or stamping — a misconfigured mode never runs silently local).
-The same `SVM_CRED_MODE` signal is the one #891's plane-fetch path must
-read, so the two halves of the seam can never disagree. The socket
-ingest (`phone-home`) latches the same mode per session. The latched
-mode is logged at startup so a box running in the wrong mode is
-operator-visible.
+The mode is pinned in the state dir (`credential_mode.json`): the first
+run pins the env-derived mode, and a later run whose env resolves
+differently fails loud on `credential-mode drift` instead of silently
+flipping — so a vend box whose entrypoint lost the env (cron's minimal
+env, a unit without `Environment=`) can never silently mint local
+grants. To change the mode deliberately: stop the ingest entrypoints,
+delete `credential_mode.json` from the state dir, set `SVM_CRED_MODE`,
+and let the next run re-pin (the re-pin is logged). The same
+`SVM_CRED_MODE` signal — and the same pin — is what #891's plane-fetch
+path must read, so the two halves of the seam can never disagree. The
+socket ingest (`phone-home`) latches the same mode at daemon start and
+passes it to each session. The latched mode is logged at startup so a
+box running in the wrong mode is operator-visible.
 
 Every stamped decision — `deny`,
 `expire`, `approve` — also appends one `answer` line to confirmd's

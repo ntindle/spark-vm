@@ -1172,4 +1172,79 @@ def test_ingest_vend_mode_latched_and_said(ctx, monkeypatch, capsys):
     plane = FakePlane(commands=[], watermark=10)
     assert _run(ctx, plane, monkeypatch) == 0
     out = capsys.readouterr()
+    assert "credential mode pinned: vend" in out.out  # first run pins
     assert "credential mode latched: vend" in out.out
+
+
+def _read_pin(ctx):
+    p = os.path.join(ctx.dir, "credential_mode.json")
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def test_cred_mode_pin_first_run_pins_local_default(ctx, monkeypatch):
+    # A never-configured box pins the default and stays byte-identical.
+    monkeypatch.delenv("SVM_CRED_MODE", raising=False)
+    plane = FakePlane(commands=[], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 0
+    pin = _read_pin(ctx)
+    assert pin["mode"] == "local"
+    assert pin["pinned_at"]
+
+
+def test_cred_mode_pin_drift_fails_loud(ctx, monkeypatch, capsys):
+    # The Security-review scenario: a vend-pinned box whose entrypoint
+    # lost the env must fail loud, never silently mint local grants.
+    with open(os.path.join(ctx.dir, "credential_mode.json"), "w") as f:
+        json.dump({"mode": "vend", "pinned_at": "x"}, f)
+    monkeypatch.delenv("SVM_CRED_MODE", raising=False)
+    _file_pending(ctx)
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 1
+    assert plane.calls == []  # failed before any network
+    assert plane.acked == []
+    assert _consumed(ctx) is None
+    out = capsys.readouterr()
+    assert "credential-mode drift" in out.err
+    assert "pinned 'vend'" in out.err
+
+
+def test_cred_mode_pin_drift_either_direction(ctx, monkeypatch, capsys):
+    # Drift is symmetric: a local-pinned box flipped to vend without
+    # the deliberate re-pin procedure also fails loud.
+    with open(os.path.join(ctx.dir, "credential_mode.json"), "w") as f:
+        json.dump({"mode": "local", "pinned_at": "x"}, f)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 1
+    assert "credential-mode drift" in capsys.readouterr().err
+
+
+def test_cred_mode_pin_corrupt_fails_loud(ctx, monkeypatch, capsys):
+    # A corrupt pin is never silently ignored.
+    with open(os.path.join(ctx.dir, "credential_mode.json"), "w") as f:
+        f.write("{not json")
+    plane = FakePlane(commands=[], watermark=10)
+    assert _run(ctx, plane, monkeypatch) == 1
+    assert "pin unreadable" in capsys.readouterr().err
+
+
+def test_cred_mode_repin_escape_hatch(ctx, monkeypatch, capsys):
+    # Deliberate migration: stop entrypoints, delete the pin, set the
+    # env — the next run re-pins (logged) and proceeds.
+    with open(os.path.join(ctx.dir, "credential_mode.json"), "w") as f:
+        json.dump({"mode": "local", "pinned_at": "x"}, f)
+    os.remove(os.path.join(ctx.dir, "credential_mode.json"))
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    _file_pending(ctx)
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 0
+    assert _read_pin(ctx)["mode"] == "vend"
+    rec = _consumed(ctx)
+    assert rec["vend_mode"] is True
+    out = capsys.readouterr()
+    assert "credential mode pinned: vend" in out.out

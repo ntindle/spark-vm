@@ -285,8 +285,11 @@ the ingest skips the local mint entirely and stamps the approval with
 authorization artifact, so minting a local grant would authorize nothing
 usable (swap fails closed on the unknown credential) and hold two
 divergent artifacts for one owner decision. The mode is read once at
-ingest start and latched for the run (contract §6); any other value
-fails loud before any network or stamping; the deny/expire paths never
-mint and are mode-independent. The dual-mode seam (config-time source
-selection) is #948; #891's plane-fetch path reads the same
-`SVM_CRED_MODE` signal.
+ingest start and latched for the run (contract §6), then pinned in the
+state dir (`credential_mode.json`): the first run pins the env-derived
+mode and a later run whose env resolves differently fails loud on
+drift instead of silently flipping — an absent `SVM_CRED_MODE` on a
+vend-pinned box can never silently mint local grants. The deny/expire
+paths never mint and are mode-independent. The dual-mode seam
+(config-time source selection) is #948; #891's plane-fetch path reads
+the same `SVM_CRED_MODE` signal and the same pin.
