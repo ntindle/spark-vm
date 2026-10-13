@@ -649,6 +649,189 @@ def test_cmd_decide_direct_path_unchanged(cli, fakes, capsys):
     assert body["approvalId"] == "ap-1"
 
 
+# -- supervisor-mediated listing (issue #1396) ------------------------------
+
+def test_list_queue_drains_on_supervisor_host(cli, fakes):
+    # The "list" queue kind is read-only: the supervisor serves the
+    # pending set from its already-open host (single-attach means the
+    # CLI can never resume it itself), the ack is the redacted
+    # operator-safe shape (no rawArgs, no answers), and neither the
+    # journal nor the request ledger changes.
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "seeded"})
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": False},
+                                    turn_id="turn-1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1")
+    assert "approval/listPending" in [m for m, _ in fakes.host_calls()]
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["status"] == "listed"
+    ack = result["ack"]
+    assert ack["approvals"][0]["approvalId"] == "ap-1"
+    assert ack["userInputs"][0]["userInputId"] == "ui-1"
+    # Redacted: the wire shape's secret-carrying fields are absent.
+    assert "rawArgs" not in json.dumps(ack)
+    assert "rm -rf /tmp/x" not in json.dumps(ack)
+    assert ack["rawApprovals"] is None
+    assert ack["rawUserInputs"] is None
+    # Read-only: the seeded ledger entry survives and no journal row
+    # was written.
+    assert [e["id"] for e in cli._msp_request_ledger_read(slug)] == ["ap-1"]
+    assert not os.path.exists(cli._msp_journal_path(slug))
+
+
+def test_list_queue_unredacted_ships_raw_shapes(cli, fakes):
+    # --show-secrets --json through the supervisor: the ack carries
+    # the raw wire shapes next to the redacted ones (the same 0600
+    # rendezvous file the queued-answer payloads use).
+    slug = "job1"
+    _make_job(cli, slug)
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": True},
+                                    turn_id="turn-1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1")
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["status"] == "listed"
+    ack = result["ack"]
+    assert "rm -rf /tmp/x" in json.dumps(ack["rawApprovals"][0])
+    assert ack["rawUserInputs"][0]["userInputId"] == "ui-1"
+    # The redacted shapes are still present (fail-closed display).
+    assert "rm -rf /tmp/x" not in json.dumps(ack["approvals"])
+
+
+def test_list_unredacted_flag_must_be_bool_true(cli, fakes):
+    # A truthy-but-not-True unredacted value (e.g. a hand-written
+    # queue entry) must not leak raw wire params: only the CLI's
+    # explicit boolean True authorizes the raw shapes.
+    slug = "job1"
+    _make_job(cli, slug)
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": "yes"},
+                                    turn_id="turn-1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1")
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["ack"]["rawApprovals"] is None
+
+
+def test_list_queue_stale_turn_refused_keeps_ledger(cli, fakes):
+    # A listing queued against an older turn is refused with a
+    # listing-worded message; the ledger is untouched (a listing never
+    # resolves requests, so there is nothing to drop).
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "approval", "ap-1",
+                                   {"title": "seeded"})
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": False},
+                                    turn_id="turn-0")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1")
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["status"] == "refused"
+    assert result["detail"] == "listing queued for an older turn"
+    assert [e["id"] for e in cli._msp_request_ledger_read(slug)] == ["ap-1"]
+
+
+def test_list_refuse_only_refused_keeps_ledger(cli, fakes):
+    # Supervisor exiting: the listing is refused like decide/answer,
+    # with no ledger change.
+    slug = "job1"
+    _make_job(cli, slug)
+    cli._msp_request_ledger_append(slug, "user_input", "ui-1",
+                                   {"questions": []})
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": False},
+                                    turn_id="turn-1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1", refuse_only=True)
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["status"] == "refused"
+    assert "supervisor exiting" in result["detail"]
+    assert [e["id"] for e in cli._msp_request_ledger_read(slug)] == ["ui-1"]
+
+
+def test_cmd_approvals_routes_via_supervisor(cli, fakes, monkeypatch,
+                                             capsys):
+    # Supervisor alive: approvals enqueues a read-only "list" (with
+    # the snapshot's turn tag) and renders the rendezvoused payload;
+    # no fresh serve host is opened (single-attach).
+    slug = "job1"
+    _make_job(cli, slug)
+    view_path = cli._msp_supervisor_files(slug)["view"]
+    with open(view_path, "w") as f:
+        json.dump({"t": time.time(), "msp_state": "blocked_approval",
+                   "active_turn_id": "turn-1"}, f)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    payload = {"approvals": [{"approvalId": "ap-1", "title": "Run shell",
+                              "choices": [{"choiceId": "deny",
+                                           "decision": "denied"}]}],
+               "userInputs": [], "rawApprovals": None,
+               "rawUserInputs": None}
+    canned = {"status": "listed", "ack": payload}
+    monkeypatch.setattr(cli, "_msp_wait_decision_result",
+                        lambda s, rid: canned)
+    rc = cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "approval ap-1: Run shell" in out
+    assert FakeHost.instances == []  # no direct host opened
+    entries = [json.loads(line) for line in
+               open(cli._msp_supervisor_files(slug)["decide_queue"])]
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "list"
+    assert entries[0]["unredacted"] is False
+    assert entries[0]["turn_id"] == "turn-1"
+
+
+def test_cmd_approvals_supervisor_refused_raises(cli, fakes, monkeypatch):
+    # A refused listing rendezvous surfaces as a clean `muse-job:
+    # error:` line (main()'s handler), not a traceback.
+    slug = "job1"
+    _make_job(cli, slug)
+    monkeypatch.setattr(cli, "_msp_supervisor_alive", lambda s: True)
+    canned = {"status": "refused",
+              "detail": "listing queued for an older turn"}
+    monkeypatch.setattr(cli, "_msp_wait_decision_result",
+                        lambda s, rid: canned)
+    with pytest.raises(RuntimeError, match="older turn"):
+        cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
+
+
+def test_list_via_supervisor_renders_real_drained_payload(
+        cli, fakes, monkeypatch, capsys):
+    # Non-vacuous: real enqueue + real drain on the fake serve host +
+    # the real rendezvous read, rendered by the shared renderer. Change
+    # the serve's pending set and the output follows.
+    slug = "job1"
+    _make_job(cli, slug)
+    rid = cli._msp_enqueue_decision(slug, "list", {"unredacted": False},
+                                    turn_id="t1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1", "t1")
+    real_wait = cli._msp_wait_decision_result
+    monkeypatch.setattr(cli, "_msp_wait_decision_result",
+                        lambda s, r: real_wait(s, rid))
+    rc = cli._msp_list_via_supervisor(
+        _ns(slug=slug, json=False, show_secrets=False))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "approval ap-1: Run shell command" in out
+    assert "(redacted; pass --show-secrets" in out
+    # And again against a changed pending set: the output tracks the
+    # wire, so this is not rendering a canned payload.
+    fakes.list_pending_result = lambda params: {
+        "approvals": [], "userInputs": []}
+    rid2 = cli._msp_enqueue_decision(slug, "list", {"unredacted": False},
+                                     turn_id="t1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1", "t1")
+    monkeypatch.setattr(cli, "_msp_wait_decision_result",
+                        lambda s, r: real_wait(s, rid2))
+    rc = cli._msp_list_via_supervisor(
+        _ns(slug=slug, json=False, show_secrets=False))
+    assert rc == 0
+    assert "no pending approvals or user-input prompts" in \
+        capsys.readouterr().out
+
+
 # -- status surface ----------------------------------------------------------
 
 def test_request_ledger_surfaced_on_snapshot_status(cli, fakes):

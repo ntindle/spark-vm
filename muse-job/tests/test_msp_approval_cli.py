@@ -525,26 +525,26 @@ def _held_elsewhere_error():
     return err
 
 
-def test_approvals_held_elsewhere_truthful_error(cli, fakes):
-    # A live supervised turn holds the session single-attach: the
-    # command must fail with the truthful message, not the raw
-    # "held by another host" refusal. (Slice 1 pointed at the not-yet
-    # wired slice 2; slice 2 shipped, so the message names the current
-    # residual: listing still needs direct access, decide/answer route
-    # through the supervisor.)
+def test_approvals_held_elsewhere_routes_via_supervisor(cli, fakes,
+                                                        monkeypatch):
+    # Issue #1396: the listing no longer fails on a supervisor-held
+    # session -- the held-elsewhere race queues a read-only listing for
+    # the supervisor instead (the _msp_steer pattern, mirroring
+    # decide/answer's slice-2 behavior).
     slug = "job1"
     _make_job(cli, slug)
     fakes.resume_error = _held_elsewhere_error()
-    with pytest.raises(RuntimeError, match="held by the.*supervisor"):
-        cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
-    try:
-        cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
-    except RuntimeError as e:
-        assert "Listing through a supervised session is not wired yet" \
-            in str(e)
-        assert "decide/answer route through the supervisor" in str(e)
-    else:
-        raise AssertionError("expected RuntimeError")
+    routed = []
+    monkeypatch.setattr(
+        cli, "_msp_list_via_supervisor",
+        lambda args: routed.append(args.slug) or 0)
+    rc = cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
+    assert rc == 0
+    assert routed == [slug]
+    # The raced direct path opened a host but never listed on it
+    # (resume failed single-attach); the listing went to the
+    # supervisor instead.
+    assert "approval/listPending" not in [m for m, _ in fakes.host_calls()]
 
 
 def test_decide_held_elsewhere_routes_via_supervisor(cli, fakes,

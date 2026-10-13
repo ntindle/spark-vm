@@ -5251,76 +5251,72 @@ def _msp_pending_for_status(host, sid):
     return (len(approvals), len(prompts))
 
 
-def _msp_supervisor_held_error(slug, action):
-    """Truthful error when the job's supervisor holds the session.
+def _msp_list_via_supervisor(args):
+    """List through the supervisor on a held session (issue #1396).
 
     MSP sessions are single-attach: while the supervisor holds the
     session (the whole turn, including blocked_approval/blocked_input
     states -- the supervise loop only exits on terminal events), a
     fresh `muse serve` cannot resume it, and stealing it would SIGTERM
     the supervisor's turn. decide/answer route through the supervisor
-    (issue #1372 slice 2); listing still needs direct access, so say
-    so plainly instead of the confusing "held by another host" line.
-    """
-    return RuntimeError(
-        f"job {slug}: cannot {action} -- the session is held by the "
-        f"job's supervisor (the turn is still running; MSP sessions are "
-        f"single-attach). Listing through a supervised session is not "
-        f"wired yet (issue #1396); decide/answer route through the "
-        f"supervisor. Server-issued requests stay visible in "
-        f"`muse-job status` while the turn is blocked.")
-
-
-def cmd_approvals(args):
-    """List a job's pending approvals and user-input prompts (issue #1372).
-
-    Default output is redacted: approval subjects/rawArgs and prompt
-    answers are withheld (they may carry real secrets). --show-secrets
-    (with --json) prints the full raw wire params, with the stderr
-    warning on every invocation (the msp_approval smoke-CLI posture).
-
-    The session must be directly resumable: when the job's supervisor
-    holds it (the turn still running), listing fails with an explicit
-    error instead of the confusing single-attach refusal. decide/answer
-    do not need direct access -- they route through the supervisor
-    (issue #1372 slice 2); server-issued requests stay visible in
-    `muse-job status` while the turn is blocked.
+    (issue #1372 slice 2); the listing path deserves the same
+    treatment -- a read-only queue-drain + result rendezvous against
+    the supervisor's already-open host. The payload is the
+    operator-safe redacted shape by default; the raw wire shape only
+    when the operator passed --show-secrets --json.
     """
     slug = args.slug
-    job = load_job(slug)
-    sid = _msp_require_msp_job(job, slug)
-    msp_approval = _msp_approval()
-    if args.show_secrets and not args.json:
-        print("muse-job: warning: --show-secrets has no effect without "
-              "--json (human-readable output is always redacted)",
-              file=sys.stderr)
+    snap = _msp_read_snapshot(slug)
+    turn_id = (snap or {}).get("active_turn_id")
+    request_id = _msp_enqueue_decision(
+        slug, "list",
+        {"unredacted": bool(args.show_secrets and args.json)},
+        turn_id=turn_id)
+    result = _msp_wait_decision_result(slug, request_id)
+    if result is None:
+        raise RuntimeError(
+            "job %s: no decision result after %ds -- the supervisor may "
+            "have died between the liveness check and the drain; re-run "
+            "the command" % (slug, _MSP_DECISION_RENDEZVOUS_S))
+    status = result.get("status")
+    if status != "listed":
+        raise RuntimeError("job %s: supervisor list %s: %s"
+                           % (slug, status, result.get("detail")))
+    payload = result.get("ack") or {}
+    _msp_render_approval_listing(
+        args, payload.get("approvals") or [], payload.get("userInputs") or [],
+        raw_approvals=payload.get("rawApprovals"),
+        raw_prompts=payload.get("rawUserInputs"))
+    return 0
 
-    def go(host):
-        return (msp_approval.list_pending_approvals(host, sid),
-                msp_approval.list_pending_user_inputs(host, sid))
 
-    try:
-        approvals, prompts = _msp_call(slug, job, go)
-    except _MSPSessionHeldElsewhere:
-        raise _msp_supervisor_held_error(slug, "list approvals")
-    except RuntimeError:
-        raise
-    except Exception as e:
-        # Serve-side and client-side failures surface as a clean
-        # `muse-job: error:` line (main()'s handler), not a traceback.
-        raise RuntimeError(str(e))
-    pub_approvals = [_approval_public(a) for a in approvals]
-    pub_prompts = [_prompt_public(p) for p in prompts]
+def _msp_render_approval_listing(args, pub_approvals, pub_prompts,
+                                 raw_approvals=None, raw_prompts=None):
+    """Render a listing's operator-safe shapes (issue #1372 slice 1).
+
+    Shared by the direct path (cmd_approvals) and the supervisor-
+    mediated path (issue #1396): pub_* are the _approval_public /
+    _prompt_public shapes (structure, never secret values); raw_* are
+    the wire shapes, printed only for --show-secrets --json with the
+    stderr warning on every invocation (the msp_approval smoke-CLI
+    posture). When the raw shapes are absent, --show-secrets --json
+    falls back to the redacted shapes (fail-closed display).
+    """
+    slug = args.slug
     if args.json:
         if args.show_secrets:
             _msp_warn_unredacted()
-            out = {"approvals": [a.raw for a in approvals],
-                   "userInputs": [p.raw for p in prompts]}
+            out = {"approvals": (raw_approvals
+                                 if raw_approvals is not None
+                                 else pub_approvals),
+                   "userInputs": (raw_prompts
+                                  if raw_prompts is not None
+                                  else pub_prompts)}
         else:
             out = {"approvals": pub_approvals, "userInputs": pub_prompts}
         print(json.dumps(out, indent=2, default=str))
         return 0
-    if not approvals and not prompts:
+    if not pub_approvals and not pub_prompts:
         print(f"job {slug}: no pending approvals or user-input prompts")
         return 0
     for a in pub_approvals:
@@ -5346,6 +5342,59 @@ def cmd_approvals(args):
     if not args.show_secrets:
         print("(redacted; pass --show-secrets to print raw wire params)")
     return 0
+
+
+def cmd_approvals(args):
+    """List a job's pending approvals and user-input prompts (issue #1372).
+
+    Default output is redacted: approval subjects/rawArgs and prompt
+    answers are withheld (they may carry real secrets). --show-secrets
+    (with --json) prints the full raw wire params, with the stderr
+    warning on every invocation (the msp_approval smoke-CLI posture).
+
+    When the job's supervisor holds the session (the turn still
+    running -- typically when a non---yolo job blocks on a prompt), the
+    listing routes through the supervisor's already-open host (issue
+    #1396: read-only queue-drain + result rendezvous) instead of
+    failing: the CLI cannot resume a single-attach session a live
+    supervisor holds, and stealing it would SIGTERM the turn.
+    """
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_msp_job(job, slug)
+    if args.show_secrets and not args.json:
+        print("muse-job: warning: --show-secrets has no effect without "
+              "--json (human-readable output is always redacted)",
+              file=sys.stderr)
+    if _msp_supervisor_alive(slug):
+        # Issue #1396: the supervisor holds the only session attach --
+        # route the listing through it (read-only queue-drain +
+        # rendezvous) instead of failing.
+        return _msp_list_via_supervisor(args)
+    msp_approval = _msp_approval()
+
+    def go(host):
+        return (msp_approval.list_pending_approvals(host, sid),
+                msp_approval.list_pending_user_inputs(host, sid))
+
+    try:
+        approvals, prompts = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # Lost the race: the supervisor took the session between the
+        # liveness check and the resume -- route through the supervisor
+        # (the _msp_steer pattern).
+        return _msp_list_via_supervisor(args)
+    except RuntimeError:
+        raise
+    except Exception as e:
+        # Serve-side and client-side failures surface as a clean
+        # `muse-job: error:` line (main()'s handler), not a traceback.
+        raise RuntimeError(str(e))
+    return _msp_render_approval_listing(
+        args, [_approval_public(a) for a in approvals],
+        [_prompt_public(p) for p in prompts],
+        raw_approvals=[a.raw for a in approvals],
+        raw_prompts=[p.raw for p in prompts])
 
 
 def cmd_decide(args):
@@ -5526,8 +5575,9 @@ def _msp_on_approval_requested(slug, approval):
     carry secrets) plus the request ledger `status` renders while the
     supervisor holds the session. The ledger carries the operator-safe
     shape (ids, title, choices) so the operator can compose the
-    `decide` command from `status` alone -- `muse-job approvals` cannot
-    list on a supervisor-held session. Quick, never raises, never
+    `decide` command from `status` alone -- and `muse-job approvals`
+    lists through the supervisor on a held session (issue #1396).
+    Quick, never raises, never
     touches the transport (the reader thread forbids host.call()).
     """
     try:
@@ -5659,7 +5709,7 @@ _DECISION_REQUEST_ID_RE = re.compile(r"^dreq-[0-9a-f]{12}$")
 
 
 def _msp_enqueue_decision(slug, kind, fields, turn_id=None):
-    """Queue a decide/answer request for the supervisor; returns request_id.
+    """Queue a decide/answer/list request for the supervisor; returns request_id.
 
     The queue lives in the operator-owned metadata dir (#1145); queued
     answers may carry real secrets, so the file is 0600. Stale result
@@ -5714,9 +5764,11 @@ def _msp_decision_result_path(slug, request_id):
 def _msp_write_decision_result(slug, request_id, status, detail, ack=None):
     """Atomically publish a rendezvous result (supervisor side, 0600).
 
-    status is one of decided/answered/refused/error. The ack is the
-    key-whitelisted operator ack -- never answers, never raw server
-    fields. Never raises.
+    status is one of decided/answered/listed/refused/error. For the
+    decide/answer kinds the ack is the key-whitelisted operator ack --
+    never answers, never raw server fields. The list kind's ack
+    carries the public listing shapes, plus the raw wire shapes only
+    when the entry's unredacted flag was set. Never raises.
     """
     try:
         path = _msp_decision_result_path(slug, request_id)
@@ -5750,6 +5802,32 @@ def _msp_wait_decision_result(slug, request_id,
         if time.time() >= deadline:
             return None
         time.sleep(1)
+
+
+def _msp_supervisor_list(msp_approval, host, sid, unredacted):
+    """List pending approvals + user inputs on the supervisor's host.
+
+    The CLI cannot resume a supervisor-held session (single-attach),
+    so the listing goes through the supervisor's already-open host
+    (issue #1396) -- the same queue-drain + rendezvous channel as
+    decide/answer, but read-only: nothing is queued, decided, or
+    answered, so the request ledger is untouched. The default payload
+    is the operator-safe shape (_approval_public / _prompt_public:
+    ids, titles, choices/questions -- never raw wire params, never
+    answers); only when the operator passed --show-secrets --json
+    (the entry's unredacted flag) does the payload also carry the
+    raw wire shapes -- in the same 0600 rendezvous file the
+    queued-answer payloads already use.
+    """
+    approvals = msp_approval.list_pending_approvals(host, sid)
+    prompts = msp_approval.list_pending_user_inputs(host, sid)
+    payload = {"approvals": [_approval_public(a) for a in approvals],
+               "userInputs": [_prompt_public(p) for p in prompts],
+               "rawApprovals": None, "rawUserInputs": None}
+    if unredacted:
+        payload["rawApprovals"] = [a.raw for a in approvals]
+        payload["rawUserInputs"] = [p.raw for p in prompts]
+    return payload
 
 
 def _msp_supervisor_decide(msp_approval, host, sid, entry):
@@ -5823,7 +5901,7 @@ def _msp_supervisor_answer(msp_approval, host, sid, entry):
 
 
 def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
-    """Execute (or refuse) queued decide/answer requests. Never raises.
+    """Execute (or refuse) queued decide/answer/list requests. Never raises.
 
     Mirrors _msp_drain_steer_queue's locked read+truncate; unlike
     steer, every entry gets a terminal result file (the CLI
@@ -5831,7 +5909,9 @@ def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
     operator past the supervisor's own lifecycle. refuse_only=True
     marks everything refused without executing -- the supervisor is
     exiting and the session is about to close (host/sid are not
-    touched in that mode).
+    touched in that mode). The list kind (issue #1396) is read-only:
+    it renders the pending set against the supervisor's open host and
+    changes no ledger or journal state.
     """
     msp_approval = _msp_approval()
     _, _, _, msp_events, _ = _msp_imports()
@@ -5858,21 +5938,25 @@ def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
         rid = entry.get("request_id")
         kind = entry.get("kind")
         if (not _DECISION_REQUEST_ID_RE.match(rid or "")
-                or kind not in ("decide", "answer")):
+                or kind not in ("decide", "answer", "list")):
             # No valid id to rendezvous on: drop, never execute.
             continue
         entry_tid = entry.get("turn_id")
         refused = None
         drop_ledger = False
         if entry_tid and entry_tid != tid:
-            refused = "decision queued for an older turn"
+            refused = ("%s queued for an older turn"
+                       % ("listing" if kind == "list" else "decision"))
             # The turn is over: the request can no longer be pending
-            # server-side, so `status` must stop advertising it.
-            drop_ledger = True
+            # server-side, so `status` must stop advertising it -- but a
+            # listing never added a ledger entry, so only decide/answer
+            # drop theirs.
+            drop_ledger = kind != "list"
         elif refuse_only:
             refused = "supervisor exiting; re-run the command"
-            # The session is closing: same terminal reasoning.
-            drop_ledger = True
+            # The session is closing: same terminal reasoning as above --
+            # but again only decide/answer have ledger entries to drop.
+            drop_ledger = kind != "list"
         elif kind == "answer" and entry.get("trust") not in (True, False):
             # The trust gate, checked before anything touches the wire:
             # an unclassified answer is a policy refusal, not an
@@ -5903,6 +5987,12 @@ def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
                 ack = _msp_supervisor_decide(msp_approval, host, sid, entry)
                 status = "decided"
                 ledger_kind, ledger_id = "approval", entry.get("approval_id")
+            elif kind == "list":
+                ack = _msp_supervisor_list(
+                    msp_approval, host, sid,
+                    unredacted=entry.get("unredacted") is True)
+                status = "listed"
+                ledger_kind, ledger_id = None, None
             else:
                 ack = _msp_supervisor_answer(msp_approval, host, sid, entry)
                 status = "answered"
@@ -5917,6 +6007,11 @@ def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
             continue
         _msp_write_decision_result(slug, rid, status,
                                    "%s %s executed" % (kind, rid), ack=ack)
+        if kind == "list":
+            # Read-only: nothing was decided or answered, so there is no
+            # journal signal and no ledger entry to remove (the direct
+            # path is journal- and ledger-silent too).
+            continue
         _msp_journal_append(slug, [msp_events.JobSignal(
             "approval", "decision/%s" % kind,
             detail="decision %s %s" % (rid, status))])
@@ -5927,7 +6022,10 @@ def _msp_drain_decision_queue(slug, host, sid, tid, *, refuse_only=False):
 
 
 def _msp_decide_via_supervisor(args, kind, fields):
-    """Enqueue a decide/answer request and rendezvous on the result."""
+    """Enqueue a decide/answer request and rendezvous on the result.
+
+    (The read-only listing path is _msp_list_via_supervisor, which
+    renders _msp_render_approval_listing instead of a small ack.)"""
     slug = args.slug
     snap = _msp_read_snapshot(slug)
     turn_id = (snap or {}).get("active_turn_id")
