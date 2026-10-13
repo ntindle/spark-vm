@@ -211,7 +211,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   pre-redeem, and the WSS daemon re-arms automatically once redeem lands.
   Before this change, a provisioned box enrolled and then went silent —
   no heartbeats, and its bearer <redacted> expired within a day. (#1219, #1220,
-  #1363, #TBD)
+  #1363, #1395)
 
 - Fleet dashboard sync contract is now CI-enforced (2026-10-11): a
   committed snapshot of the inlined dashboard block ships with the
