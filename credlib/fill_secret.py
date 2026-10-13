@@ -17,8 +17,23 @@ that is now enforced at the call boundary (issue #671): fill_secret
 refuses to run unless stdin is a real terminal or the caller explicitly
 opts in with SPARKVM_FILL_SECRET_HUMAN_OVERRIDE=1. The direct read helper
 _read_value is internal; reach it via fill_secret, not past it.
+
+MEMORY HYGIENE (issue #730): fill_secret practices overwrite-on-delete.
+The store output is read into a bytearray this module owns (scrubbed
+deterministically after decoding), and the decoded value plus any
+multi-entry losers are scrubbed in place via _zero_str as soon as they
+are no longer needed — `del` alone never zeroizes a CPython buffer, so
+without this the plaintext lingers in the heap until the allocator
+reuses it. _zero_str is best-effort and fail-safe: it only touches a
+buffer whose layout it positively verified for that exact object and
+silently skips anything else (non-CPython runtimes, exotic layouts),
+so the worst case is today's behavior, never memory corruption. Honest
+residual: transient temporaries the read path cannot deterministically
+track, copies inside Playwright / the browser / the OS, and
+allocator-level copies are outside this scrubbing.
 """
 
+import ctypes
 import os
 import re
 import subprocess
@@ -44,6 +59,185 @@ ENTRY_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+)=(.*)$", re.DOTALL)
 MULTI_MARKER = "#hsurr:multi"
 
 
+def _scrub_bytearray(buf):
+    """Deterministically overwrite a bytearray in place. Portable — a
+    bytearray exposes a writable buffer by design, so no ctypes and no
+    layout assumptions. Never raises."""
+    try:
+        buf[:] = b"\x00" * len(buf)
+    except Exception:
+        pass
+
+
+def _str_buffer_span(s):
+    """Return (offset, length) of s's character-data buffer, or None.
+
+    The offset is derived per object as
+    ``sys.getsizeof(s) - (len(s) + 1) * kind`` — no hardcoded header
+    constants — and then POSITIVELY VERIFIED by reading the bytes at
+    that span and comparing them against the known encoding of the
+    content. If the read-back does not match, the layout assumption is
+    wrong for this object/build and None is returned: the caller must
+    skip scrubbing rather than touch unverified memory. Never raises.
+    """
+    try:
+        n = len(s)
+        if n == 0:
+            return None
+        if s.isascii():
+            kind, codec = 1, "ascii"
+        else:
+            kind = 2 if max(map(ord, s)) < 0x10000 else 4
+            codec = "utf-16-le" if kind == 2 else "utf-32-le"
+        size = sys.getsizeof(s)
+        data_len = n * kind
+        off = size - (n + 1) * kind
+        if off <= 0 or data_len <= 0:
+            return None
+        # Self-verifying probe: the bytes at the computed span must be
+        # exactly the content's encoding. (The probe and the expected
+        # encoding are transient temporaries — see the module docstring's
+        # honest residual.)
+        if ctypes.string_at(id(s) + off, data_len) != s.encode(codec):
+            return None
+        return (off, data_len)
+    except Exception:
+        return None
+
+
+def _zero_str(s):
+    """Best-effort in-place zeroing of a str's character buffer (#730).
+
+    Only ever call this on str objects created on THIS module's read
+    path (fresh decode/match/slice results) — never on literals,
+    interned strings, or caller-provided objects, whose buffers may be
+    shared. The span is verified per object by _str_buffer_span; an
+    unverifiable layout is silently skipped, so the worst case is no
+    scrubbing, never corruption. Never raises.
+    """
+    try:
+        if len(s) == 0:
+            return
+        span = _str_buffer_span(s)
+        if span is None:
+            return
+        off, data_len = span
+        ctypes.memset(id(s) + off, 0, data_len)
+    except Exception:
+        pass
+
+
+def _scan_multi_marker(text):
+    """Scan for the multi-entry marker; return (is_multi, body_pos).
+
+    Only the first non-blank line can be the explicit "#hsurr:multi"
+    marker — mirrors proxy/swap_addon.py. Unmarked files are a single
+    whole secret, even when they look like k=v lines (e.g. a base64
+    token ending in "=="). body_pos is the offset just past the marker
+    line, where entry parsing starts.
+
+    Scans with find() instead of splitlines() so lines are not all
+    copied up front; the small slices this creates are scrubbed before
+    return. Never raises for well-formed str input.
+    """
+    pos = 0
+    n = len(text)
+    while True:
+        nl = text.find("\n", pos)
+        if nl < 0:
+            line = text[pos:]
+            end = True
+        else:
+            line = text[pos:nl]
+            end = False
+        stripped = line.strip()
+        try:
+            if stripped:
+                return (stripped == MULTI_MARKER, n if end else nl + 1)
+        finally:
+            # Aliasing guards: str.strip() returns the SAME object when
+            # nothing is stripped, and a full slice of a str IS the same
+            # object (CPython) — never scrub what might be the caller's
+            # text itself. Scrubbing the same temp twice is idempotent.
+            for obj in (stripped, line):
+                if obj is not text:
+                    _zero_str(obj)
+        if end:
+            return (False, n)
+        pos = nl + 1
+
+
+def _parse_entry_table(text, start):
+    """Parse k=v lines after the multi marker into {entry: value}.
+
+    Mirrors proxy/swap_addon.py: lines that do not match k=v are
+    dropped. Values are fresh str objects owned by the returned dict;
+    the caller scrubs the ones it does not keep. Consumed line slices
+    are scrubbed as they go. Entry names (keys) are not secrets and
+    are left alone.
+    """
+    parsed = {}
+    pos = start
+    n = len(text)
+    while pos <= n:
+        nl = text.find("\n", pos)
+        if nl < 0:
+            line = text[pos:]
+            end = True
+        else:
+            line = text[pos:nl]
+            end = False
+        stripped = line.strip()
+        try:
+            if stripped:
+                m = ENTRY_LINE_RE.match(line)
+                if m:
+                    parsed[m.group(1)] = m.group(2)
+        finally:
+            # Aliasing guards: str.strip() returns the SAME object when
+            # nothing is stripped, and a full slice of a str IS the same
+            # object (CPython) — never scrub what might be the caller's
+            # text itself. Scrubbing the same temp twice is idempotent.
+            for obj in (stripped, line):
+                if obj is not text:
+                    _zero_str(obj)
+        if end:
+            break
+        pos = nl + 1
+    return parsed
+
+
+def _extract_entry(text, credential_name, entry_name):
+    """Split one entry out of the decoded store text.
+
+    Verbatim contract (#88) preserved: the returned value is the stored
+    bytes decoded with no strip/copy normalization.
+
+    Memory hygiene (#730): every secret-bearing buffer this function
+    creates but does NOT return is scrubbed before it goes out of
+    scope — multi-entry losers and the decoded text itself when the
+    value came from the entry table. The returned value is the caller's
+    to scrub (fill_secret does so right after page.fill); it is always
+    a fresh object from this read path, safe for _zero_str.
+    """
+    is_multi, body_pos = _scan_multi_marker(text)
+    if not is_multi:
+        # Single-secret file: the value IS the whole text, verbatim.
+        return text
+    parsed = _parse_entry_table(text, body_pos)
+    found = entry_name in parsed
+    keep = parsed[entry_name] if found else None
+    for value in parsed.values():
+        if value is not keep:
+            _zero_str(value)
+    if text is not keep:
+        _zero_str(text)
+    if not found:
+        raise DynamicCredentialError(
+            "credential '%s' has no entry '%s'" % (credential_name, entry_name))
+    return keep
+
+
 def _read_value(credential_name, entry_name):
     """Read the raw secret value for one entry. Never logs or prints it.
 
@@ -53,6 +247,12 @@ def _read_value(credential_name, entry_name):
     exec-cats the fixed path /home/swapd/secrets/<name> — issue #669),
     so no unvalidated name can reach a raw cat ("../../etc/passwd"
     would be a path traversal read as swapd).
+
+    Memory hygiene (#730): the captured stdout is copied into a
+    bytearray this module owns — the bytes object subprocess hands us
+    may be shared (or a test stub's literal), so it is never scrubbed
+    directly — and the bytearray is deterministically scrubbed after
+    decoding. See _extract_entry for the decoded side.
     """
     _validate_name(credential_name, "credential")
     _validate_name(entry_name, "entry")
@@ -70,33 +270,12 @@ def _read_value(credential_name, entry_name):
         raise DynamicCredentialError(
             "credential '%s' not set%s \u2014 add with: cred set %s"
             % (credential_name, hint, credential_name))
-    text = p.stdout.decode("utf-8")
-    lines = [l for l in text.splitlines() if l.strip()]
-    # Multi-entry file? Only when the first non-blank line is the explicit
-    # "#hsurr:multi" marker — mirrors the proxy addon. Unmarked files are a
-    # single whole secret, even when they look like k=v lines (e.g. a base64
-    # token ending in "==").
-    if not lines or lines[0].strip() != MULTI_MARKER:
-        # Verbatim, never stripped (#88): write paths chomp exactly one
-        # trailing newline exactly once — `cred set` stdin and cred-ui
-        # paste at the frontend, cred-store-set-inference at its own
-        # boundary; the narrow main writer (proxy/cred-store-set) stores
-        # stdin verbatim and its frontends chomp first. So the stored
-        # bytes ARE the intended value, and a read-side strip() corrupts
-        # secrets that legitimately start/end with whitespace (stored
-        # "a\n" would read back as "a"). Direct narrow-writer use must
-        # pipe exact bytes (printf '%s', never echo).
-        return text
-    parsed = {}
-    for line in lines[1:]:
-        m = ENTRY_LINE_RE.match(line)
-        if m:
-            parsed[m.group(1)] = m.group(2)
-        # Lines that don't match k=v are dropped (the proxy does the same).
-    if entry_name in parsed:
-        return parsed[entry_name]
-    raise DynamicCredentialError(
-        "credential '%s' has no entry '%s'" % (credential_name, entry_name))
+    buf = bytearray(p.stdout)
+    try:
+        text = buf.decode("utf-8")
+        return _extract_entry(text, credential_name, entry_name)
+    finally:
+        _scrub_bytearray(buf)
 
 
 # Opt-in marker for isolated (non-interactive) automation contexts, per
@@ -180,5 +359,11 @@ def fill_secret(page, selector, credential_name, entry_name="access_token"):
     try:
         page.fill(selector, value)
     finally:
-        # Drop our reference as soon as the fill is issued.
+        # Overwrite-on-delete (#730): `del` alone drops the reference
+        # but CPython never zeroizes the buffer, leaving the plaintext
+        # in the heap until the allocator reuses it. Scrub the buffer
+        # first — the value is always a fresh object from _read_value,
+        # safe for _zero_str — then drop the reference. What was filled
+        # is unaffected: scrubbing happens after page.fill returns.
+        _zero_str(value)
         del value

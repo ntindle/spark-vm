@@ -115,7 +115,9 @@ cred run -- <cmd> [args...]  exec <cmd> with traffic routed through the
   (including tmux, which agent coding jobs run inside) present a TTY and
   pass it, so the never-see-secrets guarantee for agents remains the
   agent policy plus the swap-proxy path and store auditing, not this
-  guard.
+  guard. After the fill it scrubs the value from its own process memory
+  (best-effort in-place overwrite of the value, the store read buffer,
+  and any unread multi-entry values — issue #730).
 
 ## Tests
 
