@@ -69,7 +69,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   decision without minting a local grant (the vended lease is the
   authorization artifact). The default `local` keeps self-hosted boxes
   byte-identical; any other value fails the run loudly at startup.
-  (#948, #TBD)
+  (#948, #1409)
 
 - Operator reference for the `muse-job` approvals subcommands
   (`approvals`, `decide`, `answer`): the default-redaction posture and
