@@ -158,7 +158,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   can tell whether a swapped secret actually left the box: a
   refused-egress verdict carrying the same flow id proves the earlier
   swap lines were phantom (the swap was audited before the egress
-  decision was known). (#16, #TBD)
+  decision was known). (#16, #1439)
 
 - The self-update status inventory now names the winning source when the
   updater's published artifact record overrides an explicit
