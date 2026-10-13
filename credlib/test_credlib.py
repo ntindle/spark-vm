@@ -387,6 +387,30 @@ class MemoryHygieneTests(unittest.TestCase):
         fill_secret._zero_str(s)
         self._assert_zeroed(s, pristine)
 
+    def test_crlf_multi_entry_values_have_no_cr(self):
+        """CRLF store files: the old splitlines() scan dropped the \r;
+        the find()-based scan must too, or the wrong secret gets filled
+        (eng review parity finding)."""
+        real_run = self._read_with_stub(
+            b"#hsurr:multi\r\naccess_token=tok-AAA\r\nbackup=tok-BBB\r\n")
+        try:
+            self.assertEqual(
+                fill_secret._read_value("gh", "access_token"), "tok-AAA")
+            self.assertEqual(
+                fill_secret._read_value("gh", "backup"), "tok-BBB")
+        finally:
+            fill_secret.subprocess.run = real_run
+
+    def test_crlf_single_secret_stays_verbatim(self):
+        """A CRLF single-secret file is returned byte-exact (#88) — the
+        \r stripping applies to multi-entry line parsing only."""
+        real_run = self._read_with_stub(b"tok-CRLF\r\n")
+        try:
+            self.assertEqual(
+                fill_secret._read_value("gh", "access_token"), "tok-CRLF\r\n")
+        finally:
+            fill_secret.subprocess.run = real_run
+
     def test_duplicate_entry_first_value_scrubbed(self):
         """A duplicate entry name must not orphan the overwritten value's
         buffer."""

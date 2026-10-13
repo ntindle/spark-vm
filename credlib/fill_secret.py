@@ -224,6 +224,10 @@ def _parse_entry_table(text, start):
     the caller scrubs the ones it does not keep. Consumed line slices
     are scrubbed as they go. Entry names (keys) are not secrets and
     are left alone.
+
+    Known divergence from the old splitlines() scan (exotic): a lone
+    interior \r as a line separator (pre-OSX line endings) is not
+    treated as a break here; CRLF (\r\n) is handled above.
     """
     parsed = {}
     pos = start
@@ -236,6 +240,14 @@ def _parse_entry_table(text, start):
         else:
             line = text[pos:nl]
             end = False
+        if line.endswith("\r"):
+            # CRLF store files (written/pasted from Windows): the old
+            # splitlines()-based scan dropped the \r, but find("\n")
+            # does not — without this the \r lands inside the value and
+            # the wrong secret gets filled. line[:-1] is a new object
+            # (or the 1-char singleton, which _zero_str refuses), so the
+            # `is not text` aliasing guard below still holds.
+            line = line[:-1]
         stripped = line.strip()
         try:
             if stripped:
@@ -280,8 +292,9 @@ def _extract_entry(text, credential_name, entry_name):
     for value in parsed.values():
         if value is not keep:
             _zero_str(value)
-    if text is not keep:
-        _zero_str(text)
+    # `keep` is always a fresh match-group str (or None when not found),
+    # never `text` itself — scrub unconditionally.
+    _zero_str(text)
     if not found:
         raise DynamicCredentialError(
             "credential '%s' has no entry '%s'" % (credential_name, entry_name))
