@@ -77,9 +77,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged. (#1394, #1428)
 - `muse-job watch` now emits a prompt `session-exited` signal when a
   job's Muse process is gone but its tmux pane survives: the watchdog
-  walks the pane's process tree and, when no Muse process exists in it
-  at all, pages immediately with the exact diagnosis ("the session
-  exited, the pane is a shell") instead of the generic dead-pane signal.
+  walks the pane's process tree and, when no Muse process remains in it
+  at all, pages immediately with the exact diagnosis ("the Muse session
+  has exited") instead of the generic dead-pane signal.
   Nothing is ever sent into the pane; the operator remedy is unchanged
   (inspect, kill, resume). (#42, #1430)
 - Relay-liveness remaining-builds gap analysis: vision-vs-state of the #486

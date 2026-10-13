@@ -146,6 +146,45 @@ def test_pane_pid_itself_may_be_the_tui(cli, tmp_path):
     assert cli._pane_tree_has_tui(100, proc_root=proc) is True
 
 
+def test_non_utf8_comm_does_not_raise(cli, tmp_path):
+    # A process can set arbitrary bytes in its comm (prctl PR_SET_NAME).
+    # The probe's "never raises" contract requires the read to survive
+    # undecodable bytes -- errors="replace", not a locale-decode crash
+    # that would kill the whole watch pass.
+    proc = str(tmp_path / "proc")
+    d = os.path.join(proc, "101")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "stat"), "wb") as f:
+        f.write(b"101 (\xff\xfe-not-utf8) S 100 100 0 0 0\n")
+    _tree(proc, {100: ("bash", 1), 102: ("muse", 100)})
+    assert cli._pane_tree_has_tui(100, proc_root=proc) is True
+
+
+def test_pane_pid_rejects_garbage(cli, monkeypatch):
+    # tmux display-message output is untrusted: non-numeric, zero, and
+    # negative values all read as inconclusive (None), never as a pid.
+    import subprocess as _subprocess
+
+    def fake_run(stdout):
+        def _run(*argv, **kwargs):
+            return _subprocess.CompletedProcess(
+                args=list(argv), returncode=0,
+                stdout=stdout.encode(), stderr=b"")
+        return _run
+
+    for bad in ("abc\n", "\n", "0\n", "-3\n", "12x\n"):
+        monkeypatch.setattr(cli, "run", fake_run(bad))
+        assert cli._pane_pid("mjob-demo") is None
+    # A tmux failure is inconclusive too, not a crash.
+    monkeypatch.setattr(cli, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _subprocess.CalledProcessError(1, "tmux")))
+    assert cli._pane_pid("mjob-demo") is None
+    # And a well-formed pid passes through.
+    monkeypatch.setattr(cli, "run", fake_run("4321\n"))
+    assert cli._pane_pid("mjob-demo") == 4321
+
+
 # ---------------------------------------------------------------------------
 # job_status wires the probe
 

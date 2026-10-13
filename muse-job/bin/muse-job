@@ -1543,7 +1543,12 @@ def _pane_tree_has_tui(pane_pid, proc_root="/proc"):
         if not entry.isdigit():
             continue
         try:
-            with open(os.path.join(proc_root, entry, "stat"), "r") as f:
+            # errors="replace": a process can set arbitrary bytes in its
+            # comm (prctl PR_SET_NAME); locale decoding must not raise and
+            # kill the whole watch pass -- the probe's "never raises"
+            # contract depends on it.
+            with open(os.path.join(proc_root, entry, "stat"), "r",
+                      errors="replace") as f:
                 stat = f.read()
         except OSError:
             continue
@@ -3478,17 +3483,17 @@ def cmd_watch(args):
                                    "detail": f"resume-banner recovery raised: {e}"})
             else:
                 if st.get("pane_proc_exited"):
-                    # Issue #42: the process tree holds no muse-family
-                    # process at all -- the session genuinely exited (not a
-                    # banner, not a trust gate). Prompt and precise: page
-                    # immediately with the exact diagnosis instead of the
-                    # generic tui-dead or the 30m events-missing path.
-                    # Emission only -- nothing is sent into the pane
-                    # (issue #4), so the #816 TOCTOU concern does not apply.
+                    # Issue #42: the process tree holds no Muse process at
+                    # all -- the session genuinely exited (not a banner, not
+                    # a trust gate). Prompt and precise: page immediately
+                    # with the exact diagnosis instead of the generic
+                    # tui-dead signal. Emission only -- nothing is sent into
+                    # the pane (issue #4), so the #816 TOCTOU concern does
+                    # not apply.
                     events.append({"job": slug, "signal": "session-exited",
-                                   "detail": "tmux alive but the pane's process tree "
-                                             "contains no muse-family process -- the Muse "
-                                             "session has exited and the pane is a shell. "
+                                   "detail": "tmux alive but no Muse process remains "
+                                             "in the pane's process tree -- the Muse "
+                                             "session has exited. "
                                              "Refusing to send anything (issue #4). Operator "
                                              "remedy: inspect with muse-job log, then "
                                              "muse-job kill <slug> and muse-job resume <slug>"})
