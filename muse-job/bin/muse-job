@@ -1498,6 +1498,89 @@ def _pane_current_path(target):
     return out or None
 
 
+def _pane_pid(target):
+    """tmux ground truth for the pane's process PID, or None.
+
+    Used by the session-exited probe (issue #42): the pane's process tree
+    is walked to decide whether any muse-family process still exists.
+    Fail closed: any capture failure yields None, which the caller treats
+    as inconclusive (never as "exited").
+    """
+    try:
+        out = run("tmux", "display-message", "-p", "-t", target,
+                  "#{pane_pid}", timeout=30).stdout.decode(
+                      errors="replace").strip()
+    except Exception:
+        return None
+    try:
+        pid = int(out)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _pane_tree_has_tui(pane_pid, proc_root="/proc"):
+    """True/False/None: does the pane's process tree hold a TUI process?
+
+    Issue #42: the content-based dead-TUI check cannot distinguish "the
+    Muse session exited and the pane is a bare shell" from the other
+    dead-pane shapes. Walking the pane's process tree for a muse-family
+    process -- the same identity rule as _is_tui_process -- gives the
+    prompt, precise `session-exited` signal.
+
+    Returns None (inconclusive) when the tree cannot be read; the caller
+    keeps the generic tui-dead signal in that case. Read-only: only
+    /proc/<pid>/stat is read (comm + ppid); no cmdlines (no secrets), no
+    symlinks followed (pid dirs must be all digits). Never raises.
+    """
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    children = {}
+    comms = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "stat"), "r") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        # comm is the text between the first '(' and the last ')' -- it
+        # may itself contain spaces and parens.
+        lparen = stat.find("(")
+        rparen = stat.rfind(")")
+        if lparen < 0 or rparen < 0 or rparen <= lparen:
+            continue
+        comm = stat[lparen + 1:rparen]
+        rest = stat[rparen + 2:].split()
+        if len(rest) < 2:
+            continue
+        try:
+            ppid = int(rest[1])
+        except ValueError:
+            continue
+        pid = int(entry)
+        comms[pid] = comm
+        children.setdefault(ppid, []).append(pid)
+    if pane_pid not in comms and pane_pid not in children:
+        # Pane pid unknown to the scan (raced exit, or a non-/proc root
+        # in tests): inconclusive, never "exited".
+        return None
+    seen = {pane_pid}
+    stack = [pane_pid]
+    while stack:
+        pid = stack.pop()
+        if _is_tui_process(comms.get(pid, "")):
+            return True
+        for child in children.get(pid, ()):
+            if child not in seen:
+                seen.add(child)
+                stack.append(child)
+    return False
+
+
 def _dead_tui_msg(target, pane):
     """Refusal error for a pane that does not show a live TUI (issue #4)."""
     # The pane tail is agent-influenced; sanitize like every other
@@ -2578,6 +2661,7 @@ def job_status(job, slug):
     pane_cmd = ""
     pane_trust = False
     pane_trust_unverified = False
+    pane_proc_exited = False
     if alive:
         pane, pane_cmd = _capture_pane_state(f"mjob-{slug}")
         pane_live = _pane_shows_live_tui(pane, pane_cmd)
@@ -2605,6 +2689,20 @@ def job_status(job, slug):
         # never as an auto-answer attempt.
         pane_trust_unverified = ((not pane_live) and (not pane_trust)
                                  and _pane_shows_trust_gate(pane))
+        # Issue #42: process-based session-exit probe. The content checks
+        # above cannot distinguish "the muse session exited, pane is a
+        # bare shell" from the other dead-pane shapes; walking the pane's
+        # process tree for a muse-family process lets cmd_watch emit the
+        # prompt, precise session-exited signal. Computed only when the
+        # pane is not already live (a live pane trivially has the
+        # process), and it only ever REFINES the dead-pane diagnosis --
+        # never suppresses a signal: an inconclusive probe (None) keeps
+        # the generic tui-dead.
+        if not pane_live:
+            pane_pid = _pane_pid(f"mjob-{slug}")
+            if pane_pid is not None:
+                probe = _pane_tree_has_tui(pane_pid)
+                pane_proc_exited = (probe is False)
     return {
         "slug": slug,
         "job_state": job.get("state"),
@@ -2616,6 +2714,11 @@ def job_status(job, slug):
         # recognized TUI process -- loud blocked-trust-unverified, never
         # auto-answered (issue #4).
         "pane_trust_unverified": pane_trust_unverified,
+        # Issue #42: conclusively no muse-family process in the pane's
+        # process tree (probe ran and found none). cmd_watch turns this
+        # into the session-exited signal; False also covers "inconclusive"
+        # (generic tui-dead stays).
+        "pane_proc_exited": pane_proc_exited,
         "pane_cmd": pane_cmd,
         # Server-side session creation time: the unspoofable anchor for the
         # liveness grace windows (issue #23, sec review). None when tmux is
@@ -3374,12 +3477,28 @@ def cmd_watch(args):
                     events.append({"job": slug, "signal": "tui-unrecovered",
                                    "detail": f"resume-banner recovery raised: {e}"})
             else:
-                events.append({"job": slug, "signal": "tui-dead",
-                               "detail": "tmux alive but the TUI is not live and no resume "
-                                         "banner is shown -- pane may be a shell or a crashed TUI; "
-                                         "refusing to send anything (issue #4). Operator remedy: "
-                                         "inspect with muse-job log, then muse-job kill <slug> "
-                                         "and muse-job resume <slug>"})
+                if st.get("pane_proc_exited"):
+                    # Issue #42: the process tree holds no muse-family
+                    # process at all -- the session genuinely exited (not a
+                    # banner, not a trust gate). Prompt and precise: page
+                    # immediately with the exact diagnosis instead of the
+                    # generic tui-dead or the 30m events-missing path.
+                    # Emission only -- nothing is sent into the pane
+                    # (issue #4), so the #816 TOCTOU concern does not apply.
+                    events.append({"job": slug, "signal": "session-exited",
+                                   "detail": "tmux alive but the pane's process tree "
+                                             "contains no muse-family process -- the Muse "
+                                             "session has exited and the pane is a shell. "
+                                             "Refusing to send anything (issue #4). Operator "
+                                             "remedy: inspect with muse-job log, then "
+                                             "muse-job kill <slug> and muse-job resume <slug>"})
+                else:
+                    events.append({"job": slug, "signal": "tui-dead",
+                                   "detail": "tmux alive but the TUI is not live and no resume "
+                                             "banner is shown -- pane may be a shell or a crashed TUI; "
+                                             "refusing to send anything (issue #4). Operator remedy: "
+                                             "inspect with muse-job log, then muse-job kill <slug> "
+                                             "and muse-job resume <slug>"})
 
         # Issue #212: detect an in-place Muse auto-update (TUI binary swap)
         # as its own signal instead of lumping the aftermath into tui-dead.
