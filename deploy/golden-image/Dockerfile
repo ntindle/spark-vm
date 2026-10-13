@@ -73,9 +73,20 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 # locked password, no SSH login — the narrow writers run via `sudo -u swapd`.
 # `agent` is the skeleton tenant user: first boot instantiates real tenant
 # users from /etc/skel (populated from /home/agent below).
+# `sparkpair` is the dedicated pairing-state service user (#1220 Option B):
+# it owns pairing state (/home/sparkpair/.config/spark-pair, 0700) and runs
+# the pure-pairing-state entrypoints — the DAC ownership discipline the
+# ingest/upload-filings ticks enforce (Finding 50). (Not pairing/README.md's
+# store-owning "box-service user", which on the image is `swapd` — #1363
+# owns the reconciliation.) Locked password, no
+# SSH login: a service identity, never an operator. (The store-coupled
+# entrypoints ingest/upload-filings stay unwired pending #1363's
+# store-access design; the pure-pairing-state entrypoints are wired.)
 RUN useradd --system --create-home --home-dir /home/swapd --shell /bin/bash swapd \
  && useradd --create-home --home-dir /home/agent --shell /bin/bash --password '*' agent \
  && passwd -l agent \
+ && useradd --system --create-home --home-dir /home/sparkpair --shell /bin/bash --password '*' sparkpair \
+ && passwd -l sparkpair \
  && mkdir -p /etc/sparkvm /run/sshd
 
 # --- repo tree -------------------------------------------------------------
@@ -181,10 +192,12 @@ RUN cp -a /home/agent/. /etc/skel/ && chown -R root:root /etc/skel
 COPY deploy/golden-image/sparkvm-sshd-firstboot.sh /usr/local/bin/sparkvm-sshd-firstboot.sh
 COPY deploy/golden-image/identity-seed-hook.sh /usr/local/bin/identity-seed-hook.sh
 COPY deploy/golden-image/data-prep.sh /usr/local/bin/data-prep.sh
+COPY deploy/golden-image/pair-tick-wrapper.sh /usr/local/bin/pair-tick-wrapper.sh
 COPY deploy/golden-image/supervisord.conf /etc/supervisor/conf.d/sparkvm.conf
 RUN chmod 0755 /usr/local/bin/sparkvm-sshd-firstboot.sh \
                /usr/local/bin/identity-seed-hook.sh \
                /usr/local/bin/data-prep.sh \
+               /usr/local/bin/pair-tick-wrapper.sh \
  && rm -f /etc/ssh/ssh_host_* \
  && printf 'PasswordAuthentication no\nChallengeResponseAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
       > /etc/ssh/sshd_config.d/sparkvm.conf \

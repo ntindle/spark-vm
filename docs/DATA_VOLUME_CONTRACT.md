@@ -59,7 +59,7 @@ today.
 
 | State | In-image default | /data path | Rule | Owner | Failure mode if the rule breaks |
 |---|---|---|---|---|---|
-| Pairing state — `box.key`, `box.pub`, `pairing.json`, `enrollment.json`, `last_heartbeat.json`, `heartbeat.log`, `phone_home_generation.json`, `phone_home_backoff.json` | `~/.config/spark-pair` (client default; the identity-seed hook resolves to `/root/.config/spark-pair`) | `/data/pairing` | **MUST persist** | Follows #1220 (status quo: root; Options A/B named there — this contract does not pre-decide) | Cold stop silently re-enrolls the box (new `box.key` = new identity; attestation token is single-use, so the re-enroll fails closed and the box strands); generation/backoff loss breaks the #947 epoch fence and the #1022 backoff resume |
+| Pairing state — `box.key`, `box.pub`, `pairing.json`, `enrollment.json`, `last_heartbeat.json`, `heartbeat.log`, `phone_home_generation.json`, `phone_home_backoff.json` | `~/.config/spark-pair` (client default; the identity-seed hook resolves to `/home/sparkpair/.config/spark-pair` on the image) | `/data/pairing` | **MUST persist** | `sparkpair` (#1220 Option B, decided 2026-10-12; `deploy/golden-image/data-prep.sh` chowns `/data/pairing` in lockstep) | Cold stop silently re-enrolls the box (new `box.key` = new identity; attestation token is single-use, so the re-enroll fails closed and the box strands); generation/backoff loss breaks the #947 epoch fence and the #1022 backoff resume |
 | confirmd stores — `pending/`, `answered/`, `consumed/` | `/home/swapd/approvals` | `/data/approvals` | **MUST persist** | `swapd` | Pending approvals vanish on cold stop — the plane thinks decisions are outstanding that the box can never deliver; answered/consumed loss re-opens replay windows the #873 write-once gate closed |
 | confirmd audit log | `/home/swapd/confirmd/audit.log` | `/data/confirmd/audit.log` | **MUST persist** | `swapd` | The refusal trail (the evidence the #849 loop and the sentinel feed consume) gaps on every cold stop |
 | Relay session journal | `/var/lib/sparkvm/relay-session-journal.jsonl` | `/data/relay-session-journal.jsonl` | **MUST persist** | The relay emitter's user (the emitter is not yet wired to a box daemon; the contract pins the path — ownership follows the emitter when it lands) | Box→plane event buffer loss drops session-liveness frames silently; the parent dir is `/data` itself, which the mount guarantees |
@@ -152,7 +152,8 @@ exactly as before. The contract is provisioned-box-only.
 - #1204 (host-key attestation): the attestation mechanism can pin the
   host identity because the keys now survive cold stops.
 - #1219 (scheduler wiring) + #1220 (pairing-state ownership): the
-  `/data/pairing` path is pinned here; the owner is theirs to settle.
+  `/data/pairing` path is pinned here; the owner is settled — `sparkpair`
+  (#1220 Option B, 2026-10-12), chowned in `data-prep.sh` lockstep.
 - #891 (box-side vend path): `/data/vend/` is reserved for its lease store.
 
 ## Decisions

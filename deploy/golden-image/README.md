@@ -132,19 +132,73 @@ previous `init` that died between the two writes) is regenerated with
 `init --force`, which is safe because such a key could never have completed
 a pairing. All three skip cases log loudly.
 
+## Pairing-state service user + pairing runtime (#1220, #1219)
+
+Pairing state is owned by the dedicated pairing-state service user
+`sparkpair` (#1220 **Option B**, decided 2026-10-12): the recipe bakes the
+user (locked password, no login, home `/home/sparkpair`), the identity-seed
+hook (root) enrolls into `/home/sparkpair/.config/spark-pair` and hands
+ownership over after a successful request, and the pure-pairing-state
+entrypoints run as `sparkpair` under supervisord — `pair-heartbeat` (the
+every-minute heartbeat loop), `pair-rotate` (the hourly `rotate --auto`
+loop), and `pair-phone-home` (the persistent WSS daemon, restarted only
+on unexpected exits). This is the DAC ownership discipline the
+ingest/upload-filings ticks enforce (Finding 50) — root never runs the
+box's plane client. Explicit split: `sparkpair` owns pairing *state*;
+`swapd` is pairing/README.md's store-owning "box-service user" on the
+image (approvals dir, confirm store — the stores `ingest` and
+`upload-filings` need and `sparkpair` cannot reach); #1363 owns their
+reconciliation. Each program runs inside `pair-tick-wrapper.sh`, which owns
+the D-RW5 unenrolled-skip gate: one loud line naming the manual `redeem`
+step, then quiet until `enrollment.json` lands — the daemon gate
+sleep-polls (with backoff) and execs `phone-home` only once enrolled, so
+the WSS lane re-arms post-redeem with no operator step.
+
+Deliberately NOT wired yet (#1363): `ingest` and `upload-filings` need
+swapd-owned stores (pending/ filings, answered/, consumed/, audit.log,
+grant-writer) that the sparkpair split cannot reach, and the pairing
+client's 0600-forced credentials cannot be group-shared — so neither the
+all-sparkpair nor the split-user shape works without a store-access
+design. #1363 tracks the design (group surgery vs credential bridge vs
+narrow sudo); until it lands, the durable-command and filing-upload legs
+stay systemd/self-hosted-only on provisioned boxes. The box still gets
+fleet visibility (heartbeat), token rotation, and the WSS lane.
+
+Scheduler decision (also #1219): supervisord loops, not a cron package.
+The image deliberately ships no cron (the recipe installs none); the
+`cua-keepalive` program is the in-image precedent for the loop shape.
+The loops preserve D22's unstaggered cadence (one Python startup at
+the top of every minute — heartbeat; ingest/upload-filings deferred per
+#1363 — one hourly — rotate) and the flock EX blocking locks already
+serialize overlapping invocations. Accepted cadence delta: the loop
+ticks every 60 s + tick runtime, not wall-clock cron — a slow plane
+stretches the cadence instead of stacking invocations. The manual
+`redeem` step (still #907's box-side half) runs as the pairing-state
+owner: `sudo -u sparkpair python3 /opt/sparkvm/pairing/spark_pair.py
+--dir /home/sparkpair/.config/spark-pair redeem`.
+
 Boundaries (honest, still open): redeem completion is #907's box-side half
 (the hook logs the exact `redeem` command and stops — it never polls inside
 the boot sequence); cold-stop state persistence is #1205's `/data` contract
 (without it, an ephemeral-rootfs cold stop wipes pairing state and the next
 boot presents the token again — the plane 403s the consumed-token replay
-and the hook logs loudly instead of retry-looping).
+and the hook logs loudly instead of retry-looping); live-box end-to-end
+verification of the wired runtime is still owed (#1219 remaining slice);
+`ingest` + `upload-filings` wiring waits on the store-access design
+(#1363); the healthy-box verification + alerting contract is #1273's slice.
+Log-path note (A1): the wired programs log to `/var/log/pair-{heartbeat,
+rotate, phone-home}.log` (10MB×5 rotation), deviating from D-RW6's decided
+names (`/var/log/spark-{heartbeat,rotate}.log`) — #1273's contract must
+read the `pair-*` paths.
 
 ## Plane-push signal for the push worker (#1268)
 
 The push worker (`[program:push-worker]` in `supervisord.conf`) runs as
-`swapd`, so it can never read the pairing record (written by this
-root-run hook into `/root/.config/spark-pair`, or by the operator's later
-`redeem` into their own `$HOME`) — the record auto-detect in
+`swapd`, so it can never read the pairing record (enrolled by this
+root-run hook into `/home/sparkpair/.config/spark-pair` — the
+the dedicated pairing-state service user `sparkpair`'s state dir per
+#1220 Option B — or by the operator's
+later `redeem` into that same dir) — the record auto-detect in
 `confirm/push.py` always fails open to box-local on the image. When this
 hook finds an already-enrolled box at boot (enrollment record in the
 hook's own state dir), it rewrites the #1135 handoff decision to a

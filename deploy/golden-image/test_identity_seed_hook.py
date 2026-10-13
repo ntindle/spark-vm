@@ -575,3 +575,93 @@ def test_dockerfile_installs_and_chmods_hook():
                   r"((?:.*\\\n)*?.*identity-seed-hook\.sh.*)",
                   text)
     assert m, "the chmod RUN must cover the hook script"
+
+
+def test_service_user_home_selects_state_dir_and_warns_on_missing_user(harness, tmp_path):
+    """#1220 Option B: when the dedicated pairing-state service user
+    `sparkpair`'s home exists and
+    SVM_PAIR_DIR is unset, the hook enrolls into that user's state dir —
+    not the invoking user's. The ownership handoff is skipped with a loud
+    warning when the user itself does not exist (dev/test), and the run
+    still succeeds. Non-vacuity: the stub's --dir must be the seam dir,
+    never the harness HOME fallback."""
+    svc_home = tmp_path / "svchome"
+    svc_home.mkdir()
+    r = harness["run"](
+        env_extra={
+            "SPARKVM_BOX_SERVICE_USER": "sparkpair-test-absent",
+            "SPARKVM_BOX_SERVICE_USER_HOME": str(svc_home),
+            **_full_env(),
+        },
+        env_remove=("SVM_PAIR_DIR",),
+    )
+    assert r.returncode == 0, r.stderr
+    want_dir = str(svc_home / ".config" / "spark-pair")
+    argv = _argv_lines(harness)
+    assert any(f"--dir {want_dir}" in line for line in argv), argv
+    assert "does not exist — skipping ownership handoff" in r.stderr
+
+
+def test_enrolled_skip_warns_on_ownership_drift(harness, tmp_path):
+    """The enrolled-skip path verifies pairing-state ownership (#1220):
+    a state dir not owned by the dedicated pairing-state service user
+    `sparkpair` is loud but never
+    auto-repaired here — the fresh-enroll path is the one that sets
+    ownership."""
+    svc_home = tmp_path / "svchome"
+    state = svc_home / ".config" / "spark-pair"
+    state.mkdir(parents=True)
+    (state / "enrollment.json").write_text(
+        json.dumps({"token": "tok", "box_id": BOX_ID}))
+    r = harness["run"](
+        env_extra={
+            "SPARKVM_BOX_SERVICE_USER": "sparkpair-test-absent",
+            "SPARKVM_BOX_SERVICE_USER_HOME": str(svc_home),
+        },
+        env_remove=("SVM_PAIR_DIR",),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not owned by sparkpair-test-absent" in r.stderr
+    # the client is never invoked on the skip path
+    assert _argv_lines(harness) == []
+
+
+def test_ownership_handoff_chown_is_present_and_gated():
+    """Static pin: the hook hands fresh-enrolled pairing state to the
+    dedicated pairing-state service user `sparkpair` with chown -R, gated on
+    the user existing (the image
+    bakes it; off-image the absence is a warning, not a failure).
+    Neuter check: deleting the chown block must fail this test."""
+    with open(HOOK, encoding="utf-8") as f:
+        text = f.read()
+    gate = text.find('id -u "$_OWN_PAIR_STATE"')
+    assert gate != -1, "ownership handoff must be gated on the user existing"
+    chown = text.find('chown -R "$_OWN_PAIR_STATE:$_OWN_PAIR_STATE" "$STATE_DIR"')
+    assert chown != -1, "ownership handoff chown missing"
+    assert gate < chown, "the chown must sit inside the user-exists gate"
+
+
+def test_inflight_pairing_warns_on_ownership_drift(harness, tmp_path):
+    """Security B1 (slot 20261012-0229 review): the pairing-in-flight branch
+    is reachable on every boot after an interrupted enrollment (request
+    succeeded, box rebooted before the manual redeem) — the state files
+    are still root-owned then, so the logged `sudo -u sparkpair ... redeem`
+    would fail with EACCES. The branch must warn loudly (mirroring the
+    enrolled-skip branch) instead of leaving a bare permission failure.
+    Non-vacuity: the warning names the remediation chown."""
+    svc_home = tmp_path / "svchome"
+    state = svc_home / ".config" / "spark-pair"
+    state.mkdir(parents=True)
+    (state / "pairing.json").write_text(json.dumps({"code": "abc123"}))
+    r = harness["run"](
+        env_extra={
+            "SPARKVM_BOX_SERVICE_USER": "sparkpair-test-absent",
+            "SPARKVM_BOX_SERVICE_USER_HOME": str(svc_home),
+        },
+        env_remove=("SVM_PAIR_DIR",),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not owned by sparkpair-test-absent" in r.stderr
+    assert "chown -R sparkpair-test-absent:sparkpair-test-absent" in r.stderr
+    # the client is never invoked on the in-flight path
+    assert _argv_lines(harness) == []
