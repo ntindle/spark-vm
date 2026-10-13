@@ -1408,3 +1408,171 @@ def test_tail_discontinuity_ack_lifecycle_new_alert_id(env):
     assert rows[0]["acked"] is True
     assert rows[1]["acked"] is False
     assert rows[1]["rule"] == "tail-discontinuity"
+
+
+# ---------------------------------------------------------------------------
+# box_snapshot.py --gate-status (S1b visibility loop, #1325)
+# ---------------------------------------------------------------------------
+
+def _gate_status_file(tmpdir, state="live", generated_at=None, raw=None):
+    path = os.path.join(tmpdir, "gate-status.json")
+    if raw is not None:
+        with open(path, "w") as fh:
+            fh.write(raw)
+        return path
+    payload = {
+        "schema_version": 1,
+        "generated_at": (generated_at or datetime.now(timezone.utc)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
+        "source": "gate_hook",
+        "answer": {"state": state, "reason": "test"},
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    return path
+
+
+def _snapshot_gate(argv):
+    proc = run_box_snapshot(*argv)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_box_snapshot_gate_status_frozen(tmp_path):
+    gate = _gate_status_file(str(tmp_path), state="frozen")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate])
+    assert snap["gate"]["frozen"] is True
+    assert isinstance(snap["gate"]["answer_age_s"], int)
+    assert snap["gate"]["answer_age_s"] >= 0
+
+
+def test_box_snapshot_gate_status_live(tmp_path):
+    gate = _gate_status_file(str(tmp_path), state="live")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate])
+    assert snap["gate"]["frozen"] is False
+    assert isinstance(snap["gate"]["answer_age_s"], int)
+
+
+def test_box_snapshot_gate_status_answer_age(tmp_path):
+    gen = datetime.now(timezone.utc) - timedelta(seconds=95)
+    gate = _gate_status_file(str(tmp_path), state="live", generated_at=gen)
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate])
+    # ~95s old; allow a few seconds of test overhead either way.
+    assert 80 <= snap["gate"]["answer_age_s"] <= 120, snap["gate"]
+
+
+def test_box_snapshot_gate_status_missing_file(tmp_path):
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status",
+                           os.path.join(str(tmp_path), "nope.json")])
+    assert snap["gate"]["frozen"] is None
+    assert snap["gate"]["answer_age_s"] is None
+    assert "not present" in (snap["note"] or "")
+
+
+def test_box_snapshot_gate_status_corrupt_file(tmp_path):
+    gate = _gate_status_file(str(tmp_path), raw="{not json")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate])
+    assert snap["gate"]["frozen"] is None
+    assert snap["gate"]["answer_age_s"] is None
+    assert "unreadable" in (snap["note"] or "")
+
+
+def test_box_snapshot_gate_status_bad_state(tmp_path):
+    gate = _gate_status_file(str(tmp_path), state="maybe")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate])
+    assert snap["gate"]["frozen"] is None
+    assert "not frozen/live" in (snap["note"] or "")
+
+
+def test_box_snapshot_frozen_flag_overrides_gate_status(tmp_path):
+    gate = _gate_status_file(str(tmp_path), state="live")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate, "--frozen", "frozen"])
+    assert snap["gate"]["frozen"] is True
+    # The explicit override wins; the file's age is not consulted.
+    assert snap["gate"]["answer_age_s"] is None
+
+
+def test_box_snapshot_gate_status_bad_timestamp_keeps_state(tmp_path):
+    # Valid state + unparseable timestamp: the state is reported, only the
+    # age is null (Engineering review blocking 1).
+    path = os.path.join(str(tmp_path), "gate-status.json")
+    payload = {
+        "schema_version": 1,
+        "generated_at": "not-a-timestamp",
+        "source": "gate_hook",
+        "answer": {"state": "frozen", "reason": "test"},
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", path])
+    assert snap["gate"]["frozen"] is True
+    assert snap["gate"]["answer_age_s"] is None
+    assert "unparseable" in (snap["note"] or "")
+
+
+def test_box_snapshot_gate_status_bad_state_keeps_age(tmp_path):
+    # Bad state + good timestamp: the age is reported, only frozen is null
+    # (Engineering review blocking 1, symmetric case).
+    path = os.path.join(str(tmp_path), "gate-status.json")
+    payload = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
+        "source": "gate_hook",
+        "answer": {"state": "maybe", "reason": "test"},
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", path])
+    assert snap["gate"]["frozen"] is None
+    assert isinstance(snap["gate"]["answer_age_s"], int)
+    assert "not frozen/live" in (snap["note"] or "")
+
+
+def test_box_snapshot_gate_status_non_dict_answer(tmp_path):
+    path = os.path.join(str(tmp_path), "gate-status.json")
+    payload = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
+        "source": "gate_hook",
+        "answer": "not-an-object",
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", path])
+    assert snap["gate"]["frozen"] is None
+    assert isinstance(snap["gate"]["answer_age_s"], int)
+    assert "not an object" in (snap["note"] or "")
+
+
+def test_box_snapshot_bogus_frozen_falls_through_to_gate_file(tmp_path):
+    # A typo in --frozen is not an explicit flag: the gate file is still
+    # consulted (QA review B2).
+    gate = _gate_status_file(str(tmp_path), state="frozen")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate,
+                           "--frozen", "bogus"])
+    assert snap["gate"]["frozen"] is True
+    assert isinstance(snap["gate"]["answer_age_s"], int)
+    assert "unrecognized --frozen value" in (snap["note"] or "")
+
+
+def test_box_snapshot_frozen_unfrozen_overrides_frozen_file(tmp_path):
+    # Reverse precedence: explicit --frozen unfrozen wins over a frozen file.
+    gate = _gate_status_file(str(tmp_path), state="frozen")
+    snap = _snapshot_gate(["--checkout", str(tmp_path),
+                           "--gate-status", gate,
+                           "--frozen", "unfrozen"])
+    assert snap["gate"]["frozen"] is False
+    assert snap["gate"]["answer_age_s"] is None
