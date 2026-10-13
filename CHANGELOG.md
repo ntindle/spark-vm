@@ -129,6 +129,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- A digest that already went out is never sent twice: re-triggering the
+  hourly digest for a window that already fired is now refused (reported
+  as a duplicate) instead of queueing a second page. (#1424, #1426)
 - The hourly digest push no longer claims "this hour" when it delivers
   late for a previous hour: the body reads "N pages coalesced — open
   the dashboard." for those late deliveries. Also adds a regression test
@@ -151,14 +154,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   prompts while the supervisor holds the session, routed read-only through
   the supervisor's open session — previously it failed with an error. The
   listing stays redacted by default (`--show-secrets --json` prints the raw
-  wire params, with the usual warning). (#1396, #TBD)
+  wire params, with the usual warning). (#1396, #1408)
 
 - The credential-vend contract's auth-failure and at-rest-encryption terms
   are corrected before the endpoint is built: box auth failures collapse
   to a plain 401 (the plane's no-oracle convention — a wrong-box token
   reads the same 401 as an unknown token), and the at-rest algorithm is
   named as AES-128-GCM, the algorithm the plane worker can actually
-  implement. (#1401, #1403, #TBD)
+  implement. (#1401, #1403, #1408)
 
 - The "Cut release" workflow no longer spawns a failing run on every push:
   a timeout bound placed on the release workflow's reusable-workflow
