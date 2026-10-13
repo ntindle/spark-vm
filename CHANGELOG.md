@@ -129,6 +129,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The markdown link check in CI now re-runs once after a short cooldown
+  when it fails: transient upstream errors (a site briefly returning 502
+  to the CI runner, as happened 2026-10-13) no longer fail the run, while
+  genuinely broken links fail both passes and still go red. (#TBD)
 - The toolset status report now probes the same managed tool locations
   the updater converges, even when the operator relocates them through
   environment overrides in only one place: the privileged install

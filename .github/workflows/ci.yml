@@ -298,9 +298,27 @@ jobs:
     runs-on: ubuntu-latest
     # Network-bound (lychee fetches external links; 429s/timeouts observed)
     timeout-minutes: 30
+    env:
+      # Single source of truth for the lychee invocation — the retry step
+      # below reuses it verbatim. scripts/test_ci_md_link_excludes.py pins
+      # the --exclude set against this definition (not the per-step args).
+      LYCHEE_ARGS: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' --exclude 'https?://(www\\.)?x264\\.org/.*' --exclude 'https?://(www\\.)?marktechpost\\.com/.*' --exclude 'https?://investors\\.digitalocean\\.com/.*' --exclude 'https?://bugs\\.webkit\\.org/.*' --exclude 'https?://(www\\.)?devops\\.com/.*' --exclude 'https?://(www\\.)?severitydaily\\.com/.*' '**/*.md'"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - name: Check links in all markdown docs
+        id: linkcheck
+        # Retry policy: lychee v0.24.2 (bundled in the pinned lychee-action
+        # v2.9.0) never retries 5xx — ErrorKind::should_retry
+        # (lychee-lib/src/retry.rs) only retries RejectedStatusCode(429), so
+        # a transient upstream 502 fails the step with no backoff (observed
+        # 2026-10-13: design-reuse.com 502'd the runner 3 min after the same
+        # content passed; 200 from independent egress with both browser and
+        # lychee UAs). --max-retries cannot fix this; it is an upstream
+        # retry-classification gap. continue-on-error + one full re-run
+        # below absorbs the transient class without masking genuine
+        # breakage: a truly broken link fails both passes and the gate step
+        # fails the job.
+        continue-on-error: true
         # --exclude-mail was removed upstream (lychee >= 0.20 excludes mail by
         # default); passing it fails the step with "unexpected argument".
         # --exclude-loopback: docs reference localhost service addresses
@@ -598,9 +616,29 @@ jobs:
         # there). The pin fails CI on any mismatch.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0, SHA-pinned
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' --exclude 'https?://(www\\.)?ipfray\\.com/.*' --exclude 'https?://(www\\.)?x264\\.org/.*' --exclude 'https?://(www\\.)?marktechpost\\.com/.*' --exclude 'https?://investors\\.digitalocean\\.com/.*' --exclude 'https?://bugs\\.webkit\\.org/.*' --exclude 'https?://(www\\.)?devops\\.com/.*' --exclude 'https?://(www\\.)?severitydaily\\.com/.*' '**/*.md'"
+          args: ${{ env.LYCHEE_ARGS }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cool down before the retry
+        # Give a transient upstream block a chance to clear before the
+        # re-run: the observed 2026-10-13 502 cleared within 3 minutes, so
+        # 90s is a heuristic, not a measured block duration.
+        if: steps.linkcheck.outcome == 'failure'
+        run: sleep 90
+      - name: Re-run link check once on failure
+        id: linkcheck_retry
+        if: steps.linkcheck.outcome == 'failure'
+        continue-on-error: true
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0, SHA-pinned
+        with:
+          args: ${{ env.LYCHEE_ARGS }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fail the job if both link-check attempts failed
+        if: steps.linkcheck.outcome == 'failure' && steps.linkcheck_retry.outcome == 'failure'
+        run: |
+          echo 'markdown link check failed on both attempts; see the lychee error summaries above' >&2
+          exit 1
 
   png-check:
     name: PNG screenshot smoke test
