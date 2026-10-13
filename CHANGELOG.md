@@ -151,6 +151,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- `muse-job status` no longer advertises phantom pending approvals: a deliberate `kill` now clears the pending-approval ledger (the deleted session can never execute them), and when the supervisor isn't running, leftover requests render as `[stale]` with an explanation instead of looking actionable. (#1437)
+
 - The self-update status inventory now names the winning source when the
   updater's published artifact record overrides an explicit
   `CUA_DRIVER_BIN`/`PLAYWRIGHT_VENV` shell override (previously silent),
