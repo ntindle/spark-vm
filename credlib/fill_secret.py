@@ -17,8 +17,32 @@ that is now enforced at the call boundary (issue #671): fill_secret
 refuses to run unless stdin is a real terminal or the caller explicitly
 opts in with SPARKVM_FILL_SECRET_HUMAN_OVERRIDE=1. The direct read helper
 _read_value is internal; reach it via fill_secret, not past it.
+
+MEMORY HYGIENE (issue #730): fill_secret practices overwrite-on-delete.
+The store output is read into a bytearray this module owns (scrubbed
+deterministically after decoding), and the decoded value plus any
+multi-entry losers are scrubbed in place via _zero_str as soon as they
+are no longer needed — `del` alone never zeroizes a CPython buffer, so
+without this the plaintext lingers in the heap until the allocator
+reuses it. _zero_str is best-effort and fail-safe: it only touches a
+buffer whose layout it positively verified for that exact object and
+silently skips anything else (non-CPython runtimes, exotic layouts),
+so the worst case is today's behavior, never memory corruption. Honest
+residual: transient temporaries the read path cannot deterministically
+track; the layout-verification probe's single encode() bytes temporary
+(one per _zero_str call — the probe reads into scrubbed bytearrays and
+compares without copying, so this is the honest minimum); 1-char
+latin-1 values, which CPython caches process-wide and are therefore
+never scrubbed (scrubbing one would corrupt every future use of that
+character in the process); the subprocess stdout bytes object itself
+(the raw store output — it may be shared, e.g. by test doubles, so only
+the owned bytearray copy is scrubbed and the original lingers per the
+pre-#730 behavior); the sudo reader child process's own transient
+memory; copies inside Playwright / the browser / the OS; and
+allocator-level copies are all outside this scrubbing.
 """
 
+import ctypes
 import os
 import re
 import subprocess
@@ -44,6 +68,243 @@ ENTRY_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+)=(.*)$", re.DOTALL)
 MULTI_MARKER = "#hsurr:multi"
 
 
+def _scrub_bytearray(buf):
+    """Deterministically overwrite a bytearray in place. Portable — a
+    bytearray exposes a writable buffer by design, so no ctypes and no
+    layout assumptions. Never raises."""
+    try:
+        buf[:] = b"\x00" * len(buf)
+    except Exception:
+        pass
+
+
+def _str_buffer_span(s):
+    """Return (offset, length) of s's character-data buffer, or None.
+
+    The offset is derived per object as
+    ``sys.getsizeof(s) - (len(s) + 1) * kind`` — no hardcoded header
+    constants — and then POSITIVELY VERIFIED by reading the bytes at
+    that span and comparing them against the known encoding of the
+    content. If the read-back does not match, the layout assumption is
+    wrong for this object/build and None is returned: the caller must
+    skip scrubbing rather than touch unverified memory. Never raises.
+    """
+    try:
+        n = len(s)
+        if n == 0:
+            return None
+        if s.isascii():
+            kind, codec = 1, "ascii"
+        else:
+            # CPython uses 1-byte kind for maxchar <= 0xFF (latin-1), not
+            # only for pure ascii — missing this silently skips scrubbing
+            # for very ordinary passwords.
+            mx = max(map(ord, s))
+            if mx <= 0xFF:
+                kind, codec = 1, "latin-1"
+            elif mx < 0x10000:
+                kind, codec = 2, "utf-16-le"
+            else:
+                kind, codec = 4, "utf-32-le"
+        size = sys.getsizeof(s)
+        data_len = n * kind
+        off = size - (n + 1) * kind
+        if off <= 0 or data_len <= 0:
+            return None
+        # Self-verifying probe: the bytes at the computed span must be
+        # exactly the content's encoding. Read into a bytearray (not an
+        # immutable bytes temp) and compare without copying, scrubbing
+        # both buffers afterwards — a dropped immutable temp would be
+        # another lingering plaintext copy, the very thing #730
+        # eliminates. One unavoidable temp remains: the encode() bytes
+        # (see the module docstring's honest residual).
+        raw = bytearray(data_len)
+        ctypes.memmove((ctypes.c_char * data_len).from_buffer(raw),
+                       id(s) + off, data_len)
+        expected = bytearray(s.encode(codec))
+        try:
+            if raw != expected:
+                return None
+        finally:
+            _scrub_bytearray(raw)
+            _scrub_bytearray(expected)
+        return (off, data_len)
+    except Exception:
+        return None
+
+
+def _zero_str(s):
+    """Best-effort in-place zeroing of a str's character buffer (#730).
+
+    Only ever call this on str objects created on THIS module's read
+    path (fresh decode/match/slice results) — never on literals,
+    interned strings, or caller-provided objects, whose buffers may be
+    shared. The span is verified per object by _str_buffer_span; an
+    unverifiable layout is silently skipped, so the worst case is no
+    scrubbing, never corruption. Never raises.
+
+    Two hard no-scrub cases, both cheap identity checks: non-str
+    objects (defense in depth — a lying __sizeof__ can't push the
+    probe out of bounds anyway), and 1-char latin-1 strings, which
+    CPython caches process-wide (unicode_latin1) — zeroing one would
+    corrupt every future use of that character in the process.
+
+    Note: a scrubbed object keeps its stale cached hash; harmless —
+    every call site drops the object immediately after scrubbing.
+    """
+    try:
+        if type(s) is not str:
+            return
+        if len(s) == 0:
+            return
+        if len(s) == 1 and s is chr(ord(s)):
+            # Process-global latin-1 cache singleton: shared, never scrub.
+            return
+        span = _str_buffer_span(s)
+        if span is None:
+            return
+        off, data_len = span
+        ctypes.memset(id(s) + off, 0, data_len)
+    except Exception:
+        pass
+
+
+def _scrub_temp(obj, owner):
+    """Scrub a transient str slice unless it aliases the owner's buffer.
+
+    Centralizes the CPython identity-subtlety rule in one place:
+    str.strip() returns the SAME object when nothing is stripped, and a
+    full slice of a str IS the same object — never scrub what might be
+    the caller's buffer. Scrubbing the same temp twice is idempotent.
+    """
+    if obj is not owner:
+        _zero_str(obj)
+
+
+def _scan_multi_marker(text):
+    """Scan for the multi-entry marker; return (is_multi, body_pos).
+
+    Only the first non-blank line can be the explicit "#hsurr:multi"
+    marker — mirrors proxy/swap_addon.py. Unmarked files are a single
+    whole secret, even when they look like k=v lines (e.g. a base64
+    token ending in "=="). body_pos is the offset just past the marker
+    line, where entry parsing starts.
+
+    Scans with find() instead of splitlines() so lines are not all
+    copied up front; the small slices this creates are scrubbed before
+    return. Never raises for well-formed str input.
+    """
+    pos = 0
+    n = len(text)
+    while True:
+        nl = text.find("\n", pos)
+        if nl < 0:
+            line = text[pos:]
+            end = True
+        else:
+            line = text[pos:nl]
+            end = False
+        stripped = line.strip()
+        try:
+            if stripped:
+                return (stripped == MULTI_MARKER, n if end else nl + 1)
+        finally:
+            _scrub_temp(stripped, text)
+            _scrub_temp(line, text)
+        if end:
+            return (False, n)
+        pos = nl + 1
+
+
+def _parse_entry_table(text, start):
+    """Parse k=v lines after the multi marker into {entry: value}.
+
+    Mirrors proxy/swap_addon.py: lines that do not match k=v are
+    dropped. Values are fresh str objects owned by the returned dict;
+    the caller scrubs the ones it does not keep. Consumed line slices
+    are scrubbed as they go. Entry names (keys) are not secrets and
+    are left alone.
+
+    Known divergence from the old splitlines() scan (exotic): a lone
+    interior \r as a line separator (pre-OSX line endings) is not
+    treated as a break here; CRLF (\r\n) is handled above.
+    """
+    parsed = {}
+    pos = start
+    n = len(text)
+    while pos <= n:
+        nl = text.find("\n", pos)
+        if nl < 0:
+            line = text[pos:]
+            end = True
+        else:
+            line = text[pos:nl]
+            end = False
+        if line.endswith("\r"):
+            # CRLF store files (written/pasted from Windows): the old
+            # splitlines()-based scan dropped the \r, but find("\n")
+            # does not — without this the \r lands inside the value and
+            # the wrong secret gets filled. Copy first, THEN scrub the
+            # pre-strip slice: scrubbing before the copy would zero the
+            # source the copy is taken from. line[:-1] is a new object
+            # (or the 1-char singleton, which _zero_str refuses), so the
+            # `is not text` aliasing guard still holds either way.
+            stripped_line = line[:-1]
+            _scrub_temp(line, text)
+            line = stripped_line
+        stripped = line.strip()
+        try:
+            if stripped:
+                m = ENTRY_LINE_RE.match(line)
+                if m:
+                    key, val = m.group(1), m.group(2)
+                    old = parsed.get(key)
+                    if old is not None and old is not val:
+                        # Duplicate entry name: the overwritten value
+                        # would otherwise orphan its buffer unscubbed.
+                        _zero_str(old)
+                    parsed[key] = val
+        finally:
+            _scrub_temp(stripped, text)
+            _scrub_temp(line, text)
+        if end:
+            break
+        pos = nl + 1
+    return parsed
+
+
+def _extract_entry(text, credential_name, entry_name):
+    """Split one entry out of the decoded store text.
+
+    Verbatim contract (#88) preserved: the returned value is the stored
+    bytes decoded with no strip/copy normalization.
+
+    Memory hygiene (#730): every secret-bearing buffer this function
+    creates but does NOT return is scrubbed before it goes out of
+    scope — multi-entry losers and the decoded text itself when the
+    value came from the entry table. The returned value is the caller's
+    to scrub (fill_secret does so right after page.fill); it is always
+    a fresh object from this read path, safe for _zero_str.
+    """
+    is_multi, body_pos = _scan_multi_marker(text)
+    if not is_multi:
+        # Single-secret file: the value IS the whole text, verbatim.
+        return text
+    parsed = _parse_entry_table(text, body_pos)
+    found = entry_name in parsed
+    keep = parsed[entry_name] if found else None
+    for value in parsed.values():
+        if value is not keep:
+            _zero_str(value)
+    # `keep` is always a fresh match-group str (or None when not found),
+    # never `text` itself — scrub unconditionally.
+    _zero_str(text)
+    if not found:
+        raise DynamicCredentialError(
+            "credential '%s' has no entry '%s'" % (credential_name, entry_name))
+    return keep
+
+
 def _read_value(credential_name, entry_name):
     """Read the raw secret value for one entry. Never logs or prints it.
 
@@ -53,6 +314,13 @@ def _read_value(credential_name, entry_name):
     exec-cats the fixed path /home/swapd/secrets/<name> — issue #669),
     so no unvalidated name can reach a raw cat ("../../etc/passwd"
     would be a path traversal read as swapd).
+
+    Memory hygiene (#730): the captured stdout is copied into a
+    bytearray this module owns — the bytes object subprocess hands us
+    may be shared (or a test stub's literal), so it is never scrubbed
+    directly and lingers per the pre-#730 behavior — and the bytearray
+    is deterministically scrubbed after decoding. See _extract_entry
+    for the decoded side.
     """
     _validate_name(credential_name, "credential")
     _validate_name(entry_name, "entry")
@@ -70,33 +338,12 @@ def _read_value(credential_name, entry_name):
         raise DynamicCredentialError(
             "credential '%s' not set%s \u2014 add with: cred set %s"
             % (credential_name, hint, credential_name))
-    text = p.stdout.decode("utf-8")
-    lines = [l for l in text.splitlines() if l.strip()]
-    # Multi-entry file? Only when the first non-blank line is the explicit
-    # "#hsurr:multi" marker — mirrors the proxy addon. Unmarked files are a
-    # single whole secret, even when they look like k=v lines (e.g. a base64
-    # token ending in "==").
-    if not lines or lines[0].strip() != MULTI_MARKER:
-        # Verbatim, never stripped (#88): write paths chomp exactly one
-        # trailing newline exactly once — `cred set` stdin and cred-ui
-        # paste at the frontend, cred-store-set-inference at its own
-        # boundary; the narrow main writer (proxy/cred-store-set) stores
-        # stdin verbatim and its frontends chomp first. So the stored
-        # bytes ARE the intended value, and a read-side strip() corrupts
-        # secrets that legitimately start/end with whitespace (stored
-        # "a\n" would read back as "a"). Direct narrow-writer use must
-        # pipe exact bytes (printf '%s', never echo).
-        return text
-    parsed = {}
-    for line in lines[1:]:
-        m = ENTRY_LINE_RE.match(line)
-        if m:
-            parsed[m.group(1)] = m.group(2)
-        # Lines that don't match k=v are dropped (the proxy does the same).
-    if entry_name in parsed:
-        return parsed[entry_name]
-    raise DynamicCredentialError(
-        "credential '%s' has no entry '%s'" % (credential_name, entry_name))
+    buf = bytearray(p.stdout)
+    try:
+        text = buf.decode("utf-8")
+        return _extract_entry(text, credential_name, entry_name)
+    finally:
+        _scrub_bytearray(buf)
 
 
 # Opt-in marker for isolated (non-interactive) automation contexts, per
@@ -180,5 +427,11 @@ def fill_secret(page, selector, credential_name, entry_name="access_token"):
     try:
         page.fill(selector, value)
     finally:
-        # Drop our reference as soon as the fill is issued.
+        # Overwrite-on-delete (#730): `del` alone drops the reference
+        # but CPython never zeroizes the buffer, leaving the plaintext
+        # in the heap until the allocator reuses it. Scrub the buffer
+        # first — the value is always a fresh object from _read_value,
+        # safe for _zero_str — then drop the reference. What was filled
+        # is unaffected: scrubbing happens after page.fill returns.
+        _zero_str(value)
         del value

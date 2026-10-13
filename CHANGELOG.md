@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The browser secret-fill helper now scrubs each secret from its own
+  process memory immediately after filling (best-effort in-place
+  overwrite of the value, the store read buffer, and any unread
+  multi-entry values). Previously the plaintext lingered in the heap
+  until the allocator happened to reuse the memory; copies outside
+  this process (browser, driver, OS) were and remain outside its
+  control. (#730, #1410)
 - `muse-job spawn` gains `--trust-workspace`: the explicit standing
   opt-in for auto-answering the workspace-trust gate in a job's own
   workdir, recorded in the job record. Without it the gate fails
