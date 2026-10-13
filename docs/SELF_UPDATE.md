@@ -209,13 +209,20 @@ update plane), and every `update` tick refreshes it — so the record always
 reflects the timer's environment, not just the installer's. The status
 plane prefers the record, falling back to its env override, then the
 default (a missing or malformed record is silent: pre-#1310 installs never
-wrote one). The tick refresh is log-loud but non-fatal: the record is a
+wrote one). When the record wins over an explicitly-set env var that names
+a different value, the cua-driver/playwright probe notes say so ("env
+CUA_DRIVER_BIN=/x overridden by managed-targets record") instead of probing
+the record's artifact silently (#1412). The tick refresh is log-loud but non-fatal: the record is a
 visibility signal, not update safety — a wedged carrier must not block
 the weekly converge. `uninstall` removes the record alongside the pins
 hash. The record path (`MANAGED_TARGETS_DIR` / `MANAGED_TARGETS_FILE`)
 carries the same root-controlled-path discipline as the pins hash
 (`install` refuses relative paths, the filesystem root, and relative
-target values).
+target values); a target value containing any line-boundary character
+(the full Python `splitlines` set — `\n \r \v \f \x1c-\x1e \x85`
+U+2028/2029, not just newline/CR) is refused rather than published, since
+the status-plane parser would split it into extra lines and let a later
+duplicate key override the real one (#1412).
 
 ## Recovery (from #532)
 

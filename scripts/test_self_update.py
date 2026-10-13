@@ -429,6 +429,161 @@ def test_read_managed_targets_record_empty_and_directory(tmp_path):
     assert self_update._read_managed_targets_record(str(d)) == {}
 
 
+# --- managed-targets override note (issue #1412) -----------------------------
+
+def _reload_with_disagreeing_env(monkeypatch, tmp_path, key, record_value,
+                                 env_value):
+    # Helper for the #1412 note tests: a record naming record_value for
+    # `key` while the invoker's env names a different env_value. Returns the
+    # reloaded module; caller undoes via monkeypatch/finally like the #1310
+    # tests.
+    other = ("PLAYWRIGHT_VENV" if key == "CUA_DRIVER_BIN"
+             else "CUA_DRIVER_BIN")
+    lines = {key: record_value, other: "/srv/updater/other"}
+    record_text = "".join("%s=%s\n" % (k, v) for k, v in lines.items())
+    return _reload_with_record_env(monkeypatch, tmp_path, record_text,
+                                   extra_env={key: env_value})
+
+
+def test_managed_override_note_fires_on_record_beating_disagreeing_env(
+        monkeypatch, tmp_path):
+    # #1412 item 2: the record wins over an explicitly-set, disagreeing env
+    # var — the operator who set CUA_DRIVER_BIN in their shell sees S1 probe
+    # a different artifact with no explanation. The probe note now names the
+    # winning source. (Vacuity: without the note wiring, the note is the
+    # plain "via <path> --version" and this fails.)
+    import importlib
+    driver = tmp_path / "cua-driver"
+    driver.write_text("#!/bin/sh\necho 0.28.2\n")
+    driver.chmod(0o755)
+    runner = fake_runner({(str(driver), "--version"): (0, "0.28.2\n", "")})
+    try:
+        reloaded = _reload_with_disagreeing_env(
+            monkeypatch, tmp_path, "CUA_DRIVER_BIN", str(driver),
+            "/opt/custom/cua-driver")
+        installed, version, note = reloaded.probe_cua_driver(runner=runner)
+        assert installed is True
+        assert "overridden by managed-targets record" in note
+        assert "CUA_DRIVER_BIN=/opt/custom/cua-driver" in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_override_note_playwright(monkeypatch, tmp_path):
+    # The PLAYWRIGHT_VENV half: the managed venv's python is probed while
+    # the env names somewhere else, so the note names the override too.
+    # (Vacuity: without the wiring, the note is "python package via ..."
+    # with no override mention and this fails.)
+    import importlib
+    venv = tmp_path / "venv"
+    bindir = venv / "bin"
+    bindir.mkdir(parents=True)
+    python = bindir / "python"
+    python.write_text("#!/bin/sh\necho 1.62.0\n")
+    python.chmod(0o755)
+    runner = fake_runner({
+        (str(python), "-c",
+         "import importlib.metadata as m; print(m.version('playwright'))"):
+        (0, "1.62.0\n", ""),
+    })
+    try:
+        reloaded = _reload_with_disagreeing_env(
+            monkeypatch, tmp_path, "PLAYWRIGHT_VENV", str(venv),
+            "/opt/custom/pw")
+        installed, version, note = reloaded.probe_playwright(runner=runner)
+        assert installed is True
+        assert "overridden by managed-targets record" in note
+        assert "PLAYWRIGHT_VENV=/opt/custom/pw" in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_override_note_silent_when_env_agrees_with_record(
+        monkeypatch, tmp_path):
+    # No surprise, no note: the env names exactly what the record names.
+    import importlib
+    driver = tmp_path / "cua-driver"
+    driver.write_text("#!/bin/sh\necho 0.28.2\n")
+    driver.chmod(0o755)
+    runner = fake_runner({(str(driver), "--version"): (0, "0.28.2\n", "")})
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path,
+            "CUA_DRIVER_BIN=%s\nPLAYWRIGHT_VENV=/srv/updater/pw\n" % driver,
+            extra_env={"CUA_DRIVER_BIN": str(driver)})
+        _, _, note = reloaded.probe_cua_driver(runner=runner)
+        assert "overridden" not in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_override_note_silent_without_record(monkeypatch, tmp_path):
+    # Env set but no record: the env is the winner, nothing is overridden.
+    # Uses the default resolution path (managed=None) for fidelity.
+    import importlib
+    driver = tmp_path / "cua-driver"
+    driver.write_text("#!/bin/sh\necho 0.28.2\n")
+    driver.chmod(0o755)
+    runner = fake_runner({(str(driver), "--version"): (0, "0.28.2\n", "")})
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path, record_text=None,
+            extra_env={"CUA_DRIVER_BIN": str(driver)})
+        # Without a record the env value IS the managed target.
+        _, _, note = reloaded.probe_cua_driver(runner=runner)
+        assert "overridden" not in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_override_note_silent_on_path_fallback(monkeypatch, tmp_path):
+    # #1412 edge: the record names a venv and the env disagrees, but the
+    # record's venv has no executable python — the probe falls back to the
+    # PATH python3, so the record's artifact was never probed and no
+    # override note may fire.
+    import importlib
+    runner = fake_runner({
+        (sys.executable, "-c",
+         "import importlib.metadata as m; print(m.version('playwright'))"):
+        (0, "1.62.0\n", ""),
+    })
+    try:
+        reloaded = _reload_with_disagreeing_env(
+            monkeypatch, tmp_path, "PLAYWRIGHT_VENV",
+            str(tmp_path / "no-such-venv"), "/opt/custom/pw")
+        installed, version, note = reloaded.probe_playwright(
+            runner=runner, which=fake_which({"python3": sys.executable}))
+        assert installed is True
+        assert "overridden" not in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_override_note_silent_when_env_unset(monkeypatch, tmp_path):
+    # Record present, env var absent: the record wins by default, nothing
+    # was overridden — the operator set nothing to be surprised about.
+    import importlib
+    driver = tmp_path / "cua-driver"
+    driver.write_text("#!/bin/sh\necho 0.28.2\n")
+    driver.chmod(0o755)
+    runner = fake_runner({(str(driver), "--version"): (0, "0.28.2\n", "")})
+    try:
+        monkeypatch.delenv("CUA_DRIVER_BIN", raising=False)
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path,
+            "CUA_DRIVER_BIN=%s\nPLAYWRIGHT_VENV=/srv/updater/pw\n" % driver)
+        _, _, note = reloaded.probe_cua_driver(runner=runner)
+        assert "overridden" not in note
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
 # --- playwright browsers ---------------------------------------------------
 
 def test_playwright_browsers_missing_cache(tmp_path):

@@ -142,6 +142,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The self-update status inventory now names the winning source when the
+  updater's published artifact record overrides an explicit
+  `CUA_DRIVER_BIN`/`PLAYWRIGHT_VENV` shell override (previously silent),
+  and the updater refuses to publish that record when a configured tool
+  path contains any line-boundary character — not just newline/CR, but
+  also vertical tab, form feed, and the Unicode line separators Python's
+  record parser splits on — closing a crafted-value key-override hole in
+  the record. (#1412, #1433)
 - A digest that already went out is never sent twice: re-triggering the
   hourly digest for a window that already fired is now refused (reported
   as a duplicate) instead of queueing a second page. (#1424, #1426)

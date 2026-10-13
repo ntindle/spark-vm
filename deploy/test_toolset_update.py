@@ -3472,6 +3472,21 @@ def test_install_publishes_managed_targets(env, tmp_path):
     assert got["PLAYWRIGHT_VENV"] == e["PLAYWRIGHT_VENV"]
 
 
+def test_install_publishes_unicode_target_values(env, tmp_path):
+    # Issue #1412 review: the line-boundary guard must not over-reject —
+    # legitimate non-ASCII paths are single parser lines and publish fine.
+    # (Vacuity: with the loose-byte bracket class the 0xA9 byte in
+    # "caf\u00e9" was refused and this failed.)
+    r, e = _install_with_targets(
+        env, tmp_path,
+        extra={"CUA_DRIVER_BIN": "/opt/caf\u00e9/cua-driver",
+               "PLAYWRIGHT_VENV": "/srv/\u00c5ngstr\u00f6m/pw"})
+    assert r.returncode == 0, r.stderr
+    got = _read_targets_record(tmp_path / "pinshash" / "managed_targets")
+    assert got["CUA_DRIVER_BIN"] == "/opt/caf\u00e9/cua-driver"
+    assert got["PLAYWRIGHT_VENV"] == "/srv/\u00c5ngstr\u00f6m/pw"
+
+
 def test_install_honors_managed_targets_file_override(env, tmp_path):
     # MANAGED_TARGETS_FILE set explicitly wins over the
     # MANAGED_TARGETS_DIR derivation.
@@ -3556,6 +3571,25 @@ def test_install_refuses_newline_in_target_value(env, tmp_path):
     r, _ = _install_with_targets(env, tmp_path,
                                  extra={"CUA_DRIVER_BIN":
                                         "/x\nCUA_DRIVER_BIN=/evil"})
+    assert r.returncode != 0
+    assert "newline" in r.stderr
+
+
+@pytest.mark.parametrize("boundary", [
+    "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+])
+def test_install_refuses_line_boundary_chars_in_target_value(
+        env, tmp_path, boundary):
+    # Issue #1412: Python's str.splitlines() (the status-plane record
+    # parser) splits on more than \n/\r — a vertical tab passes the old
+    # newline guard yet still splits into parser lines, mechanically
+    # reviving the duplicate-key override the guard closes. The publisher
+    # rejects the whole boundary set loudly. (Vacuity: with only the
+    # newline/CR guard, install succeeds and this fails.)
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"CUA_DRIVER_BIN":
+                                        "/x" + boundary +
+                                        "CUA_DRIVER_BIN=/evil"})
     assert r.returncode != 0
     assert "newline" in r.stderr
 

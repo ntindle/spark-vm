@@ -2853,11 +2853,14 @@ _publish_managed_targets() {
     # two-key set the publisher always writes together). The record
     # carries no secret (paths are public config); its only job is telling
     # S1 which artifacts the updater holds. A value that is not an
-    # absolute path — or that contains a newline/CR, which would split
-    # into extra lines and let a later duplicate key override the real
-    # one — is refused rather than published: the status plane treats a
-    # malformed record as missing (fail-closed to its env/default), and
-    # publishing garbage would move that signal.
+    # absolute path — or that contains a line-boundary character, which would
+    # split into extra parser lines and let a later duplicate key override
+    # the real one — is refused rather than published: the status plane
+    # treats a malformed record as missing (fail-closed to its env/default),
+    # and publishing garbage would move that signal. "Line-boundary" is the
+    # full Python str.splitlines() set the status-plane parser splits on
+    # (\n \r \v \f \x1c-\x1e \x85 U+2028/2029) — \n/\r alone is not enough:
+    # a \v passes a newline-only guard yet still splits (issue #1412).
     local _tmp _dir _content
     case "$MANAGED_TARGETS_FILE" in
         /*) ;;
@@ -2871,9 +2874,17 @@ _publish_managed_targets() {
         /*) ;;
         *) echo "ERROR: refusing to publish relative PLAYWRIGHT_VENV" >&2; return 1 ;;
     esac
+    # Issue #1412: reject the whole splitlines boundary set, not just \n/\r.
+    # The single-byte boundaries live in one bracket class; the multi-byte
+    # boundaries match as their exact UTF-8 sequences (loose 0xE2/0x80/0xA8
+    # bytes would over-reject legitimate paths like café). NEL is the
+    # 2-byte sequence C2 85 here — the only record reader is the UTF-8
+    # splitlines() parser, and a lone 0x85 byte makes the file invalid
+    # UTF-8, which the reader fail-closes to {} (record treated as
+    # missing), so it needs no guard of its own.
     case "$CUA_DRIVER_BIN$PLAYWRIGHT_VENV" in
-        *$'\n'*|*$'\r'*)
-            echo "ERROR: refusing to publish managed target containing newline" >&2
+        *[$'\n\r\v\f\x1c\x1d\x1e']*|*$'\xc2\x85'*|*$'\xe2\x80\xa8'*|*$'\xe2\x80\xa9'*)
+            echo "ERROR: refusing to publish managed target containing a newline or other line-boundary character" >&2
             return 1 ;;
     esac
     _dir="$(dirname -- "$MANAGED_TARGETS_FILE")"

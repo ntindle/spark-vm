@@ -141,6 +141,25 @@ _MANAGED_PLAYWRIGHT_VENV = (_managed_targets_record.get("PLAYWRIGHT_VENV")
                                               "/home/ntindle/.venvs/pw"))
 
 
+def _managed_target_source_note(key, resolved_value):
+    """Status-note fragment naming the winning managed-target source.
+
+    Issue #1412: the record wins over the invoker's env override silently —
+    an operator who set CUA_DRIVER_BIN in their shell sees S1 probe a
+    different artifact with no explanation (the probes name the probed path,
+    not why it won). Returns "" unless the record names a value for `key`,
+    the environment names a DIFFERENT value, and `resolved_value` is the
+    record's value (i.e. the record's artifact is what was actually probed).
+    """
+    record_value = _managed_targets_record.get(key)
+    env_value = os.environ.get(key)
+    if (record_value and env_value and env_value != record_value
+            and resolved_value == record_value):
+        return ("env %s=%s overridden by managed-targets record"
+                % (key, env_value))
+    return ""
+
+
 def default_runner(argv, timeout=_PROBE_TIMEOUT_S):
     """Run argv, return (returncode, stdout_text, stderr_text). Never raises."""
     try:
@@ -343,17 +362,25 @@ def probe_playwright(runner=default_runner, which=shutil.which, managed=None):
     managed venv rots. PATH python3 is the fallback for boxes the updater
     never managed; the note names the interpreter either way. The managed
     target resolves from the update plane's published record when present
-    (issue #1310), else the invoker's env override, else the default.
+    (issue #1310), else the invoker's env override, else the default. When
+    the record wins over an explicitly-set, disagreeing env var, the note
+    names the override (issue #1412).
     `managed` is injectable (the venv dir) so the preference order is
     testable.
     """
     venv = _MANAGED_PLAYWRIGHT_VENV if managed is None else managed
     managed_py = os.path.join(venv, "bin", "python") if venv else None
+    override = ""
     if _managed_executable(managed_py):
         python = managed_py
+        override = _managed_target_source_note("PLAYWRIGHT_VENV", venv)
     else:
         python = which("python3") or sys.executable
-    return _probe_python_package("playwright", python=python, runner=runner)
+    installed, version, note = _probe_python_package(
+        "playwright", python=python, runner=runner)
+    if override:
+        note = "%s; %s" % (note, override)
+    return installed, version, note
 
 
 def probe_playwright_browsers(home=None):
@@ -403,13 +430,19 @@ def probe_cua_driver(which=shutil.which, runner=default_runner, managed=None):
     (F-A1). PATH is the fallback for boxes the updater never managed; the
     note names the probed path either way. The managed target resolves from
     the update plane's published record when present (issue #1310), else
-    the invoker's env override, else the default. `managed` is injectable
+    the invoker's env override, else the default. When the record wins over
+    an explicitly-set, disagreeing env var, the note names the override
+    (issue #1412). `managed` is injectable
     (the binary path) so the preference order is testable.
     """
     target = _MANAGED_CUA_DRIVER if managed is None else managed
     if _managed_executable(target):
-        return _probe_binary_version_at(
+        installed, version, note = _probe_binary_version_at(
             target, ["--version"], r"([0-9][\w.\-]*)", runner=runner)
+        override = _managed_target_source_note("CUA_DRIVER_BIN", target)
+        if override:
+            note = "%s; %s" % (note, override)
+        return installed, version, note
     # cua-driver is held on a known-good pin (see self_update_pins.conf);
     # S1 reports drift only.
     return _probe_binary_version("cua-driver", ["--version"],
