@@ -102,3 +102,6 @@ suite use this; no sudo or swapd involved).
   writers). Every token read now crosses sudo's audit trail. Hosted
   multi-tenancy still needs real per-tenant session auth.
 - Stdlib only, no dependencies.
+- The full security contract lives in `docs/CRED_UI_SECURITY_CONTRACT.md`
+  (#281): localhost-only single-operator by explicit contract until the
+  hosted front door exists; per-tenant session auth stays deferred.

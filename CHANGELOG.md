@@ -52,6 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The cred-ui security contract is now pinned: until the hosted front door exists, cred-ui stays a localhost-only single-operator tool by explicit contract — per-install 256-bit API token (not per-user identity), structural loopback bind with the SSH tunnel as the access control, deliberate no-WHO / never-log-values posture, and the deployment constraints (never bind non-loopback, never run on a shared host). Per-tenant session auth stays deferred to the hosted front door and stays tracked on #281. (#281)
 - The browser secret-fill helper now scrubs each secret from its own
   process memory immediately after filling (best-effort in-place
   overwrite of the value, the store read buffer, and any unread
