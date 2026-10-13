@@ -5266,7 +5266,7 @@ def _msp_supervisor_held_error(slug, action):
         f"job {slug}: cannot {action} -- the session is held by the "
         f"job's supervisor (the turn is still running; MSP sessions are "
         f"single-attach). Listing through a supervised session is not "
-        f"wired yet (issue #1372); decide/answer route through the "
+        f"wired yet (issue #1396); decide/answer route through the "
         f"supervisor. Server-issued requests stay visible in "
         f"`muse-job status` while the turn is blocked.")
 
