@@ -105,7 +105,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   invalidated the whole file and left the push filters unevaluable — so
   each push created a run that died with zero jobs. The bound is removed
   from the caller job (the called workflow's own jobs keep theirs), and
-  the CI timeout pin now forbids the pattern so it cannot recur. (#TBD)
+  the CI timeout pin now forbids the pattern so it cannot recur. (#1399)
 
 - The invite-wave sender now refuses to send a real wave while the public
   host is still the reserved `.invalid` default, instead of baking
