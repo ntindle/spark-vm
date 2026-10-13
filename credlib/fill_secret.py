@@ -244,10 +244,14 @@ def _parse_entry_table(text, start):
             # CRLF store files (written/pasted from Windows): the old
             # splitlines()-based scan dropped the \r, but find("\n")
             # does not — without this the \r lands inside the value and
-            # the wrong secret gets filled. line[:-1] is a new object
+            # the wrong secret gets filled. Copy first, THEN scrub the
+            # pre-strip slice: scrubbing before the copy would zero the
+            # source the copy is taken from. line[:-1] is a new object
             # (or the 1-char singleton, which _zero_str refuses), so the
-            # `is not text` aliasing guard below still holds.
-            line = line[:-1]
+            # `is not text` aliasing guard still holds either way.
+            stripped_line = line[:-1]
+            _scrub_temp(line, text)
+            line = stripped_line
         stripped = line.strip()
         try:
             if stripped:

@@ -411,6 +411,31 @@ class MemoryHygieneTests(unittest.TestCase):
         finally:
             fill_secret.subprocess.run = real_run
 
+    def test_crlf_prestrip_slice_scrubbed(self):
+        """The pre-\r-strip line slice must be scrubbed before rebinding
+        orphans it (arch review: S1-orphan) — not just the stripped
+        copy."""
+        real_zero = fill_secret._zero_str
+        seen = []
+        def spy(s):
+            span = fill_secret._str_buffer_span(s)
+            snap = (ctypes.string_at(id(s) + span[0], span[1])
+                    if span is not None else None)
+            seen.append((s, snap))  # keep the exact object, pre-zero bytes
+            real_zero(s)
+        fill_secret._zero_str = spy
+        real_run = self._read_with_stub(
+            b"#hsurr:multi\r\naccess_token=tok-AAA\r\n")
+        try:
+            self.assertEqual(
+                fill_secret._read_value("gh", "access_token"), "tok-AAA")
+        finally:
+            fill_secret._zero_str = real_zero
+            fill_secret.subprocess.run = real_run
+        pres = [o for o, snap in seen if snap == b"access_token=tok-AAA\r"]
+        self.assertEqual(len(pres), 1)
+        self._assert_zeroed(pres[0], "access_token=tok-AAA\r")
+
     def test_duplicate_entry_first_value_scrubbed(self):
         """A duplicate entry name must not orphan the overwritten value's
         buffer."""
