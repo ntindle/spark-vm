@@ -70,6 +70,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Relay-liveness remaining-builds gap analysis: vision-vs-state of the #486
+  lane at main `db71df38` (R1 shipped, R2/R3/R4 unbuilt), decomposing the
+  three remaining slices into four slot-sized builds — R2a dial prober core
+  (#1414), R2b `relay_path_state` surface + cadence driver (#1415), R3
+  tenant-status wiring (#1416), R4 detector conjunct (#1417) — with
+  dependency re-verification and decisions D-RL2-1–D-RL2-7. (#486)
 - Box credential-source mode for the hosted credential-vending lane:
   setting `SVM_CRED_MODE=vend` tells the approval ingest the box runs on
   plane-vended short-lived credentials, so an owner approve stamps the
