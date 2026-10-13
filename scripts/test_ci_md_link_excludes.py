@@ -8,7 +8,10 @@ quarterly re-sweep ritual "covers all eight lychee-excluded hosts" — so the
 majority of CI-skipped links were rotting with no re-sweep coverage and no
 doc admitting it.
 
-The job's `args:` line in `.github/workflows/ci.yml` is the source of truth.
+The job's job-level `LYCHEE_ARGS` env definition in
+`.github/workflows/ci.yml` is the source of truth (both lychee steps — the
+first pass and the on-failure retry — reference it via
+`${{ env.LYCHEE_ARGS }}`, so the two invocations cannot drift apart).
 The doc carries its claimed inventory in a
 <!-- link-check-excludes:start --> ... <!-- link-check-excludes:end -->
 comment block (one token per line, invisible in GitHub's rendered view; see
@@ -83,19 +86,21 @@ def normalize(raw):
 
 
 def ci_excludes():
-    """The normalized token set from the markdown-links job's args line."""
+    """The normalized token set from the markdown-links job's LYCHEE_ARGS env."""
     text = CI_YML.read_text(encoding="utf-8")
     matches = [
         m.group(1)
-        for m in re.finditer(r'args:\s*"((?:[^"\\]|\\.)*)"', text)
+        for m in re.finditer(r'LYCHEE_ARGS:\s*"((?:[^"\\]|\\.)*)"', text)
         if "--no-progress" in m.group(1)
     ]
     if len(matches) != 1:
         raise AssertionError(
-            f"expected exactly one lychee args line in ci.yml, found {len(matches)} "
-            "(the pin anchors on an `args:` line containing `--no-progress` "
-            "with single-quoted `--exclude '...'` tokens — if the job's arg "
-            "shape changed, update the extraction, don't weaken the test)"
+            f"expected exactly one LYCHEE_ARGS definition in ci.yml, found {len(matches)} "
+            "(the pin anchors on the job-level `LYCHEE_ARGS:` env definition "
+            "containing `--no-progress` with single-quoted `--exclude '...'` "
+            "tokens — both lychee steps reference it via "
+            "`${{ env.LYCHEE_ARGS }}`; if the job's arg shape changed, update "
+            "the extraction, don't weaken the test)"
         )
     pats = re.findall(r"--exclude\s+'([^']+)'", matches[0])
     if not pats:
