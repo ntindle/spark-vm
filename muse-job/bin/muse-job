@@ -5532,6 +5532,92 @@ def cmd_answer(args):
     return 0
 
 
+# Issue #1394: the voucher-grant path for live jobs. The standing
+# trust-workspace opt-in (--trust-workspace) is spawn-time-only, so
+# adopting the posture on an in-flight tmux job today means
+# hand-answering in tmux or kill+respawn. This subcommand flips the
+# manager-side record bit on a live job instead: the grant takes effect
+# on the next _answer_trust_prompt pass (resume / watchdog recovery).
+# The bit's storage and the answer path are unchanged -- only the write
+# is new, so the voucher's scope (the job's own slug-derived workdir,
+# re-derived from the slug at answer time) and the fail-closed default
+# are exactly what #1372 slice 3 shipped. MSP jobs have no auto-answer
+# posture to adopt (trust prompts keep their per-answer classification),
+# so granting on one is allowed but inert; the journal says so.
+
+
+class _TrustGrantSignal:
+    """Signal-shaped journal entry for _msp_journal_append (issue #1394).
+
+    The appender only reads kind/method/detail, so the grant does not
+    need the msp_events import (which would drag the whole MSP transport
+    into a command that works on tmux jobs).
+    """
+
+    def __init__(self, detail):
+        self.kind = "operator_grant"
+        self.method = "trust_workspace"
+        self.detail = detail
+
+
+def _trust_journal_grant(slug, inert):
+    """Journal the trust grant in the operator-owned journal (never raises).
+
+    The journal lives in JOURNAL_DIR (issue #1130): manager-side, outside
+    the agent-visible job dir, which the prompt preamble never names --
+    the grant ceremony is operator-initiated and auditable, never
+    agent-reachable.
+    """
+    try:
+        _msp_journal_append(
+            slug,
+            [_TrustGrantSignal(
+                "operator adopted the standing trust-workspace opt-in for "
+                f"live job {slug} (voucher scope: the job's own "
+                "slug-derived workdir; no MSP auto-answer posture)"
+                + ("; job is an MSP job -- grant recorded but inert"
+                   if inert else ""))])
+    except Exception:
+        pass
+
+
+def cmd_trust(args):
+    """Adopt the standing trust-workspace opt-in on a live job (#1394)."""
+    slug = args.slug
+
+    def go():
+        # Serialized on the per-slug lock (the cmd_close discipline):
+        # a load-mutate-save racing a concurrent close could otherwise
+        # resurrect an archived job to "active" with its stale save, and
+        # two racing trusts would both pass the idempotency check and
+        # journal duplicate grants. The journal append stays inside the
+        # lock (fast, never raises), so the audit trail matches the
+        # record exactly.
+        job = load_job(slug)  # unknown slug -> "muse-job: error: unknown"
+        inert = bool(_msp_transport(job))
+        if job.get("trust_workspace") is True:
+            print(json.dumps({"slug": slug, "trust_workspace": True,
+                              "granted": False, "note": "already trusted",
+                              "inert": inert}))
+            return 0
+        if job.get("state") == "closed":
+            raise RuntimeError(f"job {slug}: closed; nothing to grant the "
+                               "standing trust-workspace opt-in to")
+        job["trust_workspace"] = True
+        save_job(job, slug)
+        _trust_journal_grant(slug, inert)
+        if job.get("state") == "killed":
+            print("muse-job: warning: job %s is 'killed' (watchdog will not "
+                  "revive it); the grant is recorded but takes no effect "
+                  "until the job is respawned" % slug, file=sys.stderr)
+        print(json.dumps({"slug": slug, "trust_workspace": True,
+                          "granted": True, "inert": inert}))
+        return 0
+
+    with_lock(slug, go)
+    return 0
+
+
 # --- MSP approval supervise-path wiring (issue #1372, slice 2) -------------
 # Slice 1 put decide/answer on the CLI but left a hole: on a
 # supervisor-held session (the turn still running -- which is exactly
@@ -6153,6 +6239,11 @@ def build_parser():
                    help="declare this is NOT a trust prompt and answer it "
                    "directly")
     s.set_defaults(fn=cmd_answer)
+
+    s = sub.add_parser("trust", help="adopt the standing trust-workspace "
+                       "opt-in on a live job (#1394)")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_trust)
 
     s = sub.add_parser("_msp_supervise", help=argparse.SUPPRESS)
     s.add_argument("slug")

@@ -70,6 +70,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- `muse-job trust <slug>`: adopt the standing workspace-trust opt-in on
+  a live job without killing it. The grant is recorded manager-side and
+  journaled with the operator as the actor; on an already-trusted job it
+  is a no-op, and without the grant the fail-closed default is
+  unchanged. (#1394, #1428)
 - Relay-liveness remaining-builds gap analysis: vision-vs-state of the #486
   lane at main `db71df38` (R1 shipped, R2/R3/R4 unbuilt), decomposing the
   three remaining slices into four slot-sized builds — R2a dial prober core
