@@ -444,8 +444,10 @@ def test_digest_fired_window_never_refires(conn):
 
 def test_digest_budget_suppressed_stays_pending_and_retries(conn):
     # D76: a budget-suppressed digest leaves enqueued_at NULL (so a
-    # later sweep retries) and coalesces into the current window; once
-    # budget frees, the pending past window fires.
+    # later sweep retries). #1423 (direction a): the suppression does
+    # NOT coalesce into the current window's count — no phantom row is
+    # created, so once budget frees only the past window's digest
+    # fires, with its true coalesced count.
     past = "2026-10-05T10"
     _seed_digest(conn, "owner-1", past, 2)
     ws = push_enqueue.hour_bucket(T0)
@@ -455,16 +457,14 @@ def test_digest_budget_suppressed_stays_pending_and_retries(conn):
     s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
     assert s.digests.get("suppressed_budget") == 1
     assert _digest_row(conn, "owner-1", past)[1] is None
-    cur_count, cur_enq = _digest_row(conn, "owner-1", ws)
-    assert cur_count == 1 and cur_enq is None
+    assert _digest_row(conn, "owner-1", ws) is None
     for _ in range(10):
         push_enqueue.release_reservation(conn, None, "owner-1", ws)
     s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
-    assert s2.digests.get("queued") == 2
+    assert s2.digests.get("queued") == 1
     assert _digest_row(conn, "owner-1", past)[1] is not None
-    assert _digest_row(conn, "owner-1", ws)[1] is not None
     keys = sorted(r[1] for r in _queued(conn, "digest"))
-    assert keys == sorted(["owner-1\x00" + past, "owner-1\x00" + ws])
+    assert keys == ["owner-1\x00" + past]
 
 
 # --- Pass 3: watchers --------------------------------------------------------
