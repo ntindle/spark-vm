@@ -293,6 +293,31 @@ for the operator:
   `msp_approval` library records — the flag is the voucher, and the
   voucher's MSP half is the explicit per-answer classification.
 
+**Adopting the opt-in on a live job: `muse-job trust <slug>`.**
+Issue #1394 — the spawn flag cannot be retrofitted by `resume`, so a
+job spawned without the flag (or before the flag existed) used to need
+a manual tmux answer or a kill+respawn. `trust` flips the
+manager-side record bit (`trust_workspace: true`) on a live job
+instead: the grant takes effect on the next `_answer_trust_prompt`
+pass (resume / watchdog recovery), with the same voucher scope as the
+spawn flag — the job's own slug-derived workdir only. The ceremony is
+operator-initiated, manager-side, and journaled with the operator as
+the actor (`operator_grant` in the per-job journal, the operator-owned
+journals dir): the record and the journal live outside the
+agent-visible job dir, which the prompt preamble never names, so the
+grant is never agent-reachable. The read-modify-write is serialized on
+the job's per-slug lock (the `close` discipline), so a racing `close`
+cannot be resurrected by a stale save and racing grants cannot
+double-journal. The output is JSON: `{"slug", "trust_workspace",
+"granted": true, "inert": false}` on a grant; `{"granted": false,
+"note": "already trusted", "inert": false}` is a no-op; an MSP job's
+grant prints `"inert": true` (MSP trust prompts keep their per-answer
+classification — there is no auto-answer posture to adopt there). A
+killed job prints a stderr warning (the watchdog will not revive it —
+the grant is recorded but inert until respawn); an unknown slug fails
+with `muse-job: error: unknown job: <slug>`; a closed job is refused.
+Without the grant, the fail-closed default is unchanged.
+
 **Not covered.** The opt-in does not answer trust prompts for
 directories the job navigates to mid-turn, and it does not change the
 library posture: `answer_trust_prompt` still refuses without an
