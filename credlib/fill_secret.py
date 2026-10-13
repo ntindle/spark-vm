@@ -29,8 +29,12 @@ buffer whose layout it positively verified for that exact object and
 silently skips anything else (non-CPython runtimes, exotic layouts),
 so the worst case is today's behavior, never memory corruption. Honest
 residual: transient temporaries the read path cannot deterministically
-track, copies inside Playwright / the browser / the OS, and
-allocator-level copies are outside this scrubbing.
+track; the subprocess stdout bytes object itself (the raw store output
+— it may be shared, e.g. by test doubles, so only the owned bytearray
+copy is scrubbed and the original lingers per the pre-#730 behavior);
+the sudo reader child process's own transient memory; copies inside
+Playwright / the browser / the OS; and allocator-level copies are all
+outside this scrubbing.
 """
 
 import ctypes
@@ -87,8 +91,16 @@ def _str_buffer_span(s):
         if s.isascii():
             kind, codec = 1, "ascii"
         else:
-            kind = 2 if max(map(ord, s)) < 0x10000 else 4
-            codec = "utf-16-le" if kind == 2 else "utf-32-le"
+            # CPython uses 1-byte kind for maxchar <= 0xFF (latin-1), not
+            # only for pure ascii — missing this silently skips scrubbing
+            # for very ordinary passwords.
+            mx = max(map(ord, s))
+            if mx <= 0xFF:
+                kind, codec = 1, "latin-1"
+            elif mx < 0x10000:
+                kind, codec = 2, "utf-16-le"
+            else:
+                kind, codec = 4, "utf-32-le"
         size = sys.getsizeof(s)
         data_len = n * kind
         off = size - (n + 1) * kind
@@ -127,6 +139,18 @@ def _zero_str(s):
         pass
 
 
+def _scrub_temp(obj, owner):
+    """Scrub a transient str slice unless it aliases the owner's buffer.
+
+    Centralizes the CPython identity-subtlety rule in one place:
+    str.strip() returns the SAME object when nothing is stripped, and a
+    full slice of a str IS the same object — never scrub what might be
+    the caller's buffer. Scrubbing the same temp twice is idempotent.
+    """
+    if obj is not owner:
+        _zero_str(obj)
+
+
 def _scan_multi_marker(text):
     """Scan for the multi-entry marker; return (is_multi, body_pos).
 
@@ -155,13 +179,8 @@ def _scan_multi_marker(text):
             if stripped:
                 return (stripped == MULTI_MARKER, n if end else nl + 1)
         finally:
-            # Aliasing guards: str.strip() returns the SAME object when
-            # nothing is stripped, and a full slice of a str IS the same
-            # object (CPython) — never scrub what might be the caller's
-            # text itself. Scrubbing the same temp twice is idempotent.
-            for obj in (stripped, line):
-                if obj is not text:
-                    _zero_str(obj)
+            _scrub_temp(stripped, text)
+            _scrub_temp(line, text)
         if end:
             return (False, n)
         pos = nl + 1
@@ -194,13 +213,8 @@ def _parse_entry_table(text, start):
                 if m:
                     parsed[m.group(1)] = m.group(2)
         finally:
-            # Aliasing guards: str.strip() returns the SAME object when
-            # nothing is stripped, and a full slice of a str IS the same
-            # object (CPython) — never scrub what might be the caller's
-            # text itself. Scrubbing the same temp twice is idempotent.
-            for obj in (stripped, line):
-                if obj is not text:
-                    _zero_str(obj)
+            _scrub_temp(stripped, text)
+            _scrub_temp(line, text)
         if end:
             break
         pos = nl + 1
@@ -251,8 +265,9 @@ def _read_value(credential_name, entry_name):
     Memory hygiene (#730): the captured stdout is copied into a
     bytearray this module owns — the bytes object subprocess hands us
     may be shared (or a test stub's literal), so it is never scrubbed
-    directly — and the bytearray is deterministically scrubbed after
-    decoding. See _extract_entry for the decoded side.
+    directly and lingers per the pre-#730 behavior — and the bytearray
+    is deterministically scrubbed after decoding. See _extract_entry
+    for the decoded side.
     """
     _validate_name(credential_name, "credential")
     _validate_name(entry_name, "entry")

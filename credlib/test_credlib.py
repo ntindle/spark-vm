@@ -335,6 +335,15 @@ class MemoryHygieneTests(unittest.TestCase):
         fill_secret._zero_str(s)
         self._assert_zeroed(s, pristine)
 
+    def test_zero_str_zeroes_latin1_buffer(self):
+        """latin-1 (non-ascii, maxchar <= 0xFF) uses 1-byte kind — the
+        span probe must find it, not silently skip (arch review nit)."""
+        s = "".join(["pâsswörd"])
+        pristine = "".join(["pâsswörd"])
+        self.assertIsNotNone(fill_secret._str_buffer_span(s))
+        fill_secret._zero_str(s)
+        self._assert_zeroed(s, pristine)
+
     def test_zero_str_zeroes_non_ascii_buffer(self):
         s = "".join(["pâsswörd-🔑-fin"])
         pristine = "".join(["pâsswörd-🔑-fin"])
