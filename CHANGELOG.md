@@ -382,6 +382,23 @@ codified as rule 6 so future watch bullets arrive compliant.)
   CVE/write-up yet, AgentComputer still publishes no egress pricing.
   (#1318)
 
+- Cycle-69 competitor watch (2026-10-13): a full pass over the
+  tracked agent-sandbox vendors — two new vendor-confirmed entries:
+  Microsoft Execution Containers (policy-driven OS-level containment
+  for AI agents, generally available Oct 7 — process, session, WSL,
+  and microVM backends across Windows 11/macOS/Linux, unified JSON
+  policy schema, Enforcement/Learning/Permissive modes) and AWS
+  security bulletin 2026-127-AWS (two CVEs in the Bedrock AgentCore
+  Starter Toolkit import path — a 9.0 code-injection via crafted
+  agent config and a 5.7 SSRF/local-file-read via crafted OpenAPI
+  references; fixed in 0.3.14, toolkit deprecated). Also folded:
+  Modal's VM Sandboxes launching (already in use at named production customers) and its new Sandbox Sidecars
+  (trusted ops isolated from agent-reachable code). Watch-doc delta
+  only: Daytona's V0.224.0 (per-call region for sandbox/snapshot
+  creates). Both tracked funding rounds (Modal $750M, Baseten ~$26B)
+  remain unclosed; still no Vercel sandbox zero-day CVE/write-up;
+  AgentComputer still publishes no egress pricing. (#1429)
+
 - Rollout-controller deploy driver (#1287): per-plane template deploys
   land through the pinned release manifest (deployment ID + SHA-256,
   never a floating "latest", verified against the deployed bytes),
