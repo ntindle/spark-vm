@@ -397,7 +397,7 @@ def test_no_raw_control_bytes():
 def test_required_views_and_ids():
     html = _html()
     for token in ("login-view", "app-view", "fleet-list", "detail-card",
-                  "detail-approvals", "pairing-list", "key-input",
+                  "detail-approvals", "detail-push", "pairing-list", "key-input",
                   "login-form", "logout-btn", "refresh-btn"):
         assert 'id="%s"' % token in html, "missing #%s" % token
 
@@ -425,6 +425,11 @@ def test_api_calls_are_same_origin():
     assert '"/v1/boxes/"' in html
     assert "/approvals?status=pending&limit=50" in html
     assert "/approvals/" in html and '/decision"' in html
+    # Push-subscription surface (#968) calls the plane that served the
+    # page — relative paths only, never a hard-coded origin.
+    assert '"/v1/push/subscriptions"' in html
+    assert '"/v1/push/vapid-pubkey"' in html
+    assert "/v1/push/subscriptions?box_id=" in html
     assert "https://api.sparkvm.dev" not in html, \
         "no hard-coded plane origin; the page calls the plane that served it"
 
@@ -892,3 +897,371 @@ card.getAttribute = function () { return "a_1"; };
     assert o["reenabled"] is True
     assert o["errShown"] is True
     assert o["lateIgnored"] is True
+
+
+# --- push-subscription surface (#968 / GP2) ---------------------------------
+
+def test_b64url_to_u8_vectors():
+    """b64urlToU8 decodes the plane's VAPID-key wire form (base64url of the
+    raw 65-byte uncompressed P-256 point) to the ArrayBufferView
+    PushManager.subscribe() wants."""
+    o = _node_eval("""
+var v = b64urlToU8("TQ");           // "TQ" -> [77]
+var dash = b64urlToU8("-_");        // 0xFB 0xFF
+var unpadded = b64urlToU8("AQID");  // [1,2,3]
+console.log(JSON.stringify({
+  tq: Array.from(v),
+  dash: Array.from(dash),
+  unpadded: Array.from(unpadded),
+}));
+""")
+    assert o["tq"] == [77]
+    assert o["dash"] == [0xFB]  # "+/" is 12 bits -> 1 byte; per-spec atob
+    assert o["unpadded"] == [1, 2, 3]
+
+
+def test_push_row_html_states():
+    """pushRowHtml pins the row template: live vs dead_410 chips, never
+    paged vs last-page relative time."""
+    o = _node_eval("""
+var now2h = Math.floor(Date.parse("2026-10-12T02:21:40Z") / 1000);
+console.log(JSON.stringify({
+  live: pushRowHtml({device: "pixel-9", status: "live",
+                     last_page_at: null}, 1300),
+  dead: pushRowHtml({device: "pixel-9", status: "dead_410",
+                     last_page_at: null}, 1300),
+  paged: pushRowHtml({device: "pixel-9", status: "live",
+                       last_page_at: "2026-10-12T00:21:40Z"}, now2h),
+  badtime: pushRowHtml({device: "pixel-9", status: "live",
+                        last_page_at: "not-a-time"}, 1300),
+}));
+""")
+    live, dead, paged, badtime = o["live"], o["dead"], o["paged"], o["badtime"]
+    assert "pixel-9" in live and 'chip ok">Live' in live
+    assert "never paged" in live
+    assert 'chip stale">Stopped working' in dead and "Remove" in dead
+    assert "Remove" in live  # every row is removable
+    assert "last page 2h ago" in paged
+    assert "paged before" in badtime
+
+
+def test_push_row_html_xss_and_no_secret_render():
+    """#968: the device label is owner-controlled data — the REAL
+    pushRowHtml() template must escape markup. D98 client half: even
+    if the plane violated D98 and returned secret fields on the list
+    endpoint, the row renders device labels and statuses only — the
+    secret VALUES never appear in the DOM."""
+    secret_p256dh = "QUJDREVGR0g"  # stand-in; a real value is 65 bytes
+    secret_auth = "a2V5c2VjcmV0"
+    secret_endpoint = "https://fcm.example.com/secret/send/xyz"
+    a = {"device": 'phone"><img src=x onerror=alert(9)>',
+         "status": "live",
+         "last_page_at": None,
+         "endpoint": secret_endpoint,
+         "p256dh": secret_p256dh,
+         "auth": secret_auth}
+    o = _node_eval("""
+const s = %s;
+console.log(JSON.stringify({ row: pushRowHtml(s, 1300) }));
+""" % json.dumps(a))["row"]
+    assert "<img" not in o and "&lt;img" in o
+    assert 'data-device="' in o and "&quot;" in o
+    for secret in (secret_p256dh, secret_auth, secret_endpoint):
+        assert secret not in o, "secret field value rendered into the DOM"
+
+
+def test_push_register_uses_plane_served_paths_and_device_charset():
+    """The register flow builds its URLs from the pinned contract paths
+    and applies the device-label charset client-side (the plane's D99
+    validation is authoritative; the UI pre-check is the fast path)."""
+    html = _html()
+    assert "pushRowHtml" in html and "b64urlToU8" in html
+    assert "registerDevice" in html and "unsubscribeDevice" in html
+    # client-side charset pre-check mirrors the D99 [A-Za-z0-9._-] rule
+    assert r"/^[A-Za-z0-9._-]{1,64}$/" in html
+    # browser push keys are POSTed, never stored in the page
+    assert 'sessionStorage.setItem("svm_owner_key"' in html
+    # no write of push keys to web storage anywhere in the script
+    script = _script()
+    for storage in ("localStorage.setItem", "sessionStorage.setItem"):
+        assert script.count(storage) == (1 if storage == "sessionStorage.setItem" else 0), \
+            "push keys must never be written to web storage"
+
+
+# --- push-subscription behavioral tests (#968 round-1 QA) ---------------------
+
+_PUSH_NAVIGATOR_STUB = r"""
+var __reg = {
+  pushManager: {
+    subscribe: function (args) {
+      __subscribeArgs = args;
+      return Promise.resolve({
+        endpoint: "https://push.example.com/abc",
+        toJSON: function () {
+          return { keys: { p256dh: "cDhlcmU", auth: "YXV0aA" } };
+        }
+      });
+    }
+  }
+};
+var navigator = {
+  serviceWorker: {
+    register: function (url) { __swRegisterUrl = url; return Promise.resolve(__reg); },
+    ready: Promise.resolve(__reg)
+  },
+  __pushCapable: true
+};
+var __timers = [];
+var __realSetTimeout = setTimeout;
+setTimeout = function (fn, ms) { __timers.push(fn); return __timers.length; };
+"""
+
+
+def test_register_device_success_flow():
+    """The real registerDevice() end-to-end against stubs: /sw.js
+    registration, PushManager.subscribe args, POST path/body, 201 ->
+    the success message. Would fail on a no-op registerDevice."""
+    o = _node_app_eval(_PUSH_NAVIGATOR_STUB + r"""
+var __apiCalls = [], __swRegisterUrl = null, __subscribeArgs = null;
+api = function (path, opts) {
+  __apiCalls.push({ path: path, opts: opts || null });
+  if (path === "/v1/push/vapid-pubkey") {
+    var key = Buffer.from(new Uint8Array(65).fill(4)).toString("base64url");
+    return Promise.resolve({ status: 200, data: { ok: true, vapid_pubkey: key } });
+  }
+  return Promise.resolve({ status: 201, data: { ok: true } });
+};
+document.getElementById("push-device").value = "pixel-9";
+(async function () {
+  registerDevice("box1");
+  var btnMid = document.getElementById("push-register");
+  var midLabel = btnMid.textContent, midDisabled = btnMid.disabled;
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  var posts = __apiCalls.filter(function (c) {
+    return c.path === "/v1/push/subscriptions"; });
+  var btn = document.getElementById("push-register");
+  console.log(JSON.stringify({
+    swUrl: __swRegisterUrl,
+    userVisibleOnly: __subscribeArgs && __subscribeArgs.userVisibleOnly,
+    appKeyLen: __subscribeArgs ?
+      __subscribeArgs.applicationServerKey.length : -1,
+    appKeyFirst: __subscribeArgs ?
+      __subscribeArgs.applicationServerKey[0] : -1,
+    nPosts: posts.length,
+    postBody: posts.length ? posts[0].opts.body : null,
+    okShown: document.getElementById("push-ok").textContent,
+    midLabel: midLabel, midDisabled: midDisabled,
+    btnEnabled: !btn.disabled, btnLabel: btn.textContent,
+  }));
+})();
+""")
+    assert o["swUrl"] == "/sw.js"
+    assert o["userVisibleOnly"] is True
+    assert o["appKeyLen"] == 65 and o["appKeyFirst"] == 4
+    assert o["nPosts"] == 1
+    body = o["postBody"]
+    assert body["box_id"] == "box1" and body["device"] == "pixel-9"
+    assert body["endpoint"] == "https://push.example.com/abc"
+    assert body["keys"] == {"p256dh": "cDhlcmU", "auth": "YXV0aA"}
+    assert "Registered" in o["okShown"]
+    assert o["midDisabled"] is True and o["midLabel"] == "Registering…"
+    assert o["btnEnabled"] is True and o["btnLabel"] == "Register this device"
+
+
+def test_register_device_200_upsert_and_400_and_bad_label():
+    """200 reads as success (D100 upsert); 400 surfaces the plane's
+    message; a bad label is rejected client-side with zero api calls."""
+    o = _node_app_eval(_PUSH_NAVIGATOR_STUB + r"""
+var __apiCalls = [];
+var __postStatus = 200;
+api = function (path, opts) {
+  __apiCalls.push({ path: path });
+  if (path === "/v1/push/vapid-pubkey") {
+    var key = Buffer.from(new Uint8Array(65).fill(4)).toString("base64url");
+    return Promise.resolve({ status: 200, data: { ok: true, vapid_pubkey: key } });
+  }
+  return Promise.resolve({ status: __postStatus,
+    data: __postStatus === 400 ? { error: "device label taken" } : { ok: true } });
+};
+(async function () {
+  var out = {};
+  document.getElementById("push-device").value = "pixel-9";
+  registerDevice("box1");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  out.upsert200 = document.getElementById("push-ok").textContent;
+  __postStatus = 400;
+  registerDevice("box1");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  out.bad400 = document.getElementById("push-err").textContent;
+  var nBefore = __apiCalls.length;
+  document.getElementById("push-device").value = "bad label!";
+  registerDevice("box1");
+  out.badLabelErr = document.getElementById("push-err").textContent;
+  out.noApiOnBadLabel = (__apiCalls.length === nBefore);
+  console.log(JSON.stringify(out));
+})();
+""")
+    assert "Registered" in o["upsert200"]
+    assert "device label taken" in o["bad400"]
+    assert "1–64 chars" in o["badLabelErr"]
+    assert o["noApiOnBadLabel"] is True
+
+
+def test_register_device_rereg_uses_row_label_not_input():
+    """A stopped row's Re-register button passes the row's exact label
+    (Product B3) — recovery upserts the exact (owner, box, device)
+    triple instead of a retyped guess."""
+    o = _node_app_eval(_PUSH_NAVIGATOR_STUB + r"""
+var __postedDevice = null;
+api = function (path, opts) {
+  if (path === "/v1/push/vapid-pubkey") {
+    var key = Buffer.from(new Uint8Array(65).fill(4)).toString("base64url");
+    return Promise.resolve({ status: 200, data: { ok: true, vapid_pubkey: key } });
+  }
+  __postedDevice = (opts && opts.body && opts.body.device) || null;
+  return Promise.resolve({ status: 200, data: { ok: true } });
+};
+(async function () {
+  document.getElementById("push-device").value = "a mistyped guess!";
+  registerDevice("box1", "exact-old-label");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  console.log(JSON.stringify({ postedDevice: __postedDevice,
+    ok: document.getElementById("push-ok").textContent }));
+})();
+""")
+    assert o["postedDevice"] == "exact-old-label"
+    assert "Registered" in o["ok"]
+
+
+def test_unsubscribe_device_url_shape_and_outcomes():
+    """DELETE hits /v1/push/subscriptions/{box_id}/{device} with both
+    parts encoded; 200 -> Removed, 404 -> Already gone."""
+    o = _node_app_eval(r"""
+var __realSetTimeout = setTimeout;
+var __timers = [];
+setTimeout = function (fn, ms) { __timers.push(fn); return __timers.length; };
+var __apiCalls = [];
+var __deleteStatus = 200;
+api = function (path, opts) {
+  __apiCalls.push({ path: path, method: (opts || {}).method });
+  return Promise.resolve({ status: __deleteStatus,
+    data: __deleteStatus === 200 ? { ok: true } : {} });
+};
+(async function () {
+  var out = {};
+  unsubscribeDevice("box 1", "pixel 9");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  out.url = __apiCalls.length ? __apiCalls[0].path : null;
+  out.method = __apiCalls.length ? __apiCalls[0].method : null;
+  out.ok200 = document.getElementById("push-ok").textContent;
+  __deleteStatus = 404;
+  unsubscribeDevice("box1", "pixel-9");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  out.ok404 = document.getElementById("push-ok").textContent;
+  console.log(JSON.stringify(out));
+})();
+""")
+    assert o["url"] == "/v1/push/subscriptions/box%201/pixel%209"
+    assert o["method"] == "DELETE"
+    assert "Removed" in o["ok200"]
+    assert "Already gone" in o["ok404"]
+
+
+def test_render_push_dead_empty_and_capability_gate():
+    """renderPush pins the dead-row recovery affordance (per-row
+    Re-register with the row's exact label) and the empty state; the
+    capability gate explains instead of a dead button."""
+    o = _node_app_eval(r"""
+var out = {};
+renderPush("box1", [{ device: "old", status: "dead_410",
+                      last_page_at: null }]);
+var dead = document.getElementById("detail-push").innerHTML;
+out.deadHasStoppedChip = dead.indexOf("Stopped working") !== -1;
+out.deadHasRereg = dead.indexOf("push-rereg") !== -1;
+out.sharedBtnStillRegister = dead.indexOf(">Register this device<") !== -1;
+out.noSingularReregister = dead.indexOf("Re-register this device") === -1;
+renderPush("box1", []);
+out.empty = document.getElementById("detail-push").innerHTML;
+out.emptyMsg = out.empty.indexOf("No devices registered") !== -1;
+out.roleAlert = out.empty.indexOf('role="alert"') !== -1;
+var navigator = {};  // no serviceWorker, no PushManager
+loadPush("box1");
+out.gate = document.getElementById("detail-push").innerHTML;
+out.gateMsg = out.gate.indexOf("can't receive push notifications") !== -1;
+console.log(JSON.stringify(out));
+""")
+    assert o["deadHasStoppedChip"] is True
+    assert o["deadHasRereg"] is True
+    assert o["sharedBtnStillRegister"] is True
+    assert o["noSingularReregister"] is True
+    assert o["emptyMsg"] is True
+    assert o["roleAlert"] is True
+    assert o["gateMsg"] is True
+
+
+def test_load_push_404_degrades_to_muted_notice():
+    """Product B4: a plane without the subscription endpoints (404/501)
+    renders a plain-language muted notice, not a raw error."""
+    o = _node_app_eval(r"""
+var navigator = { serviceWorker: {} };
+window = { PushManager: true };
+api = function (path, opts) {
+  return Promise.resolve({ status: 404, data: {} });
+};
+var __realSetTimeout = setTimeout;
+(async function () {
+  detailBoxId = "box1";  // showDetail sets this before loadPush
+  loadPush("box1");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  var html = document.getElementById("detail-push").innerHTML;
+  console.log(JSON.stringify({
+    muted: html.indexOf("aren't enabled on this control plane yet") !== -1,
+    noRawError: html.indexOf("Failed to load") === -1,
+  }));
+})();
+""")
+    assert o["muted"] is True
+    assert o["noRawError"] is True
+
+
+def test_completion_reload_rerenders_past_the_guard():
+    """Engineering round-2: the no-wipe guard scopes the 30s auto-refresh
+    ONLY. The 1.5s post-completion reload must re-render the section
+    (force) even though the success message is still visible — otherwise
+    the newly registered device never appears."""
+    o = _node_app_eval(_PUSH_NAVIGATOR_STUB + r"""
+var __listCalls = 0;
+window = { PushManager: true };  // capability gate needs window, not navigator
+api = function (path, opts) {
+  if (path === "/v1/push/vapid-pubkey") {
+    var key = Buffer.from(new Uint8Array(65).fill(4)).toString("base64url");
+    return Promise.resolve({ status: 200, data: { ok: true, vapid_pubkey: key } });
+  }
+  if (path.indexOf("/v1/push/subscriptions?box_id=") === 0) {
+    __listCalls++;
+    return Promise.resolve({ status: 200, data: { ok: true, subscriptions:
+      [{ device: "pixel-9", status: "live", last_page_at: null }] } });
+  }
+  return Promise.resolve({ status: 201, data: { ok: true } });
+};
+(async function () {
+  detailBoxId = "box1";
+  document.getElementById("push-device").value = "pixel-9";
+  registerDevice("box1");
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  var okBefore = document.getElementById("push-ok").textContent;
+  // __timers[0] is the 30s watchdog, __timers[1] the 1.5s completion reload
+  __timers[__timers.length - 1]();
+  await new Promise(function (r) { __realSetTimeout(r, 50); });
+  var html = document.getElementById("detail-push").innerHTML;
+  console.log(JSON.stringify({
+    okBefore: okBefore,
+    listCalls: __listCalls,
+    rowAppeared: html.indexOf("pixel-9") !== -1 &&
+                 html.indexOf('chip ok">Live') !== -1,
+  }));
+})();
+""")
+    assert "Registered" in o["okBefore"]
+    assert o["listCalls"] == 1
+    assert o["rowAppeared"] is True

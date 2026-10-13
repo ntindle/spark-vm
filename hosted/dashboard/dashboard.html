@@ -61,6 +61,14 @@
   .approve-row .approve-btn { flex-shrink: 0; }
   .decide-row { display: flex; gap: 8px; margin-top: 8px; }
   .decide-row .deny-btn { border-color: var(--err); color: var(--err); }
+  .push-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .push-row .dev { flex: 1; min-width: 0; font-weight: 600;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .push-row .since { font-size: .8rem; color: #888; white-space: nowrap; }
+  @media (max-width: 480px) {
+    .push-row { flex-wrap: wrap; }
+    .push-row .dev { flex: 1 1 100%; }
+  }
   @media (max-width: 480px) {
     dl.detail { grid-template-columns: 1fr; }
     dl.detail dd { margin-bottom: 8px; }
@@ -116,6 +124,12 @@
     double-tap replays, a conflicting tap is rejected, and an expired
     approval reads as expired, never pending.</p>
     <div id="detail-approvals"><p class="muted">Loading…</p></div>
+    <h3 class="muted" style="font-size:.9rem">Push notifications</h3>
+    <p class="muted">Which devices get paged when this box files an
+    approval — the registration half of the phone-approval loop.
+    One row per device you registered; a stopped row means the push
+    service stopped accepting it, and only you can register it again.</p>
+    <div id="detail-push"><p class="muted">Loading…</p></div>
     <p><button id="detail-close">Back to fleet</button></p>
   </section>
 
@@ -283,6 +297,50 @@ function approvalCard(a, now) {
       : '') +
     '</div>';
 }
+function b64urlToU8(b64) {
+  // base64url (RFC 4648 section 5) -> Uint8Array. The plane's
+  // GET /v1/push/vapid-pubkey returns the VAPID public key as raw
+  // base64url; PushManager.subscribe() wants applicationServerKey
+  // as an ArrayBufferView.
+  var s = String(b64 == null ? "" : b64).replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  var bin = atob(s);
+  var out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function pushRowHtml(s, now) {
+  // Pure template for one push subscription (#968 / GP2). The device
+  // label is OWNER-controlled but the status rows transit the same
+  // esc() discipline as the approval cards — a template that renders
+  // a raw field must fail the node XSS suite. D98: the plane never
+  // returns secret fields on the list endpoint, so there is nothing
+  // here that must stay hidden — device labels and statuses are the
+  // whole render.
+  var isDead = s.status === "dead_410";
+  var paged = "";
+  if (s.last_page_at != null) {
+    var pt = Math.floor(Date.parse(s.last_page_at) / 1000);
+    paged = isFinite(pt)
+      ? '<span class="since">last page ' + esc(relTime(pt, now)) + "</span>"
+      : '<span class="since">paged before</span>';
+  } else {
+    paged = '<span class="since">never paged</span>';
+  }
+  return '<div class="push-row card" data-device="' + esc(s.device) + '">' +
+    '<span class="dev">' + esc(s.device) + "</span>" +
+    (isDead
+      ? '<span class="chip stale">Stopped working</span>'
+      : '<span class="chip ok">Live</span>') +
+    paged +
+    // A stopped row's own Re-register button passes the row's label
+    // straight into registerDevice — recovery must upsert the exact
+    // (owner, box, device) triple, and retyping the label by hand is
+    // one typo away from a duplicate row plus a ghost dead row.
+    (isDead ? '<button class="push-rereg">Re-register</button>' : '') +
+    '<button class="push-unsub">Remove</button>' +
+    "</div>";
+}
 
 /* ---- app state ---- */
 var KEY = null;
@@ -368,8 +426,10 @@ function refreshAll() {
     banner.classList.remove("hidden");
   });
   loadPairings();
-  if (detailBoxId && !document.getElementById("detail-card").classList.contains("hidden"))
+  if (detailBoxId && !document.getElementById("detail-card").classList.contains("hidden")) {
     loadApprovals(detailBoxId, true);
+    loadPush(detailBoxId, true);
+  }
 }
 function renderFleet() {
   var now = Math.floor(Date.now() / 1000);
@@ -412,6 +472,7 @@ function showDetail(boxId) {
     document.getElementById("detail-raw").classList.add("hidden");
     document.getElementById("raw-toggle").textContent = "Show raw status JSON";
     loadApprovals(boxId);
+    loadPush(boxId, false, true); // explicit navigation forces the render
   }).catch(function () {
     if (detailBoxId !== boxId) return; // a newer box was opened; stay out
     document.getElementById("detail-name").textContent = "Failed to load box";
@@ -519,6 +580,249 @@ function decideApproval(card, boxId, aid, decision) {
     err.textContent = "Decision failed: " + (e && e.message || e);
     err.classList.remove("hidden");
   });
+}
+function loadPush(boxId, quiet, force) {
+  // Owner push-subscription surface for this box (#968 / GP2).
+  // Capability gate first: PushManager needs a service worker, and
+  // some browsers simply cannot receive push — say why instead of
+  // showing a dead button.
+  var el = document.getElementById("detail-push");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    el.innerHTML = "<p class=\"muted\">This browser can't receive push " +
+      "notifications (no service-worker or PushManager support) — " +
+      "register from a supported browser instead.</p>";
+    return;
+  }
+  if (!quiet || !el.querySelector(".card")) el.innerHTML = '<p class="muted">Loading…</p>';
+  api("/v1/push/subscriptions?box_id=" + encodeURIComponent(boxId))
+    .then(function (r) {
+      if (detailBoxId !== boxId) return; // a newer box was opened; stay out
+      if (r.status === 200 && r.data.ok) {
+        renderPush(boxId, r.data.subscriptions || [], force);
+      } else if (r.status === 404 || r.status === 501) {
+        // The plane hasn't implemented the subscription endpoints yet
+        // (the wire contract is merged; the private plane half follows
+        // it). This is a known not-yet state, not a bug — say so in
+        // plain language instead of an error.
+        el.innerHTML = '<p class="muted">Push notifications aren\'t ' +
+          'enabled on this control plane yet — the registration ' +
+          'endpoints are pinned in docs/PUSH_SUBSCRIPTION_WIRE_CONTRACT.md ' +
+          'and land with the plane half of the work.</p>';
+      } else {
+        el.innerHTML = '<p class="err">Failed to load push subscriptions: ' +
+          esc(r.data.error || ("HTTP " + r.status)) + "</p>";
+      }
+    }).catch(function (e) {
+      if (String(e && e.message) === "unauthorized") return;
+      el.innerHTML = '<p class="err">Failed to load push subscriptions: ' +
+        esc(e && e.message || e) + "</p>";
+    });
+}
+function renderPush(boxId, subs, force) {
+  var el = document.getElementById("detail-push");
+  // Same no-wipe rule as the decide cards (#954) — but it scopes the
+  // 30s auto-refresh ONLY. Explicit navigation and the post-completion
+  // reload pass force, so a visible confirmation never deadlocks the
+  // section (the completion reload is the read window's end).
+  if (!force &&
+      el.querySelector(".push-busy, .err:not(.hidden), .okmsg:not(.hidden)")) return;
+  var now = Math.floor(Date.now() / 1000);
+  var dead = subs.filter(function (s) { return s.status === "dead_410"; });
+  var live = subs.filter(function (s) { return s.status !== "dead_410"; });
+  var out = "";
+  if (dead.length) {
+    out += "<p class=\"muted\">These stopped working — the push service " +
+      "rejected them. Use the Re-register button on each stopped row " +
+      "(it carries the exact device label the plane expects); " +
+      "nobody else can do it for you.</p>";
+  }
+  out += live.map(function (s) { return pushRowHtml(s, now); }).join("") +
+    dead.map(function (s) { return pushRowHtml(s, now); }).join("");
+  if (!subs.length) {
+    out += "<p class=\"muted\">No devices registered — this box can't " +
+      "page you until you register one.</p>";
+  }
+  out += '<div class="approve-row">' +
+    '<input type="text" id="push-device" maxlength="64" ' +
+    'placeholder="Device label, e.g. pixel-9" aria-label="Device label">' +
+    '<button class="primary approve-btn" id="push-register">' +
+    "Register this device" +
+    "</button></div>" +
+    '<p class="err hidden" id="push-err" role="alert"></p>' +
+    '<p class="okmsg hidden" id="push-ok"></p>';
+  el.innerHTML = out;
+  var btn = document.getElementById("push-register");
+  btn.addEventListener("click", function () { registerDevice(boxId); });
+  Array.prototype.forEach.call(el.querySelectorAll(".push-unsub"),
+    function (u) {
+      u.addEventListener("click", function () {
+        unsubscribeDevice(boxId,
+          u.parentNode.getAttribute("data-device"));
+      });
+    });
+  Array.prototype.forEach.call(el.querySelectorAll(".push-rereg"),
+    function (b) {
+      b.addEventListener("click", function () {
+        registerDevice(boxId,
+          b.parentNode.getAttribute("data-device"));
+      });
+    });
+}
+function registerDevice(boxId, presetLabel) {
+  // Mint a browser push subscription with the plane's VAPID key, then
+  // POST it to the plane. The 30s watchdog mirrors the decide path:
+  // api() is a bare fetch with no timeout. presetLabel (a stopped
+  // row's own label) bypasses the manual input — recovery must upsert
+  // the exact (owner, box, device) triple, not a retyped guess.
+  var el = document.getElementById("detail-push");
+  var err = document.getElementById("push-err"),
+      ok = document.getElementById("push-ok");
+  var input = document.getElementById("push-device"),
+      btn = document.getElementById("push-register");
+  err.classList.add("hidden"); ok.classList.add("hidden");
+  var label = presetLabel || input.value.trim();
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(label)) {
+    err.textContent = "Device label: 1–64 chars of letters, digits, " +
+      "dot, underscore, or dash.";
+    err.classList.remove("hidden");
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "Registering…";
+  el.classList.add("push-busy");
+  var settled = false;
+  var watchdog = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    btn.disabled = false;
+    btn.textContent = "Register this device";
+    el.classList.remove("push-busy");
+    err.textContent = "Registration timed out — the plane may still " +
+      "have recorded it; refresh or tap again to check.";
+    err.classList.remove("hidden");
+  }, 30000);
+  var restore = function () {
+    btn.disabled = false;
+    btn.textContent = "Register this device";
+    el.classList.remove("push-busy");
+  };
+  var finish = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    restore();
+    // Completion reload: the 1.5 s read window is over, so force the
+    // render past the no-wipe guard (the guard scopes auto-refresh only).
+    if (detailBoxId) setTimeout(function () { loadPush(detailBoxId, false, true); }, 1500);
+  };
+  navigator.serviceWorker.register("/sw.js").then(function () {
+    return navigator.serviceWorker.ready;
+  }).then(function (reg) {
+    return api("/v1/push/vapid-pubkey").then(function (r) {
+      if (r.status !== 200 || !r.data.ok || !r.data.vapid_pubkey) {
+        throw new Error("couldn't fetch the plane's VAPID key");
+      }
+      var appKey;
+      try {
+        appKey = b64urlToU8(r.data.vapid_pubkey);
+      } catch (e) {
+        throw new Error("the plane's VAPID key is malformed");
+      }
+      return reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appKey
+      });
+    });
+  }).then(function (sub) {
+    var j = sub.toJSON();
+    // The browser's own push keys are POSTed here and never stored in
+    // the page: the PushManager holds them, the POST is the only
+    // transit, and D45 encrypts them at rest on the plane.
+    return api("/v1/push/subscriptions", {
+      method: "POST",
+      body: { box_id: boxId, device: label, endpoint: sub.endpoint,
+              keys: { p256dh: j.keys.p256dh, auth: j.keys.auth } }
+    });
+  }).then(function (r) {
+    if (r.status === 200 || r.status === 201) {
+      ok.textContent = "Registered — this device will be paged when " +
+        "this box files an approval.";
+      ok.classList.remove("hidden");
+    } else {
+      err.textContent = "Registration failed: " +
+        (r.data.error || ("HTTP " + r.status));
+      err.classList.remove("hidden");
+    }
+    finish();
+  }).catch(function (e) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    restore();
+    if (String(e && e.message) === "unauthorized") return;
+    if (e && e.name === "NotAllowedError") {
+      err.textContent = "Browser blocked notifications — allow them for " +
+        "this site, then tap again.";
+    } else {
+      err.textContent = "Registration failed: " + (e && e.message || e);
+    }
+    err.classList.remove("hidden");
+  });
+}
+function unsubscribeDevice(boxId, device) {
+  // DELETE /v1/push/subscriptions/{box_id}/{device} (#968 D101) — a
+  // real delete, not a tombstone; re-subscribe is a fresh row.
+  // The 30s watchdog mirrors registerDevice: a hung DELETE must not
+  // freeze the section forever, because the no-wipe guard blocks
+  // quiet refreshes while push-busy is set.
+  var el = document.getElementById("detail-push");
+  var err = document.getElementById("push-err"),
+      ok = document.getElementById("push-ok");
+  err.classList.add("hidden"); ok.classList.add("hidden");
+  el.classList.add("push-busy");
+  var settled = false;
+  var watchdog = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    el.classList.remove("push-busy");
+    err.textContent = "Remove timed out — the plane may still have " +
+      "removed it; refresh or tap again to check.";
+    err.classList.remove("hidden");
+  }, 30000);
+  var release = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    el.classList.remove("push-busy");
+    // Completion reload: the 1.5 s read window is over, so force the
+    // render past the no-wipe guard (the guard scopes auto-refresh only).
+    if (detailBoxId) setTimeout(function () { loadPush(detailBoxId, false, true); }, 1500);
+  };
+  api("/v1/push/subscriptions/" + encodeURIComponent(boxId) + "/" +
+      encodeURIComponent(device), { method: "DELETE" })
+    .then(function (r) {
+      if (r.status === 200 && r.data.ok) {
+        ok.textContent = "Removed — this device won't be paged for " +
+          "this box anymore.";
+        ok.classList.remove("hidden");
+      } else if (r.status === 404) {
+        ok.textContent = "Already gone — the row was already removed.";
+        ok.classList.remove("hidden");
+      } else {
+        err.textContent = "Remove failed: " +
+          (r.data.error || ("HTTP " + r.status));
+        err.classList.remove("hidden");
+      }
+      release();
+    }).catch(function (e) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      el.classList.remove("push-busy");
+      if (String(e && e.message) === "unauthorized") return;
+      err.textContent = "Remove failed: " + (e && e.message || e);
+      err.classList.remove("hidden");
+    });
 }
 function loadPairings() {
   if (!KEY) return;
