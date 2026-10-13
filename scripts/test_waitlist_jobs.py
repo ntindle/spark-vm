@@ -123,6 +123,45 @@ def test_reminder_fires_at_plus_seven_days():
     assert [e for e in evs if e["event"] == "reminder_sent"][0]["ref"] == entry_id
 
 
+def test_reminder_after_spool_outage_retries_and_records_fresh_token(
+        monkeypatch):
+    # #406 (QA round-3): the advertised automatic-recovery path — a
+    # sick-spool signup leaves the row pending with no token recorded;
+    # once the spool heals, the +7d reminder retries AND records the
+    # fresh token on the row, so the emailed link actually validates
+    # (a regression here would mail a token the server never recorded —
+    # a dead confirm link).
+    svc, tmp, clock = make_service()
+    real_spool = svc._write_spool
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    status, _ = submit(svc, "outage-rem@example.com")
+    assert status == 200
+    entry_id = svc.by_email["outage-rem@example.com"]
+    row = svc.rows[entry_id]
+    assert row["status"] == "pending"
+    assert row["active_token"] is None
+    assert row["email_sends"] == []
+
+    monkeypatch.setattr(svc, "_write_spool", real_spool)
+    clock.advance(days=8)
+    assert svc.send_reminders() == 1
+    row = svc.rows[entry_id]
+    assert row["status"] == "pending"
+    fresh = row["active_token"]
+    assert fresh is not None
+    ok_row, ok = svc.validate_token(fresh)
+    assert ok
+    assert len(row["email_sends"]) == 1
+    docs = spool_docs(tmp)
+    reminder = [d for d in docs if d.get("kind") == "reminder"]
+    assert len(reminder) == 1
+    assert fresh in reminder[0]["body"]
+
+
 def test_reminder_not_before_plus_seven_days():
     svc, tmp, clock = make_service()
     submit(svc, "early@example.com")

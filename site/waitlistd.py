@@ -1117,9 +1117,11 @@ class WaitlistService:
         the old file (never — spool names are unique per send) or the
         new one, never a torn one. The tmp is removed on failure so no
         partial file is ever left behind for the sender. OSError
-        propagates — the caller's contract is unchanged: the invite path
-        catches it and commits nothing; the other paths treat it as
-        fatal.
+        propagates — every caller catches it and commits nothing (#406):
+        the invite, confirm, reminder, and path-A queue paths all return
+        False with the row/ledger state untouched, and the next retry
+        (wave, re-submit, reminder job, path-A re-drive) picks the send
+        up cleanly.
         """
         path = os.path.join(self.spool_dir, name)
         tmp = f"{path}.tmp-{secrets.token_hex(4)}"
@@ -1222,7 +1224,10 @@ class WaitlistService:
 
     def _queue_confirm_email(self, row):
         """Spool the confirm email; the operator's sender drains the spool.
-        Returns False when the unified 3/24h cap suppressed the send.
+        Returns False when the unified 3/24h cap suppressed the send or
+        when the spool write failed (#406: the row is then untouched —
+        still pending, no token recorded — so a later re-submit or the
+        +7d reminder retries cleanly).
 
         The §4 cap is enforced as the UNION of the row's email_sends
         ledger and the path-A "email" ledger (see _unified_send_allowed):
@@ -1238,11 +1243,11 @@ class WaitlistService:
             f"{self.public_host}/waitlist/forget?token="
             f"{self.mint_forget_token(row['entry_id'], row['owner_email'])}"
         )
-        row["active_token"] = token  # the one live token for this row
-        # Which email carried the live token — drives the `via` attr on
+        # The token is recorded on the row only after the spool write
+        # succeeds (#406) — a failed spool leaves the row untouched.
+        # Which email carried the live token drives the `via` attr on
         # the `confirmed` event (FUNNEL_MEASUREMENT.md §3.4: original |
         # reminder). The reminder overwrites this when it sends.
-        row["active_token_kind"] = "confirm"
         # The §4 DRAFT splits the confirm opener by submission path:
         # path-A rows get the "your agent asked" opener, path-B the form one.
         body_tpl = (CONFIRM_BODY_PATH_A if row.get("path") == "email"
@@ -1259,7 +1264,18 @@ class WaitlistService:
         name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")  # unique per send: two
         # sends in the same second for one row must not share a filename
-        self._write_spool(name, doc)  # atomic — #389
+        try:
+            self._write_spool(name, doc)  # atomic — #389
+        except OSError:
+            # #406: mirror the invite path's return-False handling — a
+            # spool failure (disk-full, spool-dir permission) commits
+            # nothing. The minted token is never referenced, the row
+            # keeps its pre-send state, and no confirm_sent event fires,
+            # so a later re-submit or the +7d reminder retries cleanly
+            # instead of 500ing the web signup.
+            return False
+        row["active_token"] = token  # the one live token for this row
+        row["active_token_kind"] = "confirm"
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
@@ -1332,7 +1348,10 @@ class WaitlistService:
         §4 3/24h cap like every other transactional send (union of the
         row ledger and the path-A ledger — see _unified_send_allowed).
         Returns True when the email went out; False when the cap deferred it (the job retries on the
-        next cron run — the old token stays live, nothing is marked)."""
+        next cron run — the old token stays live, nothing is marked) or when
+        the spool write failed (#406: the row is then untouched — the old
+        token stays live, nothing is marked — and the next cron run
+        retries cleanly)."""
         if not self._unified_send_allowed(row):
             return False
         old_token = row.get("active_token")
@@ -1348,11 +1367,16 @@ class WaitlistService:
             except (ValueError, IndexError):
                 use_token = None
         if use_token is None:
+            # Fresh token — recorded on the row only after the spool
+            # write succeeds (#406), so a failed spool leaves the old
+            # token live and the row untouched.
+            fresh_token = True
             use_token = self.mint_token(row["entry_id"], row["owner_email"])
-            row["active_token"] = use_token
+        else:
+            fresh_token = False
         # Even when the reminder reuses the live confirm token, the human
         # clicked the REMINDER email — the `confirmed` event must say so.
-        row["active_token_kind"] = "reminder"
+        # (Set after the spool write, with the token — #406.)
         link = f"{self.public_host}/waitlist/confirm?token={use_token}"
         forget_link = (
             f"{self.public_host}/waitlist/forget?token="
@@ -1375,7 +1399,17 @@ class WaitlistService:
         }
         name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        self._write_spool(name, doc)  # atomic — #389
+        try:
+            self._write_spool(name, doc)  # atomic — #389
+        except OSError:
+            # #406: mirror the invite path — commit nothing. The old
+            # token stays live, no email_sends ledger entry, no
+            # reminder_sent_at, no event; the job retries on the next
+            # cron run.
+            return False
+        if fresh_token:
+            row["active_token"] = use_token
+        row["active_token_kind"] = "reminder"
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
@@ -1670,8 +1704,11 @@ class WaitlistService:
         goes out — a cap-suppressed re-send must never strand the user
         with zero live tokens.
 
-        Returns one of "confirmed" | "resubmitted" | "confirm_capped";
-        the caller renders that outcome for its own channel.
+        Returns one of "confirmed" | "resubmitted" | "confirm_capped" |
+        "confirm_delayed"; the caller renders that outcome for its own
+        channel. "confirm_delayed" is the #406 spool-failure case where no
+        email ever went out for the row (as opposed to "confirm_capped",
+        where the earlier link still works).
         """
         if row["status"] == "confirmed":
             # Idempotent: already on the list. No new event, no email.
@@ -1685,8 +1722,15 @@ class WaitlistService:
             if old_token:
                 self._consume_token(old_token)
             return "resubmitted"
-        # Capped: the earlier link still works — the caller says so
-        # honestly instead of claiming an email was sent.
+        if not row.get("email_sends"):
+            # #406: the spool failed and no email ever went out for this
+            # row (the initial send failed the same way) — rendering
+            # "already sent" would be a lie. Same honest page as a
+            # failed first send; the +7d reminder retries automatically.
+            return "confirm_delayed"
+        # Capped (or spool-failed after an earlier success): the earlier
+        # link still works — the caller says so honestly instead of
+        # claiming an email was sent.
         return "confirm_capped"
 
     def _resubmit(self, row, owner_raw, muse_contact):
@@ -1697,6 +1741,7 @@ class WaitlistService:
             "confirmed": page_confirmed(),
             "resubmitted": page_check_inbox(owner_raw),
             "confirm_capped": page_already_sent(owner_raw),
+            "confirm_delayed": page_confirm_delayed(owner_raw),
         }[outcome]
 
     def _create_row(self, owner, owner_raw, muse_contact, *, path="form",
@@ -1736,8 +1781,14 @@ class WaitlistService:
         if path == "email":
             attrs["inbound_auth"] = bool(inbound_auth)
         self._emit("waitlist_submitted", entry_id, attrs)
-        self._queue_confirm_email(row)  # first send is always under the cap
-        return 200, page_check_inbox(owner_raw)
+        if self._queue_confirm_email(row):
+            return 200, page_check_inbox(owner_raw)
+        # #406: the spool write failed — the row stays pending with
+        # nothing committed. No 500; an honest page instead of "check
+        # your inbox" for an email that was never queued. The +7d
+        # reminder job retries automatically, and a re-submit mints a
+        # fresh token.
+        return 200, page_confirm_delayed(owner_raw)
 
 
     # -- path-A email intake -------------------------------------------------
@@ -1911,7 +1962,9 @@ class WaitlistService:
         checked against both and recorded in both, so path-A replies
         count together with confirms/reminders/invites to the same
         address. Returns True when the email went out, False when the
-        cap suppressed it."""
+        cap suppressed it or when the spool write failed (#406: the
+        ledger and row see the send only when the spool actually
+        landed)."""
         if not self._patha_send_allowed(to):
             return False
         # Union half #1: when the recipient owns a live row, the row's
@@ -1930,7 +1983,14 @@ class WaitlistService:
         }
         name = (f"patha-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        self._write_spool(name, doc)  # atomic — #389
+        try:
+            self._write_spool(name, doc)  # atomic — #389
+        except OSError:
+            # #406: mirror the invite path — the ledgers see the send
+            # only when the spool actually landed. Callers map False to
+            # their honest outcome (clarification_capped /
+            # forget_request_capped).
+            return False
         self._record_patha_event(to, "email")
         if row is not None:
             # Union half #2: the row ledger sees path-A sends too.
@@ -2011,12 +2071,18 @@ class WaitlistService:
         a racing second invocation slip past before the first records.
 
         Returns (outcome, row) where outcome is one of:
-          "created"        — new row; confirm email queued (path-A opener)
+          "created"        — new row; confirm email queued (path-A opener).
+                             On a spool failure the outcome is
+                             "confirm_delayed" instead (nothing queued).
           "resubmitted"    — existing pending row refreshed + fresh
                              confirm email
           "confirmed"      — row already confirmed; idempotent, no email
           "confirm_capped" — accepted but the 3/24h cap suppressed the
                              re-send; the earlier link still works.
+          "confirm_delayed" — accepted but the confirm email couldn't be
+                             queued (sick spool dir, #406) and no email
+                             ever went out for the row; the +7d reminder
+                             retries automatically.
           "already_invited" — the owner was already invited off the
                              waitlist; no new row, no email, nothing
                              refreshed. The submission ledger event is
@@ -2057,7 +2123,15 @@ class WaitlistService:
             _, _page = self._create_row(
                 owner, owner, sender, path="email",
                 inbound_auth=inbound_auth, pubkey=pubkey, usecase=usecase)
-            return "created", self.rows[self.by_email[owner]]
+            row = self.rows[self.by_email[owner]]
+            if not row.get("email_sends"):
+                # #406: the confirm email couldn't be queued (sick spool
+                # dir — the cap can't suppress a first send). Returning
+                # "created" would tell the operator a confirm email was
+                # queued that never was; the honest outcome mirrors the
+                # web channel's delayed page.
+                return "confirm_delayed", row
+            return "created", row
 
     # -- confirm -----------------------------------------------------------
 
@@ -3641,6 +3715,34 @@ def page_already_claimed(owner_raw):
             "the claim is recorded and there&#x2019;s nothing else to do.</p>"
             '<p class="muted">Re-entering the address here won&#x2019;t '
             "create a new spot — each address claims exactly once.</p>"
+        ),
+    )
+
+
+def page_confirm_delayed(owner_raw):
+    """Honest rendering for a spool-failed confirm send (#406): the signup
+    is saved but no confirmation email was queued — never claim an email
+    went out when it didn't. The row stays pending and the +7d reminder
+    job retries automatically; a re-submit mints a fresh token."""
+    if owner_raw:
+        addr = html.escape(owner_raw.strip(), quote=True)
+        echo = (
+            f"<p>Your signup for <strong>{addr}</strong> is saved.</p>"
+            '<p class="muted"><a href="/waitlist">Go back</a> and re-enter '
+            "your address to trigger a fresh confirmation email.</p>"
+        )
+    else:
+        echo = ""
+    return PAGE_SHELL.format(
+        title="Confirmation delayed",
+        body=(
+            "<h1>Confirmation delayed</h1>"
+            + echo +
+            "<p>We couldn\u2019t send your confirmation email just now, "
+            "but we\u2019ll keep retrying automatically \u2014 there\u2019s "
+            "nothing you need to do.</p>"
+            "<p class=\"muted\">Unconfirmed addresses are dropped automatically "
+            "after 14 days.</p>"
         ),
     )
 

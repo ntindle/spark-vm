@@ -112,6 +112,10 @@ Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
                          unset or unwritable. Never the repo.
     WAITLIST_PUBLIC_HOST public origin for links in queued email
                          (default https://waitlist.example.invalid).
+                         A real --send-wave refuses to run while the
+                         default survives (#407): the reserved .invalid
+                         name would bake dead claim links into every
+                         invite.
     WAITLIST_CLAIM_LIVE  set to exactly "1" only when GET
                          /waitlist/claim actually serves invite tokens —
                          the route ships in waitlistd (claim slice), and
@@ -148,6 +152,12 @@ from waitlistd import (  # noqa: E402
 _cli_clock = None
 
 
+# The reserved non-routable default for WAITLIST_PUBLIC_HOST (RFC 2606).
+# A real --send-wave fails loud while this survives (#407) — it would
+# bake dead claim links into every invite email.
+_DEFAULT_PUBLIC_HOST = "https://waitlist.example.invalid"
+
+
 def load_config(argv):
     if "--help" in argv or "-h" in argv:
         sys.stdout.write(__doc__ + "\n")
@@ -179,7 +189,7 @@ def load_config(argv):
             "writable directory.\n")
         raise SystemExit(2)
     host = os.environ.get("WAITLIST_PUBLIC_HOST",
-                           "https://waitlist.example.invalid")
+                           _DEFAULT_PUBLIC_HOST)
     return key, data_dir, host
 
 
@@ -237,6 +247,23 @@ def main(argv):
             "WAITLIST_CLAIM_LIVE is not \"1\". Set it only when GET "
             "/waitlist/claim serves invite tokens "
             "(WAITLIST_OPERATIONS.md §10).\n")
+        raise SystemExit(2)
+
+    if want_wave and not dry_run and \
+            host.rstrip("/") == _DEFAULT_PUBLIC_HOST:
+        # #407: the self-attestation above can't catch a host that was
+        # never configured — the .invalid default is a reserved
+        # non-routable name, so a wave sent with it bakes dead claim
+        # links into every invite. Fail loud; --dry-run is unaffected
+        # (it sends nothing). A live claim-route probe is deliberately
+        # not part of this gate: the sender may run without network
+        # access to the public origin, and a probe failure would block
+        # a legitimate wave.
+        sys.stderr.write(
+            "waitlist_invites: refusing to send a wave — "
+            "WAITLIST_PUBLIC_HOST is still the reserved default "
+            f"{_DEFAULT_PUBLIC_HOST!r}. Set it to the real public "
+            "origin before sending invites.\n")
         raise SystemExit(2)
 
     wave = count = pricing = terms = None

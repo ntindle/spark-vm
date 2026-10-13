@@ -351,7 +351,7 @@ def test_cli_wave_and_rollover(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
     monkeypatch.setenv("WAITLIST_DATA", str(data))
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
-                       "https://waitlist.example.invalid")
+                       "https://sparkvm.dev")  # #407: a real wave refuses the .invalid default
     monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
@@ -384,6 +384,10 @@ def test_cli_rejects_empty_pricing(tmp_path, monkeypatch):
     data.mkdir()
     monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
     monkeypatch.setenv("WAITLIST_DATA", str(data))
+    # Reach the pricing check: satisfy the CLAIM_LIVE attestation and the
+    # #407 default-host gate so the failure is really about pricing.
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST", "https://sparkvm.dev")
     with pytest.raises(SystemExit) as exc:
         wi.main(["--send-wave", "--wave", "w1", "--count", "1",
                  "--pricing-file", str(pricing),
@@ -516,8 +520,53 @@ def test_cli_claim_live_guard(tmp_path, monkeypatch, capsys):
     assert wi.main(argv + ["--dry-run"]) == 0
     # ...and the attestation unlocks the real wave.
     monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    # #407: a real wave also refuses the reserved .invalid default host.
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST", "https://sparkvm.dev")
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
+                                 clock=MutClock())
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    assert wi.main(argv) == 0
+    assert "invited 1 row(s)" in capsys.readouterr().out
+
+
+def test_cli_wave_refuses_default_public_host(tmp_path, monkeypatch, capsys):
+    # #407: the self-attestation can't catch a host that was never
+    # configured — a real wave with WAITLIST_PUBLIC_HOST still at the
+    # reserved .invalid default refuses loud (exit 2), so no wave of
+    # dead-CTA claim links can go out. --dry-run is unaffected (it sends
+    # nothing); an explicit real host unlocks the wave.
+    pricing = tmp_path / "pricing.txt"
+    terms = tmp_path / "terms.txt"
+    _write(str(pricing), PRICING)
+    _write(str(terms), TERMS)
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    monkeypatch.delenv("WAITLIST_PUBLIC_HOST", raising=False)
+    argv = ["--send-wave", "--wave", "w1", "--count", "1",
+            "--pricing-file", str(pricing),
+            "--trial-terms-file", str(terms)]
+    with pytest.raises(SystemExit) as exc:
+        wi.main(argv)
+    assert exc.value.code == 2
+    assert "WAITLIST_PUBLIC_HOST" in capsys.readouterr().err
+    # A trailing slash must not dodge the gate (the service rstrips it).
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid/")
+    with pytest.raises(SystemExit) as exc:
+        wi.main(argv)
+    assert exc.value.code == 2
+    # --dry-run sends nothing: no host gate...
+    assert wi.main(argv + ["--dry-run"]) == 0
+    # ...and a real host unlocks the real wave.
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST", "https://sparkvm.dev")
+    service = wd.WaitlistService(str(data), KEY,
+                                 "https://sparkvm.dev",
                                  clock=MutClock())
     service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
     row = service.rows[service.by_email["a@example.com"]]
@@ -1845,7 +1894,7 @@ def test_cli_wave_prints_manifest(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
     monkeypatch.setenv("WAITLIST_DATA", str(data))
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
-                       "https://waitlist.example.invalid")
+                       "https://sparkvm.dev")  # #407: a real wave refuses the .invalid default
     monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
@@ -1886,7 +1935,7 @@ def test_cli_wave_manifest_failure_warns_but_invites(tmp_path, monkeypatch,
     monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
     monkeypatch.setenv("WAITLIST_DATA", str(data))
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
-                       "https://waitlist.example.invalid")
+                       "https://sparkvm.dev")  # #407: a real wave refuses the .invalid default
     monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
