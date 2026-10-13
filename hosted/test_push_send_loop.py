@@ -792,6 +792,31 @@ def test_plaintext_mapping_d79():
             digest_count=None)
 
 
+def test_digest_plaintext_drops_when_clause_for_past_window():
+    # A late-fired past-window digest (the D76 hour-boundary heal) must
+    # not claim "this hour" about the previous hour's pages — and the
+    # body must stay human: no raw UTC hour bucket on the lock screen.
+    # The window stays in the aid for machine consumers.
+    now = datetime(2026, 10, 6, 16, 1, tzinfo=timezone.utc)
+    aid, ttl, text = push_send_loop._plaintext_for(
+        "digest", key_material="2026-10-06T15", owner_principal="o",
+        record=None, digest_count=3, now=now)
+    assert aid == "digest:o:2026-10-06T15" and ttl == 3600
+    assert text == "3 pages coalesced \u2014 open the dashboard."
+    assert "this hour" not in text
+    assert "2026-10-06T15" not in text
+    # The current window keeps the "this hour" text.
+    _, _, text_now = push_send_loop._plaintext_for(
+        "digest", key_material="2026-10-06T16", owner_principal="o",
+        record=None, digest_count=1, now=now)
+    assert text_now == "1 page coalesced this hour \u2014 open the dashboard."
+    # Singular/plural preserved on the windowless form.
+    _, _, text_one = push_send_loop._plaintext_for(
+        "digest", key_material="2026-10-06T15", owner_principal="o",
+        record=None, digest_count=1, now=now)
+    assert text_one == "1 page coalesced \u2014 open the dashboard."
+
+
 def test_serialize_plaintext_d84_is_canonical():
     payload = push_send_loop.serialize_plaintext(
         {"ttl_s": 600, "summary": "hi", "aid": "a1"})

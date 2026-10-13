@@ -471,18 +471,27 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
     accepted (disposition `queued`), `push_digest_state.enqueued_at`
     is stamped with the sweep's clock reading. A budget-suppressed
     digest leaves `enqueued_at` NULL so a later sweep retries; a
-    fired window is never refired (the D54/D57 page-once key is the
-    window itself, so a refire attempt is a harmless `duplicate`).
+    fired window is never refired because the sweep only scans
+    `count > 0 AND enqueued_at IS NULL` and D87 zeroes the count at
+    completion. Note the enqueue boundary does NOT guard this:
+    digest attempt rows carry the subscription's real box id
+    (D56c/D89) while the digest's queued row carries box_id=''
+    (enqueue D51), so neither the D53 outcome-blind fast-path
+    (box_id-scoped) nor the D57 partial index (outcome-scoped)
+    sees a completed digest's rows -- a direct `enqueue_page`
+    re-enqueue of a fired window reports `queued` (latent; the
+    sweep is the only caller and never refires -- see #1424).
 
     #1096 — the crash gap: `enqueue_page` commits the `queued` row in
     its own transaction and the stamp below is a second commit, so a
     crash between them leaves `enqueued_at` NULL with a live page row
     — and the stamp (then only on `queued`) never healed. The stamp
-    now also lands on a `duplicate` refire when a page/attempt row
-    exists for the window's exact digest key (the D77 suppression
-    audit is suffixed, so it cannot false-match). A `duplicate` from
-    the D57 race path with no page row present leaves the stamp
-    unset — a later sweep retries.
+    now also lands on a `duplicate` refire when the queued page row
+    still exists for the window's exact digest key (the D77
+    suppression audit is suffixed, so it cannot false-match; digest
+    attempt rows carry real box ids and never match the box_id=''
+    lookup). A `duplicate` from the D57 race path with no page row
+    present leaves the stamp unset — a later sweep retries.
     """
     _require_key_material("owner_principal", owner_principal)
     moment = _utcnow(now)

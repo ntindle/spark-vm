@@ -129,6 +129,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The hourly digest push no longer claims "this hour" when it delivers
+  late for a previous hour: the body reads "N pages coalesced — open
+  the dashboard." for those late deliveries. Also adds a regression test
+  locking in the no-duplicate guarantee: re-enqueueing an already-
+  delivered page is safely ignored instead of sending twice. (#1425)
 - The markdown link check in CI now re-runs once after a short cooldown
   when it fails: transient upstream errors (a site briefly returning 502
   to the CI runner, as happened 2026-10-13) no longer fail the run, while
