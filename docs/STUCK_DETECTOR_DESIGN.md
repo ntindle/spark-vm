@@ -108,7 +108,7 @@ predicate, not a separate unenforced procedure):
    never a stall — the §4 `NOT suspended_or_scheduled` conjunct does this
    work once H13's suspend contract ships; until then the conjunct is
    unobservable and the closed-world rule (§4) blocks emission. The
-   12-code vocabulary has no `suspended` code (endpoint §4), so nothing
+   13-code vocabulary has no `suspended` code (endpoint §4), so nothing
    in the taxonomy accidentally covers this case — the provider-state
    conjunct is the whole story.
 6. **Only then, `stuck`.** The arc-scope conjunct (§4) is the hard gate:
@@ -319,7 +319,7 @@ as the `stuck` code.
 - **Q2:** multi-box tenants (G7): ANSWERED → `TENANT_STATUS_ENDPOINT.md`
   §8 rule 4 (2026-09-26): one tenant-level stall; per-box candidates are
   evaluation-internal to the detector and are not surfaced on the
-  endpoint. The predicate stays per-session, but the 12-code vocabulary
+  endpoint. The predicate stays per-session, but the 13-code vocabulary
   is per-tenant — G7's decision (per-tenant arc, explicit selection
   preference) means the detector emits per-box session-arc candidates
   internally and one tenant-level stall outward.

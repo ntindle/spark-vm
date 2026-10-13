@@ -184,7 +184,7 @@ remains unreachable until all four ship.
   not this design. The doc's only binding recommendation: probe while a
   post-`live` arc exists on the box, stand down when the provider says
   suspended/destroyed (the prober reads provider state first).
-- **No new status codes.** Every outcome routes to the existing 12-code
+- **No new status codes.** Every outcome routes to the existing 13-code
   vocabulary. If a future turn wants a `relay-degraded` nuance, that's a
   vocabulary change with its own design, not a silent addition.
 
