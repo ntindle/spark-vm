@@ -50,6 +50,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Security
+
+- `muse-job spawn` gains `--trust-workspace`: the explicit standing
+  opt-in for auto-answering the workspace-trust gate in a job's own
+  workdir, recorded in the job record. Without it the gate fails
+  closed — the prompt surfaces to the operator (watchdog
+  `blocked-trust` / MSP request ledger) instead of being answered,
+  per the standing trust-policy decision. The MSP path is
+  deliberately unchanged: trust prompts keep their per-answer
+  classification. (#1393)
+
 ### Added
 
 - The fleet dashboard gains a Push notifications section on each

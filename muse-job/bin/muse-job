@@ -987,6 +987,15 @@ def _spawn_prepare(slug, args, preamble, tmux_name):
             "state": "active",
             "budget_hours": args.budget_hours,
             "started_at": time.time(),
+            # Issue #1372 slice 3: the standing trust-policy opt-in
+            # (--trust-workspace). True when the operator vouched for the
+            # job's own workdir at spawn; gates the workspace-trust
+            # auto-answer in _answer_trust_prompt. Fail-closed default:
+            # records predating the flag (and spawns without it) read
+            # False here, so the gate surfaces to the operator instead.
+            # getattr: older callers/tests build the Namespace without
+            # the flag (same pattern as --tmux in cmd_spawn).
+            "trust_workspace": bool(getattr(args, "trust_workspace", False)),
             # Anchor for the events-missing liveness grace (issue #3): tracks the
             # CURRENT session, refreshed by the resume fallback when it discovers
             # a new session uuid. Falls back to started_at for legacy records.
@@ -1047,6 +1056,9 @@ def _spawn(slug, args):
     # the resume path: the workdir is slug-derived and operator-owned, so
     # "Trust and continue" grants nothing the job's agent doesn't already
     # have through its shell.
+    # Issue #1372 slice 3: the answer is gated on the job record's
+    # --trust-workspace opt-in (inside _answer_trust_prompt). Without the
+    # opt-in this is a no-op and the gate surfaces via blocked-trust.
     if _answer_trust_prompt(slug):
         print("answered workspace-trust prompt", file=sys.stderr)
     # Discover the session uuid via the session index.
@@ -1467,6 +1479,23 @@ def _capture_pane_state(target):
     except Exception:
         cmd = ""
     return pane, cmd
+
+
+def _pane_current_path(target):
+    """tmux ground truth for the pane's working directory, or None.
+
+    Used by _answer_trust_prompt's scope enforcement (#1372 slice 3): the
+    standing --trust-workspace voucher covers the job's own workdir only,
+    and the pane's actual cwd is what the trust gate is really for. Fail
+    closed: any capture failure yields None, which the caller refuses.
+    """
+    try:
+        out = run("tmux", "display-message", "-p", "-t", target,
+                  "#{pane_current_path}", timeout=30).stdout.decode(
+                      errors="replace").strip()
+    except Exception:
+        return None
+    return out or None
 
 
 def _dead_tui_msg(target, pane):
@@ -2928,15 +2957,36 @@ _RESUME_GONE_RE = re.compile(
 def _answer_trust_prompt(slug, timeout=20):
     """Answer the TUI's workspace-trust prompt if it is showing.
 
-    Called after launching a TUI in the job's own workdir (resume and the
-    fallback-fresh path). The workdir is slug-derived and operator-owned --
-    the job was spawned there -- so selecting "Trust and continue" grants
-    nothing the job's agent doesn't already have through its shell; it only
-    unblocks the TUI boot. Without this, resume hangs at the prompt
-    forever. Text and Enter are separate send-keys calls, per the tmux
-    input rule. Never raises: a missed prompt just leaves the existing
-    behavior (the caller proceeds and its own checks decide).
+    Called after launching a TUI in the job's own workdir (spawn, resume,
+    and the watchdog's trust recovery). The workdir is slug-derived and
+    operator-owned -- the job was spawned there -- so selecting "Trust and
+    continue" grants nothing the job's agent doesn't already have through
+    its shell; it only unblocks the TUI boot. Without this, resume hangs
+    at the prompt forever. Text and Enter are separate send-keys calls, per
+    the tmux input rule. Never raises: a missed prompt just leaves the
+    existing behavior (the caller proceeds and its own checks decide).
+
+    Issue #1372 slice 3: the auto-answer is gated on the job record's
+    standing trust opt-in (``muse-job spawn --trust-workspace``). Without
+    the opt-in the gate is fail-closed per the #211 decision -- the prompt
+    stays and the watchdog's ``blocked-trust`` signal pages the operator.
+    A missing/unreadable/corrupt job record also fails closed (no answer).
     """
+    # The standing opt-in check comes FIRST, before any pane capture:
+    # without the operator's explicit voucher this function must not
+    # answer, no matter what the pane shows.
+    try:
+        job = load_job(slug)
+    except Exception:
+        return False
+    # Defense in depth: the write path always stores a real bool, so a
+    # hand-edited "false" string (truthy) must not opt in.
+    if job.get("trust_workspace") is not True:
+        return False
+    # The voucher's scope is the job's own workdir only (#1372 slice 3).
+    # Re-derive it from the slug (the canonical contract, same rationale
+    # as trusted_job_paths) rather than trusting the record's field.
+    vouched = os.path.realpath(os.path.join(job_dir(slug), "work"))
     target = f"mjob-{slug}"
     deadline = time.time() + timeout
     try:
@@ -2954,6 +3004,18 @@ def _answer_trust_prompt(slug, timeout=20):
             # answered into.
             if (_is_tui_process(pane_cmd)
                     and _pane_shows_trust_gate(pane)):
+                # Scope enforcement: the gate must be FOR the vouched
+                # workdir. The pane's actual cwd is tmux ground truth -- a
+                # gate parked in any other directory (the agent cd'd
+                # elsewhere mid-turn, or a future call site launching a TUI
+                # outside the workdir) fails closed instead of spending the
+                # operator's voucher. Fail closed on capture failure too;
+                # the watchdog then emits the loud, operator-actionable
+                # blocked-trust signal.
+                pane_cwd = _pane_current_path(target)
+                if pane_cwd is None or \
+                        os.path.realpath(pane_cwd) != vouched:
+                    return False
                 run("tmux", "send-keys", "-t", target, "1", timeout=30)
                 time.sleep(1)
                 run("tmux", "send-keys", "-t", target, "Enter", timeout=30)
@@ -2980,6 +3042,11 @@ def _recover_trust_prompt(slug):
     the gate is still showing after the answer attempt. Never raises:
     _answer_trust_prompt is itself no-raise, and a capture failure reads as
     still-blocked (fail closed).
+
+    Issue #1372 slice 3: the answer itself is gated on the job record's
+    --trust-workspace opt-in (inside _answer_trust_prompt). Without the
+    opt-in this recovery always lands on `blocked-trust` -- the prompt
+    surfaces to the operator instead of being answered.
     """
     _answer_trust_prompt(slug)
     try:
@@ -5438,6 +5505,17 @@ def cmd_answer(args):
 # go through answer_trust_prompt with an explicit
 # TrustPolicy(auto_answer_trust=True) -- the no-gate answer_user_input
 # primitive is never reachable from the queue path for trust prompts.
+#
+# Issue #1372 slice 3 (the standing --trust-workspace opt-in): on the MSP
+# path the opt-in is recorded in the job record but changes NO answering
+# behavior -- trust prompts keep surfacing through the journal + request
+# ledger above, and `muse-job answer` keeps its per-call classification.
+# Deliberate: the reader-thread callbacks are journal/record-only by
+# design (they never touch the transport), and auto-answering a trust
+# prompt on heuristic classification alone would contradict the #211
+# decision the library records (a trust prompt need not contain the word
+# "trust"). The standing opt-in covers the tmux spawn-time workdir gate,
+# where the gate's full observed shape is verified on the pane.
 
 
 def _msp_on_approval_requested(slug, approval):
@@ -5872,13 +5950,10 @@ def _msp_decide_via_supervisor(args, kind, fields):
                           result.get("detail")))
 
 
-def main():
-    # --version before argparse: subparsers are required, so argparse alone
-    # would reject a bare --version. Only the bare flag counts, so a steer
-    # message containing "--version" is never hijacked.
-    if sys.argv[1:] in (["--version"], ["-V"]):
-        print(SPARKVM_VERSION)
-        return 0
+def build_parser():
+    # Factored out of main() (issue #1372 slice 3) so tests can assert
+    # the spawn CLI surface -- notably the --trust-workspace opt-in --
+    # without exec'ing the process.
     ap = argparse.ArgumentParser(prog="muse-job")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -5895,6 +5970,19 @@ def main():
                    help="drive the job in a tmux TUI pane (legacy transport); "
                    "default is MSP over `muse serve` "
                    "(issue #228: muse-job v2)")
+    # Issue #1372 slice 3: the standing trust-policy opt-in. The operator's
+    # explicit, per-job, auditable answer to the #211 question "who vouches
+    # for the workspace". Scope is the job's own slug-derived workdir only;
+    # without it the trust gate is fail-closed (it surfaces to the
+    # operator instead of being auto-answered).
+    s.add_argument("--trust-workspace", action="store_true",
+                   help="standing opt-in: auto-answer the workspace-trust "
+                   "gate in this job's own workdir on spawn/resume "
+                   "(issue #1372 slice 3; tmux transport only -- the MSP "
+                   "path keeps per-answer classification). Recorded in the "
+                   "job record. Without it, trust prompts surface to the "
+                   "operator (watchdog blocked-trust / MSP request ledger) "
+                   "per the #211 fail-closed decision.")
     s.set_defaults(fn=cmd_spawn)
 
     s = sub.add_parser("steer", help="send a message into a running job")
@@ -5972,6 +6060,17 @@ def main():
     s.add_argument("slug")
     s.set_defaults(fn=_msp_supervise_cmd)
 
+    return ap
+
+
+def main():
+    # --version before argparse: subparsers are required, so argparse alone
+    # would reject a bare --version. Only the bare flag counts, so a steer
+    # message containing "--version" is never hijacked.
+    if sys.argv[1:] in (["--version"], ["-V"]):
+        print(SPARKVM_VERSION)
+        return 0
+    ap = build_parser()
     args = ap.parse_args()
     try:
         # Issue #7: central slug gate. Only cmd_spawn validated the slug;

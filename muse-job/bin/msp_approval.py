@@ -53,6 +53,14 @@ question stands. The decision recorded here (and on issue #225):
    answer by calling it). ``answer_trust_prompt`` is the auto-answer
    entry point and refuses without the opt-in policy (fail-closed).
 
+The OPERATOR-REACHABLE standing opt-in for the workspace-trust gate is
+decided and documented in muse-job's README ("Standing trust-policy
+opt-in (--trust-workspace)", issue #1372 slice 3): ``muse-job spawn
+--trust-workspace`` records the operator's per-job voucher for the
+job's own workdir in the job record; without it the gate fails closed
+to the operator. No config-file standing default exists (muse-job has
+no config system); the flag is the explicit, auditable shape.
+
 Wire-shape provenance
 ---------------------
 The method names and param/result shapes come from the exported schema

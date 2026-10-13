@@ -366,6 +366,8 @@ def test_answer_trust_prompt_ignores_conversation_mention(cli, monkeypatch):
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli, "load_job",
+                        lambda slug: {"slug": slug, "trust_workspace": True})
     assert cli._answer_trust_prompt("demo", timeout=0.01) is False
     assert [c for c in calls if "send-keys" in c] == []
 
@@ -407,6 +409,10 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
             stderr = b""
             if "capture-pane" in argv:
                 stdout = panes[0].encode()
+            elif "#{pane_current_path}" in argv:
+                # Scope enforcement (#1372 slice 3): the pane's cwd must be
+                # the job's own workdir for the voucher to apply.
+                stdout = os.path.join(cli.job_dir("demo"), "work").encode()
             elif "display-message" in argv:
                 # Security B1 (PR #816 review): the gate fires only while the
                 # foreground process is the TUI -- a dead pane is never sent
@@ -417,6 +423,8 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
         return P()
 
     monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "load_job",
+                        lambda slug: {"slug": slug, "trust_workspace": True})
     assert cli._answer_trust_prompt("demo") is True
     sent = [" ".join(c) for c in calls if "send-keys" in c]
     assert any(c.endswith(" 1") for c in sent)
@@ -446,6 +454,8 @@ def test_answer_trust_prompt_refuses_dead_pane_with_stale_text(cli, monkeypatch)
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli, "load_job",
+                        lambda slug: {"slug": slug, "trust_workspace": True})
     assert cli._answer_trust_prompt("demo", timeout=0.01) is False
     assert [c for c in calls if "send-keys" in c] == []
 
@@ -459,6 +469,8 @@ def test_answer_trust_prompt_no_prompt_returns_false(cli, monkeypatch):
         return P()
 
     monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "load_job",
+                        lambda slug: {"slug": slug, "trust_workspace": True})
     # Live TUI at a ❯ prompt under bash fg... _pane_shows_live_tui is False
     # (bash), so it polls to timeout. Keep the timeout tiny via monkeypatch.
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
