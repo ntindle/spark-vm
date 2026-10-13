@@ -71,6 +71,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Muse-job trust + approvals lane convergence pin: re-verified the #1397
+  analysis at current main after the trust grant (#1394), the
+  supervisor-mediated listing (#1396), and the session-exited watch
+  (#1430) all shipped — the trust lane is complete (#1427's premise
+  refuted: the gate-side legacy-record fail-closed test already exists)
+  — and filed the one new gap: `muse-job status` shows stale approval requests
+  after the supervisor dies, because the request ledger has no
+  dead-supervisor tombstone (#1434). (#1435)
+
 - `muse-job trust <slug>`: adopt the standing workspace-trust opt-in on
   a live job without killing it. The grant is recorded manager-side and
   journaled with the operator as the actor; on an already-trusted job it
