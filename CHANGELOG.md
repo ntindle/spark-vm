@@ -71,6 +71,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The invite-wave sender now refuses to send a real wave while the public
+  host is still the reserved `.invalid` default, instead of baking
+  dead claim links into every invite — failing loud at the send moment
+  like the claim-live attestation already does. (#1390)
+
+- Confirmation, reminder, and path-A emails now survive a sick spool
+  directory the same way invite emails already did: a spool-write failure
+  commits nothing and returns "not sent" instead of crashing the web
+  signup with a 500, so a later re-submit or the reminder job retries
+  cleanly. (#1390)
+
 - The fleet version inventory's per-box snapshot now reads the release-gate
   hook's own status file, so a box's reported frozen/live answer and its age
   come from the live gate evaluation instead of only an operator's manual

@@ -1570,6 +1570,198 @@ def test_write_spool_failure_removes_partial_and_raises():
     assert spool_files(tmp) == []  # no torn file, no tmp leftover
 
 
+def _rows_on_disk(tmp):
+    path = os.path.join(tmp, "rows.jsonl")
+    rows = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                row = json.loads(line)
+                rows[row["entry_id"]] = row
+    return rows
+
+
+def test_confirm_spool_failure_no_500_row_untouched(monkeypatch):
+    # #406: disk-full during a web signup must not 500 — the confirm
+    # queue path mirrors the invite path's return-False handling. The
+    # row stays pending with nothing committed (no token, no send
+    # ledger, no confirm_sent event), so a re-submit or the +7d
+    # reminder retries cleanly.
+    svc, tmp = make_service(clock=TickClock())
+    orig_spool = svc._write_spool
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    status, body = svc.submit_form(form_fields("full@example.com"),
+                                   "1.2.3.4")
+    assert status == 200  # no exception propagated → no 500
+    # Honest page: no "we sent an email" claim for an email never queued.
+    assert "Confirmation delayed" in body
+    assert "We sent a confirmation email to" not in body
+    assert "keep retrying automatically" in body
+    assert spool_files(tmp) == []
+    row = svc.rows[svc.by_email["full@example.com"]]
+    assert row["status"] == "pending"
+    assert row["active_token"] is None
+    assert row["email_sends"] == []
+    kinds = [e["event"] for e in read_events(tmp)]
+    assert "waitlist_submitted" in kinds
+    assert "confirm_sent" not in kinds
+    # The on-disk row matches: nothing committed.
+    disk = _rows_on_disk(tmp)
+    assert disk[row["entry_id"]]["active_token"] is None
+    assert disk[row["entry_id"]]["email_sends"] == []
+    # Recovery: spool healthy again, a re-submit retries cleanly.
+    monkeypatch.setattr(svc, "_write_spool", orig_spool)
+    status, body = svc.submit_form(form_fields("full@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert len(spool_files(tmp)) == 1
+    row = svc.rows[svc.by_email["full@example.com"]]
+    live = row["active_token"]
+    assert live is not None
+    ok_row, ok = svc.validate_token(live)
+    assert ok
+    status, body = svc.confirm_post(live)
+    assert status == 200
+
+
+def test_resubmit_during_spool_outage_gets_delayed_not_already_sent(
+        monkeypatch):
+    # #406 follow-on: a re-submit while the spool is still sick must not
+    # render "already sent" when no email ever went out for the row —
+    # the honest "Confirmation delayed" page is used instead. (When an
+    # earlier send did succeed, "already sent" stays correct: the
+    # earlier link genuinely still works.)
+    svc, tmp = make_service(clock=TickClock())
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    status, body = svc.submit_form(form_fields("outage@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert "Confirmation delayed" in body
+    # Re-submit during the same outage: still delayed, never "already sent".
+    status, body = svc.submit_form(form_fields("outage@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert "Confirmation delayed" in body
+    assert "already sent" not in body
+    assert spool_files(tmp) == []
+
+
+def test_resubmit_spool_failure_after_earlier_success_gets_already_sent(
+        monkeypatch):
+    # #406: the discriminator's true-positive side — the spool fails on
+    # a re-submit AFTER an earlier send succeeded. "already sent" stays
+    # correct: the earlier link genuinely still works (the old token is
+    # never consumed on failure).
+    svc, tmp = make_service(clock=TickClock())
+    status, body = svc.submit_form(form_fields("ok-then-out@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert "Check your inbox" in body
+    row = svc.rows[svc.by_email["ok-then-out@example.com"]]
+    live_token = row["active_token"]
+    spooled_before = spool_files(tmp)
+    assert len(spooled_before) == 1
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    status, body = svc.submit_form(form_fields("ok-then-out@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert "already sent" in body
+    assert "Confirmation delayed" not in body
+    assert spool_files(tmp) == spooled_before  # nothing new spooled
+    # The pre-outage token still validates — the earlier link works.
+    ok_row, ok = svc.validate_token(live_token)
+    assert ok
+
+
+def test_patha_spool_outage_outcomes_are_delayed_not_created(
+        monkeypatch):
+    # #406 (QA round-2): the path-A create path must not report
+    # "created"/"accepted" (confirm email queued) when the spool failed
+    # and nothing was queued — "confirm_delayed" instead, for both the
+    # create and the re-submit legs.
+    svc, tmp = make_service(clock=TickClock())
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    outcome, row = svc.submit_email(
+        owner="pa-outage@example.com", sender="muse@x.io",
+        inbound_auth=True)
+    assert outcome == "confirm_delayed"
+    assert row["status"] == "pending"
+    assert row["email_sends"] == []
+    assert spool_files(tmp) == []
+    # Re-submit during the same outage: also delayed, never "created".
+    outcome, row = svc.submit_email(
+        owner="pa-outage@example.com", sender="muse@x.io",
+        inbound_auth=True)
+    assert outcome == "confirm_delayed"
+    assert spool_files(tmp) == []
+
+
+def test_reminder_spool_failure_keeps_old_token_live(monkeypatch):
+    # #406: a failed reminder spool commits nothing — the old token
+    # stays live, no email_sends ledger entry, no reminder_sent_at, no
+    # event; the next cron run retries.
+    svc, tmp = make_service(clock=TickClock())
+    svc.submit_form(form_fields("due@example.com"), "1.2.3.4")
+    row = svc.rows[svc.by_email["due@example.com"]]
+    assert row["status"] == "pending"
+    old_token = row["active_token"]  # submit-minted, never confirmed
+    ok_row, ok = svc.validate_token(old_token)
+    assert ok
+    spooled_before = spool_files(tmp)
+    sends_before = list(row["email_sends"])
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    assert svc._queue_reminder_email(row) is False
+    assert spool_files(tmp) == spooled_before  # nothing new spooled
+    # Old token still live (nothing superseded it)...
+    ok_row, ok = svc.validate_token(old_token)
+    assert ok
+    assert row["active_token"] == old_token
+    # ...and nothing was marked.
+    assert row["reminder_sent_at"] is None
+    assert row["email_sends"] == sends_before
+    kinds = [e["event"] for e in read_events(tmp)]
+    assert "reminder_sent" not in kinds
+    disk = _rows_on_disk(tmp)
+    assert disk[row["entry_id"]]["reminder_sent_at"] is None
+
+
+def test_patha_spool_failure_returns_false_no_ledger(monkeypatch):
+    # #406: a failed path-A spool records nothing — no ledger event, no
+    # row send entry; the caller maps False to its honest outcome.
+    svc, tmp = make_service(clock=TickClock())
+
+    def boom(name, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    assert svc._spool_patha_email("pa@example.com", "Re: hello", "body",
+                                  "clarification") is False
+    assert spool_files(tmp) == []
+    ledger = os.path.join(tmp, "patha_events.jsonl")
+    assert not os.path.exists(ledger) or open(ledger).read().strip() == ""
+
+
 def test_ip_hits_sweep_drops_stale_keys():
     # #390: once over the bound, keys whose hits are all outside the
     # window are dropped; the new IP still rate-limits correctly.

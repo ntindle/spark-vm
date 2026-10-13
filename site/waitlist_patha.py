@@ -230,6 +230,10 @@ def process_inbound(service, raw, *, auth, inbox_addr):
       "resubmitted"           existing pending row refreshed
       "confirmed"             row already confirmed (idempotent)
       "confirm_capped"        accepted; re-send suppressed by the cap
+      "confirm_delayed"       accepted but the confirm email couldn't be
+                              queued (sick spool dir, #406) and no email
+                              ever went out for the row; the +7d
+                              reminder retries automatically
       "clarified"             clarification reply spooled (auth=pass)
       "clarification_capped"  clarification suppressed by the cap
       "forget_request_sent"   §5 forget-confirmation email spooled

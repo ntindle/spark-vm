@@ -203,6 +203,19 @@ address.":
 deleted after 30 days (§5). No third email — the reminder *is* the last
 touch.
 
+**Spool failure:** if the email spool directory is unwritable when a
+confirm, reminder, or path-A email is queued (disk-full, permissions),
+the send is skipped the same way a rate-cap-suppressed send is — nothing
+is committed (no token recorded, no send counted, no funnel event), and
+the next retry picks it up (re-submit, the +7d reminder, the path-A
+re-drive). The web signup does not 500: a failed first send renders an
+honest "Confirmation delayed" page ("we couldn't send your confirmation
+email just now, but we'll keep retrying automatically") instead of
+claiming an email went out, and a failed re-submit renders the same page
+when no email ever went out for the row (as opposed to the "already sent"
+page, which is only used when the earlier link genuinely still works).
+The row stays pending and the reminder job retries it.
+
 *Compliance:* no launch date; no pricing numbers; "no card required for
 the waitlist" is a waitlist promise, not a trial promise (trial terms TBD,
 Billing decision); the "doesn't verify identity" line is the §3 honesty
@@ -428,6 +441,17 @@ entry and the expired entry rejoins `confirmed` at the back of the queue
 page (FAQ Q6 or how-it-works step 1; §10 gate) — a reader promised "we'll
 email you the moment your box is ready" must know the box doesn't wait
 forever.
+
+**Send-moment gates:** a real `--send-wave` (not `--dry-run`) refuses to
+run unless two operator preconditions hold, both checked before anything
+is sent. `WAITLIST_CLAIM_LIVE` must be exactly `"1"` — the operator's
+attestation that GET `/waitlist/claim` actually serves invite tokens on
+the deployed page (a wave's only CTA is the claim link). And
+`WAITLIST_PUBLIC_HOST` must not still be the reserved `.invalid`
+default — the default is a non-routable name, so a wave sent with it
+would bake dead claim links into every invite. Both failures exit 2
+with a loud message; set the real public origin and the attestation
+before sending.
 
 **Commit → emit crash window:** the wave commits the invited row BEFORE
 emitting the `invite_sent` funnel event (the `FUNNEL_MEASUREMENT.md` §3.4
