@@ -60,6 +60,7 @@ pocketnews.com.my
 producthunt.com
 red5.net
 release-compare-url
+severitydaily.com
 termsquad.com
 theregister.com
 tvgreport.com
