@@ -283,6 +283,19 @@ ingest start and latched for the run (`docs/CREDENTIAL_VEND_CONTRACT.md`
 
 Any other value fails loud at startup (the run exits 1 before any
 network or stamping — a misconfigured mode never runs silently local).
+Export the variable on every ingest entrypoint: the cron line needs
+`SVM_CRED_MODE=vend` in its environment (cron's minimal env does not
+inherit the operator's shell — put it on the crontab line itself), and
+the `phone-home` daemon needs it in its service environment
+(`Environment=SVM_CRED_MODE=vend` on the systemd unit, or the
+supervisor config's env). A vend box whose entrypoint lost the env
+fails loud on pin drift — it can never silently mint local grants.
+
+Forward-compat note: until #891's plane-fetch path lands, vend mode
+stamps `vend_mode: true` approvals that nothing consumes yet, and the
+mode is operator-declared, not cross-checked against plane
+configuration (contract §6's "plane configured → vend path" has no
+detector yet — that cross-check is #891's scope).
 The mode is pinned in the state dir (`credential_mode.json`): the first
 run pins the env-derived mode, and a later run whose env resolves
 differently fails loud on `credential-mode drift` instead of silently

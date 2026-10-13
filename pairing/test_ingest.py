@@ -1248,3 +1248,17 @@ def test_cred_mode_repin_escape_hatch(ctx, monkeypatch, capsys):
     assert rec["vend_mode"] is True
     out = capsys.readouterr()
     assert "credential mode pinned: vend" in out.out
+
+
+def test_ingest_vend_mode_expired_strips_planted_grant_ttl(ctx, monkeypatch):
+    # Vend mints nothing, so a vend-mode expired record must not claim
+    # a lifetime either (#73 twin).
+    _file_pending(ctx, grant_ttl_hours=99, expires=_future_iso(-10))
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+    plane = FakePlane(commands=[_cmd(11, payload=_decision_payload(
+        decision="approve"))], watermark=10)
+    assert _run(ctx, plane, monkeypatch, mint=_MintOk()) == 0
+    rec = _consumed(ctx)
+    assert rec["decision"] == "expired"
+    assert "grant_ttl_hours" not in rec
+    assert "vend_mode" not in rec  # expired path is mode-independent

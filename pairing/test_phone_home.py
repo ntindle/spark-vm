@@ -2210,3 +2210,70 @@ def test_epoch_bump_fchmod_failure_closes_fd(ctx, monkeypatch, tmp_path,
     out = capsys.readouterr().out
     assert "epoch bump SKIPPED" in out
     assert "cannot secure ingest lock" in out
+
+
+# --- dual-mode seam (issue #948): socket carrier ------------------------------
+
+def test_socket_vend_mode_approve_skips_local_mint(ctx, monkeypatch,
+                                                   tmp_path):
+    # The socket carrier runs the same _ingest_approval_decision as the
+    # cron ingest: a vend-mode box must not mint a local grant here
+    # either. The daemon latches the mode at start (state-dir pin) and
+    # threads it into every session.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    monkeypatch.setenv("SVM_CRED_MODE", "vend")
+
+    def forbidden_mint(argv):
+        raise AssertionError("grant-writer must not run in vend mode")
+
+    monkeypatch.setattr(spark_pair, "_mint_grant", forbidden_mint)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner(
+                        _s5b_decision(decision="approve"))),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    rec = _s5b_consumed(approvals)
+    assert rec["decision"] == "approve"
+    assert rec["decision_origin"] == "plane"
+    assert rec["vend_mode"] is True
+    assert "grant_ttl_hours" not in rec
+    acks = _s5b_acks(stub)
+    assert len(acks) == 1
+    assert acks[0]["seq"] == 1
+
+
+def test_phone_home_invalid_cred_mode_fails_loud_at_startup(ctx, monkeypatch,
+                                                            capsys):
+    # Fail-closed before the daemon loop: no connection is attempted and
+    # nothing is stamped. ctx.control=None resolves to DEFAULT_CONTROL
+    # with no I/O; _ws_upgrade is rigged to explode to prove we never
+    # get that far.
+    monkeypatch.setenv("SVM_CRED_MODE", "bogus")
+
+    def _no_upgrade(*a, **k):
+        raise AssertionError("must not connect with a bad mode")
+
+    monkeypatch.setattr(spark_pair, "_ws_upgrade", _no_upgrade)
+    assert spark_pair.cmd_phone_home(ctx) == 1
+    out = capsys.readouterr()
+    assert "not a credential mode" in out.err
+
+
+def test_phone_home_vend_mode_drift_fails_loud_at_startup(ctx, monkeypatch,
+                                                          capsys):
+    # The pin is shared by both entrypoints: a daemon whose unit lost
+    # the env on a vend-pinned box fails loud at start, like the cron
+    # ingest.
+    with open(os.path.join(ctx.dir, "credential_mode.json"), "w") as f:
+        json.dump({"mode": "vend", "pinned_at": "x"}, f)
+    monkeypatch.delenv("SVM_CRED_MODE", raising=False)
+
+    def _no_upgrade(*a, **k):
+        raise AssertionError("must not connect on drift")
+
+    monkeypatch.setattr(spark_pair, "_ws_upgrade", _no_upgrade)
+    assert spark_pair.cmd_phone_home(ctx) == 1
+    assert "credential-mode drift" in capsys.readouterr().err

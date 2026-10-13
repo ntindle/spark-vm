@@ -1914,6 +1914,11 @@ def _ingest_approval_decision_guarded(d, approvals, box_id, token, seq,
 
     def _stamp_expired():
         rec = _ingest_expired_record(item, aid, requester, seq, key)
+        if cred_mode == _CRED_MODE_VEND:
+            # Vend mints nothing — a planted grant_ttl_hours must not
+            # survive into the record (#73 twin, like the vend approve
+            # path above).
+            rec.pop("grant_ttl_hours", None)
         if _ingest_stamp_consumed(approvals, aid, rec):
             _ingest_audit(d, aid, "expired", requester, seq)
         else:
