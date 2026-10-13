@@ -65,15 +65,80 @@ _PINS_HASH_FILE = os.environ.get(
 _PINS_MISMATCH_WARNING = ("installed pins differ from checkout — "
                           "run `toolset-update.sh install`")
 
+# Issue #1310: the update plane resolves the managed targets
+# (CUA_DRIVER_BIN, PLAYWRIGHT_VENV) from ITS environment (the systemd
+# unit's, under the timer) while the status plane resolves them from the
+# invoker's shell — the two planes silently target different artifacts when
+# the operator relocates the managed locations in one environment but not
+# the other. The privileged install publishes the resolved targets, and
+# every update tick refreshes the record, to this world-readable file (the
+# #1313 pins-hash carrier dir; only the privileged update plane may write
+# it). The status plane prefers the record — falling back to its env
+# override, then the default — so S1 always probes the artifacts the
+# updater actually converges. A missing or unreadable record is silent by
+# design (pre-#1310 installs never wrote one), and only the two known keys
+# with absolute-path values are accepted: a malformed record is ignored
+# wholesale, fail-closed to env/default.
+_MANAGED_TARGETS_FILE = os.environ.get(
+    "MANAGED_TARGETS_FILE",
+    os.path.join(os.environ.get("MANAGED_TARGETS_DIR",
+                                "/var/lib/sparkvm-toolset"),
+                 "managed_targets"))
+_MANAGED_TARGET_KEYS = ("CUA_DRIVER_BIN", "PLAYWRIGHT_VENV")
+
+
+def _read_managed_targets_record(path=_MANAGED_TARGETS_FILE):
+    """Read the update plane's published managed targets (issue #1310).
+
+    Returns a dict of the known keys, or {} on any problem (missing file,
+    unreadable, malformed). Fail-closed: values must be absolute paths,
+    and unknown keys are ignored — the caller falls back to env/default.
+    """
+    record = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            # Bounded read: the record is two short lines; an unbounded
+            # read of a huge file (e.g. MANAGED_TARGETS_FILE pointed at
+            # /dev/zero) must not hang the import.
+            lines = f.read(65536).splitlines()
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError (non-UTF8 bytes) and the
+        # NUL-byte path rejection — both fail closed like any other
+        # unreadable record, instead of killing the status tool at import.
+        return {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key in _MANAGED_TARGET_KEYS and value.startswith("/"):
+            record[key] = value
+    # The publisher always writes both keys together: a record missing one
+    # is corrupt (e.g. torn by a concurrent read landing mid-publish) —
+    # ignore it wholesale, fail-closed to env/default, rather than
+    # trusting the surviving half (which may itself be truncated).
+    if set(record) != set(_MANAGED_TARGET_KEYS):
+        return {}
+    return record
+
 # The update plane (deploy/toolset-update.sh) converges MANAGED targets, never
 # PATH — the status plane must report the same artifacts the updater holds,
 # or "drift" in S1 is not the drift S2's layers clear (F-A1). These are the
-# update plane's defaults, honoring its environment overrides so the two
-# planes keep agreeing when the operator relocates the managed locations.
-_MANAGED_CUA_DRIVER = os.environ.get("CUA_DRIVER_BIN",
-                                     "/home/ntindle/cua/bin/cua-driver")
-_MANAGED_PLAYWRIGHT_VENV = os.environ.get("PLAYWRIGHT_VENV",
-                                          "/home/ntindle/.venvs/pw")
+# update plane's resolved targets, read from the record the privileged
+# install publishes and every update tick refreshes (issue #1310); when no
+# record exists the invoker's environment overrides still apply, then the
+# defaults — so the two planes keep agreeing when the operator relocates
+# the managed locations (and S1 stays useful on boxes the updater never
+# managed).
+_managed_targets_record = _read_managed_targets_record()
+_MANAGED_CUA_DRIVER = (_managed_targets_record.get("CUA_DRIVER_BIN")
+                       or os.environ.get("CUA_DRIVER_BIN",
+                                         "/home/ntindle/cua/bin/cua-driver"))
+_MANAGED_PLAYWRIGHT_VENV = (_managed_targets_record.get("PLAYWRIGHT_VENV")
+                            or os.environ.get("PLAYWRIGHT_VENV",
+                                              "/home/ntindle/.venvs/pw"))
 
 
 def default_runner(argv, timeout=_PROBE_TIMEOUT_S):
@@ -276,8 +341,11 @@ def probe_playwright(runner=default_runner, which=shutil.which, managed=None):
     holds (F-A1): a PATH python3 carrying a different playwright would
     report drift the updater can never clear, or report clean while the
     managed venv rots. PATH python3 is the fallback for boxes the updater
-    never managed; the note names the interpreter either way. `managed`
-    is injectable (the venv dir) so the preference order is testable.
+    never managed; the note names the interpreter either way. The managed
+    target resolves from the update plane's published record when present
+    (issue #1310), else the invoker's env override, else the default.
+    `managed` is injectable (the venv dir) so the preference order is
+    testable.
     """
     venv = _MANAGED_PLAYWRIGHT_VENV if managed is None else managed
     managed_py = os.path.join(venv, "bin", "python") if venv else None
@@ -333,8 +401,10 @@ def probe_cua_driver(which=shutil.which, runner=default_runner, managed=None):
     owner, never PATH (PATH-hijacking: the timer runs as root) — the status
     plane must report the same artifact the updater holds on the pin
     (F-A1). PATH is the fallback for boxes the updater never managed; the
-    note names the probed path either way. `managed` is injectable (the
-    binary path) so the preference order is testable.
+    note names the probed path either way. The managed target resolves from
+    the update plane's published record when present (issue #1310), else
+    the invoker's env override, else the default. `managed` is injectable
+    (the binary path) so the preference order is testable.
     """
     target = _MANAGED_CUA_DRIVER if managed is None else managed
     if _managed_executable(target):

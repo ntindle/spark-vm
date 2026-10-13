@@ -272,6 +272,163 @@ def test_managed_defaults_honor_env_overrides(monkeypatch):
         importlib.reload(self_update)
 
 
+# --- managed-targets record (issue #1310) ----------------------------------
+
+def _reload_with_record_env(monkeypatch, tmp_path, record_text=None,
+                            extra_env=None, set_targets_file=True):
+    # Helper: point MANAGED_TARGETS_FILE at an optional record (unless
+    # set_targets_file=False, for testing the MANAGED_TARGETS_DIR
+    # derivation), apply extra env, reload the module, return it. Caller
+    # undoes via the yielded monkeypatch/finally pattern below.
+    import importlib
+    target = tmp_path / "managed_targets"
+    if record_text is not None:
+        target.write_text(record_text)
+    if set_targets_file:
+        monkeypatch.setenv("MANAGED_TARGETS_FILE", str(target))
+    for k, v in (extra_env or {}).items():
+        monkeypatch.setenv(k, v)
+    return importlib.reload(self_update)
+
+
+def test_managed_targets_record_preferred_over_env(monkeypatch, tmp_path):
+    # #1310 core: the update plane publishes the targets it converges; the
+    # status plane must prefer the record over the invoker's shell env —
+    # otherwise an override set in only one environment silently retargets
+    # S1 away from the artifacts the updater holds. (Vacuity: without the
+    # record preference, the env values win and this fails.)
+    import importlib
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path,
+            "CUA_DRIVER_BIN=/srv/updater/cua-driver\n"
+            "PLAYWRIGHT_VENV=/srv/updater/pw\n",
+            extra_env={"CUA_DRIVER_BIN": "/opt/custom/cua-driver",
+                       "PLAYWRIGHT_VENV": "/opt/custom/pw"})
+        assert reloaded._MANAGED_CUA_DRIVER == "/srv/updater/cua-driver"
+        assert reloaded._MANAGED_PLAYWRIGHT_VENV == "/srv/updater/pw"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_targets_env_fallback_without_record(monkeypatch, tmp_path):
+    # No record yet (pre-#1310 install): the env override still applies.
+    import importlib
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path, record_text=None,
+            extra_env={"CUA_DRIVER_BIN": "/opt/custom/cua-driver",
+                       "PLAYWRIGHT_VENV": "/opt/custom/pw"})
+        assert reloaded._MANAGED_CUA_DRIVER == "/opt/custom/cua-driver"
+        assert reloaded._MANAGED_PLAYWRIGHT_VENV == "/opt/custom/pw"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_targets_default_without_record_or_env(monkeypatch, tmp_path):
+    # Neither record nor env: the compiled-in defaults (a box the updater
+    # never managed).
+    import importlib
+    monkeypatch.delenv("CUA_DRIVER_BIN", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_VENV", raising=False)
+    try:
+        reloaded = _reload_with_record_env(monkeypatch, tmp_path)
+        assert (reloaded._MANAGED_CUA_DRIVER ==
+                "/home/ntindle/cua/bin/cua-driver")
+        assert (reloaded._MANAGED_PLAYWRIGHT_VENV ==
+                "/home/ntindle/.venvs/pw")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_targets_malformed_record_ignored(monkeypatch, tmp_path):
+    # Fail-closed: a record with relative values, unknown keys, and garbage
+    # is ignored WHOLESALE — the parser requires the exact two-key set the
+    # publisher always writes together, so a corrupt/torn record can never
+    # contribute a half-trusted half. Both bindings fall back (env, then
+    # default) as if no record existed. (Vacuity: if the parser accepted
+    # partial records, the absolute PLAYWRIGHT_VENV line would win and this
+    # fails.)
+    import importlib
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path,
+            "# comment\n"
+            "\n"
+            "CUA_DRIVER_BIN=relative/cua-driver\n"
+            "PLAYWRIGHT_VENV=/srv/updater/pw\n"
+            "SOME_OTHER_KEY=/whatever\n"
+            "garbage without equals\n",
+            extra_env={"CUA_DRIVER_BIN": "/opt/custom/cua-driver"})
+        # cua-driver: record ignored -> env wins.
+        assert reloaded._MANAGED_CUA_DRIVER == "/opt/custom/cua-driver"
+        # playwright: record ignored wholesale (not partially trusted) ->
+        # env unset -> default.
+        assert (reloaded._MANAGED_PLAYWRIGHT_VENV ==
+                "/home/ntindle/.venvs/pw")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_targets_dir_derivation(monkeypatch, tmp_path):
+    # The status plane mirrors the shell's derivation: MANAGED_TARGETS_FILE
+    # unset + MANAGED_TARGETS_DIR set -> <dir>/managed_targets. (Vacuity:
+    # without the derivation the hardcoded default wins and this fails.)
+    import importlib
+    monkeypatch.delenv("MANAGED_TARGETS_FILE", raising=False)
+    try:
+        reloaded = _reload_with_record_env(
+            monkeypatch, tmp_path,
+            "CUA_DRIVER_BIN=/srv/dir/cua-driver\n"
+            "PLAYWRIGHT_VENV=/srv/dir/pw\n",
+            extra_env={"MANAGED_TARGETS_DIR": str(tmp_path)},
+            set_targets_file=False)
+        assert reloaded._MANAGED_CUA_DRIVER == "/srv/dir/cua-driver"
+        assert reloaded._MANAGED_PLAYWRIGHT_VENV == "/srv/dir/pw"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_managed_targets_partial_record_ignored(tmp_path):
+    # A record with only one of the two keys (torn write, hand edit) is
+    # ignored wholesale — the surviving half may itself be truncated.
+    p = tmp_path / "managed_targets"
+    p.write_text("CUA_DRIVER_BIN=/srv/updater/cua-driver\n")
+    assert self_update._read_managed_targets_record(str(p)) == {}
+
+
+def test_read_managed_targets_record_missing_file(tmp_path):
+    # A missing record is not an error — it is the pre-#1310 state.
+    assert (self_update._read_managed_targets_record(
+        str(tmp_path / "no-such-file")) == {})
+
+
+def test_read_managed_targets_record_non_utf8_ignored(tmp_path):
+    # Non-UTF8 bytes must fail closed ({}), not raise UnicodeDecodeError
+    # out of the import-time call and kill the whole status tool.
+    # (Vacuity: with the OSError-only catch, this raises and the test
+    # errors.)
+    p = tmp_path / "managed_targets"
+    p.write_bytes(b"CUA_DRIVER_BIN=/x\xff\nPLAYWRIGHT_VENV=/y\n")
+    assert self_update._read_managed_targets_record(str(p)) == {}
+
+
+def test_read_managed_targets_record_empty_and_directory(tmp_path):
+    # Empty record and directory-as-record both read as {} (fail-closed
+    # to env/default), pinning the IsADirectoryError path too.
+    p = tmp_path / "managed_targets"
+    p.write_text("")
+    assert self_update._read_managed_targets_record(str(p)) == {}
+    d = tmp_path / "dirrecord"
+    d.mkdir()
+    assert self_update._read_managed_targets_record(str(d)) == {}
+
+
 # --- playwright browsers ---------------------------------------------------
 
 def test_playwright_browsers_missing_cache(tmp_path):
