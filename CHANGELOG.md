@@ -69,7 +69,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   wiring, and the standing `--trust-workspace` opt-in are all verified
   present, so the issue closes as shipped; the one explicitly-named
   remainder — listing approvals on a supervisor-held session — is
-  tracked as its own issue. (#TBD)
+  tracked as its own issue. (#1397)
 
 - The fleet dashboard gains a Push notifications section on each
   box's detail page (register/remove devices, re-register prompt on
