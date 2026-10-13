@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The fleet dashboard gains a Push notifications section on each
+  box's detail page (register/remove devices, re-register prompt on
+  stopped rows) — it becomes usable once your control plane
+  implements the pinned wire contract
+  (docs/PUSH_SUBSCRIPTION_WIRE_CONTRACT.md); until then the section
+  plainly reports the endpoints as unavailable instead of erroring.
+  Subscription secrets never appear on the read path, and the page
+  never stores your browser's push keys. (#1391)
+
 - The plane Worker's push-lane cron triggers now have a deploy contract
   and a post-deploy proof: an operator-facing contract pins the
   per-minute reminder/digest sweep trigger and the daily 90-day
