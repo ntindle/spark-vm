@@ -151,6 +151,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- A budget-suppressed digest no longer inflates the digest count: previously the suppression added a phantom +1 to the current window's coalesced-page count (misattributed — a carried digest is not a page), so the retried digest's "N pages coalesced" overstated the real pages. The suppressed digest now writes only its audit record and never touches the count; the retried digest renders the window's true coalesced count. (#1423, #1440)
+
 - `muse-job status` no longer advertises phantom pending approvals: a deliberate `kill` now clears the pending-approval ledger (the deleted session can never execute them), and when the supervisor isn't running, leftover requests render as `[stale]` with an explanation instead of looking actionable. (#1437)
 
 - The credential-swap audit log now stamps every swap line and every

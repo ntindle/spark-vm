@@ -361,10 +361,11 @@ def test_digest_suppression_stays_retryable(conn):
     assert s2.event_key == "owner-1\x00" + ws
 
 
-def test_digest_repeated_suppression_is_duplicate_not_double_count(conn):
-    # D77: a second suppression while still over budget is a harmless
-    # "duplicate" (the suppression is already recorded) — the digest
-    # count is incremented exactly once.
+def test_digest_suppression_never_coalesces_into_count(conn):
+    # #1423 (direction a): a budget-suppressed digest is NOT coalesced
+    # into the digest count — the count stays exactly what the filings
+    # built. The retried digest renders the window's true coalesced
+    # count; the suffixed suppression audit row is the record.
     ws = push_enqueue.hour_bucket()
     for _ in range(10):
         assert push_enqueue.reserve_budget(conn, None, "owner-1", ws)
@@ -381,16 +382,38 @@ def test_digest_repeated_suppression_is_duplicate_not_double_count(conn):
         conn, event_kind="digest", owner_principal="owner-1",
         box_id=None, key_material=ws)
     assert s2.disposition == "duplicate"
-    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 3
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 2
     # D77 regression pin: the suppression audit must carry the suffixed
     # key. With the plain key (reverted), the audit row shares the page
-    # key and a later retry wedges on "duplicate" forever. The two
-    # assertions above pin the no-double-count behavior but pass
-    # identically with or without the suffix; this one does not.
+    # key and a later retry wedges on "duplicate" forever.
     keys = [r[0] for r in conn.execute(
         "SELECT event_key FROM push_send_results"
         " WHERE outcome = 'suppressed_budget'").fetchall()]
     assert keys == ["owner-1\x00" + ws + "\x00suppressed"]
+
+
+def test_suppressed_past_window_digest_touches_no_window_count(conn):
+    # #1423: the old code incremented the CURRENT window's
+    # push_digest_state row on a suppressed digest (window_start is
+    # hour_bucket(now), not the digest's window). Under direction (a)
+    # neither the past window's nor the current window's count moves.
+    ws_past = "2026-10-13T10:00:00+00:00"
+    ws = push_enqueue.hour_bucket()
+    for _ in range(10):
+        assert push_enqueue.reserve_budget(conn, None, "owner-1", ws)
+    conn.execute(
+        "INSERT INTO push_digest_state"
+        " (owner_principal, window_start, count)"
+        " VALUES ('owner-1', ?, 5), ('owner-1', ?, 1)",
+        (ws_past, ws))
+    conn.commit()
+    s1 = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws_past)
+    assert s1.disposition == "suppressed_budget"
+    assert s1.event_key == "owner-1\x00" + ws_past
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws_past) == 5
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 1
 
 
 def test_refire_after_completion_blocked_by_outcome_blind_fast_path(conn):

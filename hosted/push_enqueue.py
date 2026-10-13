@@ -111,9 +111,15 @@ schema contract):
   for every coalesced page, so unlike a filing it must be allowed
   to retry once budget frees.
 - **D54. Digest-enqueue split.** On budget exhaustion the page does not
-  send — it coalesces: INSERT the `suppressed_budget` audit row
+  send. A *filing* coalesces: INSERT the `suppressed_budget` audit row
   (http_status/latency_ms NULL — nothing was sent) and increment
   `push_digest_state.count` for `(owner_principal, window_start)`.
+  A *digest's* own suppression (#1423) writes only the suffixed
+  `suppressed_budget` audit row (D77) and never touches the count —
+  the digest is retryable by design and its retry renders the window's
+  true coalesced count; folding the suppression into the count would
+  double-represent the same pages (once as a phantom +1, again at full
+  count in the retried digest, with wrong units).
   The D9 slice's digest "send" *is* its `enqueue_page("digest",
   owner_principal, None, window_start)` call when
   `push_digest_state.count > 0` — dedup (D53/D57) makes it idempotent,
@@ -446,9 +452,29 @@ def enqueue_page(conn, *, event_kind, owner_principal, box_id,
         # digest: suppressed_terminal audits already suffix for the
         # same reason.)
         if event_kind == "digest":
+            # #1423 (direction a): a budget-suppressed digest is NOT
+            # coalesced into the digest count. The digest is retryable
+            # by design (D77) and its retry renders the window's true
+            # coalesced count; folding the suppression in here
+            # double-represents the same pages — once as a phantom +1
+            # in the count, again at full count in the retried digest
+            # (with wrong units: the count counts pages, and a carried
+            # digest is not a page). The suffixed suppression audit row
+            # below is the record of the suppression.
             audit_key = event_key + "\x00suppressed"
-        else:
-            audit_key = event_key
+            try:
+                with conn:
+                    row_id = _insert_result_row(conn, at, owner_principal,
+                                                box_col, event_kind,
+                                                audit_key,
+                                                OUTCOME_SUPPRESSED_BUDGET)
+            except sqlite3.IntegrityError:
+                # Suppression already recorded for this digest (the
+                # retry re-reads the same pending row). Nothing was
+                # reserved on this path, nothing to release.
+                return EnqueueResult("duplicate", event_key, None)
+            return EnqueueResult("suppressed_budget", event_key, row_id)
+        audit_key = event_key
         try:
             with conn:
                 row_id = _insert_result_row(conn, at, owner_principal,
@@ -464,11 +490,8 @@ def enqueue_page(conn, *, event_kind, owner_principal, box_id,
                     " WHERE owner_principal = ? AND window_start = ?",
                     (owner_principal, window_start))
         except sqlite3.IntegrityError:
-            # Lost the race: another thread coalesced this key first
-            # (filings), or this window's suppression is already
-            # recorded (digest — the retry then just re-reads the
-            # same pending row). Nothing was reserved on this path,
-            # nothing to release.
+            # Lost the race: another thread coalesced this key first.
+            # Nothing was reserved on this path, nothing to release.
             return EnqueueResult("duplicate", event_key, None)
         return EnqueueResult("suppressed_budget", event_key, row_id)
 
