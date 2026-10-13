@@ -112,7 +112,12 @@ New pins this slice (continuing the global D-series):
   digest            aid=``"digest:" + owner_principal + ":" + window_start``,
                     ttl_s=3600 (covers the hour window), summary=the
                     ``push_digest_state`` count rendered by the plane
-                    ("N pages coalesced this hour"). A missing or corrupt
+                    ("N pages coalesced this hour"; a digest that
+                    fires late for a past window, the D76 hour-boundary
+                    heal, drops the when-clause — "N pages coalesced —
+                    open the dashboard." — so the text never claims
+                    "this hour" about last hour's pages and never shows
+                    a raw UTC hour bucket). A missing or corrupt
                     digest-state row (count not a positive int — #1356)
                     is corruption: the page dead-letters (fail-closed,
                     operator-visible) rather than sending a count the loop
@@ -133,8 +138,10 @@ New pins this slice (continuing the global D-series):
   unread, so the effective budget cost is zero. The outbox is the
   delivery buffer across the cold-start gap #428's email covers.
   Honest staleness note: parked pages age — a ``digest`` parked for
-  days will eventually buzz "N pages coalesced this hour" for a stale
-  window, and a ``heartbeat_stale`` page ages badly. There is no
+  days will eventually buzz for a stale window (the body drops the
+  "this hour" when-clause once the window is past, per the D79 pin,
+  so it never mislabels the hour), and a ``heartbeat_stale`` page
+  ages badly. There is no
   parked max-age in this slice (follow-up: bound or expire parked
   pages); gate-2 still suppresses decided/deleted approvals at send
   time, so the aged page that does go out is never a decided one.
@@ -499,7 +506,7 @@ def make_record_reader(conn, now):
 # ---------------------------------------------------------------------------
 
 def _plaintext_for(event_kind, *, key_material, owner_principal, record,
-                   digest_count):
+                   digest_count, now=None):
     """Return ``(aid, ttl_s, summary)`` for the D79 kind mapping.
 
     ``key_material`` is the event key's second component; ``record`` is the
@@ -529,11 +536,23 @@ def _plaintext_for(event_kind, *, key_material, owner_principal, record,
         aid, ttl_s, text = ("heartbeat-stale:" + key_material,
                             _TTL_HEARTBEAT_STALE, _SUMMARY_HEARTBEAT_STALE)
     elif event_kind == "digest":
+        # A late-fired past-window digest (the D76 hour-boundary heal)
+        # must not claim "this hour" about the previous hour's pages:
+        # the when-clause is dropped for past windows. The window
+        # stays in the aid for machine consumers; the body stays
+        # human (a raw UTC hour bucket has no place on a lock screen).
+        # Fail-closed on a missing clock: `now=None` cannot prove the
+        # window is current, so it takes the windowless form rather
+        # than assuming "this hour".
+        current_window = (push_enqueue.hour_bucket(now)
+                          if now is not None else None)
+        when = (" this hour" if current_window is not None
+                and key_material == current_window else "")
         aid, ttl_s, text = (
             "digest:" + owner_principal + ":" + key_material,
             _TTL_DIGEST,
-            "%d page%s coalesced this hour — open the dashboard."
-            % (digest_count, "" if digest_count == 1 else "s"))
+            "%d page%s coalesced%s — open the dashboard."
+            % (digest_count, "" if digest_count == 1 else "s", when))
     else:
         raise ValueError("not a paging event kind: %r" % (event_kind,))
     return push_payload.scrub_push_text(aid), ttl_s, text
@@ -1079,7 +1098,7 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
     aid, ttl_s, text = _plaintext_for(
         event_kind, key_material=key_material,
         owner_principal=owner_principal, record=record,
-        digest_count=digest_count)
+        digest_count=digest_count, now=moment)
     plaintext = serialize_plaintext(
         push_payload.build_push_payload(aid, ttl_s, text))
 

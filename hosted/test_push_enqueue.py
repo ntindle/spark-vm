@@ -393,6 +393,58 @@ def test_digest_repeated_suppression_is_duplicate_not_double_count(conn):
     assert keys == ["owner-1\x00" + ws + "\x00suppressed"]
 
 
+def test_refire_after_completion_blocked_by_outcome_blind_fast_path(conn):
+    # Pins the 2026-10-06 #1064 key-scheme note, faithfully: after a page
+    # completes, the queued row is DELETEed and only per-device attempt
+    # rows remain -- with outcomes ('accepted', 'retry', ...) that the D57
+    # partial unique index does NOT cover. The D53 outcome-blind dedup
+    # fast-path is the sole guard: a re-enqueue of the completed page
+    # must report "duplicate", never "queued". If the fast-path is ever
+    # narrowed to an outcome-filtered SELECT, this test fails (and a
+    # second page would go out).
+    #
+    # The pin uses `approval_filed`, not `digest`: digest attempt rows
+    # carry the subscription's REAL box id (D56c/D89) while the digest's
+    # queued row carries box_id='' (enqueue D51), so the D53 fast-path
+    # (which matches on box_id) structurally cannot see a completed
+    # digest's attempt rows -- the digest's no-refire guard is the
+    # sweep's `enqueued_at` scan (D87), not D53. Pinning D53 on the
+    # digest kind would assert `duplicate` for a state that yields
+    # `queued` (caught by QA review, slot 20261013-0659).
+    s1 = push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal="owner-1",
+        box_id="box-1", key_material="aid-9")
+    assert s1.disposition == "queued"
+    key = s1.event_key
+    # Simulate the sender loop's completion: the queued row is gone, one
+    # per-device attempt row (outcome 'accepted', same real box id) is
+    # left behind -- exactly the post-completion state.
+    conn.execute("DELETE FROM push_send_results WHERE outcome = 'queued'")
+    conn.execute(
+        "INSERT INTO push_send_results"
+        " (at, owner_principal, box_id, device, event_kind, event_key,"
+        "  outcome, http_status, latency_ms, sent_at, vapid_key_id)"
+        " VALUES (?, 'owner-1', 'box-1', 'phone', 'approval_filed', ?,"
+        "         'accepted', 201, 12.0, 0.0, 'v1')",
+        (push_enqueue.utc_iso(), key))
+    conn.commit()
+    # Prove the D57 predicate genuinely cannot see this row: the guard
+    # under test is the fast-path, not the index.
+    covered = conn.execute(
+        "SELECT 1 FROM push_send_results"
+        " WHERE box_id = 'box-1' AND event_kind = 'approval_filed'"
+        " AND event_key = ?"
+        " AND outcome IN ('queued', 'suppressed_budget',"
+        "                'suppressed_terminal') LIMIT 1",
+        (key,)).fetchone()
+    assert covered is None
+    s2 = push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal="owner-1",
+        box_id="box-1", key_material="aid-9")
+    assert s2.disposition == "duplicate"
+
+
+
 # --- D56 reservation lifecycle ---------------------------------------------
 
 def test_release_reservation(conn):
