@@ -12,6 +12,17 @@ citing the new observation — never delete the bound, and never set it at
 or above the 360-minute GitHub maximum (a bound the platform would enforce
 anyway is no bound at all).
 
+Exemption: reusable-workflow caller jobs (a job-level `uses:`) MUST NOT
+carry timeout-minutes — GitHub's schema forbids it there (like runs-on and
+steps), and a caller job carrying one invalidates the whole workflow file.
+GitHub then cannot evaluate the `on:` trigger filters, so every push
+repo-wide creates a run that fails with 0 jobs (2026-10-12 incident: #1367
+put timeout-minutes: 60 on release.yml's golden-image caller job, causing
+55 phantom `Cut release` runs in ~20h). The called workflow's own jobs
+carry their own bounds instead. The exemption is pinned both ways below:
+caller jobs are excused from the requirement AND forbidden from carrying
+the bound.
+
 Pure stdlib, no fixtures (mirrors test_workflow_action_pins.py — PyYAML is
 not a test dependency, so jobs are split on their 2-space-indented keys and
 each block is scanned for a 4-space-indented timeout-minutes line; a
@@ -35,6 +46,10 @@ JOB_KEY_RE = re.compile(r"^  ([a-zA-Z0-9_-]+):$", re.M)
 # Job-level timeout-minutes: exactly 4 spaces (a 6-space step-level entry
 # is a different scope and must not count).
 TIMEOUT_RE = re.compile(r"^    timeout-minutes:\s*(\d+)\s*(?:#.*)?$", re.M)
+# A job-level `uses:` (exactly 4 spaces) marks a reusable-workflow caller
+# job — `steps:` entries sit at 6 spaces and must not match. Caller jobs
+# cannot carry timeout-minutes (GitHub schema; see module docstring).
+CALLER_RE = re.compile(r"^    uses:\s", re.M)
 
 # GitHub's hard ceiling for timeout-minutes; a bound at or above it is
 # vacuous — the platform enforces the ceiling first.
@@ -63,17 +78,40 @@ def _timeout_minutes(block):
     return int(m.group(1)) if m else None
 
 
+def _is_caller_job(block):
+    return CALLER_RE.search(block) is not None
+
+
 def test_every_job_has_timeout_minutes():
     unbound = []
     for name in WORKFLOW_FILES:
         path = WORKFLOWS / name
         assert path.is_file(), "workflow file missing: %s" % name
         for job, block in _jobs(path):
+            if _is_caller_job(block):
+                continue  # GitHub forbids timeout-minutes on caller jobs
             if _timeout_minutes(block) is None:
                 unbound.append("%s:%s" % (name, job))
     assert not unbound, (
         "jobs without an explicit timeout-minutes (a hung job burns the "
         "6-hour GitHub default):\n  " + "\n  ".join(sorted(unbound)))
+
+
+def test_caller_jobs_carry_no_timeout_minutes():
+    # Regression pin for the 2026-10-12 incident: a reusable-workflow
+    # caller job carrying timeout-minutes invalidates the whole workflow
+    # file on GitHub — the `on:` trigger filters become unevaluable, so
+    # every push repo-wide spawns a run that fails with 0 jobs (#1367 did
+    # this to release.yml's golden-image caller job: 55 phantom runs).
+    bad = []
+    for name in WORKFLOW_FILES:
+        for job, block in _jobs(WORKFLOWS / name):
+            if _is_caller_job(block) and _timeout_minutes(block) is not None:
+                bad.append("%s:%s" % (name, job))
+    assert not bad, (
+        "reusable-workflow caller jobs must not carry timeout-minutes "
+        "(GitHub schema forbids it; the file fails validation and every "
+        "push spawns a 0-job failing run):\n  " + "\n  ".join(sorted(bad)))
 
 
 def test_timeout_bounds_are_sane():

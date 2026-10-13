@@ -99,6 +99,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The "Cut release" workflow no longer spawns a failing run on every push:
+  a timeout bound placed on the release workflow's reusable-workflow
+  caller job is not allowed by GitHub's workflow schema, which
+  invalidated the whole file and left the push filters unevaluable — so
+  each push created a run that died with zero jobs. The bound is removed
+  from the caller job (the called workflow's own jobs keep theirs), and
+  the CI timeout pin now forbids the pattern so it cannot recur. (#TBD)
+
 - The invite-wave sender now refuses to send a real wave while the public
   host is still the reserved `.invalid` default, instead of baking
   dead claim links into every invite — failing loud at the send moment

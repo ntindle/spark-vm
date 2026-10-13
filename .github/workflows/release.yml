@@ -114,8 +114,14 @@ jobs:
     # total failure, where no release exists to gate.
     name: golden-image build gate
     needs: release
-    # mirrors build-and-gate's own bound; the caller job must not outlive it
-    timeout-minutes: 60
+    # No timeout-minutes on this job: it calls a reusable workflow
+    # (`uses:`), and GitHub's schema forbids timeout-minutes (like runs-on
+    # and steps) on caller jobs. A caller job carrying one invalidates the
+    # whole file — GitHub then cannot evaluate the `on:` trigger filters,
+    # so EVERY push repo-wide creates a `Cut release` run that fails with
+    # 0 jobs (incident 2026-10-12: #1367's bound caused 55 phantom runs in
+    # ~20h). The called workflow's own jobs carry their own bounds
+    # (golden-image.yml); the caller needs none.
     if: always() && needs.release.outputs.tag != ''
     permissions:
       contents: read
