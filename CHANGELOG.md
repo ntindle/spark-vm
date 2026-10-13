@@ -75,7 +75,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   hook's own status file, so a box's reported frozen/live answer and its age
   come from the live gate evaluation instead of only an operator's manual
   flag — closing the loop on visible degraded operation. An explicit manual
-  flag still overrides the file when given. (#TBD)
+  flag still overrides the file when given. (#1389)
 
 - The contributor test suite no longer emits warnings on a clean run: two
   test files and one product docstring with invalid escape sequences in
