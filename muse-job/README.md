@@ -333,9 +333,10 @@ approval or a user-input prompt (the decision-side companion to the
 section is the operator reference.
 
 **List: `muse-job approvals <slug>`.** Prints every pending approval —
-with its choice ids and the exact `muse-job decide` invocation — and
-every open user-input prompt — with the exact `muse-job answer`
-invocation, flagged when the prompt looks like a trust prompt. The
+with its choice ids and the ready-to-copy `muse-job decide` invocation
+template — and
+every open user-input prompt — with the ready-to-copy `muse-job answer`
+invocation template, flagged when the prompt looks like a trust prompt. The
 output is redacted by default: approval subjects, raw tool args, and
 prompt answers are withheld, because they may carry real secrets.
 `--json` keeps the same redaction; `--show-secrets` (which only takes
@@ -354,8 +355,12 @@ single-attach session — this is the normal path, not a fallback. The
 admission ack prints only a key whitelist: the server's free-form
 fields never reach the operator's terminal unexamined.
 
-**Answer: `muse-job answer <slug> --user-input-id <id> --answers '<json
-list>' --trust-policy-opt-in | --classified-not-trust-prompt`.** The
+**Answer: `muse-job answer <slug> --user-input-id <id> --answers
+'[{"questionId": ..., ...}]' --classified-not-trust-prompt |
+--trust-policy-opt-in`.** (The flag order above matches the template the
+CLI itself prints — `--classified-not-trust-prompt` before
+`--trust-policy-opt-in` — and the answer-dict shape comes from the CLI's
+own `--answers` help, e.g. `'[{"questionId":"q1","selectedLabel":"Yes"}]'`.) The
 operator must classify the prompt explicitly — exactly one of the two
 flags, enforced by the CLI. A trust prompt is answered only with the
 explicit voucher (`--trust-policy-opt-in`, gated client-side by an
