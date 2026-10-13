@@ -77,6 +77,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Credential-vending lane convergence pin: re-verified the lane at
+  current main after the contract's no-oracle 401 + AES-128-GCM
+  amendments (#1401, #1403 — contract halves landed, build halves still
+  ride the #890 endpoint build) and the dual-mode ingest seam (#948,
+  closed by #1409) — the seven newer contract findings are confirmed as
+  pristine pre-build gates on the #890 build (placement shape,
+  rate-limit mechanism, manifest-write atomicity, key-rotation path),
+  with the grace-token question resolved: the vend endpoint's mint path
+  requires a current token, grace stays for non-secret-issuing routes.
+  (#850, #1443)
 - Muse-job trust + approvals lane convergence pin: re-verified the #1397
   analysis at current main after the trust grant (#1394), the
   supervisor-mediated listing (#1396), and the session-exited watch
