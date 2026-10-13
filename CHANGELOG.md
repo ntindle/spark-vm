@@ -65,7 +65,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Operator reference for the `muse-job` approvals subcommands
   (`approvals`, `decide`, `answer`): the default-redaction posture and
-  the `--show-secrets` warning, decide-before-read routing through the
+  the `--show-secrets` warning, decide routing through the
   supervisor while a turn is running, and the exact-one-of trust
   classification `answer` requires — the first operator-facing doc for
   the #1372 subcommands, closing the hole the issue's gap analysis

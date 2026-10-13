@@ -333,8 +333,10 @@ fields never reach the operator's terminal unexamined.
 list>' --trust-policy-opt-in | --classified-not-trust-prompt`.** The
 operator must classify the prompt explicitly — exactly one of the two
 flags, enforced by the CLI. A trust prompt is answered only with the
-explicit voucher (`--trust-policy-opt-in`, backed by an explicit
-`TrustPolicy` opt-in on the wire); anything else is answered directly
+explicit voucher (`--trust-policy-opt-in`, gated client-side by an
+explicit `TrustPolicy(auto_answer_trust=True)` — the wire call
+(`userInput/answer`) is identical either way, so the classification
+never reaches the server); anything else is answered directly
 (`--classified-not-trust-prompt`). The CLI never classifies by itself:
 the recorded #211 decision forbids auto-answering trust prompts on
 heuristic absence alone, because a trust prompt need not contain the
