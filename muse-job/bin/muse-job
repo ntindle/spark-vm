@@ -5008,8 +5008,10 @@ def _msp_kill(args):
     # kill does not defer a sibling's auto-recovery for a full TTL.
     _phase_msp_occupancy_note(slug, False)
     # Issue #1437 (F-MSP-7, the deliberate-kill instance of the
-    # phantom-ledger hazard): the session is deleted above, so every
-    # ledgered request is definitively dead -- clear the ledger so
+    # phantom-ledger hazard): the supervisor is torn down above and
+    # the job is marked killed, so no live drain will ever execute a
+    # ledgered request (the session delete is best-effort advisory --
+    # executability needs the supervisor) -- clear the ledger so
     # `status` stops advertising phantom "requested" approvals.
     _msp_request_ledger_clear(slug)
     print(json.dumps({"slug": slug, "transport": "msp", "session": "deleted",
@@ -5944,9 +5946,12 @@ def _msp_request_ledger_remove(slug, kind, rid):
 def _msp_request_ledger_clear(slug):
     """Drop every request-ledger entry. Never raises.
 
-    Called from _msp_kill: the session is deleted there, so every
-    ledgered request is definitively dead -- no live drain will ever
-    execute it, and keeping it advertised in `status` would be the
+    Called from _msp_kill: the supervisor is torn down there
+    (SIGTERM->SIGKILL ladder in _msp_kill_supervisor) and the job is
+    marked killed, so no live drain will ever execute a ledgered
+    request -- the session delete is best-effort advisory, but
+    executability requires a live supervisor, which no longer exists.
+    Keeping the entries advertised in `status` would be the
     phantom-ledger hazard (issue #1437, the F-MSP-7 follow-through).
     Not a TTL-triggered tombstone: the trigger is the deliberate kill,
     never heartbeat-aliveness (the #1434 design notes reject
