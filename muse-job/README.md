@@ -342,10 +342,9 @@ the recorded #211 decision forbids auto-answering trust prompts on
 heuristic absence alone, because a trust prompt need not contain the
 word "trust".
 
-**Known limitation.** `approvals` lists only when the job's session is
-directly attachable — while the supervisor holds it (the whole turn,
-including the blocked states), listing fails with an explicit error
-instead of the old confusing refusal. `decide`/`answer` still route
-through the supervisor, and `muse-job status` keeps showing the
-blocked request in the meantime. Wiring listing through the
-supervisor is its own open remainder (issue #1396).
+**Held sessions.** While the job's supervisor holds the session (the
+whole turn, including the blocked states), `approvals` lists through
+the supervisor's already-open host (read-only queue-drain +
+rendezvous), and `decide`/`answer` route through it too — the same
+redacted-by-default posture either way. `muse-job status` keeps
+showing the blocked request in the meantime (issue #1396).

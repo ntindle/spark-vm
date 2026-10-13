@@ -92,7 +92,7 @@ regardless.)
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `POST /v1/boxes/{box_id}/credentials` | **box bearer** (#844) | Mint: the box requests named credentials, receives short-lived values. `{box_id}` in the path must equal the token's box (else 403 — the token is valid, the identity is wrong). |
+| `POST /v1/boxes/{box_id}/credentials` | **box bearer** (#844) | Mint: the box requests named credentials, receives short-lived values. Auth failures collapse to a plain `401` on the whole box surface — `{box_id}` in the path must equal the token's box, but a wrong-box token reads the same unattributed `401` as an unknown token (the plane's no-oracle convention: a stolen box token presented against other box ids must not learn which ids are enrolled). Revoked and expired tokens also `401` (distinct holder-visible messages — "box revoked" / "token expired" — no cross-box probing). The vend route reuses the plane's shared box-auth gate, so it inherits this property. |
 | `PUT /v1/owner/boxes/{box_id}/credentials/manifest` | **owner key** (#843) | Management: write/replace the box's secret manifest (metadata + source values, write-only). |
 | `GET /v1/owner/boxes/{box_id}/credentials/manifest` | **owner key** | Management: read manifest **metadata only — never secret values** (values are write-only after set; see §3). |
 | `DELETE /v1/owner/boxes/{box_id}/credentials/{name}` | **owner key** | Revoke: retains the manifest row as a tombstone and stamps `revoked_at` — a revoked name is never vended (mint lists it in `refused`); the stamp is cleared only by re-PUT with a fresh value. Propagation is bounded by §5. |
@@ -230,7 +230,11 @@ vend_manifest(box_id TEXT, name TEXT, ttl_seconds INT,
 -- Secret values: ciphertext only. Separate table so a manifest reader
 -- can never trip over a value.
 vend_values(box_id TEXT, name TEXT, ciphertext BLOB, nonce BLOB,
-            alg TEXT /* 'aes-256-gcm' */, created_at TEXT, rotated_at TEXT,
+            alg TEXT /* 'aes-128-gcm' (issue #1403: the plane worker is
+            stdlib-only, so the vendored AES-128-GCM from
+            hosted/push_crypto.py is the implementable algorithm; the
+            data key is a random Worker secret either way) */,
+            created_at TEXT, rotated_at TEXT,
             PRIMARY KEY (box_id, name));
 
 -- Server-side vend audit (G50.6): every vend, refresh, revoke, and
@@ -266,8 +270,12 @@ the auth-class boundary (§2.1).
 The vision moves secret material off the box and onto the plane. Without
 this answer the design is a trust relocation, not a trust improvement:
 
-- **At rest:** encrypted. `vend_values.ciphertext` is AES-256-GCM with a
-  random nonce per value. The data key lives as a **Cloudflare Worker
+- **At rest:** encrypted. `vend_values.ciphertext` is AES-128-GCM with a
+  random nonce per value (issue #1403: the plane worker is
+  stdlib-only with no AES, so the contract names the vendored
+  AES-128-GCM from `hosted/push_crypto.py` — vendored the way the
+  worker already vendors its Ed25519/P-256 code — rather than an
+  AES-256 the platform cannot currently implement). The data key lives as a **Cloudflare Worker
   secret — one per tenant plane** (D-MT1, 2026-10-09: one plane per
   tenant; provisioned per plane at plane deploy time, D-VD3) — never in
   D1, never in the repo, never in logs, never in an audit row. Key
