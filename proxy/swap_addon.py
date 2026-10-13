@@ -2495,9 +2495,10 @@ class SwapAddon:
             authorization, so a deferred pass must never release its
             output. Only _swap_json_text's validity probe uses this.
         audit_sink: when not None, a list to which (host, matched
-            placeholder, approved_aid) audit entries are APPENDED instead
-            of being written inline — the caller flushes them through
-            self._audit after the substituted output is fully validated,
+            placeholder, approved_aid, flow_id) audit entries are
+            APPENDED instead of being written inline — the caller
+            flushes them through self._audit after the substituted
+            output is fully validated,
             recording the approval signals only on a successful flush. On
             a validation abort the caller discards the buffer, so a
             refused swap leaves zero `swapped=` residue. Mutually
