@@ -150,6 +150,13 @@
 # mode 700 so the unprivileged S1 status plane reads this record instead of
 # the pins themselves; written only by the privileged `install` step),
 # PINS_HASH_DIR (carrier dir for PINS_HASH_FILE; default /var/lib/sparkvm-toolset),
+# MANAGED_TARGETS_FILE (world-readable record of the update plane's resolved
+# managed targets; default $MANAGED_TARGETS_DIR/managed_targets — the
+# unprivileged S1 status plane reads this record instead of trusting its own
+# environment, which resolves differently from the timer's; written by the
+# privileged `install` step and refreshed by every `update` tick),
+# MANAGED_TARGETS_DIR (carrier dir for MANAGED_TARGETS_FILE; default
+# $PINS_HASH_DIR),
 # CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
 # CUA_DRIVER_OWNER/GROUP (default ntindle — the daemon runs as ntindle, not
 # root), CUA_RELEASE_BASE (release download base; tests point it at a local
@@ -243,6 +250,23 @@ TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # (PINS_HASH_FILE set explicitly wins; otherwise it derives from the dir.)
 : "${PINS_HASH_DIR:=/var/lib/sparkvm-toolset}"
 : "${PINS_HASH_FILE:=$PINS_HASH_DIR/self_update_pins.hash}"
+# Managed targets record: the world-readable record the unprivileged S1
+# status plane reads to learn which artifacts the update plane converges
+# (issue #1310). The update plane resolves $CUA_DRIVER_BIN/$PLAYWRIGHT_VENV
+# from ITS environment (the systemd unit's, under the timer); the status
+# plane resolves them from the invoker's shell. If the operator relocates
+# the managed locations via the override in one environment but not the
+# other, the two planes silently target different artifacts — the exact
+# divergence #1308 closed, reintroduced through the override path. The
+# privileged `install` publishes the resolved targets and every `update`
+# tick refreshes the record, so the record always reflects the update
+# plane's own resolution; the status plane prefers the record, falling back
+# to its env override, then the default (see scripts/self_update.py). Same
+# carrier discipline as the pins hash: only a privileged install/update may
+# move the signal (root-owned 0755 dir, 0644 record). (MANAGED_TARGETS_FILE
+# set explicitly wins; otherwise it derives from the dir.)
+: "${MANAGED_TARGETS_DIR:=$PINS_HASH_DIR}"
+: "${MANAGED_TARGETS_FILE:=$MANAGED_TARGETS_DIR/managed_targets}"
 : "${CUA_DRIVER_BIN:=/home/ntindle/cua/bin/cua-driver}"
 : "${CUA_DRIVER_OWNER:=ntindle}"
 : "${CUA_DRIVER_GROUP:=ntindle}"
@@ -2551,6 +2575,24 @@ cmd_update() {
         return 0
     fi
 
+    # #1310: refresh the managed-targets record on every tick so the S1
+    # status plane always reads what THIS environment (the timer's)
+    # resolves — the install-time record alone would go stale the moment
+    # the unit's Environment= changes without a reinstall. Placed after
+    # the opt-out return: an opted-out updater converges nothing, so it
+    # must not keep publishing "these are the converged artifacts" — the
+    # record freezes at its last active value until re-opt-in. --dry-run
+    # is a pure diagnostic and changes nothing: the dry-run invoker's
+    # environment is typically the operator's shell, not the timer's, so
+    # publishing it would reintroduce the #1310 divergence through the
+    # dry-run path. Log-loud but non-fatal: the record is an S1
+    # visibility signal, not part of the update's safety — a wedged
+    # carrier dir must not block the weekly converge.
+    if [ "$dry" != "1" ]; then
+        _publish_managed_targets \
+            || log "update: WARNING: could not refresh managed targets record $MANAGED_TARGETS_FILE"
+    fi
+
     # Single-flight: never interleave two update runs.
     mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null \
         || { log "update: cannot create state dir $TOOLSET_STATE_DIR"; return 1; }
@@ -2791,6 +2833,74 @@ _publish_installed_pins_hash() {
     return 0
 }
 
+_publish_managed_targets() {
+    # _publish_managed_targets — write the update plane's resolved managed
+    # targets to the world-readable MANAGED_TARGETS_FILE (issue #1310).
+    # Called from cmd_install (fail-loud) and from cmd_update's tick
+    # (the caller decides loudness — see below). The record is a plain
+    # KEY=value file naming the two artifacts THIS invocation of the update
+    # plane converges; the S1 status plane prefers it over its own
+    # environment so the two planes can never silently target different
+    # artifacts through the CUA_DRIVER_BIN/PLAYWRIGHT_VENV override path.
+    # Same hardening family as _publish_installed_pins_hash: absolute-path
+    # only, canonicalized dir refused at the filesystem root, owner-owned
+    # 0755 carrier dir, owner-owned 0644 record, unlink+recreate via
+    # `install` from a TMPDIR staging file (never staged in the root-owned
+    # carrier dir — staging there would regress the supported
+    # non-root-via-_sudo install path). Unlink+recreate is not
+    # rename-atomic: a status-plane read landing mid-copy can see a torn
+    # record, which its parser treats as missing (it requires the exact
+    # two-key set the publisher always writes together). The record
+    # carries no secret (paths are public config); its only job is telling
+    # S1 which artifacts the updater holds. A value that is not an
+    # absolute path — or that contains a newline/CR, which would split
+    # into extra lines and let a later duplicate key override the real
+    # one — is refused rather than published: the status plane treats a
+    # malformed record as missing (fail-closed to its env/default), and
+    # publishing garbage would move that signal.
+    local _tmp _dir _content
+    case "$MANAGED_TARGETS_FILE" in
+        /*) ;;
+        *) echo "ERROR: MANAGED_TARGETS_FILE must be an absolute path" >&2; return 1 ;;
+    esac
+    case "$CUA_DRIVER_BIN" in
+        /*) ;;
+        *) echo "ERROR: refusing to publish relative CUA_DRIVER_BIN" >&2; return 1 ;;
+    esac
+    case "$PLAYWRIGHT_VENV" in
+        /*) ;;
+        *) echo "ERROR: refusing to publish relative PLAYWRIGHT_VENV" >&2; return 1 ;;
+    esac
+    case "$CUA_DRIVER_BIN$PLAYWRIGHT_VENV" in
+        *$'\n'*|*$'\r'*)
+            echo "ERROR: refusing to publish managed target containing newline" >&2
+            return 1 ;;
+    esac
+    _dir="$(dirname -- "$MANAGED_TARGETS_FILE")"
+    _dir="$(readlink -m -- "$_dir")" \
+        || { echo "ERROR: cannot canonicalize managed targets dir" >&2; return 1; }
+    case "$_dir" in
+        /|//)
+            echo "ERROR: refusing to publish managed targets under filesystem root" >&2
+            return 1 ;;
+    esac
+    _sudo install -d -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0755 "$_dir" \
+        || { echo "ERROR: cannot create managed targets dir $_dir" >&2; return 1; }
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/managed-targets.XXXXXX")" \
+        || { echo "ERROR: cannot stage managed targets record" >&2; return 1; }
+    _content="CUA_DRIVER_BIN=$CUA_DRIVER_BIN
+PLAYWRIGHT_VENV=$PLAYWRIGHT_VENV"
+    printf '%s\n' "$_content" >"$_tmp" 2>/dev/null \
+        || { echo "ERROR: cannot stage managed targets record" >&2; rm -f "$_tmp"; return 1; }
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0644 "$_tmp" "$MANAGED_TARGETS_FILE" \
+        || { echo "ERROR: cannot publish managed targets record $MANAGED_TARGETS_FILE" >&2; rm -f "$_tmp"; return 1; }
+    rm -f "$_tmp"
+    log "published managed targets to $MANAGED_TARGETS_FILE"
+    return 0
+}
+
 cmd_install() {
     # One-command backfill: copy the script to the state-dir installed copy,
     # install the systemd units, enable the timer. Re-running refreshes the
@@ -2849,6 +2959,13 @@ cmd_install() {
     # cannot be published leaves the mismatch signal dead, and a silent
     # install is worse than a failed one.
     _publish_installed_pins_hash || return 1
+    # #1310: publish the update plane's resolved managed targets so the
+    # unprivileged S1 status plane probes the same artifacts the updater
+    # converges (the two planes resolve CUA_DRIVER_BIN/PLAYWRIGHT_VENV from
+    # different environments; without the record they silently diverge
+    # through the override path). Fail-loud: same reasoning as the pins
+    # hash — a silent install is worse than a failed one.
+    _publish_managed_targets || return 1
     # The wheel-hashes file is the operator-owned hash authority for the
     # playwright layer's wheel download. Installed/backfilled ONLY here —
     # the update plane never reads it from the live checkout, same
@@ -2892,6 +3009,15 @@ cmd_uninstall() {
         /*)
             _sudo rm -f "$PINS_HASH_FILE" 2>/dev/null || true
             _sudo rmdir "$(dirname -- "$PINS_HASH_FILE")" 2>/dev/null || true ;;
+    esac
+    # #1310: remove the managed-targets record alongside the pins hash — a
+    # stale record would leave S1 probing artifacts no updater holds. The
+    # carrier dir is removed only if empty (it is shared with the pins
+    # hash under the default derivation).
+    case "${MANAGED_TARGETS_FILE:-}" in
+        /*)
+            _sudo rm -f "$MANAGED_TARGETS_FILE" 2>/dev/null || true
+            _sudo rmdir "$(dirname -- "$MANAGED_TARGETS_FILE")" 2>/dev/null || true ;;
     esac
     if [ "$SKIP_SYSTEMCTL" != "1" ]; then
         _sudo systemctl daemon-reload 2>/dev/null || true

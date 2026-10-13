@@ -194,6 +194,29 @@ making a checkout/installed split loud. The record path (`PINS_HASH_DIR` /
 carrier dir would let anyone move the mismatch signal; `install` refuses
 relative paths and the filesystem root.
 
+Managed-targets record (issue #1310): the same two-planes split applies to
+*where* the managed tools live, not just which versions they hold. The
+update plane resolves `CUA_DRIVER_BIN` / `PLAYWRIGHT_VENV` from its own
+environment (the systemd unit's, under the timer); the status plane used
+to resolve them from the invoker's shell. An operator relocating the
+managed locations via the override in one environment but not the other
+left the two planes silently targeting different artifacts — the exact
+divergence #1308 closed, reintroduced through the override path. The
+privileged `install` step now publishes the resolved targets to a
+world-readable record, `/var/lib/sparkvm-toolset/managed_targets`
+(root-owned 0755 carrier dir, 0644 file; written only by the privileged
+update plane), and every `update` tick refreshes it — so the record always
+reflects the timer's environment, not just the installer's. The status
+plane prefers the record, falling back to its env override, then the
+default (a missing or malformed record is silent: pre-#1310 installs never
+wrote one). The tick refresh is log-loud but non-fatal: the record is a
+visibility signal, not update safety — a wedged carrier must not block
+the weekly converge. `uninstall` removes the record alongside the pins
+hash. The record path (`MANAGED_TARGETS_DIR` / `MANAGED_TARGETS_FILE`)
+carries the same root-controlled-path discipline as the pins hash
+(`install` refuses relative paths, the filesystem root, and relative
+target values).
+
 ## Recovery (from #532)
 
 Self-update without recovery is just a fancier way to break the box. The

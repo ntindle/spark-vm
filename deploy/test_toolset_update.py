@@ -3296,7 +3296,10 @@ def test_install_honors_pins_hash_file_override(env, tmp_path):
                               extra={"PINS_HASH_FILE": str(h)})
     assert r.returncode == 0, r.stderr
     assert h.exists()
-    assert not (tmp_path / "pinshash").exists()
+    # The pins hash honored the override; the pinshash dir itself may still
+    # exist — the #1310 managed-targets record derives from PINS_HASH_DIR
+    # by default and lands there.
+    assert not (tmp_path / "pinshash" / "self_update_pins.hash").exists()
 
 
 def test_install_refreshes_stale_pins_hash(env, tmp_path):
@@ -3429,6 +3432,211 @@ def test_uninstall_removes_pins_hash_record(env, tmp_path):
     r2 = run_bash("./deploy/toolset-update.sh uninstall", env_extra=e)
     assert r2.returncode == 0, r2.stderr
     assert not h.exists()
+
+
+# --- install/update publish the managed-targets record (issue #1310) --------
+
+def _install_with_targets(env, tmp_path, extra=None):
+    e = dict(env["env"])
+    # MANAGED_TARGETS_DIR defaults to $PINS_HASH_DIR, so the fixture's
+    # pinshash redirect covers the record too — the "all state dirs under
+    # tmp" contract needs no new knob here.
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    if extra:
+        e.update(extra)
+    return run_bash("./deploy/toolset-update.sh install", env_extra=e), e
+
+
+def _read_targets_record(p):
+    out = {}
+    for line in p.read_text().splitlines():
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
+def test_install_publishes_managed_targets(env, tmp_path):
+    # #1310: the privileged install publishes the update plane's resolved
+    # managed targets to the world-readable carrier dir (the state dir is
+    # mode 700, unreadable by the S1 status plane). (Vacuity: without the
+    # publish step no record exists and the mode/content assertions fail.)
+    r, e = _install_with_targets(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    carrier = tmp_path / "pinshash"
+    assert stat.S_IMODE(carrier.stat().st_mode) == 0o755
+    rec = carrier / "managed_targets"
+    assert rec.exists()
+    assert stat.S_IMODE(rec.stat().st_mode) == 0o644
+    got = _read_targets_record(rec)
+    assert got["CUA_DRIVER_BIN"] == e["CUA_DRIVER_BIN"]
+    assert got["PLAYWRIGHT_VENV"] == e["PLAYWRIGHT_VENV"]
+
+
+def test_install_honors_managed_targets_file_override(env, tmp_path):
+    # MANAGED_TARGETS_FILE set explicitly wins over the
+    # MANAGED_TARGETS_DIR derivation.
+    f = tmp_path / "custom" / "targets"
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"MANAGED_TARGETS_FILE": str(f)})
+    assert r.returncode == 0, r.stderr
+    assert f.exists()
+    assert not (tmp_path / "pinshash" / "managed_targets").exists()
+
+
+def test_install_refreshes_stale_managed_targets(env, tmp_path):
+    # Re-running install must move the signal to the currently resolved
+    # targets: pre-seed a record that cannot match, re-install, and the
+    # record is rewritten. (Fabricated staleness stands in for "targets
+    # relocated since the last install" — the publish step runs
+    # unconditionally in cmd_install, so any re-install refreshes it.)
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "managed_targets").write_text(
+        "CUA_DRIVER_BIN=/stale/driver\nPLAYWRIGHT_VENV=/stale/venv\n")
+    r, e = _install_with_targets(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    got = _read_targets_record(carrier / "managed_targets")
+    assert got["CUA_DRIVER_BIN"] == e["CUA_DRIVER_BIN"]
+    assert got["PLAYWRIGHT_VENV"] == e["PLAYWRIGHT_VENV"]
+
+
+def test_install_fails_loud_when_targets_dir_uncreatable(env, tmp_path):
+    # A MANAGED_TARGETS_DIR that cannot be created (here: an existing file,
+    # so `install -d` fails deterministically for any uid) must fail the
+    # install loudly — a silent install would leave the targets signal
+    # dead. (Vacuity: without the fail-closed publish step, install would
+    # succeed and this fails.)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"MANAGED_TARGETS_DIR": str(blocker)})
+    assert r.returncode != 0
+    assert "managed targets" in r.stderr
+
+
+def test_install_refuses_relative_targets_file(env, tmp_path):
+    # A relative MANAGED_TARGETS_FILE would make the privileged `install -d`
+    # chmod/chown the current working directory — refused loudly instead
+    # (fail-closed), mirroring the pins-hash guard.
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"MANAGED_TARGETS_FILE":
+                                        "relative/targets"})
+    assert r.returncode != 0
+    assert "absolute path" in r.stderr
+
+
+def test_install_refuses_relative_cua_driver_bin(env, tmp_path):
+    # A relative managed target cannot name a stable artifact across the
+    # two planes' different working directories — the publish refuses it
+    # loudly rather than publishing a lie the status plane would then
+    # probe. (Vacuity: without the guard, install succeeds and this fails.)
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"CUA_DRIVER_BIN":
+                                        "relative/cua-driver"})
+    assert r.returncode != 0
+    assert "relative CUA_DRIVER_BIN" in r.stderr
+
+
+def test_install_refuses_relative_playwright_venv(env, tmp_path):
+    # Symmetric to the CUA_DRIVER_BIN refusal: both managed targets get
+    # the absolute-path guard.
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"PLAYWRIGHT_VENV":
+                                        "relative/pw"})
+    assert r.returncode != 0
+    assert "relative PLAYWRIGHT_VENV" in r.stderr
+
+
+def test_install_refuses_newline_in_target_value(env, tmp_path):
+    # A newline in a target value would split into extra lines on publish;
+    # the status-plane parser takes the last occurrence of a known key, so
+    # a crafted value could override the real one. Refused loudly rather
+    # than published. (Vacuity: without the guard, install succeeds and
+    # this fails.)
+    r, _ = _install_with_targets(env, tmp_path,
+                                 extra={"CUA_DRIVER_BIN":
+                                        "/x\nCUA_DRIVER_BIN=/evil"})
+    assert r.returncode != 0
+    assert "newline" in r.stderr
+
+
+def test_update_opted_out_does_not_publish_targets(env, tmp_path):
+    # An opted-out updater converges nothing: the tick must not publish the
+    # managed-targets record (it would claim artifacts nothing converges).
+    # The record freezes at its last active value — here, absent.
+    # (Vacuity: with the refresh before the opt-out return, the record
+    # appears and this fails.)
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    e["TOOLSET_UPDATE_OPTOUT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "pinshash" / "managed_targets").exists()
+
+
+def test_update_dry_run_does_not_refresh_managed_targets(env, tmp_path):
+    # --dry-run is a pure diagnostic ("changes nothing"): it must not move
+    # the record. The dry-run invoker's environment is typically the
+    # operator's shell, not the timer's — publishing it would reintroduce
+    # the #1310 divergence through the dry-run path. Pre-seed a stale
+    # record with different env targets, dry-run, and the record is
+    # byte-identical. (Vacuity: without the dry-run guard the record is
+    # rewritten to the invoker's targets and this fails.)
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    stale = "CUA_DRIVER_BIN=/stale/driver\nPLAYWRIGHT_VENV=/stale/venv\n"
+    (carrier / "managed_targets").write_text(stale)
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (carrier / "managed_targets").read_text() == stale
+
+
+def test_update_tick_refreshes_managed_targets(env, tmp_path):
+    # #1310: the record must reflect the TIMER's environment, not just the
+    # installer's — every update tick refreshes it. Pre-seed a stale
+    # record (what an install-time-only record would leave behind after a
+    # unit Environment= relocation), run a tick, and the record moves to
+    # the tick's resolved targets. (Vacuity: without the tick hook, the
+    # stale record survives and this fails.)
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "managed_targets").write_text(
+        "CUA_DRIVER_BIN=/stale/driver\nPLAYWRIGHT_VENV=/stale/venv\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    got = _read_targets_record(carrier / "managed_targets")
+    assert got["CUA_DRIVER_BIN"] == e["CUA_DRIVER_BIN"]
+    assert got["PLAYWRIGHT_VENV"] == e["PLAYWRIGHT_VENV"]
+
+
+def test_update_tick_survives_targets_publish_failure(env, tmp_path):
+    # The record is an S1 visibility signal, not update safety: a wedged
+    # carrier (here: under /proc, unwritable) must not block the weekly
+    # converge — the tick logs loudly and continues. (Vacuity: if the
+    # publish failure propagated, update would return nonzero and this
+    # fails.)
+    e = dict(env["env"])
+    e["MANAGED_TARGETS_FILE"] = "/proc/managed_targets"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    runlog = env["state"] / "toolset-update.log"
+    assert "could not refresh managed targets record" in runlog.read_text()
+
+
+def test_uninstall_removes_managed_targets_record(env, tmp_path):
+    # Uninstall removes the published record — otherwise the stale record
+    # keeps S1 probing artifacts no updater holds.
+    r, e = _install_with_targets(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    rec = tmp_path / "pinshash" / "managed_targets"
+    assert rec.exists()
+    r2 = run_bash("./deploy/toolset-update.sh uninstall", env_extra=e)
+    assert r2.returncode == 0, r2.stderr
+    assert not rec.exists()
 
 
 def test_publish_fails_loud_when_pins_unhashable(env, tmp_path):

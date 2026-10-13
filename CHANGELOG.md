@@ -123,6 +123,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The toolset status report now probes the same managed tool locations
+  the updater converges, even when the operator relocates them through
+  environment overrides in only one place: the privileged install
+  publishes the resolved locations to a world-readable record and every
+  updater run refreshes it, and the status plane prefers the record over
+  its own environment. Previously the two planes silently targeted
+  different artifacts through the override path, so reported drift was
+  not the drift the updater clears. (#1310, #1411)
+
 - `muse-job approvals` now lists a job's pending approvals and user-input
   prompts while the supervisor holds the session, routed read-only through
   the supervisor's open session — previously it failed with an error. The
