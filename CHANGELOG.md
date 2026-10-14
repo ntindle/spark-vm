@@ -52,6 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Rejection errors for malformed browser-driver calls can no longer be
+  forged into multi-line log entries: parameter keys and action names
+  containing newlines or control characters are backslash-escaped
+  before they reach an error message, so a hostile key can't fake
+  adjacent log lines. (#1473, #1487)
 - The credential-vending contract now pins the token-state gate for
   issuance: minting and refreshing vended credentials requires a
   `current` box token — a `grace` (post-rotation) token reads `401`

@@ -1380,3 +1380,68 @@ def test_envelope_string_caps():
         O.validate_observation(obs)
     assert exc.value.code == "bad_observation"
     assert big not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Log forging (#1473): caller-controlled keys/names must never reach an
+# error/log line with raw control characters — a raw newline in an error
+# would let one entry fake adjacent log lines.
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_param_key_with_newline_produces_single_line_error():
+    # The #1473 prescription: a key containing \n must produce a
+    # single-line error with the newline backslash-escaped.
+    action = {"action": "look", "evil\nkey": "x"}
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([action]))
+    assert exc.value.code == "bad_params"
+    msg = str(exc.value)
+    assert "\n" not in msg
+    assert "evil\\nkey" in msg
+
+
+def test_unknown_param_key_control_chars_escaped():
+    # \r / \t keep readable mnemonics; other C0/C1 controls become
+    # \xNN; printable text (incl. non-ASCII) passes through untouched.
+    key = "a\rb\tc\x00d\x7fe\x9fé"
+    action = {"action": "look", key: "x"}
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([action]))
+    assert exc.value.code == "bad_params"
+    msg = str(exc.value)
+    for raw in ("\r", "\t", "\x00", "\x7f", "\x9f"):
+        assert raw not in msg
+    assert "a\\rb\\tc\\x00d\\x7fe\\x9fé" in msg
+
+
+def test_unknown_action_name_with_newline_produces_single_line_error():
+    # _action_entry's unknown-action echo had the same hole: a raw
+    # name embedded with %.200s. It now escapes like _safe_key.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "ev\nil"}]))
+    assert exc.value.code == "unknown_action"
+    msg = str(exc.value)
+    assert "\n" not in msg
+    assert "ev\\nil" in msg
+
+
+def test_envelope_unknown_key_with_newline_single_line():
+    # The envelope layer shares format_unknown_keys, so the escape
+    # covers it too — one pin for the shared format.
+    payload = call([{"action": "look"}])
+    payload["bad\nenvelope_key"] = 1
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(payload)
+    assert exc.value.code == "bad_envelope"
+    msg = str(exc.value)
+    assert "\n" not in msg
+    assert "bad\\nenvelope_key" in msg
+
+
+def test_safe_key_truncation_escapes_control_chars():
+    # The >200-char branch escapes the truncated prefix too — the
+    # hole is not reopened by long keys.
+    key = "k" * 199 + "\n" + "x" * 50
+    assert P._safe_key(key).startswith("k" * 199 + "\\n")
+    assert "\n" not in P._safe_key(key)
