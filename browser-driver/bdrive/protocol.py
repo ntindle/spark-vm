@@ -456,11 +456,13 @@ def _action_entry(name):
     except KeyError:
         # Truncate: a giant unknown name must not be echoed into the
         # error (log-pipeline DoS). The up-front size scan usually
-        # rejects those first; this is the backstop.
+        # rejects those first; this is the backstop. Escape: a newline
+        # in the name must not reach the log line raw (log-forging —
+        # #1473; the same guard _safe_key applies to parameter keys).
         raise ProtocolError(
             "unknown_action",
             "unknown action (len %d), rejected not interpreted: %.200s"
-            % (len(name), name),
+            % (len(name), _escape_control_chars(name)),
         )
 
 
@@ -602,12 +604,37 @@ class ValidatedCall:
     actions: tuple
 
 
+def _escape_control_chars(text):
+    """Backslash-escape control characters in caller-controlled text.
+
+    Log-forging guard (#1473): a caller-controlled key or action name
+    containing newlines / control characters must never reach an
+    error/log line verbatim, where a raw newline would let one entry
+    fake adjacent log lines. ``\\n`` / ``\\r`` / ``\\t`` keep readable
+    mnemonics; every other C0/C1 control becomes ``\\xNN``. Printable
+    text (including non-ASCII) passes through untouched.
+    """
+    out = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F:
+            out.append("\\x%02x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _safe_key(key):
     """A parameter key safe to embed in an error message."""
     if isinstance(key, str):
         if len(key) <= 200:
-            return key
-        return key[:200] + "…(len %d)" % len(key)
+            return _escape_control_chars(key)
+        return _escape_control_chars(key[:200]) + "…(len %d)" % len(key)
     return "<%s>" % type(key).__name__
 
 
