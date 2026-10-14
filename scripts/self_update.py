@@ -22,6 +22,11 @@ the managed artifacts the update plane converges; F-A2 (issue #1309) —
 pins are first-wins (matching ``_read_pin``) and duplicates are loud;
 issue #1311 — the browsers probe resolves the cache the update plane
 converges (PLAYWRIGHT_BROWSERS_PATH, else the Playwright user's cache);
+the update plane publishes the expected build dir names (from the
+hash-verified package's `install --dry-run`) and S1 compares its probed
+cache against them — a missing expected build is drift the updater
+clears, an extra dir is noted but never drift (the updater never prunes
+cache dirs);
 issue #1313 — the status plane compares its checkout pins against the
 sha256(installed pins) record the privileged install publishes
 (``PINS_HASH_FILE``), warning when they differ so a pin bump without an
@@ -65,6 +70,18 @@ _PINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # design, not an error).
 _PINS_HASH_FILE = os.environ.get(
     "PINS_HASH_FILE", "/var/lib/sparkvm-toolset/self_update_pins.hash")
+
+# Issue #1311: the update plane publishes the expected Playwright
+# browser build dir names (from the hash-verified package's
+# `install --dry-run`, one name per line) to this world-readable record
+# (only the privileged update plane may write it; the names are public
+# config, not a secret). The status plane compares its probed cache
+# against it: a missing expected build is drift, an extra dir is noted
+# but never drift. A missing or malformed record is silent by design
+# (pre-#1311 installs publish none).
+_EXPECTED_PLAYWRIGHT_BROWSERS_FILE = os.environ.get(
+    "EXPECTED_PLAYWRIGHT_BROWSERS_FILE",
+    "/var/lib/sparkvm-toolset/expected_playwright_browsers")
 
 # "installed pins differ from checkout — run `toolset-update.sh install`"
 # is the prescribed wording (issue #1313): the mismatch is actionable only
@@ -440,7 +457,83 @@ def _playwright_browsers_dir(home=None, environ=None, pwd_module=None):
             "invoker home (PLAYWRIGHT_USER=%s unresolvable)" % user)
 
 
-def probe_playwright_browsers(home=None, environ=None, pwd_module=None):
+def _read_expected_playwright_browsers(path=None):
+    """Read the update plane's published expected browser build names.
+
+    Returns a set of build dir names, or None when there is no usable
+    record (missing, unreadable, malformed). None is the honest no-signal
+    state: pre-#1311 installs publish no record, and a corrupt record is
+    indistinguishable from absent to the unprivileged reader. Malformed
+    means: longer than the byte cap (a truncated prefix could name a
+    subset and fake a clean comparison), any padded line (the publisher
+    never writes padding — a padded line is corruption, not a name), any
+    line over the publisher's 128-char cap, any line containing a
+    `splitlines()` boundary char other than the record's own newline
+    separator (the #1412 lesson: `splitlines()` would let one crafted
+    line masquerade as two valid names), or any line outside the
+    publisher's safe-name charset ([A-Za-z0-9._-], never "." or "..").
+    The record is ignored wholesale rather than trusting the surviving
+    lines, mirroring _read_managed_targets_record's fail-closed
+    whole-record rule. An empty / comment-only record is not a usable
+    record either (the publisher refuses to write a 0-name record): it
+    reads as None, never as an empty expectation that would report a
+    false clean.
+    """
+    if path is None:
+        path = _EXPECTED_PLAYWRIGHT_BROWSERS_FILE
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            # Bounded read with an over-cap check: read one byte past the
+            # cap so a longer record fails closed instead of being
+            # accepted as its truncated prefix.
+            data = f.read(65537)
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError (non-UTF8 bytes) and the
+        # NUL-byte path rejection — both fail closed like any other
+        # unreadable record, instead of killing the status tool at import.
+        return None
+    if len(data) > 65536:
+        return None
+    names = set()
+    # Split on "\n" only: splitlines() would also split on \r \v \f
+    # \x1c-\x1e \x85 U+2028/2029, letting one crafted line masquerade
+    # as two valid names.
+    for line in data.split("\n"):
+        if line != line.strip():
+            return None
+        if not line or line.startswith("#"):
+            continue
+        if (line in (".", "..") or len(line) > 128
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", line)
+                or any(c in line for c in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")):
+            return None
+        names.add(line)
+    if not names:
+        return None
+    return names
+
+
+def _list_browser_builds(base):
+    """Build dir names in a Playwright browsers cache.
+
+    Returns [] when the cache dir is absent (a missing cache holds zero
+    builds — the updater converges to this same path, so a missing cache
+    is updater-clearable drift, not an unknowable state), and None when
+    the dir is unreadable for another reason (S1 cannot compare).
+    """
+    try:
+        entries = sorted(os.listdir(base))
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    return [e for e in entries
+            if not e.startswith(".")  # skip Playwright's .links dir
+            and os.path.isdir(os.path.join(base, e))]
+
+
+def probe_playwright_browsers(home=None, environ=None, pwd_module=None,
+                              expected_path=None):
     """Installed Playwright browser builds in the managed browsers cache.
 
     S1 reports the cache the update plane converges (issue #1311): the
@@ -451,21 +544,74 @@ def probe_playwright_browsers(home=None, environ=None, pwd_module=None):
     not the Playwright user, or the variable was set. The note names
     the resolved dir and its source, so a reader can tell which cache
     was probed.
+
+    When the update plane's expected-builds record exists, the note also
+    carries the comparison: a MISSING expected build is drift the updater
+    clears (the next tick installs it); an EXTRA dir is named but never
+    drift — the updater never prunes cache dirs, so an extra-build signal
+    must never read as updater-clearable. No usable record (pre-#1311
+    installs) leaves the count-only behavior unchanged.
+    `expected_path` is injectable so the comparison is testable.
     """
     base, source = _playwright_browsers_dir(home, environ, pwd_module)
-    try:
-        entries = sorted(os.listdir(base))
-    except OSError:
+    browsers = _list_browser_builds(base)
+    if browsers is None:
         return False, None, "no browser cache at %s (%s)" % (base, source)
-    browsers = [e for e in entries
-                if not e.startswith(".")  # skip Playwright's .links dir
-                and os.path.isdir(os.path.join(base, e))]
+    expected = _read_expected_playwright_browsers(expected_path)
     if not browsers:
-        return False, None, (
-            "browser cache dir exists but is empty at %s (%s)"
-            % (base, source))
-    return True, "%d build(s)" % len(browsers), "%s; cache at %s (%s)" % (
-        ", ".join(browsers), base, source)
+        # Empty or absent cache: every expected build is missing. The
+        # message names which case it is (an absent dir is not an empty
+        # one), and the DRIFT fragment names the missing builds — the
+        # empty-cache case must not stay silent while the top-level
+        # state reports mismatch.
+        if os.path.isdir(base):
+            note = ("browser cache dir exists but is empty at %s (%s)"
+                    % (base, source))
+        else:
+            note = "no browser cache at %s (%s)" % (base, source)
+        if expected:
+            note += ("; DRIFT: missing expected build(s): %s"
+                     % ", ".join(sorted(expected)))
+        return False, None, note
+    note = "%s; cache at %s (%s)" % (", ".join(browsers), base, source)
+    if expected is not None:
+        actual = set(browsers)
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        # Independent clauses, not if/elif: a cache that is both missing
+        # a build and carrying an extra one must name both.
+        if missing:
+            note += ("; DRIFT: missing expected build(s): %s"
+                     % ", ".join(missing))
+        if extra:
+            note += ("; unexpected extra build(s) (not drift — the updater "
+                     "never prunes cache dirs): %s" % ", ".join(extra))
+        if not missing and not extra:
+            note += "; matches expected %d build(s)" % len(expected)
+    return True, "%d build(s)" % len(browsers), note
+
+
+def playwright_browsers_expected_state(home=None, environ=None,
+                                        pwd_module=None, expected_path=None):
+    """Compare the probed cache against the published expected builds.
+
+    Returns "match" (every expected build present), "mismatch" (at least
+    one expected build missing — including a wholly absent cache dir,
+    which holds zero builds and is updater-clearable drift), or "unknown"
+    (no usable expected record, or the cache is unreadable — S1 cannot
+    compare). Extra dirs never produce "mismatch": the updater never
+    prunes cache dirs, so an extra dir is not updater-clearable drift
+    (issue #1311). Never raises.
+    """
+    try:
+        base, _source = _playwright_browsers_dir(home, environ, pwd_module)
+        browsers = _list_browser_builds(base)
+        expected = _read_expected_playwright_browsers(expected_path)
+    except Exception:  # noqa: BLE001 - S1 state helpers never raise
+        return "unknown"
+    if expected is None or browsers is None:
+        return "unknown"
+    return "mismatch" if (expected - set(browsers)) else "match"
 
 
 def probe_snap(which=shutil.which, runner=default_runner):
@@ -707,7 +853,8 @@ def pin_warnings(pins):
     return sorted(name for name in pins if name not in known)
 
 
-def format_table(records, pin_warnings=(), duplicate_pins=()):
+def format_table(records, pin_warnings=(), duplicate_pins=(),
+                 browsers_expected_state="unknown"):
     rows = [("TOOL", "INSTALLED", "VERSION", "PINNED", "DRIFT", "NOTE")]
     for r in records:
         rows.append((
@@ -733,6 +880,13 @@ def format_table(records, pin_warnings=(), duplicate_pins=()):
         lines.append("not installed: %s" % ", ".join(missing))
     if drifted:
         lines.append("drift from pin: %s" % ", ".join(drifted))
+    if browsers_expected_state == "mismatch":
+        # Issue #1311: the expected-builds comparison's loud signal, in
+        # the #1313 pins-hash style — a missing expected build is drift
+        # the updater clears, so it earns a footer line, not just a
+        # (60-char-truncated) probe note.
+        lines.append("browser builds differ from expected — "
+                     "run `toolset-update.sh update`")
     if pin_warnings:
         lines.append("unmatched pins (no such probe): %s"
                      % ", ".join(pin_warnings))
@@ -761,6 +915,7 @@ def main(argv=None):
         pins_state = installed_pins_state(pins_path=args.pins)
         mismatch_lines = ([_PINS_MISMATCH_WARNING]
                           if pins_state == "mismatch" else [])
+        browsers_state = playwright_browsers_expected_state()
         if args.json:
             print(json.dumps({
                 "generated_at": int(time.time()),
@@ -769,10 +924,12 @@ def main(argv=None):
                 "pin_warnings": warnings,
                 "duplicate_pins": duplicates,
                 "installed_pins_state": pins_state,
+                "playwright_browsers_expected_state": browsers_state,
             }, indent=2))
         else:
             table = format_table(records, pin_warnings=warnings,
-                                 duplicate_pins=duplicates)
+                                 duplicate_pins=duplicates,
+                                 browsers_expected_state=browsers_state)
             if mismatch_lines:
                 table += "\n\n" + "\n".join(mismatch_lines)
             print(table)

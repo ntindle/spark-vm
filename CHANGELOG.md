@@ -101,6 +101,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The self-update status report now compares the installed Playwright
+  browser builds against the list the updater expects: a missing browser
+  build shows up as drift with a loud "run `toolset-update.sh update`"
+  hint instead of silently reporting a bare count, so a half-installed
+  browser cache can no longer read as clean. Extra builds in the cache
+  are named but never count as drift, since the updater never deletes
+  cache contents. (#1311, #1474)
 - Faster local test loop: contributors can now run the suite in
   parallel with `pytest -n=auto` (one worker per CPU), verified to
   give identical results to the serial run on the sampled suites,

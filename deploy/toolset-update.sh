@@ -166,6 +166,13 @@
 # wheel-hash list; default $TOOLSET_STATE_DIR/playwright_wheel_hashes.txt),
 # PLAYWRIGHT_BROWSER_HASHES (installed browser-archive hash list; default
 # $TOOLSET_STATE_DIR/playwright_browser_hashes.txt).
+# EXPECTED_PLAYWRIGHT_BROWSERS_FILE (world-readable record of the build dir
+# names the hash-verified playwright package would install for
+# `install chromium`; default $PINS_HASH_DIR/expected_playwright_browsers
+# — the unprivileged S1 status plane compares its probed cache against
+# this record; written by the privileged `install` step and refreshed by
+# every real `update` tick, whether or not the playwright layer converged
+# — the record claims SHOULD-BE, not IS).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -288,6 +295,17 @@ TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # repo checkout, same two-planes contract as the pins file
 # (docs/SELF_UPDATE.md). Issue #1017.
 : "${PLAYWRIGHT_BROWSER_HASHES:=$TOOLSET_STATE_DIR/playwright_browser_hashes.txt}"
+# Expected Playwright browser builds: the world-readable record the
+# unprivileged S1 status plane compares its probed cache against (issue
+# #1311). One build dir name per line (e.g. chromium-1148), derived from
+# the hash-verified package's own `install --dry-run` by
+# _publish_expected_playwright_browsers — never hardcoded, never a path
+# (names only, so a hostile dry-run cannot inject a path into the record).
+# Same carrier discipline as the pins hash and the managed targets: only a
+# privileged install/update may move the signal (root-owned 0755 dir, 0644
+# record). (EXPECTED_PLAYWRIGHT_BROWSERS_FILE set explicitly wins;
+# otherwise it derives from the dir.)
+: "${EXPECTED_PLAYWRIGHT_BROWSERS_FILE:=$PINS_HASH_DIR/expected_playwright_browsers}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -2652,6 +2670,28 @@ cmd_update() {
         failed_comps="${failed_comps:+$failed_comps }playwright"
     fi
 
+    # #1311: refresh the expected-browser-builds record. The record
+    # claims SHOULD-BE — the build names the currently installed,
+    # hash-verified package's dry-run names — not IS: it is refreshed on
+    # every real tick whether or not the playwright layer converged, so
+    # a failed layer still leaves S1 comparing against the fresh
+    # expectation (a stale record would read as a false clean). A blocked
+    # layer refreshes it too: the record tracks the installed package,
+    # not the converge, and the mismatch hint then persists until the
+    # block clears (S1 cannot read blocked.state — mode 700 — so the
+    # hint cannot know about the block; the update plane's `status`
+    # shows blocked layers). Skipped on --dry-run (dry-run changes
+    # nothing, and the dry-run invoker's environment is not the timer's).
+    # Log-loud but non-fatal — the record is an S1 visibility signal, not
+    # part of the update's safety. Residual: if the dry-run itself fails,
+    # the record stays stale until a tick where it succeeds; the layer
+    # failure is loud in the audit log.
+    if [ "$dry" != "1" ]; then
+        _publish_expected_playwright_browsers \
+            "$PLAYWRIGHT_VENV/bin/playwright" \
+            || log "update: WARNING: could not refresh expected Playwright browsers record $EXPECTED_PLAYWRIGHT_BROWSERS_FILE"
+    fi
+
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
     elif [ "$rc" = "0" ]; then
@@ -2915,6 +2955,132 @@ PLAYWRIGHT_VENV=$PLAYWRIGHT_VENV"
     return 0
 }
 
+_publish_expected_playwright_browsers() {
+    # _publish_expected_playwright_browsers <cli> — write the build dir
+    # names the hash-verified playwright package would install for
+    # `install chromium` on this box to the world-readable
+    # EXPECTED_PLAYWRIGHT_BROWSERS_FILE (issue #1311). The unprivileged S1
+    # status plane compares its probed cache dirs against this record: a
+    # MISSING expected build is drift the updater clears (the next tick
+    # installs it); an EXTRA dir is named in S1's note but never counts as
+    # drift — the updater never prunes cache dirs (PLAYWRIGHT_BROWSERS_PATH
+    # may point at a shared cache), so an extra-build signal must never
+    # read as updater-clearable. The record holds NAMES only (basenames of
+    # the --dry-run install locations), so a hostile dry-run cannot inject
+    # a path into it, and S1 compares names against the names it lists in
+    # the probed cache. Same hardening family as _publish_managed_targets:
+    # absolute-path only, canonicalized dir refused at the filesystem
+    # root, owner-owned 0755 carrier dir, owner-owned 0644 record,
+    # unlink+recreate via `install` from a TMPDIR staging file (never
+    # staged in the root-owned carrier dir). Callers decide loudness: the
+    # record is an S1 visibility signal, not update safety — a wedged
+    # carrier must not block the weekly converge.
+    local cli="$1" pairs loc parent base first_parent names _tmp _dir expect_loc
+    local seen_parent=0 count=0
+    case "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE" in
+        /*) ;;
+        *) echo "ERROR: EXPECTED_PLAYWRIGHT_BROWSERS_FILE must be an absolute path" >&2; return 1 ;;
+    esac
+    pairs="$(_playwright_browser_pairs "$cli")" || return 1
+    names=''
+    first_parent=''
+    # pairs alternate location, url; only locations feed the record.
+    expect_loc=1
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$expect_loc" = "1" ]; then
+            loc="$line"
+            expect_loc=0
+            # Defense-in-depth: _playwright_browser_pairs already
+            # enforces absolute locations, but the publisher must not
+            # depend on its caller for that — a relative location is
+            # refused here, not laundered into a basename.
+            case "$loc" in
+                /*) ;;
+                *)
+                    echo "ERROR: refusing non-absolute install location from --dry-run" >&2
+                    return 1 ;;
+            esac
+            parent="${loc%/*}"
+            base="${loc##*/}"
+            # The basename is the whole record entry: it must be a plain
+            # dir name — non-empty, not . / .., no path separators (implied
+            # by the ${##*/} split, but a trailing slash would empty it),
+            # charset [A-Za-z0-9._-], bounded length (a hostile dry-run
+            # must not bloat the record). Anything else fails closed.
+            # The refusal never echoes $base: it is untrusted dry-run
+            # output, and echoing it would let a hostile dry-run inject
+            # log lines / terminal escapes.
+            case "$base" in
+                ''|.|..|*[!A-Za-z0-9._-]*)
+                    echo "ERROR: refusing unsafe browser build dir name from --dry-run" >&2
+                    return 1 ;;
+            esac
+            if [ "${#base}" -gt 128 ]; then
+                echo "ERROR: refusing overlong browser build dir name from --dry-run" >&2
+                return 1
+            fi
+            # All locations must share one parent dir: the record names
+            # dirs of a single cache, and a dry-run scattering locations
+            # across parents is not a cache S1 can compare against.
+            # (seen_parent flag, not an empty-string sentinel: a
+            # root-level location has an empty parent and must latch.)
+            if [ "$seen_parent" = "0" ]; then
+                first_parent="$parent"
+                seen_parent=1
+            elif [ "$parent" != "$first_parent" ]; then
+                echo "ERROR: refusing --dry-run install locations with differing parents" >&2
+                return 1
+            fi
+            # Total bound: a real Playwright dry-run names a handful of
+            # archives (3 for `install chromium`). An output naming
+            # hundreds is not a real dry-run — refuse rather than write
+            # a bloated record S1 would have to swallow.
+            count=$((count + 1))
+            if [ "$count" -gt 100 ]; then
+                echo "ERROR: refusing --dry-run output naming more than 100 browser archives" >&2
+                return 1
+            fi
+            names="${names}${base}
+"
+        else
+            expect_loc=1
+        fi
+    done < <(printf '%s' "$pairs")
+    if [ "$expect_loc" != "1" ]; then
+        echo "ERROR: truncated --dry-run pair (location without url)" >&2
+        return 1
+    fi
+    if [ -z "$names" ]; then
+        echo "ERROR: no browser build dir names in --dry-run output" >&2
+        return 1
+    fi
+    # Sorted + deduped: duplicate pairs name the same dir, and a stable
+    # record keeps S1 comparisons and operator diffs trivial. LC_ALL=C:
+    # record byte order must not depend on the tick's locale.
+    names="$(printf '%s' "$names" | LC_ALL=C sort -u)"
+    _dir="$(dirname -- "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE")"
+    _dir="$(readlink -m -- "$_dir")" \
+        || { echo "ERROR: cannot canonicalize expected browsers dir" >&2; return 1; }
+    case "$_dir" in
+        /|//)
+            echo "ERROR: refusing to publish expected browsers under filesystem root" >&2
+            return 1 ;;
+    esac
+    _sudo install -d -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0755 "$_dir" \
+        || { echo "ERROR: cannot create expected browsers dir $_dir" >&2; return 1; }
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/expected-browsers.XXXXXX")" \
+        || { echo "ERROR: cannot stage expected browsers record" >&2; return 1; }
+    printf '%s\n' "$names" >"$_tmp" 2>/dev/null \
+        || { echo "ERROR: cannot stage expected browsers record" >&2; rm -f "$_tmp"; return 1; }
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" \
+        -m 0644 "$_tmp" "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE" \
+        || { echo "ERROR: cannot publish expected browsers record $EXPECTED_PLAYWRIGHT_BROWSERS_FILE" >&2; rm -f "$_tmp"; return 1; }
+    rm -f "$_tmp"
+    log "published expected Playwright browser builds to $EXPECTED_PLAYWRIGHT_BROWSERS_FILE"
+    return 0
+}
+
 cmd_install() {
     # One-command backfill: copy the script to the state-dir installed copy,
     # install the systemd units, enable the timer. Re-running refreshes the
@@ -2980,6 +3146,22 @@ cmd_install() {
     # through the override path). Fail-loud: same reasoning as the pins
     # hash — a silent install is worse than a failed one.
     _publish_managed_targets || return 1
+    # #1311: publish the expected Playwright browser build names so the
+    # unprivileged S1 status plane can compare its probed cache against
+    # them. Best-effort, unlike the pins hash / managed targets above:
+    # the record derives from the hash-verified package's `install
+    # --dry-run`, which needs the managed venv's playwright CLI — on a
+    # fresh box the venv may not exist yet (setup provisions it, not
+    # install), and a missing CLI must not fail the install. A failed
+    # publish leaves S1 at "unknown" (silent by design, same as
+    # pre-#1311); the first update tick retries.
+    if [ -x "$PLAYWRIGHT_VENV/bin/playwright" ]; then
+        _publish_expected_playwright_browsers \
+            "$PLAYWRIGHT_VENV/bin/playwright" \
+            || log "install: WARNING: could not publish expected Playwright browsers record $EXPECTED_PLAYWRIGHT_BROWSERS_FILE (first update tick retries)"
+    else
+        log "install: Playwright CLI absent — expected browsers record deferred to the first update tick"
+    fi
     # The wheel-hashes file is the operator-owned hash authority for the
     # playwright layer's wheel download. Installed/backfilled ONLY here —
     # the update plane never reads it from the live checkout, same
@@ -3032,6 +3214,15 @@ cmd_uninstall() {
         /*)
             _sudo rm -f "$MANAGED_TARGETS_FILE" 2>/dev/null || true
             _sudo rmdir "$(dirname -- "$MANAGED_TARGETS_FILE")" 2>/dev/null || true ;;
+    esac
+    # #1311: remove the expected-browsers record alongside the managed
+    # targets — a stale record would leave S1 comparing its cache against
+    # build names no updater holds. Same best-effort, absolute-path-only,
+    # rmdir-if-empty discipline.
+    case "${EXPECTED_PLAYWRIGHT_BROWSERS_FILE:-}" in
+        /*)
+            _sudo rm -f "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE" 2>/dev/null || true
+            _sudo rmdir "$(dirname -- "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE")" 2>/dev/null || true ;;
     esac
     if [ "$SKIP_SYSTEMCTL" != "1" ]; then
         _sudo systemctl daemon-reload 2>/dev/null || true
