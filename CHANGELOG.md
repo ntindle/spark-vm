@@ -183,7 +183,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the Playwright user's cache, else the invoker's cache. Previously it
   always probed the invoker's cache, so it reported the wrong browsers
   whenever the invoker was not the Playwright user or the variable was
-  set. (#1311, #TBD)
+  set. (#1311, #1454)
 
 - The sentinel telemetry reference now documents the refused-egress audit
   shape: when the egress guard kills a connection, the log carries a
