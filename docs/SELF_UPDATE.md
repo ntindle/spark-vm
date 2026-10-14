@@ -100,7 +100,11 @@ complementary planes, not competitors (see "Two planes" below).
   S1 is exactly the drift the updater's layers clear. The apt-layer tools
   (docker, node, gh) and the Playwright browser builds remain outside that
   invariant: the apt layer converges repo-latest rather than the pins, and
-  S1 reports browser builds as a count, not a version.
+  S1 reports browser builds as a count, not a version. The browsers probe
+  still targets the same cache directory the update plane converges —
+  `PLAYWRIGHT_BROWSERS_PATH` when set, else the Playwright user's cache
+  (`PLAYWRIGHT_USER`, default `ntindle`), else the invoker's cache (issue
+  #1311) — so a wrong-cache report can no longer fake a clean inventory.
 - **S2 — update execution + recovery (framework shipped, #551; cua-driver, apt, and playwright layers shipped; pre-update snapshots + automatic rollback + blocked marking shipped):** per-tool
   updaters behind `deploy/toolset-update.sh update`, with `--dry-run`, the idle
   guard (defer while agent jobs are live), per-tool pinning enforcement, and

@@ -20,6 +20,8 @@ backfill installer.
 Traceability: F-A1 (issue #1308) — the playwright/cua-driver probes target
 the managed artifacts the update plane converges; F-A2 (issue #1309) —
 pins are first-wins (matching ``_read_pin``) and duplicates are loud;
+issue #1311 — the browsers probe resolves the cache the update plane
+converges (PLAYWRIGHT_BROWSERS_PATH, else the Playwright user's cache);
 issue #1313 — the status plane compares its checkout pins against the
 sha256(installed pins) record the privileged install publishes
 (``PINS_HASH_FILE``), warning when they differ so a pin bump without an
@@ -38,6 +40,11 @@ import shutil
 import subprocess
 import sys
 import time
+
+try:
+    import pwd
+except ImportError:  # non-POSIX platforms have no pwd module
+    pwd = None
 
 # Per-probe subprocess timeout: a stuck version command must not stall the
 # whole inventory. Tools report in milliseconds; 10 s is generous.
@@ -383,25 +390,82 @@ def probe_playwright(runner=default_runner, which=shutil.which, managed=None):
     return installed, version, note
 
 
-def probe_playwright_browsers(home=None):
-    """Installed Playwright browser builds under ~/.cache/ms-playwright.
+def _playwright_user_home(user, pwd_module=None):
+    """Home dir of the Playwright user, or None when unresolvable.
 
-    Reports for the INVOKING user (on the box that's whoever runs the
-    command) — S3's timer runs it as the box owner so the report covers
-    the browsers the agent actually uses.
+    `user` may be a login name or a numeric uid string (mirrors
+    `_as_playwright_user` in deploy/toolset-update.sh, which resolves a
+    numeric PLAYWRIGHT_USER to a name before switching).
     """
-    base = os.path.join(home or os.path.expanduser("~"),
-                        ".cache", "ms-playwright")
+    mod = pwd if pwd_module is None else pwd_module
+    if mod is None:
+        return None
+    try:
+        if user.isdigit():
+            return mod.getpwuid(int(user)).pw_dir
+        return mod.getpwnam(user).pw_dir
+    except (KeyError, OverflowError, ValueError):
+        return None
+
+
+def _playwright_browsers_dir(home=None, environ=None, pwd_module=None):
+    """Resolve the Playwright browsers cache dir S1 must report on.
+
+    Resolution order mirrors the update plane's
+    `_playwright_browsers_dir` in deploy/toolset-update.sh, so S1
+    reports the cache the updater converges:
+    1. explicit `home` override — the test seam;
+       `~/.cache/ms-playwright` under it;
+    2. non-blank PLAYWRIGHT_BROWSERS_PATH from the environment, verbatim
+       (the update plane uses it as-is);
+    3. the Playwright user's cache — PLAYWRIGHT_USER (default `ntindle`,
+       the update plane's default) resolved via pwd;
+    4. the invoker's `~/.cache/ms-playwright` when the Playwright user
+       is unresolvable.
+    Returns (dir, source-note).
+    """
+    env = os.environ if environ is None else environ
+    if home:
+        return (os.path.join(home, ".cache", "ms-playwright"),
+                "explicit home override")
+    browsers_path = env.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if browsers_path.strip():
+        return browsers_path, "PLAYWRIGHT_BROWSERS_PATH"
+    user = env.get("PLAYWRIGHT_USER", "") or "ntindle"
+    user_home = _playwright_user_home(user, pwd_module)
+    if user_home is not None:
+        return (os.path.join(user_home, ".cache", "ms-playwright"),
+                "PLAYWRIGHT_USER=%s" % user)
+    return (os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright"),
+            "invoker home (PLAYWRIGHT_USER=%s unresolvable)" % user)
+
+
+def probe_playwright_browsers(home=None, environ=None, pwd_module=None):
+    """Installed Playwright browser builds in the managed browsers cache.
+
+    S1 reports the cache the update plane converges (issue #1311): the
+    PLAYWRIGHT_BROWSERS_PATH override when set, else the Playwright
+    user's cache (PLAYWRIGHT_USER, default ntindle), else the invoker's
+    cache when that user is unresolvable. Probing the invoker's cache
+    unconditionally reported the wrong cache whenever the invoker was
+    not the Playwright user, or the variable was set. The note names
+    the resolved dir and its source, so a reader can tell which cache
+    was probed.
+    """
+    base, source = _playwright_browsers_dir(home, environ, pwd_module)
     try:
         entries = sorted(os.listdir(base))
     except OSError:
-        return False, None, "no browser cache at %s" % base
+        return False, None, "no browser cache at %s (%s)" % (base, source)
     browsers = [e for e in entries
                 if not e.startswith(".")  # skip Playwright's .links dir
                 and os.path.isdir(os.path.join(base, e))]
     if not browsers:
-        return False, None, "browser cache dir exists but is empty"
-    return True, "%d build(s)" % len(browsers), ", ".join(browsers)
+        return False, None, (
+            "browser cache dir exists but is empty at %s (%s)"
+            % (base, source))
+    return True, "%d build(s)" % len(browsers), "%s; cache at %s (%s)" % (
+        ", ".join(browsers), base, source)
 
 
 def probe_snap(which=shutil.which, runner=default_runner):

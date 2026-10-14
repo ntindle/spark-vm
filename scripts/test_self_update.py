@@ -642,6 +642,101 @@ def test_playwright_browsers_lists_builds(tmp_path):
     assert "chromium-1181" in note and "firefox-1490" in note
 
 
+class _FakePwEnt:
+    def __init__(self, pw_dir):
+        self.pw_dir = pw_dir
+
+
+class _FakePwd:
+    def __init__(self, by_name=None, by_uid=None):
+        self._by_name = by_name or {}
+        self._by_uid = by_uid or {}
+
+    def getpwnam(self, name):
+        return self._by_name[name]
+
+    def getpwuid(self, uid):
+        return self._by_uid[uid]
+
+
+def test_playwright_browsers_env_var_wins(monkeypatch, tmp_path):
+    cache = tmp_path / "custom-cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    monkeypatch.delenv("PLAYWRIGHT_USER", raising=False)
+    installed, version, note = self_update.probe_playwright_browsers()
+    assert installed is True
+    assert version == "1 build(s)"
+    assert "chromium-1181" in note and "PLAYWRIGHT_BROWSERS_PATH" in note
+
+
+def test_playwright_browsers_playwright_user_home(monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "pwuser")
+    fake = _FakePwd(by_name={"pwuser": _FakePwEnt(str(tmp_path))})
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=fake)
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "PLAYWRIGHT_USER=pwuser" in note
+
+
+def test_playwright_browsers_numeric_playwright_user(monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "1000")
+    fake = _FakePwd(by_uid={1000: _FakePwEnt(str(tmp_path))})
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=fake)
+    assert installed is True
+    assert "PLAYWRIGHT_USER=1000" in note
+
+
+def test_playwright_browsers_unresolvable_user_falls_back_to_invoker(
+        monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "no-such-user")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=_FakePwd())
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "unresolvable" in note
+
+
+def test_playwright_browsers_explicit_home_beats_env_var(
+        monkeypatch, tmp_path):
+    home_cache = tmp_path / "home" / ".cache" / "ms-playwright"
+    (home_cache / "chromium-1181").mkdir(parents=True)
+    other_cache = tmp_path / "other"
+    (other_cache / "firefox-1490").mkdir(parents=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(other_cache))
+    installed, version, note = self_update.probe_playwright_browsers(
+        home=str(tmp_path / "home"))
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "firefox-1490" not in note
+    assert "explicit home override" in note
+
+
+def test_playwright_browsers_blank_env_var_treated_as_unset(
+        monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "   ")
+    monkeypatch.setenv("PLAYWRIGHT_USER", "pwuser")
+    fake = _FakePwd(by_name={"pwuser": _FakePwEnt(str(tmp_path))})
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=fake)
+    assert installed is True
+    assert "PLAYWRIGHT_USER=pwuser" in note
+
+
 # --- unattended-upgrades ---------------------------------------------------
 
 def _uu_which_runner(conf_dir, version_out=(0, "2.10.2\n", ""), tmp_path=None):
