@@ -737,6 +737,86 @@ def test_playwright_browsers_blank_env_var_treated_as_unset(
     assert "PLAYWRIGHT_USER=pwuser" in note
 
 
+def test_playwright_browsers_default_playwright_user(monkeypatch, tmp_path):
+    # PLAYWRIGHT_USER unset -> the default ntindle (the update plane's
+    # default): the production path when the timer env sets no user.
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_USER", raising=False)
+    fake = _FakePwd(by_name={"ntindle": _FakePwEnt(str(tmp_path))})
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=fake)
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "PLAYWRIGHT_USER=ntindle" in note
+
+
+def test_playwright_browsers_empty_playwright_user_means_default(
+        monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "")
+    fake = _FakePwd(by_name={"ntindle": _FakePwEnt(str(tmp_path))})
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=fake)
+    assert installed is True
+    assert "PLAYWRIGHT_USER=ntindle" in note
+
+
+def test_playwright_browsers_pwd_none_falls_back_to_invoker(
+        monkeypatch, tmp_path):
+    # Non-POSIX: no pwd module at all -> invoker-home fallback, never raise.
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "pwuser")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(self_update, "pwd", None)
+    installed, version, note = self_update.probe_playwright_browsers()
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "unresolvable" in note
+
+
+class _OverflowPwd:
+    def getpwnam(self, name):
+        raise KeyError(name)
+
+    def getpwuid(self, uid):
+        raise OverflowError("uid too large")
+
+
+def test_playwright_browsers_huge_numeric_user_falls_back(
+        monkeypatch, tmp_path):
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "99999999999999999999999999")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=_OverflowPwd())
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "unresolvable" in note
+
+
+def test_playwright_browsers_unicode_digit_user_falls_back(
+        monkeypatch, tmp_path):
+    # "²".isdigit() is True but int() raises ValueError -> fallback.
+    cache = tmp_path / ".cache" / "ms-playwright"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_USER", "²")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    installed, version, note = self_update.probe_playwright_browsers(
+        pwd_module=_FakePwd())
+    assert installed is True
+    assert "chromium-1181" in note
+    assert "unresolvable" in note
+
+
 # --- unattended-upgrades ---------------------------------------------------
 
 def _uu_which_runner(conf_dir, version_out=(0, "2.10.2\n", ""), tmp_path=None):
