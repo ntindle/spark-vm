@@ -120,22 +120,29 @@ python3 -m pytest -n auto
 
 `-n auto` starts one worker per CPU and splits individual tests across
 workers. Verified against the serial run with identical results:
-`scripts/` (667 passed, 1 skipped) and `hosted/` (404 passed plus the
-one pre-existing dashboard inline-copy failure) both agree serial vs
-parallel; on a 2-CPU box the parallel runs measured ~37s → ~28s
-(`scripts/`) and ~80s → ~67s (`hosted/`). The full suite has
+`scripts/` (667 passed, 1 skipped, 33 subtests) and `hosted/` (404 passed
+plus the one pre-existing dashboard inline-copy failure — #1299,
+`hosted/dashboard/test_dashboard.py::test_worker_inline_copy_byte_identical`,
+which reproduces on a pristine-main serial run and is
+environment-dependent: it fails only where the control-plane checkout
+resolves) both agree serial vs parallel; on a 2-CPU box the parallel
+runs measured ~37s → ~28s (`scripts/`) and ~80s → ~67s (`hosted/`)
+(single run; pytest 9.1.1 + pytest-xdist 3.8.0). The full suite has
 not yet had a timed parallel run; the serial one-liner above remains
 the reference for the full run, and CI sharding is unchanged.
 
-The audit behind this found no parallel blocker: no `conftest.py`
+The static audit behind this found no parallel blocker: no `conftest.py`
 shared fixtures, real socket binds use ephemeral ports or per-test
 temporary sockets, repo-tree writes go to temporary directories, and
-`sys.path` / `sys.modules` / environment mutations in tests follow
-save-and-restore. A failure that appears only under `-n auto` is an
+`sys.path` / `sys.modules` / environment mutations in tests are
+import-time additive inserts or follow save-and-restore / monkeypatch.
+A failure that appears only under `-n auto` is an
 order-dependence bug in the test, not in pytest — fix the test (see
 the "Two conventions" paragraph above). The conservative variant
 `python3 -m pytest -n auto --dist loadfile` keeps each test file on
-one worker instead of splitting tests across workers.
+one worker instead of splitting tests across workers. If `pytest`
+fails with `unrecognized arguments: -n`, pytest-xdist is not
+installed — reinstall `requirements-test.txt`.
 
 Per-component dependency notes — install these (beyond stdlib + pytest)
 before running that component's suite:

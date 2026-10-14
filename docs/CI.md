@@ -98,7 +98,9 @@ python3 -m pytest proxy -q
 # requirements-test.txt; verified identical results on scripts/ + hosted/):
 python3 -m pytest -q -n auto
 # (full guidance + caveats: CONTRIBUTING.md "Parallel runs"; CI sharding
-# is unchanged)
+# is unchanged; full-suite parallel unmeasured — verified only on
+# scripts/ + hosted/, and hosted/ carries the one pre-existing #1299
+# inline-copy failure, so a 1-failure hosted/ run is the known state)
 
 # changelog ritual lint (same check as the CI `changelog-ritual` job):
 # entries must not reference the maintainer's internal working-note paths
