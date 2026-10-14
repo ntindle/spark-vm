@@ -3986,6 +3986,24 @@ class _Handler(BaseHTTPRequestHandler):
         # HTTP layer (the meta robots tag alone does not reach them).
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Robots-Tag", "noindex, nofollow")
+        # The daemon's pages carry no JavaScript (verified: PAGE_SHELL and
+        # the page_* renderers emit no <script> or event handlers; every
+        # user-controlled string is html-escaped) — pin that posture in a
+        # machine-enforceable way so a later edit cannot silently add
+        # script execution. form-action 'self': the confirm/forget/claim
+        # buttons POST back to this origin. Deliberately no framing
+        # directive here (no frame-ancestors, no X-Frame-Options): the
+        # #1237 policy pins waitlistd's no-framing-protection delta
+        # deliberately — the flow's credential is the single-use token,
+        # no ambient session — and
+        # scripts/test_http_hardening_headers.py asserts that posture in
+        # both directions. Relitigating it is a separate decision, not
+        # part of this pin.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "base-uri 'none'; form-action 'self'",
+        )
         self.end_headers()
         self.wfile.write(data)
 
