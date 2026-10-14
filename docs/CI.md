@@ -94,6 +94,12 @@ python3 -m pytest proxy -q
 # scripts/test_contributing_suites.py, so unlike the old per-directory list
 # that used to live here, it can't drift)
 
+# parallel local runs (same inventory, via pytest-xdist in
+# requirements-test.txt; verified identical results on scripts/ + hosted/):
+python3 -m pytest -q -n auto
+# (full guidance + caveats: CONTRIBUTING.md "Parallel runs"; CI sharding
+# is unchanged)
+
 # changelog ritual lint (same check as the CI `changelog-ritual` job):
 # entries must not reference the maintainer's internal working-note paths
 # (agent_notes/, hidden_files/, workspace/goals/).
