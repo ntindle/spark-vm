@@ -230,7 +230,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   claimed the daemon served the page while no such route existed — the
   claim is now true, and the launch checklist gates the form page with
   a done criterion (page loads, form posts to the live endpoint,
-  headers verified). (#TBD, #1483)
+  headers verified). (#1485, #1483)
 
 - The email signup parser no longer mistakes a signup that mentions
   the forget feature for a deletion request: an inbound email that
@@ -240,7 +240,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (or silently triaged them when no waitlist row existed). A genuine
   "forget me" reply — one with no owner address in it — still triggers
   the deletion-confirmation email, and deletion requests are still
-  never swallowed by the spam limit. (#TBD, #1482)
+  never swallowed by the spam limit. (#1485, #1482)
 
 - The README repo-layout table no longer lists a `cred/` directory that
   never existed: the `cred` CLI is a single file at the repo root and
