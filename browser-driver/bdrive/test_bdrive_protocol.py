@@ -86,6 +86,171 @@ def test_unknown_parameter_rejected_not_ignored():
     )
 
 
+def test_unknown_envelope_key_rejected_not_absorbed():
+    # The issue's exact repro: a typo'd ref_scope with NO ref_scope key
+    # was silently dropped and the call proceeded scopeless.
+    expect_code(
+        {
+            "session": "s1",
+            "actions": [{"action": "look"}],
+            "ref_scpoe": "typo",
+        },
+        "bad_envelope",
+    )
+    expect_code(
+        call(
+            [{"action": "look"}],
+            ref_scpoe="typo",
+            zzz={"big": "x" * 1000},
+        ),
+        "bad_envelope",
+    )
+    expect_code(call([{"action": "look"}], extra="x"), "bad_envelope")
+    # Non-string envelope keys are unknown keys too, not a TypeError.
+    payload = call([{"action": "look"}])
+    payload[5] = "x"
+    expect_code(payload, "bad_envelope")
+
+
+def test_unknown_envelope_key_error_never_echoes_giant_value():
+    # A giant unknown value must fail on length alone; the rejection
+    # must not echo it (log-pipeline DoS via the error path). The
+    # message assertion pins the mechanism: without the size scan this
+    # would still fail on the unknown key, but with a different message.
+    marker = "MARKER-1448-" * 100000  # > MAX_PARAM_LEN
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "look"}], zzz=marker))
+    assert exc.value.code == "bad_envelope"
+    assert "envelope value exceeds" in str(exc.value)
+    assert "MARKER-1448" not in str(exc.value)
+
+
+def test_giant_envelope_key_rejected_without_echo():
+    key = "k" * (P.MAX_PARAM_LEN + 1)
+    payload = call([{"action": "look"}])
+    payload[key] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(payload)
+    assert exc.value.code == "bad_envelope"
+    assert "envelope key exceeds" in str(exc.value)
+    assert key not in str(exc.value)
+    assert str(P.MAX_PARAM_LEN + 1) in str(exc.value)
+
+
+def test_unknown_envelope_key_echo_is_bounded():
+    # Many unknown keys: the error names the first few + a count, not
+    # the whole set (the unbounded-echo hole #1449 pins at action level).
+    payload = call([{"action": "look"}])
+    for i in range(12):
+        payload["unknown_%02d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(payload)
+    assert exc.value.code == "bad_envelope"
+    assert "unknown_00" in str(exc.value)
+    assert "unknown_04" in str(exc.value)
+    assert "and 7 more" in str(exc.value)
+    assert "unknown_11" not in str(exc.value)
+
+
+def test_unknown_envelope_key_echo_boundaries():
+    # Exactly 5 unknown keys: all shown, no "more" suffix.
+    payload = call([{"action": "look"}])
+    for i in range(5):
+        payload["unknown_%02d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(payload)
+    assert exc.value.code == "bad_envelope"
+    for i in range(5):
+        assert ("unknown_%02d" % i) in str(exc.value)
+    assert "more" not in str(exc.value)
+    # 6 unknown keys: first 5 shown + "and 1 more", 6th absent.
+    payload["unknown_05"] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(payload)
+    assert exc.value.code == "bad_envelope"
+    for i in range(5):
+        assert ("unknown_%02d" % i) in str(exc.value)
+    assert "and 1 more" in str(exc.value)
+    assert "unknown_05" not in str(exc.value)
+
+
+def test_dict_wrapped_giant_value_never_echoed():
+    # A dict-wrapped giant string must fail the size scan: validators
+    # echo with %r, so a dict that passes the scan leaks in full.
+    big = "x" * (20 * 1024 * 1024)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": {"a": big}}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+    # A giant dict *key* is echoed by the same %r paths.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": {big: "v"}}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+
+
+def test_envelope_dict_wrapped_giant_value_rejected():
+    # Same dict blindness at envelope level: an unknown key with a
+    # dict value carrying a giant string must fail on length alone.
+    marker = "MARKER-1448-" * 100000  # > MAX_PARAM_LEN
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "look"}], zzz={"big": marker}))
+    assert exc.value.code == "bad_envelope"
+    assert "envelope value exceeds" in str(exc.value)
+    assert "MARKER-1448" not in str(exc.value)
+
+
+def _deep_nest(leaf, depth=5000):
+    nested = leaf
+    for _ in range(depth):
+        nested = [nested]
+    return nested
+
+
+def test_deeply_nested_values_do_not_raise_recursion_error():
+    # The old recursive scan died with RecursionError past ~1000 depth;
+    # the iterative scan must return a clean ProtocolError instead.
+    expect_code(
+        call([{"action": "look"}], zzz=_deep_nest("x")), "bad_envelope"
+    )
+    deep_big = "y" * (P.MAX_PARAM_LEN + 1)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "look"}], zzz=_deep_nest(deep_big)))
+    assert exc.value.code == "bad_envelope"
+    assert "envelope value exceeds" in str(exc.value)
+    expect_code(
+        call([{"action": "fill", "ref": "@e1", "text": _deep_nest("x")}]),
+        "bad_params",
+    )
+    expect_code(
+        call(
+            [{"action": "fill", "ref": "@e1", "text": _deep_nest(deep_big)}]
+        ),
+        "bad_params",
+    )
+
+
+def test_ref_scope_key_may_be_absent():
+    # ref_scope is optional: a call with no ref_scope key at all is
+    # valid when no action addresses refs (SPEC §5 pin wording).
+    validated = P.validate_call(
+        {"session": "s1", "actions": [{"action": "snapshot"}]}
+    )
+    assert validated.ref_scope is None
+
+
+def test_envelope_check_runs_before_action_validation():
+    # Envelope-first precedence: an unknown key plus a malformed action
+    # reports bad_envelope, not the action's bad_params. The malformed
+    # action alone still reports bad_params (layering contract).
+    expect_code(
+        call([{"action": "click"}], extra="x"), "bad_envelope"
+    )
+    expect_code(call([{"action": "click"}]), "bad_params")
+
+
 def test_all_spec_actions_accepted():
     # goto sits last: the post-navigation rule forbids tree actions
     # after a navigation inside the same array. snapshot is excluded:

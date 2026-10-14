@@ -84,6 +84,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   per the standing trust-policy decision. The MSP path is
   deliberately unchanged: trust prompts keep their per-answer
   classification. (#1393)
+- The browser driver's action protocol now rejects calls carrying
+  unknown top-level fields instead of silently dropping them: a
+  misspelled `ref_scope` previously sailed through and the call ran
+  without its observation token, and a giant unknown field passed
+  through unexamined. Envelope values now go through the same size
+  scan as action parameters, and rejection messages name at most the
+  first few unknown keys, never their values. (#1448, #1471)
 
 ### Added
 
