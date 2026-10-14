@@ -17,7 +17,9 @@ bigger than a typo, the issue conversation happens first. -->
 # How it was tested
 
 <!-- Commands you ran and what they showed. New behavior gets a test.
-Install test deps first (`pip install -r requirements-test.txt`), then the
+Install test deps first, venv-first per CONTRIBUTING.md
+(`python3 -m venv .venv`, `source .venv/bin/activate`,
+`pip install -r requirements-test.txt`), then the
 one-liner runs the whole suite: `python3 -m pytest` from the repo root.
 Keep `main` green. -->
 

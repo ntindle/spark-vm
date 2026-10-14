@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
+# contributor venv (see CONTRIBUTING.md): gitignored so the checkout
+# stays clean and the local gate's changed-paths check reads the tree
+# correctly with a venv present.
+.venv/
 # demo-asset intermediates (regenerable; keep out of git)
 # demo-push-work/ also holds a throwaway VAPID private key: never commit.
 /demo-frames/

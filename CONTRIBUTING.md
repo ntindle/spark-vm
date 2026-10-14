@@ -71,11 +71,39 @@ directories `testpaths` collects, so the uniqueness contract holds even
 for test files no suite currently wires in.
 All suites pass on `main`; your PR should keep them green.
 
-Install the test dependencies first:
+Install the test dependencies first — inside a virtual environment.
+On stock Ubuntu 24.04 (and any PEP 668 system) a bare `pip install`
+refuses with `externally-managed-environment`, so create and activate
+a venv first, then install into it. The commands below are bash on
+Unix; Windows uses `.venv\Scripts\Activate.ps1` (PowerShell) instead
+of the `source` line, fish uses `source .venv/bin/activate.fish`.
+
+On Debian/Ubuntu, `python3 -m venv` itself needs one package first —
+a stock install has no `ensurepip`, so the venv command fails with
+`ensurepip is not available` until you install it (once per machine):
 
 ```bash
+sudo apt install -y python3-venv
+```
+
+Then, from the repo root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-test.txt
 ```
+
+If a first attempt failed halfway and left a half-created `.venv/`,
+remove it and retry: `rm -rf .venv` (PowerShell:
+`Remove-Item -Recurse -Force .venv`), then run the block above again.
+
+Keep the venv activated for every `pytest` / `local-gate.sh` run in
+this checkout (re-activate with `source .venv/bin/activate` in each new
+shell). If `pytest` fails with `ModuleNotFoundError`, you are probably
+in a shell where the venv is not activated — re-activate first.
+`.venv/` is gitignored, so the checkout stays clean — and the
+local gate's changed-paths check keeps reading your tree correctly.
 
 To run one component's suite: `python3 -m pytest <dir>` from the repo
 root (e.g. `python3 -m pytest proxy`).
@@ -216,7 +244,7 @@ extension-less executables with a shell shebang — and is the single
 source of truth for both the gate step and the suite's pin.)
 
 The PNG screenshot smoke test is locally runnable too — CI's own steps are the
-recipe: `pip install playwright`, then the one-time
+recipe: with the venv activated (see above), `pip install playwright`, then the one-time
 `python3 -m playwright install --with-deps chromium` (installs OS deps,
 escalates internally), then `python3 scripts/pw-test.py` and
 `python3 scripts/png-check.py`.

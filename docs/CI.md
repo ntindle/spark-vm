@@ -125,13 +125,17 @@ shellcheck --severity=error $(git ls-files '*.sh')
 # Copy the full args from .github/workflows/ci.yml's markdown-links job, e.g.:
 lychee --no-progress --exclude-loopback --exclude 'https?://(www\.)?medium\.com/.*' --exclude 'https?://(www\.)?businesswire\.com/.*' --exclude 'https?://(www\.)?globenewswire\.com/.*' '**/*.md'  # + the rest of ci.yml's --exclude list
 
-# PNG smoke test (same scripts CI runs; --with-deps handles OS deps)
+# PNG smoke test (same scripts CI runs; --with-deps handles OS deps).
+# Run inside the CONTRIBUTING.md venv (activate it first). POSIX `.`,
+# not `source`: this block is `sh`, and `source` is a bashism.
+. .venv/bin/activate
 pip install playwright && python3 -m playwright install --with-deps chromium
 rm -f /tmp/pw-test.png  # stale screenshot must not mask a pw-test failure
 python3 scripts/pw-test.py && python3 scripts/png-check.py
 ```
 
-The pytest suites need `pip install -r requirements-test.txt` first
+The pytest suites need the CONTRIBUTING.md venv activated plus
+`pip install -r requirements-test.txt` first
 (pytest, cryptography, pillow); the lint scripts are stdlib-only; lychee,
 shellcheck, and playwright are external binaries.
 
