@@ -611,34 +611,120 @@ def _safe_key(key):
     return "<%s>" % type(key).__name__
 
 
+#: Cap on unknown keys echoed in a rejection, shared by the envelope
+#: layer (``_check_envelope``), the action layer
+#: (``_validate_action_object``), and the observation layer
+#: (``observation.validate_observation`` / ``_check_node``): the
+#: unknown-key error must not itself become an unbounded echo (the
+#: hole #1449 pins at the action level). First N keys, rendered via
+#: ``_safe_key`` (never raw), plus a count of the rest.
+_MAX_UNKNOWN_KEYS_ECHO = 5
+
+
+def format_unknown_keys(unknown):
+    """Render an unknown-key set for a rejection message: the first
+    ``_MAX_UNKNOWN_KEYS_ECHO`` keys (sorted, via ``_safe_key`` — never
+    raw) plus a count of the rest. Public so the observation layer
+    shares the exact format instead of re-implementing it."""
+    shown = sorted(unknown, key=_safe_key)[:_MAX_UNKNOWN_KEYS_ECHO]
+    extra = len(unknown) - len(shown)
+    suffix = " and %d more" % extra if extra else ""
+    return ", ".join(_safe_key(k) for k in shown) + suffix
+
+
 def _value_too_long(value):
-    """True when a raw value exceeds MAX_PARAM_LEN. The size scan the
-    action-level ``_check_action_size`` and the envelope-level
-    ``_check_envelope`` share, so both layers enforce the same bound.
-    Traverses dicts (keys as well as values): a dict-wrapped giant
-    string must fail the scan, or a validator's ``%r`` echo downstream
-    would print the whole value (the B8 bound). Iterative: a hostile
-    caller can nest containers arbitrarily deep, and a recursive scan
-    would die with RecursionError instead of failing loud. An
-    id()-visited set keeps cyclic in-process input terminating
-    (JSON, the wire format, is always acyclic; every object here stays
-    reachable from ``value``, so ids cannot be recycled mid-scan)."""
-    seen = set()
-    stack = [value]
+    """True when a raw value's echo-cost exceeds MAX_PARAM_LEN. The
+    size scan the action-level ``_check_action_size`` and the
+    envelope-level ``_check_envelope`` share, so both layers enforce
+    the same bound. The budget is AGGREGATE, not per-string: a
+    per-string check alone leaves the #1449 hole open — the issue's
+    2000-key dict of short strings still echoed a ~36 KiB error after
+    per-string recursion, because no single member exceeded the
+    bound. The scan therefore charges every popped item for what its
+    ``%r`` echo costs and fails once the running total passes the
+    bound:
+    - strings/bytes: raw ``len`` (no quote allowance, so a bare
+      string passes iff ``len <= MAX`` — the pinned boundary);
+    - expanding a container: ``16 + 64 * len`` (brackets plus
+      per-element structural overhead — separators, quotes, and
+      worst-case small-scalar reprs);
+    - ``bool``/``None``: ``8``; ``float``: ``32``;
+    - ``int`` (not ``bool``): ``bit_length() // 3 + 2`` (a decimal
+      digit estimate), and any int with ``bit_length() >= 14285``
+      fails outright — its ``repr`` would raise ``ValueError`` under
+      Python's 4300-digit int-to-string limit instead of returning a
+      string (``10**4300`` has bit_length 14285, so every int with
+      >4300 digits has bit_length >= 14285; the threshold catches
+      all of them, with a tiny conservative band of 4300-digit ints
+      that fail loud instead of passing);
+    - any other leaf: ``8`` (custom objects / non-JSON mappings are
+      not traversed — unreachable via JSON, noted as residual).
+    A value that passes has echo-cost at most MAX_PARAM_LEN, so any
+    downstream echo is bounded by the budget plus escape expansion
+    (``%r`` can multiply control characters — 1 MiB of NULs reprs
+    to ~4 MiB, and a ``\\U`` escape expands one char to ten, so the
+    absolute echo bound is a small constant factor (~10x) over the
+    budget, not the budget itself); a value that fails gets the
+    short "value exceeds" rejection, never an echo. A bare string at exactly the
+    cap passes; the same string nested in a container fails on the
+    expansion overhead — the cap is on total echo-cost, and nesting
+    costs. Traversal covers dicts (keys as well as values), sets,
+    and frozensets: the JSON wire format cannot produce sets, but
+    in-process callers can, and the scan is the choke point before
+    every ``%r`` echo. Iterative, with ancestor-path tracking: a
+    container's id is added on entry and removed on exit, so a
+    shared (DAG) subtree is counted once PER OCCURRENCE — the
+    ``%r`` echo prints it every time — while a true cycle still
+    terminates (a re-encountered ancestor is skipped; ``repr``
+    prints ``[...]`` for it, a few chars). Every pop either charges
+    or sits in a container whose expansion charge already covered
+    its slot (an empty string charges 0, but its parent paid 64
+    for the element), except a bare root scalar, a single pop — so
+    the early exit caps total pops and a DAG-doubling blowup cannot
+    run away. Depth values up to 200 are allowed: a value nesting
+    deeper than 201 levels fails (the check fires on the 202nd
+    level, i.e. depth > 200) — legitimate params nest ~3 deep, and ``repr``
+    of a deeper chain would raise ``RecursionError`` instead of
+    failing loud — the scan fails such values on depth before any
+    ``%r`` site sees them."""
+    ancestors = set()
+    stack = [(value, 0, False)]
+    total = 0
     while stack:
-        item = stack.pop()
-        if isinstance(item, str):
-            if len(item) > MAX_PARAM_LEN:
+        item, depth, is_exit = stack.pop()
+        if is_exit:
+            ancestors.discard(id(item))
+            continue
+        if depth > 200:
+            return True
+        if isinstance(item, (str, bytes, bytearray)):
+            total += len(item)
+        elif item is None or isinstance(item, bool):
+            total += 8
+        elif isinstance(item, float):
+            total += 32
+        elif isinstance(item, int):
+            if item.bit_length() >= 14285:
                 return True
-        elif isinstance(item, (list, tuple, dict)):
-            if id(item) in seen:
+            total += item.bit_length() // 3 + 2
+        elif isinstance(item, (list, tuple, dict, set, frozenset)):
+            if id(item) in ancestors:
                 continue
-            seen.add(id(item))
+            ancestors.add(id(item))
+            total += 16 + 64 * len(item)
+            if total > MAX_PARAM_LEN:
+                return True
+            stack.append((item, depth, True))
             if isinstance(item, dict):
-                stack.extend(item.keys())
-                stack.extend(item.values())
+                stack.extend((k, depth + 1, False) for k in item.keys())
+                stack.extend((v, depth + 1, False) for v in item.values())
             else:
-                stack.extend(item)
+                stack.extend((child, depth + 1, False) for child in item)
+            continue
+        else:
+            total += 8
+        if total > MAX_PARAM_LEN:
+            return True
     return False
 
 
@@ -648,11 +734,13 @@ def _check_action_size(obj, index):
     Validators and error paths use ``%r`` liberally; if a giant value
     reaches a validator first, the rejection message echoes the whole
     value into the error/log line — a log-pipeline DoS per request.
-    Keys, values (including nested list/tuple string members), the
+    Keys, values (including nested list/tuple/set/dict string members), the
     action name, and ``timeout_ms`` are therefore scanned up front;
-    anything over MAX_PARAM_LEN fails loud here, with the length (never
-    the value) in the message. Values that pass the scan are at most
-    1MiB, which also bounds every downstream ``%r`` echo.
+    anything whose echo-cost exceeds MAX_PARAM_LEN fails loud here,
+    with the length (never the value) in the message. Values that pass
+    the scan have echo-cost at most 1MiB, which bounds every downstream
+    ``%r`` echo to the budget plus escape expansion (see
+    ``_value_too_long``).
     """
     if not isinstance(obj, dict):
         raise ProtocolError(
@@ -683,10 +771,13 @@ def _validate_action_object(obj, index):
     params = {k: v for k, v in obj.items() if k not in ("action", "timeout_ms")}
     unknown = set(params) - _ACTION_KEYS[name]
     if unknown:
+        # Cap the echo: the unknown-key error must not itself become an
+        # unbounded echo (the #1449 hole — 10,000 unknown keys produced
+        # an ~89 KiB error). Shared format via ``format_unknown_keys``.
         raise ProtocolError(
             "bad_params",
             "actions[%d] (%s): unknown parameter(s) %s"
-            % (index, name, sorted(unknown, key=_safe_key)),
+            % (index, name, format_unknown_keys(unknown)),
         )
     validator(params)
     timeout_ms = obj.get("timeout_ms", 0)
@@ -731,13 +822,6 @@ def _check_post_navigation_rule(validated):
 #: per-action unknown-param rule in ``_validate_action_object``).
 _ENVELOPE_KEYS = frozenset({"session", "actions", "ref_scope"})
 
-#: Cap on unknown envelope keys echoed in a rejection: the unknown-key
-#: error must not itself become an unbounded echo (the hole #1449 pins
-#: at the action level). First N keys, rendered via ``_safe_key`` (never
-#: raw), plus a count of the rest. Deliberately stricter than
-#: ``observation.validate_observation``'s raw ``sorted(unknown)`` echo.
-_MAX_UNKNOWN_ENVELOPE_KEYS_ECHO = 5
-
 
 def _check_envelope(payload):
     """Pin the call envelope — size scan + key set — before anything
@@ -770,13 +854,9 @@ def _check_envelope(payload):
             )
     unknown = set(payload) - _ENVELOPE_KEYS
     if unknown:
-        shown = sorted(unknown, key=_safe_key)[:_MAX_UNKNOWN_ENVELOPE_KEYS_ECHO]
-        extra = len(unknown) - len(shown)
-        suffix = " and %d more" % extra if extra else ""
         raise ProtocolError(
             "bad_envelope",
-            "call: unknown envelope key(s) %s%s"
-            % (", ".join(_safe_key(k) for k in shown), suffix),
+            "call: unknown envelope key(s) %s" % format_unknown_keys(unknown),
         )
 
 

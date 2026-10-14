@@ -14,7 +14,13 @@ Like ``bdrive.protocol``, this module is pure validation — no browser,
 no I/O.
 """
 
-from bdrive.protocol import MAX_PARAM_LEN, REF_RE, ProtocolError, is_nonempty_str
+from bdrive.protocol import (
+    MAX_PARAM_LEN,
+    REF_RE,
+    ProtocolError,
+    format_unknown_keys,
+    is_nonempty_str,
+)
 
 
 #: Hard cap on AX tree depth. The tree is derived from the rendered
@@ -79,7 +85,8 @@ def _check_node(node, path):
         if unknown:
             raise ProtocolError(
                 "bad_observation",
-                "%s: unknown node field(s) %s" % (path, sorted(unknown)),
+                "%s: unknown node field(s) %s"
+                % (path, format_unknown_keys(unknown)),
             )
 
 
@@ -133,7 +140,8 @@ def validate_observation(obs):
     unknown = set(obs) - {"url", "title", "target", "ref_scope", "ax"}
     if unknown:
         raise ProtocolError(
-            "bad_observation", "unknown field(s) %s" % sorted(unknown)
+            "bad_observation",
+            "unknown field(s) %s" % format_unknown_keys(unknown),
         )
 
 
