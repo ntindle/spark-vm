@@ -171,7 +171,8 @@
 # `install chromium`; default $PINS_HASH_DIR/expected_playwright_browsers
 # — the unprivileged S1 status plane compares its probed cache against
 # this record; written by the privileged `install` step and refreshed by
-# every `update` tick whose playwright layer converges).
+# every real `update` tick, whether or not the playwright layer converged
+# — the record claims SHOULD-BE, not IS).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
