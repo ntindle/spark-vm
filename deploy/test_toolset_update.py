@@ -3673,6 +3673,159 @@ def test_uninstall_removes_managed_targets_record(env, tmp_path):
     assert not rec.exists()
 
 
+# --- expected Playwright browser builds (issue #1311) ----------------------
+
+def test_install_publishes_expected_browsers(env, tmp_path):
+    # #1311: the privileged install publishes the expected browser build
+    # dir names (from the hash-verified package's `install --dry-run`) to
+    # the world-readable carrier dir, so S1 can compare its probed cache
+    # against them. (Vacuity: without the publish step no record exists
+    # and the content assertion fails.) The fixture's dry-run names a
+    # single archive, chromium-1234.
+    r, e = _install_with_targets(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    carrier = tmp_path / "pinshash"
+    rec = carrier / "expected_playwright_browsers"
+    assert rec.exists()
+    assert stat.S_IMODE(rec.stat().st_mode) == 0o644
+    assert rec.read_text() == "chromium-1234\n"
+
+
+def test_install_defers_expected_browsers_when_cli_absent(env, tmp_path):
+    # The expected record derives from the hash-verified package's
+    # dry-run, which needs the managed venv's playwright CLI — a fresh
+    # box may not have the venv yet, and that must not fail the install.
+    # Install succeeds, logs the deferral, and publishes no record; the
+    # first update tick retries.
+    empty_venv = tmp_path / "empty-venv"
+    empty_venv.mkdir()
+    r, e = _install_with_targets(
+        env, tmp_path, extra={"PLAYWRIGHT_VENV": str(empty_venv)})
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+    runlog = env["state"] / "toolset-update.log"
+    assert "expected browsers record deferred to the first update tick" \
+        in runlog.read_text()
+
+
+def test_update_tick_refreshes_expected_browsers(env, tmp_path):
+    # Every update tick refreshes the record: pre-seed a stale one (what
+    # an install-time-only record would leave behind after a pin bump),
+    # run a tick, and the record moves to the dry-run's names.
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "expected_playwright_browsers").write_text("chromium-0000\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (carrier / "expected_playwright_browsers").read_text() \
+        == "chromium-1234\n"
+
+
+def test_update_dry_run_does_not_publish_expected_browsers(env, tmp_path):
+    # --dry-run changes nothing: no record appears.
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_update_tick_survives_expected_publish_failure(env, tmp_path):
+    # The record is an S1 visibility signal, not update safety: a wedged
+    # carrier (here: under /proc, unwritable) must not block the weekly
+    # converge — the tick logs loudly and continues. (Vacuity: if the
+    # publish failure propagated, update would return nonzero.)
+    e = dict(env["env"])
+    e["EXPECTED_PLAYWRIGHT_BROWSERS_FILE"] = \
+        "/proc/expected_playwright_browsers"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    runlog = env["state"] / "toolset-update.log"
+    assert "could not refresh expected Playwright browsers record" \
+        in runlog.read_text()
+
+
+def test_uninstall_removes_expected_browsers_record(env, tmp_path):
+    # Uninstall removes the published record — otherwise the stale record
+    # keeps S1 comparing its cache against build names no updater holds.
+    r, e = _install_with_targets(env, tmp_path)
+    assert r.returncode == 0, r.stderr
+    rec = tmp_path / "pinshash" / "expected_playwright_browsers"
+    assert rec.exists()
+    r2 = run_bash("./deploy/toolset-update.sh uninstall", env_extra=e)
+    assert r2.returncode == 0, r2.stderr
+    assert not rec.exists()
+
+
+def _publish_with_pairs(env, tmp_path, pairs_text, extra=None):
+    # Source the script with _playwright_browser_pairs stubbed to emit
+    # `pairs_text`, then call the publish function directly.
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    e["PAIRS_TEXT"] = pairs_text
+    if extra:
+        e.update(extra)
+    stub = ("_playwright_browser_pairs() { printf '%s' \"$PAIRS_TEXT\"; }; "
+            "_publish_expected_playwright_browsers /fake/cli")
+    return run_bash(SRC_PREFIX + stub, env_extra=e)
+
+
+def test_publish_expected_browsers_writes_sorted_names(env, tmp_path):
+    # Pairs arrive in dry-run order (unsorted, with a duplicate pair);
+    # the record is sorted + deduped — a stable record keeps S1
+    # comparisons and operator diffs trivial.
+    pairs = ("/cache/chromium_headless_shell-1181\n"
+             "https://cdn.playwright.dev/x/a.zip\n"
+             "/cache/chromium-1181\n"
+             "https://cdn.playwright.dev/x/b.zip\n"
+             "/cache/chromium-1181\n"
+             "https://cdn.playwright.dev/x/b.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode == 0, r.stderr
+    rec = tmp_path / "pinshash" / "expected_playwright_browsers"
+    assert rec.read_text() == "chromium-1181\nchromium_headless_shell-1181\n"
+
+
+def test_publish_expected_browsers_refuses_unsafe_name(env, tmp_path):
+    # A space in the build dir name is outside the publisher's safe-name
+    # charset: fail closed, publish nothing.
+    pairs = ("/cache/chromium 1181\nhttps://cdn.playwright.dev/x/a.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "unsafe browser build dir name" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_split_parents(env, tmp_path):
+    # Locations scattered across two parent dirs name no single cache:
+    # fail closed, publish nothing.
+    pairs = ("/cache-a/chromium-1181\nhttps://cdn.playwright.dev/x/a.zip\n"
+             "/cache-b/chromium_headless_shell-1181\n"
+             "https://cdn.playwright.dev/x/b.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "differing parents" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_relative_path(env, tmp_path):
+    # A relative record path would make the privileged `install -d`
+    # chmod/chown the current working directory — refuse it loudly.
+    pairs = "/cache/chromium-1181\nhttps://cdn.playwright.dev/x/a.zip\n"
+    r = _publish_with_pairs(
+        env, tmp_path, pairs,
+        extra={"EXPECTED_PLAYWRIGHT_BROWSERS_FILE":
+               "relative/expected_playwright_browsers"})
+    assert r.returncode != 0
+    assert "must be an absolute path" in r.stderr
+
+
 def test_publish_fails_loud_when_pins_unhashable(env, tmp_path):
     # The hash step must report "cannot hash" (not the misleading
     # "malformed hash") when sha256sum itself fails: point PINS_FILE at a

@@ -817,6 +817,181 @@ def test_playwright_browsers_unicode_digit_user_falls_back(
     assert "unresolvable" in note
 
 
+# --- expected Playwright browser builds (issue #1311) --------------------
+
+def _expected_record(tmp_path, text):
+    p = tmp_path / "expected_playwright_browsers"
+    p.write_text(text)
+    return str(p)
+
+
+def test_expected_browsers_reader_valid(tmp_path):
+    p = _expected_record(tmp_path, "chromium-1181\nchromium_headless_shell-1181\n")
+    assert self_update._read_expected_playwright_browsers(p) == {
+        "chromium-1181", "chromium_headless_shell-1181"}
+
+
+def test_expected_browsers_reader_missing_is_none(tmp_path):
+    assert self_update._read_expected_playwright_browsers(
+        str(tmp_path / "missing")) is None
+
+
+def test_expected_browsers_reader_malformed_line_is_none(tmp_path):
+    # A path separator, a space, or ".." in any line means the record is
+    # not one the publisher wrote: ignored wholesale, not line-skipped.
+    for bad in ("chromium-1181/bad\n", "chromium 1181\n", "..\n",
+                "chromium-1181\n../escape\n"):
+        p = _expected_record(tmp_path, bad)
+        assert self_update._read_expected_playwright_browsers(p) is None, bad
+
+
+def test_expected_browsers_reader_ignores_blanks_and_comments(tmp_path):
+    p = _expected_record(tmp_path, "\n# published by the update plane\n"
+                                  "chromium-1181\n\n")
+    assert self_update._read_expected_playwright_browsers(p) == {
+        "chromium-1181"}
+
+
+def test_expected_browsers_reader_non_utf8_is_none(tmp_path):
+    p = tmp_path / "expected_playwright_browsers"
+    p.write_bytes(b"chromium-1181\n\xff\xfe\n")
+    assert self_update._read_expected_playwright_browsers(str(p)) is None
+
+
+def test_browsers_probe_match_names_expected(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(tmp_path, "chromium-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    installed, version, note = self_update.probe_playwright_browsers(
+        expected_path=expected)
+    assert installed is True
+    assert "matches expected 1 build(s)" in note
+    assert "DRIFT" not in note
+
+
+def test_browsers_probe_missing_is_drift(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(
+        tmp_path, "chromium-1181\nchromium_headless_shell-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    installed, version, note = self_update.probe_playwright_browsers(
+        expected_path=expected)
+    assert installed is True
+    assert "DRIFT: missing expected build(s): chromium_headless_shell-1181" \
+        in note
+
+
+def test_browsers_probe_extra_is_noted_not_drift(monkeypatch, tmp_path):
+    # An extra dir is named in the note but never DRIFT: the updater
+    # never prunes cache dirs, so an extra build is not updater-clearable.
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    (cache / "chromium-9999").mkdir(parents=True)
+    expected = _expected_record(tmp_path, "chromium-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    installed, version, note = self_update.probe_playwright_browsers(
+        expected_path=expected)
+    state = self_update.playwright_browsers_expected_state(
+        expected_path=expected)
+    assert "unexpected extra build(s)" in note
+    assert "chromium-9999" in note
+    assert "DRIFT" not in note
+    assert state == "match"
+
+
+def test_browsers_probe_no_record_unchanged(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    installed, version, note = self_update.probe_playwright_browsers(
+        expected_path=str(tmp_path / "missing"))
+    assert installed is True
+    assert "DRIFT" not in note
+    assert "matches expected" not in note
+
+
+def test_browsers_expected_state_unknown_without_record(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    state = self_update.playwright_browsers_expected_state(
+        expected_path=str(tmp_path / "missing"))
+    assert state == "unknown"
+
+
+def test_browsers_expected_state_mismatch_when_missing(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(
+        tmp_path, "chromium-1181\nchromium_headless_shell-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    state = self_update.playwright_browsers_expected_state(
+        expected_path=expected)
+    assert state == "mismatch"
+
+
+def test_browsers_expected_state_unknown_when_cache_missing(monkeypatch,
+                                                            tmp_path):
+    # Record present but the cache unreadable: S1 cannot compare.
+    expected = _expected_record(tmp_path, "chromium-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH",
+                       str(tmp_path / "no-cache"))
+    state = self_update.playwright_browsers_expected_state(
+        expected_path=expected)
+    assert state == "unknown"
+
+
+def test_status_table_emits_browsers_mismatch_footer(monkeypatch, tmp_path,
+                                                    capsys):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(
+        tmp_path, "chromium-1181\nchromium_headless_shell-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    monkeypatch.setattr(self_update, "_EXPECTED_PLAYWRIGHT_BROWSERS_FILE",
+                        expected)
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text("")
+    rc = self_update.main(["status", "--pins", str(pins)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "browser builds differ from expected — " \
+        "run `toolset-update.sh update`" in out
+
+
+def test_status_table_silent_on_browsers_match(monkeypatch, tmp_path, capsys):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(tmp_path, "chromium-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    monkeypatch.setattr(self_update, "_EXPECTED_PLAYWRIGHT_BROWSERS_FILE",
+                        expected)
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text("")
+    rc = self_update.main(["status", "--pins", str(pins)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "browser builds differ from expected" not in out
+
+
+def test_status_json_carries_browsers_state(monkeypatch, tmp_path, capsys):
+    cache = tmp_path / "cache"
+    (cache / "chromium-1181").mkdir(parents=True)
+    expected = _expected_record(
+        tmp_path, "chromium-1181\nchromium_headless_shell-1181\n")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+    monkeypatch.setattr(self_update, "_EXPECTED_PLAYWRIGHT_BROWSERS_FILE",
+                        expected)
+    pins = tmp_path / "self_update_pins.conf"
+    pins.write_text("")
+    rc = self_update.main(["status", "--pins", str(pins), "--json"])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["playwright_browsers_expected_state"] == "mismatch"
+
+
 # --- unattended-upgrades ---------------------------------------------------
 
 def _uu_which_runner(conf_dir, version_out=(0, "2.10.2\n", ""), tmp_path=None):

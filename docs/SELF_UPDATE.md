@@ -98,10 +98,14 @@ complementary planes, not competitors (see "Two planes" below).
   Playwright, `$CUA_DRIVER_BIN` for cua-driver), falling back to PATH when
   the managed target isn't present — for these pin-driven tools, "drift" in
   S1 is exactly the drift the updater's layers clear. The apt-layer tools
-  (docker, node, gh) and the Playwright browser builds remain outside that
-  invariant: the apt layer converges repo-latest rather than the pins, and
-  S1 reports browser builds as a count, not a version. The browsers probe
-  still targets the same cache directory the update plane converges —
+  (docker, node, gh) remain outside that invariant: the apt layer converges
+  repo-latest rather than the pins. The Playwright browser builds join the
+  invariant for missing builds (issue #1311): the update plane publishes
+  the expected build dir names (from the hash-verified package's
+  `install --dry-run`) and S1 compares its probed cache against them — a
+  missing expected build is drift the next tick clears; an extra dir is
+  named in the probe note but never drift, because the updater never
+  prunes cache dirs. The browsers probe still targets the same cache directory the update plane converges —
   `PLAYWRIGHT_BROWSERS_PATH` when set, else the Playwright user's cache
   (`PLAYWRIGHT_USER`, default `ntindle`), else the invoker's cache (issue
   #1311) — so a wrong-cache report can no longer fake a clean inventory.
@@ -227,6 +231,29 @@ target values); a target value containing any line-boundary character
 U+2028/2029, not just newline/CR) is refused rather than published, since
 the status-plane parser would split it into extra lines and let a later
 duplicate key override the real one (#1412).
+
+Expected browser builds (issue #1311): the same two-planes split applies
+to *which* browser builds the cache holds. The update plane's playwright
+layer installs exactly the archives the hash-verified package's
+`install --dry-run` names, but S1 used to report browser builds as a bare
+count — no drift signal existed at all. The privileged `install` step now
+publishes the expected build dir names (one per line, names only, never
+paths) to a world-readable record,
+`/var/lib/sparkvm-toolset/expected_playwright_browsers` (root-owned 0755
+carrier dir, 0644 file), and every `update` tick whose playwright layer
+converges refreshes it (a failed layer publishes nothing — the cache does
+not match the dry-run then; `--dry-run` publishes nothing). The status
+plane compares its probed cache against the record: `match` /
+`mismatch` (at least one expected build missing) / `unknown` (no record
+yet — pre-#1311 installs, or an unreadable record; silent by design). A
+mismatch renders the loud footer line "browser builds differ from
+expected — run `toolset-update.sh update`" and the
+`playwright_browsers_expected_state: "mismatch"` field in
+`status --json`. Asymmetric by design: an extra dir in the cache is named
+in the probe note but never counts as drift — the updater never prunes
+cache dirs (`PLAYWRIGHT_BROWSERS_PATH` may point at a shared cache), so an
+extra-build signal must never read as updater-clearable. `uninstall`
+removes the record alongside the pins hash and the managed targets.
 
 ## Recovery (from #532)
 
