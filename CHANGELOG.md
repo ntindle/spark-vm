@@ -550,6 +550,24 @@ codified as rule 6 so future watch bullets arrive compliant.)
   remain unclosed; still no Vercel sandbox zero-day CVE/write-up;
   AgentComputer still publishes no egress pricing. (#1429)
 
+- Cycle-70 competitor watch (2026-10-14): a full pass over the
+  tracked agent-sandbox vendors, and the Modal funding round CLOSED —
+  four new vendor-confirmed entries: Modal's $750M Series D at a
+  $15.75B valuation (Accel led; company announced Oct 14, with first-
+  party figures of $1B annualized run rate, a $300M sandbox run rate,
+  ~3 billion sandboxes spun up, and first-party GA language for VM
+  Sandboxes); Vercel's changelog entry "Sandbox creation now returns
+  a ready sandbox" (Oct 8); Agent37, a YC-backed low-cost sandbox
+  vendor (founder-attested launch, stated $0.37/month per sandbox);
+  and an AWS security bulletin for the Bedrock AgentCore harness
+  (CVE-2026-18830 — caller-supplied tool-use blocks could bypass
+  model invocation; server-side fix, no customer action needed).
+  Watch-doc delta only: a new Hugo advisory (theme-defined module
+  replacements widening the Node.js read sandbox). Still no Vercel
+  sandbox zero-day CVE/write-up, Baseten's ~$26B round is still
+  unclosed, Vercel Drives is still in public beta, and AgentComputer
+  still publishes no egress pricing. (#1480)
+
 - Rollout-controller deploy driver (#1287): per-plane template deploys
   land through the pinned release manifest (deployment ID + SHA-256,
   never a floating "latest", verified against the deployed bytes),
