@@ -167,6 +167,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The `muse-job watch` watchdog no longer blocks `steer` for a job while
+  it recovers that job: monitoring now runs under the per-job lock and
+  queues any needed recovery, and the recovery itself (resuming a dead
+  session, or the MSP dead-turn ladder) runs after the lock is released,
+  with the same state and concurrency re-checks before it acts. Recovery
+  events now print after all monitoring events in a pass. (#41, #TBD)
+
 - The sentinel telemetry reference now documents the refused-egress audit
   shape: when the egress guard kills a connection, the log carries a
   `refused=egress` line with the same flow id as the earlier swap lines,

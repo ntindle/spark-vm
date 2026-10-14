@@ -3359,9 +3359,129 @@ def git_diffstat(work):
         return ""
 
 
+def _run_watch_recovery(kind, slug, events, held_elsewhere=False):
+    """Phase 2 of a watch pass (issue #41): run ONE queued recovery
+    WITHOUT holding the per-job lock.
+
+    Phase 1 (watch_one, under the lock) only monitors and queues; the
+    recovery itself -- cmd_resume's sleeps/probes/re-discovery, the MSP
+    ladder's polls -- used to run inside that lock, so `steer` (which
+    takes the same lock) blocked for minutes behind a dead job. Recovery
+    events keep their exact pre-#41 detail strings (watchers grep for
+    them). Never raises: a recovery-phase failure is a needs-attention
+    event, like every other watch failure.
+    """
+    try:
+        fresh = load_job(slug)
+    except Exception:
+        fresh = None
+    if fresh is None or fresh.get("state") not in ("active", "blocked"):
+        # Issue #5, phase-2 edition: the operator may have killed or
+        # closed the job after phase 1 queued the recovery. Refuse to
+        # revive it. (cmd_resume re-checks again before re-activating --
+        # defense in depth, not redundancy: this check avoids even
+        # starting a session for a job that already left the monitored
+        # states.)
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": "job left the monitored states after "
+                                 "recovery was queued (operator may have "
+                                 "killed or closed it); not auto-recovering"})
+        return
+    if kind == "tmux-resume":
+        # Issue #41 phase-2 bar re-check: phase 1 queued EVERY dead
+        # job before any recovery ran, so without this check a second
+        # dead phase job would over-admit next to the first job's fresh
+        # session (same-pass serialization). cmd_resume re-checks again
+        # inside (#1131): defense in depth for the residual window
+        # between this check and session creation -- the same
+        # gate-outside + re-check-inside pattern as the #5 state check.
+        if _phase_concurrency_bars_resume(slug):
+            events.append({"job": slug, "signal": "deferred",
+                           "detail": _PHASE_DEFERRED_DETAIL +
+                           " (phase-2 bar re-check fired; next pass retries)"})
+            return
+        # cmd_resume re-checks the bar once more inside (#1131) before
+        # creating the session: the residual window between the
+        # phase-2 check above and session creation stays covered.
+        try:
+            cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
+            events.append({"job": slug, "signal": "recovered",
+                           "detail": "tmux was dead; resumed session"})
+        except _PhaseConcurrencyDeferred:
+            events.append({"job": slug, "signal": "deferred",
+                           "detail": _PHASE_DEFERRED_DETAIL +
+                           " (re-check inside cmd_resume fired; next "
+                           "pass retries)"})
+        except Exception as e:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"tmux dead and resume failed: {e}"})
+        return
+    if kind == "msp-ladder":
+        # Unlike the tmux path, the ladder has no internal bar re-check:
+        # its old "same pass, no shell-out between them" premise died
+        # with the phase split, so re-check here before running it.
+        if _phase_concurrency_bars_resume(slug):
+            if held_elsewhere:
+                # Same event as the phase-1 barred+held branch: the
+                # ladder cannot attach to a supervisor-held session, so
+                # surface for the operator instead of deferring.
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": "MSP turn stalled; supervisor holds "
+                                         "the session so the recovery ladder "
+                                         "cannot attach -- `muse-job steer` to "
+                                         "nudge or `muse-job kill` to end it"})
+            else:
+                events.append({"job": slug, "signal": "deferred",
+                               "detail": _PHASE_DEFERRED_DETAIL +
+                               " (msp stalled-turn recovery; next pass retries)"})
+            return
+        _, _, _, _, msp_recovery = _msp_imports()
+        sid = fresh.get("session_uuid")
+        if not sid:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "MSP job with no recorded session id; "
+                                     "cannot recover it"})
+            return
+
+        def go2(host):
+            # recover_dead_turn polls the view and detects the dead shape
+            # internally; it takes (host, session_id, job_dir) and returns
+            # a RecoveryReport (never a diagnosis tuple).
+            return msp_recovery.recover_dead_turn(host, sid, job_dir(slug))
+        try:
+            report = _msp_call(slug, fresh, go2)
+        except Exception as e:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"MSP recovery raised: {e}"})
+            return
+        action = report.action
+        note = (report.detail or "; ".join(report.attempts) or "")
+        detail = _clean_text(note)[:200]
+        if action == msp_recovery.ACTION_NONE:
+            return
+        if action in (msp_recovery.ACTION_CONTINUED,
+                      msp_recovery.ACTION_RESUMED):
+            events.append({"job": slug, "signal": "recovered",
+                           "detail": f"MSP stalled turn recovered via "
+                                     f"{action}: {detail}"})
+        else:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"MSP stalled turn; recovery {action}: "
+                                     f"{detail}"})
+        return
+    events.append({"job": slug, "signal": "needs-attention",
+                   "detail": f"unknown watch recovery kind {kind!r}; "
+                             "not auto-recovering"})
+
+
 def cmd_watch(args):
     """One watchdog pass over active jobs. Emits JSON lines; never fails."""
     events = []
+    # Issue #41, phase split: monitoring runs under the per-job lock;
+    # recovery runs after it is released (see _run_watch_recovery).
+    # Recovery events print after ALL monitoring events -- a job that
+    # both pages and recovers reports the page first.
+    pending = []  # (kind, slug, held_elsewhere) recovery requests
 
     def watch_one(slug):
         if not job_record_exists(slug):
@@ -3378,7 +3498,7 @@ def cmd_watch(args):
             # Never let an MSP exception escape the pass (the tmux path
             # below is wrapped the same way by the caller).
             try:
-                _watch_msp_job(slug, job, events, time.time())
+                _watch_msp_job(slug, job, events, time.time(), pending)
             except Exception as e:
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"MSP watch pass raised: {e}"})
@@ -3418,23 +3538,15 @@ def cmd_watch(args):
                 events.append({"job": slug, "signal": "deferred",
                                "detail": _PHASE_DEFERRED_DETAIL})
                 return
-            try:
-                cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
-                events.append({"job": slug, "signal": "recovered",
-                               "detail": "tmux was dead; resumed session"})
-            except _PhaseConcurrencyDeferred:
-                # Issue #1131: the re-check inside cmd_resume fired -- a
-                # sibling went live in the check-then-act window. Same
-                # pinned detail as the pre-check above (watchers grep for
-                # it) with a suffix naming the re-check; the next watch
-                # pass retries.
-                events.append({"job": slug, "signal": "deferred",
-                               "detail": _PHASE_DEFERRED_DETAIL +
-                               " (re-check inside cmd_resume fired; next "
-                               "pass retries)"})
-            except Exception as e:
-                events.append({"job": slug, "signal": "needs-attention",
-                               "detail": f"tmux dead and resume failed: {e}"})
+            # Issue #41: queue the recovery for phase 2 instead of
+            # running cmd_resume inline. The resume takes minutes
+            # (sleeps, pane probes, up to 90s of session re-discovery)
+            # and used to hold this job's lock the whole time, so
+            # `steer` for the job blocked behind the recovery. The
+            # #5 gate above and the #804 pre-check already ran; phase
+            # 2 re-checks both before acting (cmd_resume's #1131
+            # re-check covers the bar).
+            pending.append(("tmux-resume", slug, False))
             return
 
         # Dead-TUI detection: tmux is up but the Muse session inside it has
@@ -3646,6 +3758,17 @@ def cmd_watch(args):
             with_lock(slug, lambda: watch_one(slug))
         except Exception:
             pass
+
+    # Phase 2 (issue #41): recoveries queued by phase 1 run here, after
+    # every job's lock is released, so a multi-minute recovery never
+    # blocks another job's steer -- or this job's. _run_watch_recovery
+    # never raises; a failure is a needs-attention event.
+    for kind, slug, held_elsewhere in pending:
+        try:
+            _run_watch_recovery(kind, slug, events, held_elsewhere)
+        except Exception as e:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"watch recovery phase raised: {e}"})
 
     for e in events:
         print(json.dumps(e), flush=True)
@@ -5109,14 +5232,15 @@ def _msp_close_runtime(slug, job):
               file=sys.stderr)
 
 
-def _watch_msp_job(slug, job, events, now):
+def _watch_msp_job(slug, job, events, now, pending):
     """One watchdog pass for an MSP job. Emits JSON findings; never raises
     past this boundary (the caller wraps in try/except like the tmux path).
 
     - blocked_approval/blocked_input -> blocked finding (operator decision)
     - turn_failed -> needs-attention (recovery already gave up)
-    - stalled/dead turn -> the msp_recovery ladder (continued/resumed =
-      recovered; give_up = needs-attention)
+    - stalled/dead turn -> QUEUE the msp_recovery ladder on `pending`
+      (issue #41: it runs in cmd_watch's phase 2, after the per-job lock
+      is released; the caller drives it via _run_watch_recovery)
     - turn completed with SUMMARY.md -> done finding (operator confirms,
       then closes)
     """
@@ -5152,7 +5276,9 @@ def _watch_msp_job(slug, job, events, now):
                                  f"`muse-job spawn {slug} --tmux` (spawn "
                                  f"refuses an existing dir)"})
         return
-    _, _, _, msp_events, msp_recovery = _msp_imports()
+    # No _msp_imports() unpack here: the ladder (the old msp_recovery
+    # consumer) moved to _run_watch_recovery, and the poll below reaches
+    # the imports through _msp_call, which validates deployment itself.
     sid = job.get("session_uuid")
     if not sid:
         events.append({"job": slug, "signal": "needs-attention",
@@ -5224,10 +5350,10 @@ def _watch_msp_job(slug, job, events, now):
         # detail string is reused verbatim (watchers grep for it) with a
         # suffix naming the MSP path, mirroring the #1131 re-check shape.
         # Manual `muse-job resume` stays the deliberate bypass by design.
-        # No #1131-style re-check inside the ladder: the bar check and the
-        # recover call happen in the same pass with no shell-out between
-        # them, so the residual sibling-start window is the same accepted
-        # class as #1131's (and the stamps are 15-min stale by design).
+        # Issue #41: the bar pre-check stays here, but the ladder itself
+        # is queued for phase 2 -- so phase 2 re-checks the bar before
+        # running it (see _run_watch_recovery); the old "same pass, no
+        # shell-out between them" premise no longer holds.
         if _phase_concurrency_bars_resume(slug):
             if held_elsewhere:
                 # The recovery ladder needs an attached host; the
@@ -5243,31 +5369,12 @@ def _watch_msp_job(slug, job, events, now):
                                "detail": _PHASE_DEFERRED_DETAIL +
                                " (msp stalled-turn recovery; next pass retries)"})
             return
-        def go2(host):
-            # recover_dead_turn polls the view and detects the dead shape
-            # internally; it takes (host, session_id, job_dir) and returns
-            # a RecoveryReport (never a diagnosis tuple).
-            return msp_recovery.recover_dead_turn(host, sid, job_dir(slug))
-        try:
-            report = _msp_call(slug, job, go2)
-        except Exception as e:
-            events.append({"job": slug, "signal": "needs-attention",
-                           "detail": f"MSP recovery raised: {e}"})
-            return
-        action = report.action
-        note = (report.detail or "; ".join(report.attempts) or "")
-        detail = _clean_text(note)[:200]
-        if action == msp_recovery.ACTION_NONE:
-            return
-        if action in (msp_recovery.ACTION_CONTINUED,
-                      msp_recovery.ACTION_RESUMED):
-            events.append({"job": slug, "signal": "recovered",
-                           "detail": f"MSP stalled turn recovered via "
-                                     f"{action}: {detail}"})
-        else:
-            events.append({"job": slug, "signal": "needs-attention",
-                           "detail": f"MSP stalled turn; recovery {action}: "
-                                     f"{detail}"})
+        # held_elsewhere rides along so phase 2's bar re-check can
+        # reproduce the barred+held event above if a sibling goes live
+        # between the phases. (By phase 2 the supervisor may have
+        # released the session; a stale True only ever yields a loud,
+        # actionable needs-attention, never a silent skip.)
+        pending.append(("msp-ladder", slug, held_elsewhere))
         return
     # turn completed -> done claim when the agent wrote SUMMARY.md.
     if view.last_terminal == "completed":

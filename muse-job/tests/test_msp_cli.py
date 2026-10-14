@@ -1230,7 +1230,14 @@ def test_watch_stalled_runs_recovery_ladder(cli, fakes):
                                           detail="interrupted zombie, re-anchored",
                                           attempts=["detected quiet_running"])
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    pending = []
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(),
+                        pending)
+    # Issue #41: monitoring queues the ladder; it does not run it inline.
+    assert events == []
+    assert pending == [("msp-ladder", slug, False)]
+    kind, queued_slug, held = pending[0]
+    cli._run_watch_recovery(kind, queued_slug, events, held)
     assert len(events) == 1
     assert events[0]["signal"] == "recovered"
     assert "continued" in events[0]["detail"]
@@ -1252,7 +1259,13 @@ def test_watch_stalled_recovery_none_is_silent(cli, fakes):
     fakes.outcome = types.SimpleNamespace(action="none", detail="",
                                           attempts=[])
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    pending = []
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(),
+                        pending)
+    assert events == []
+    assert pending == [("msp-ladder", slug, False)]
+    kind, queued_slug, held = pending[0]
+    cli._run_watch_recovery(kind, queued_slug, events, held)
     assert events == []
 
 
@@ -1265,7 +1278,13 @@ def test_watch_stalled_recovery_give_up_pages(cli, fakes):
                                           detail="ladder exhausted",
                                           attempts=["detected turn_failed"])
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    pending = []
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(),
+                        pending)
+    assert events == []
+    assert pending == [("msp-ladder", slug, False)]
+    kind, queued_slug, held = pending[0]
+    cli._run_watch_recovery(kind, queued_slug, events, held)
     assert len(events) == 1
     assert events[0]["signal"] == "needs-attention"
     assert "give_up" in events[0]["detail"]
@@ -1277,7 +1296,7 @@ def test_watch_blocked_approval_pages(cli, fakes):
     fakes.view = FakeView(state="blocked_approval",
                           pending_summary="approve: deploy")
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(), [])
     assert events[0]["signal"] == "blocked"
     assert "deploy" in events[0]["detail"]
     assert _read_job(cli, slug)["state"] == "blocked"
@@ -1291,7 +1310,7 @@ def test_watch_done_claim_on_completed_turn(cli, fakes):
     fakes.view = FakeView(state="idle", active_turn_id=None,
                           last_terminal="completed")
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(), [])
     assert events[0]["signal"] == "done"
 
 
@@ -1306,7 +1325,7 @@ def test_watch_stillborn_carries_two_path_retry_advice(cli, fakes):
               stillborn={"turn_id": "turn-1", "terminal": "cancelled",
                          "journal": ["turn/started", "turn/completed"]})
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(), [])
     assert len(events) == 1
     assert events[0]["signal"] == "needs-attention"
     detail = events[0]["detail"]
@@ -1333,7 +1352,7 @@ def test_watch_stillborn_gates_unknown_terminal(cli, fakes):
               stillborn={"turn_id": "turn-1", "terminal": "EVIL\nline",
                          "journal": ["turn/started"]})
     events = []
-    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time(), [])
     assert len(events) == 1
     assert "EVIL" not in events[0]["detail"]
     assert "'unknown'" in events[0]["detail"]
