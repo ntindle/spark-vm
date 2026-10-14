@@ -91,6 +91,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   through unexamined. Envelope values now go through the same size
   scan as action parameters, and rejection messages name at most the
   first few unknown keys, never their values. (#1448, #1471)
+- Browser-driver rejections can no longer echo oversized values into
+  error or log lines: the size check now totals everything a value
+  would cost to print — strings, nested containers, repeated shared
+  values, and plain numbers included — and rejects past 1 MiB, and a
+  call or observation carrying thousands of misspelled fields names
+  only the first five plus a count instead of echoing every key.
+  (#1449, #1472)
 
 ### Added
 

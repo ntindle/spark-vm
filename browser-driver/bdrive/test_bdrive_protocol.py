@@ -202,6 +202,279 @@ def test_envelope_dict_wrapped_giant_value_rejected():
     assert "MARKER-1448" not in str(exc.value)
 
 
+def test_set_wrapped_giant_value_never_echoed():
+    # The set half of the #1449 hole: the size scan traversed dicts
+    # (since #1471) but not sets, so a set-wrapped giant string
+    # passed the scan and a validator's %r echo printed it in full
+    # (1.5M-char error for a 1.5M-char member). Both set shapes and
+    # the nested shapes must fail loud with a short error.
+    big = "x" * (20 * 1024 * 1024)
+    for wrapped in ({big}, frozenset({big})):
+        with pytest.raises(P.ProtocolError) as exc:
+            P.validate_call(call([{"action": "click", "ref": wrapped}]))
+        assert exc.value.code == "bad_params"
+        assert len(str(exc.value)) < 10000
+        assert big not in str(exc.value)
+    # Many small members: the %r echo prints the whole set, so the
+    # scan must catch the aggregate shape, not just a giant member —
+    # a per-string check alone would pass every member here.
+    many = {"member_%06d_abcdefghij" % i for i in range(100_000)}
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": many}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert "member_000000" not in str(exc.value)
+    # The issue's literal repro: a 2000-key dict of SHORT strings.
+    # Its content (2000 x 5-char keys + 2000 x 5-char values = 20
+    # KiB) plus the dict-expansion charge (16 + 64 x 2000 =
+    # ~125 KiB) totals ~148 KiB, inside the budget, so it still
+    # passes the scan and the validator echoes it — but this input's
+    # echo (~36 KiB) is bounded by the 1 MiB budget, not unbounded.
+    # Per-string recursion alone left this shape untouched; the
+    # aggregate budget is what bounds it.
+    small_dict = {"k%04d" % i: "v%04d" % i for i in range(2000)}
+    for action in (
+        {"action": "click", "ref": small_dict},
+        {"action": "look", "timeout_ms": small_dict},
+    ):
+        with pytest.raises(P.ProtocolError) as exc:
+            P.validate_call(call([action]))
+        assert exc.value.code == "bad_params"
+        assert "value exceeds" not in str(exc.value)
+        assert len(str(exc.value)) < 50_000
+    # Same aggregate shape as a list: 2000 medium strings, each under
+    # the bound, 1.8 MiB total — must fail on the budget, not echo.
+    wide = ["m" * 900 for _ in range(2000)]
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": wide}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    # No false positive: a moderate aggregate (100 keys x ~100 chars)
+    # still reaches the validator instead of failing on size.
+    moderate = {"k%03d" % i: "v" * 100 for i in range(100)}
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": moderate}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" not in str(exc.value)
+    # Nested: set inside a list, set inside a dict value.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": [{big}]}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": {"k": {big}}}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+
+
+def test_unknown_action_param_echo_is_bounded():
+    # The action-level half of #1449: 10,000 unknown params produced
+    # an ~89 KiB error naming every key. The error must name the
+    # first few + a count, like the envelope layer.
+    action = {"action": "look"}
+    for i in range(10_000):
+        action["unknown_%05d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([action]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert "unknown_00000" in str(exc.value)
+    assert "unknown_00004" in str(exc.value)
+    assert "and 9995 more" in str(exc.value)
+    assert "unknown_09999" not in str(exc.value)
+
+
+def test_unknown_action_param_echo_boundaries():
+    # Exactly 5 unknown params: all shown, no "more" suffix.
+    action = {"action": "look"}
+    for i in range(5):
+        action["unknown_%02d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([action]))
+    assert exc.value.code == "bad_params"
+    for i in range(5):
+        assert ("unknown_%02d" % i) in str(exc.value)
+    assert "more" not in str(exc.value)
+    # 6 unknown params: first 5 shown + "and 1 more", 6th absent.
+    action["unknown_05"] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([action]))
+    assert exc.value.code == "bad_params"
+    for i in range(5):
+        assert ("unknown_%02d" % i) in str(exc.value)
+    assert "and 1 more" in str(exc.value)
+    assert "unknown_05" not in str(exc.value)
+
+
+def test_shared_subtree_counted_per_occurrence():
+    # A shared (DAG) subtree is echoed once per occurrence by %r, so
+    # the scan must charge it per occurrence too. A global visited
+    # set counts it once: [inner] * 100 with a 1 MiB member reprs to
+    # ~100 MiB but would pass a once-only scan.
+    inner = ["x" * 1_000_000]
+    assert P._value_too_long([inner] * 100) is True
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": [inner] * 100}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" in str(exc.value)
+    assert len(str(exc.value)) < 10000
+
+
+def test_scalar_heavy_values_bounded():
+    # Scalar-only shapes the old strings-only scan charged 0 for:
+    # a million Nones echo to ~6 MiB, a million empty strings to
+    # ~4 MiB. The failure is driven by the outer container's
+    # expansion charge (16 + 64 x len): 200,000 zeros cost
+    # 12,800,016 on expansion alone (ints add 2 each), and 300,000
+    # empty strings cost 19,200,016 (empty strings charge 0
+    # themselves — the expansion charge is what fails them).
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": [0] * 200_000}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" in str(exc.value)
+    assert len(str(exc.value)) < 10000
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": [""] * 300_000}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" in str(exc.value)
+    assert len(str(exc.value)) < 10000
+
+
+def test_bytes_values_scanned():
+    # bytes/bytearray count like strings: a 1.5 MiB bytes value fails
+    # on size; a small bytes value reaches the validator.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": b"x" * 1_500_000}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" in str(exc.value)
+    assert len(str(exc.value)) < 10000
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": b"short"}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" not in str(exc.value)
+
+
+def test_size_scan_boundaries():
+    # Boundary pins for the echo-cost accounting (strings raw len,
+    # containers 16 + 64 x len on expansion, scalars 8/32/int-digit
+    # estimate): exact totals at the cap pass, cap + 1 fails. Direct
+    # helper calls: the accounting is the mechanism under test, and
+    # validate_call would echo a ~1 MiB passing value into the
+    # assertion output.
+    cap = P.MAX_PARAM_LEN
+    assert P._value_too_long("x" * cap) is False
+    assert P._value_too_long("x" * (cap + 1)) is True
+    # Two strings summing exactly to the cap (after the outer
+    # list's 16 + 64 x 2 expansion) pass; one more char fails.
+    # (524,216 + 524,216) + 128 + 16 = exactly MAX_PARAM_LEN.
+    assert P._value_too_long(["a" * 524_216, "b" * 524_216]) is False
+    assert P._value_too_long(["a" * 524_217, "b" * 524_216]) is True
+    # Container charge: 16 + 80 x N for N empty lists in an outer
+    # list; 16 + 80 x 13,107 = exactly the cap.
+    assert P._value_too_long([[] for _ in range(13_107)]) is False
+    assert P._value_too_long([[] for _ in range(13_108)]) is True
+    # Scalar charge: ints cost bit_length() // 3 + 2 each (0 -> 2);
+    # [0] x 15,000 in an outer list costs 16 + 64 x 15,000 + 2 x
+    # 15,000 = 990,016 and passes; [0] x 16,000 costs 16 +
+    # 64 x 16,000 + 2 x 16,000 = 1,056,016 and fails.
+    assert P._value_too_long([0] * 15_000) is False
+    assert P._value_too_long([0] * 16_000) is True
+
+
+def test_cyclic_values_terminate_scan():
+    # The scan must terminate on cyclic input (direct helper calls:
+    # validate_call would hand a cyclic value to the recursive
+    # _freeze next, which is a separate concern).
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    assert P._value_too_long(cyclic_list) is False
+    cyclic_dict = {}
+    cyclic_dict["self"] = cyclic_dict
+    assert P._value_too_long(cyclic_dict) is False
+    # A giant string inside a cycle still fails.
+    cyclic_big = ["x" * 2_000_000]
+    cyclic_big.append(cyclic_big)
+    assert P._value_too_long(cyclic_big) is True
+
+
+def test_scalar_node_count_shapes_bounded():
+    # Scalar-only shapes the old strings-only scan charged 0 for:
+    # a million Nones echo to ~6 MiB, a million empty strings to
+    # ~4 MiB — the per-element expansion charge must fail them.
+    for value in (
+        [None] * 300_000,
+        [""] * 300_000,
+        [0.0] * 100_000,
+        [10**4000] * 300,
+        {i: "" for i in range(200_000)},
+    ):
+        with pytest.raises(P.ProtocolError) as exc:
+            P.validate_call(call([{"action": "click", "ref": value}]))
+        assert exc.value.code == "bad_params"
+        assert "value exceeds" in str(exc.value)
+        assert len(str(exc.value)) < 10000
+
+
+def test_deep_nest_and_huge_int_fail_closed():
+    # Deep nesting must fail as ProtocolError, never RecursionError:
+    # the scan's depth cap fires before any %r site sees the chain.
+    # (The existing deep-nest test only covers static-message paths.)
+    for action in (
+        {"action": "click", "ref": _deep_nest("x")},
+        {"action": "look", "timeout_ms": _deep_nest("x")},
+        {"action": "click", "ref": "@e1", "kind": _deep_nest("x")},
+        {"action": "scroll", "direction": _deep_nest("x")},
+    ):
+        with pytest.raises(P.ProtocolError) as exc:
+            P.validate_call(call([action]))
+        assert exc.value.code == "bad_params"
+        assert "value exceeds" in str(exc.value)
+    # A huge int must fail as ProtocolError, never ValueError: its
+    # repr would raise under the 4300-digit int-to-string limit.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "look", "timeout_ms": 10**10000}]))
+    assert exc.value.code == "bad_params"
+    assert "value exceeds" in str(exc.value)
+
+
+def test_unknown_observation_field_echo_is_bounded():
+    # The observation layer's unknown-key errors use the same cap as
+    # the call layers: 10,000 unknown top-level fields name the first
+    # five + a count, never the whole set.
+    base = {
+        "url": "https://example.com",
+        "title": "T",
+        "target": "doc-1",
+        "ref_scope": "rs_1_abc",
+        "ax": [],
+    }
+    obs = dict(base)
+    for i in range(10_000):
+        obs["unknown_%05d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        O.validate_observation(obs)
+    assert exc.value.code == "bad_observation"
+    assert len(str(exc.value)) < 10000
+    assert "unknown_00000" in str(exc.value)
+    assert "and 9995 more" in str(exc.value)
+    assert "unknown_09999" not in str(exc.value)
+    # Same cap for unknown AX node fields.
+    node = {
+        "ref": "@e1", "role": "button", "name": "OK",
+        "visible": True, "enabled": True,
+    }
+    for i in range(10_000):
+        node["unknown_%05d" % i] = "x"
+    with pytest.raises(P.ProtocolError) as exc:
+        O.validate_observation(dict(base, ax=[node]))
+    assert exc.value.code == "bad_observation"
+    assert len(str(exc.value)) < 10000
+    assert "and 9995 more" in str(exc.value)
+    assert "unknown_09999" not in str(exc.value)
+
+
 def _deep_nest(leaf, depth=5000):
     nested = leaf
     for _ in range(depth):
@@ -1021,7 +1294,8 @@ def test_param_length_cap():
         P.validate_call(call([{"action": "goto", "url": "https://x/" + big}]))
     assert exc.value.code == "bad_params"
     assert big not in str(exc.value)
-    # Exactly at the cap is fine.
+    # Exactly at the cap is fine: strings charge raw length, so a
+    # bare string passes iff its length is at most MAX_PARAM_LEN.
     P.validate_call(call([{"action": "goto",
                            "url": "https://x/" + "u" * (P.MAX_PARAM_LEN - 10)}]))
 

@@ -194,6 +194,17 @@ ref_scope}` (`ref_scope` optional — required when actions address
 refs); any other top-level key is rejected with `bad_envelope` (a
 misspelled `ref_scope` fails loud, never silently dropped), and
 envelope values go through the same size scan as action params.
+Unknown keys — at the envelope, action, or observation level — fail
+loud, naming at most the first five keys plus a count of the rest,
+so a rejection never echoes an unbounded key list. The size scan is
+per parameter value and aggregate: it charges every element for
+its echo cost (string/bytes lengths, 16 + 64-per-element structural
+overhead on container expansion, scalar reprs, int digit
+estimates) and fails the value once the running total exceeds
+`MAX_PARAM_LEN` (1 MiB); values nesting deeper than 201 levels fail
+on depth alone (the check fires on the 202nd level, i.e. depth >
+200). A giant string nested inside any container fails
+on size alone instead of being echoed by a validator.
 
 - Refs may address elements inside iframes (SSO and payment forms live
   there); the snapshot's AX tree includes frame boundaries and every
