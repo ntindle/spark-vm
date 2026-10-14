@@ -111,7 +111,7 @@ root (e.g. `python3 -m pytest proxy`).
 ### Parallel runs
 
 For a faster local loop, run the suite in parallel with
-[pytest-xdist](https://pytest-dev.github.io/pytest-xdist/) (installed
+[pytest-xdist](https://pytest-xdist.readthedocs.io/en/stable/) (installed
 via `requirements-test.txt`):
 
 ```bash
