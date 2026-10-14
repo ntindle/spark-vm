@@ -20,7 +20,7 @@ that proves the trigger itself is registered.
   CI/offline mode. Exit 0 = all present, 1 = missing (names them),
   2 = usage/API error. The API token comes from `CF_API_TOKEN` env
   only and is never printed or logged.
-- `test_verify_plane_cron.py` — hermetic fixture-based tests (12),
+- `test_verify_plane_cron.py` — hermetic fixture-based tests (27),
   including the silently-unwired failure mode: sweep cron missing from
   an otherwise-deployed worker.
 

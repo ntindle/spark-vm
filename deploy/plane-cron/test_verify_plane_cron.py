@@ -5,6 +5,7 @@ no token, no Cloudflare account. Fixtures use the Workers API
 schedules-list shape: {"result": [{"cron": ...}], "success": true}.
 """
 
+import ast
 import json
 import os
 import re
@@ -334,3 +335,57 @@ def test_live_malformed_payload_is_usage_error_not_trigger_missing(
     assert "cannot read fixture" not in out.out
     assert "Traceback" not in out.out and "Traceback" not in out.err
     assert "sekrit" not in out.out and "sekrit" not in out.err
+
+
+def test_readme_test_count_matches():
+    # The README states how many test functions this file holds; that
+    # count drifted once already (said 12 when the file held 26). Pin it
+    # so adding a test without updating the README fails loudly instead
+    # of drifting again. Counted via ast (not regex) so class-based and
+    # async tests count exactly as pytest collects them. Contract: this
+    # counts test *functions*, not parametrized expansions — a
+    # parametrized test fails the pin (its collected-case count differs
+    # from its function count), so the pin must be updated if
+    # parametrization is ever added. The README match is anchored to the
+    # exact bullet line, and must match exactly once, so a second
+    # mention elsewhere in the README can never shadow the bullet.
+    here = Path(__file__).resolve().parent
+    readme = (here / "README.md").read_text(encoding="utf-8")
+    matches = re.findall(
+        r"test_verify_plane_cron\.py` — hermetic fixture-based tests "
+        r"\((\d+)\)",
+        readme)
+    assert len(matches) == 1, (
+        "README must state the test count exactly once, on the "
+        "test_verify_plane_cron.py bullet line")
+    stated = int(matches[0])
+    tree = ast.parse(
+        (here / "test_verify_plane_cron.py").read_text(encoding="utf-8"))
+
+    def _is_test(node):
+        return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+            and node.name.startswith("test_")
+
+    def _is_parametrized(node):
+        return any("parametrize" in ast.unparse(d)
+                   for d in node.decorator_list)
+
+    actual = 0
+    for node in tree.body:
+        if _is_test(node):
+            assert not _is_parametrized(node), (
+                f"{node.name} is parametrized: the pin counts test "
+                "functions, not parametrized expansions — update the "
+                "pin before adding parametrized tests")
+            actual += 1
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            for method in node.body:
+                if _is_test(method):
+                    assert not _is_parametrized(method), (
+                        f"{node.name}.{method.name} is parametrized: "
+                        "the pin counts test functions, not "
+                        "parametrized expansions — update the pin "
+                        "before adding parametrized tests")
+                    actual += 1
+    assert stated == actual, (
+        f"README says {stated} tests, file holds {actual}")
