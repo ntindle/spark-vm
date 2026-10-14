@@ -88,7 +88,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 
 - Faster local test loop: contributors can now run the suite in
-  parallel with `pytest -n auto` (one worker per CPU), verified to
+  parallel with `pytest -n=auto` (one worker per CPU), verified to
   give identical results to the serial run on the sampled suites,
   with a documented conservative per-file grouping variant for
   machines where the default split is unwanted. The serial run

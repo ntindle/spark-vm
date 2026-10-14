@@ -1,7 +1,7 @@
 """Pin the documented parallel local test path to its dependency and docs.
 
 CONTRIBUTING.md "Parallel runs" tells contributors to run the suite with
-`python3 -m pytest -n auto` (pytest-xdist). That advice is only true if
+`python3 -m pytest -n=auto` (pytest-xdist). That advice is only true if
 pytest-xdist is actually installed by requirements-test.txt and the
 parallel path is documented in both contributor entry points
 (CONTRIBUTING.md and docs/CI.md). This pin fails loudly if any leg of
@@ -77,18 +77,18 @@ class TestParallelRunnerDocs(unittest.TestCase):
         lines = REQUIREMENTS.read_text(encoding="utf-8").splitlines()
         xdist = [ln for ln in lines if ln.startswith("pytest-xdist")]
         self.assertEqual(len(xdist), 1, "requirements-test.txt must name pytest-xdist exactly once")
-        self.assertIn("-n auto", xdist[0], "pytest-xdist line must point at the documented -n auto command")
+        self.assertIn("-n=auto", xdist[0], "pytest-xdist line must point at the documented -n=auto command")
 
     def test_contributing_documents_parallel_path(self):
         section = _parallel_section(CONTRIBUTING.read_text(encoding="utf-8"))
-        self.assertIn("-n auto", section, "Parallel runs section must show the -n auto invocation")
+        self.assertIn("-n=auto", section, "Parallel runs section must show the -n=auto invocation")
         self.assertIn("loadfile", section, "Parallel runs section must name the conservative --dist loadfile variant")
         self.assertIn("order-dependence", section, "Parallel runs section must state the order-dependence rule")
         self.assertIn("#1299", section, "Parallel runs section must name the known hosted/ failure (#1299)")
 
     def test_ci_doc_documents_parallel_path(self):
         block = _ci_parallel_block(CI_DOC.read_text(encoding="utf-8"))
-        self.assertIn("-n auto", block, "CI.md parallel block must show the -n auto invocation")
+        self.assertIn("-n=auto", block, "CI.md parallel block must show the -n=auto invocation")
         self.assertIn("pytest-xdist", block, "CI.md parallel block must name pytest-xdist as the mechanism")
         self.assertIn("unmeasured", block, "CI.md parallel block must warn the full-suite parallel run is unmeasured")
 

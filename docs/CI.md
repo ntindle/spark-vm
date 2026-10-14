@@ -96,7 +96,7 @@ python3 -m pytest proxy -q
 
 # parallel local runs (same inventory, via pytest-xdist in
 # requirements-test.txt; verified identical results on scripts/ + hosted/):
-python3 -m pytest -q -n auto
+python3 -m pytest -q -n=auto
 # (full guidance + caveats: CONTRIBUTING.md "Parallel runs"; CI sharding
 # is unchanged; full-suite parallel unmeasured — verified only on
 # scripts/ + hosted/, and hosted/ carries the one pre-existing #1299

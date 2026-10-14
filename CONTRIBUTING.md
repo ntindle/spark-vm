@@ -115,10 +115,10 @@ For a faster local loop, run the suite in parallel with
 via `requirements-test.txt`):
 
 ```bash
-python3 -m pytest -n auto
+python3 -m pytest -n=auto
 ```
 
-`-n auto` starts one worker per CPU and splits individual tests across
+`-n=auto` starts one worker per CPU and splits individual tests across
 workers. Verified against the serial run with identical results:
 `scripts/` (667 passed, 1 skipped, 33 subtests) and `hosted/` (404 passed
 plus the one pre-existing dashboard inline-copy failure — #1299,
@@ -136,10 +136,10 @@ shared fixtures, real socket binds use ephemeral ports or per-test
 temporary sockets, repo-tree writes go to temporary directories, and
 `sys.path` / `sys.modules` / environment mutations in tests are
 import-time additive inserts or follow save-and-restore / monkeypatch.
-A failure that appears only under `-n auto` is an
+A failure that appears only under `-n=auto` is an
 order-dependence bug in the test, not in pytest — fix the test (see
 the "Two conventions" paragraph above). The conservative variant
-`python3 -m pytest -n auto --dist loadfile` keeps each test file on
+`python3 -m pytest -n=auto --dist loadfile` keeps each test file on
 one worker instead of splitting tests across workers. If `pytest`
 fails with `unrecognized arguments: -n`, pytest-xdist is not
 installed — reinstall `requirements-test.txt`.
