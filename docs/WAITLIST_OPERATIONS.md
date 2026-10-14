@@ -628,6 +628,13 @@ criterion:
   per-sender rate limit; normalized per-owner dedup.
 - [ ] **Path-B form + endpoint**: honeypot + time-trap + per-IP limit;
   writes validated rows only.
+- [ ] **Form page served**: `GET /waitlist` on the control-plane origin
+  serves the deploy-substituted `waitlist.html` (staged next to
+  `waitlistd.py` on the control-plane host) — done when the page loads
+  (200), the form posts to the live `POST /waitlist/form`, and the
+  response carries the daemon's page headers (`Content-Security-Policy`
+  with `form-action 'self'`, `X-Content-Type-Options`,
+  `Referrer-Policy: no-referrer`, `X-Robots-Tag`).
 - [ ] **Confirm sender + token signer**: HMAC, single-use, 14d expiry;
   idempotent re-click ("you're already confirmed"); rate-limited
   (all reply types counted); reminder job at +7d; drop job at +14d;

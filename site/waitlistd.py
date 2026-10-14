@@ -5,6 +5,10 @@ Implements the waitlist-era half of docs/HOSTED_SIGNUP_WEB_UI.md §7's
 endpoint surface:
 
     POST /waitlist/form      path-B form intake (§4.2)
+    GET  /waitlist            the signup form page itself — static
+                             site/waitlist.html served through the daemon's
+                             page headers (#1483 pins the serving story:
+                             the page is served by waitlistd, not Pages)
     GET  /waitlist/confirm   renders only — never changes state (§4.3)
     POST /waitlist/confirm   token as form field, not query string (§4.3)
     GET  /waitlist/forget    renders only — never changes state (slice 3c)
@@ -3637,6 +3641,18 @@ class WaitlistService:
 # Pages (no page JS anywhere; all user content html-escaped)
 # ---------------------------------------------------------------------------
 
+# The waitlist form page, served at GET /waitlist (#1483): this route is
+# what pins the site/README.md + site/_headers claim that waitlist.html
+# "is served by waitlistd, not Pages". Resolved relative to this file —
+# never from request input, so there is no traversal surface. Read per
+# request so a deploy-time substitution of the <host> /
+# <control-plane-origin> placeholders (site/README.md) takes effect
+# without a daemon restart. The operator stages waitlist.html next to
+# waitlistd.py on the control-plane host.
+FORM_PAGE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "waitlist.html")
+
+
 PAGE_SHELL = """\
 <!doctype html>
 <html lang="en">
@@ -4007,6 +4023,35 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_form_page(self):
+        """GET /waitlist: serve the static signup form page (#1483).
+
+        Goes through _send, so the page carries the same header
+        discipline as the token pages (CSP with form-action 'self' —
+        the form posts to this origin's POST /waitlist/form after the
+        deploy-time substitution — X-Content-Type-Options,
+        Referrer-Policy, X-Robots-Tag). A missing/unreadable file is an
+        operator misconfiguration — fail loud (500) rather than 404,
+        so the §10 "form page served" check fails closed instead of
+        looking unimplemented."""
+        try:
+            with open(FORM_PAGE_PATH, "rb") as fh:
+                body = fh.read().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            # UnicodeError: a non-UTF-8 waitlist.html is the same
+            # operator-misconfiguration class as a missing file — fail
+            # loud, not an uncaught exception in do_GET.
+            sys.stderr.write(
+                "waitlistd: cannot read form page %r: %s\n"
+                % (FORM_PAGE_PATH, exc))
+            self._send(500, PAGE_SHELL.format(
+                title="Form unavailable",
+                body=("<h1>Form unavailable</h1>"
+                      "<p>The signup form is temporarily unavailable — "
+                      "please try again later.</p>")))
+            return
+        self._send(200, body)
+
     def _fields(self):
         """Parse the form body. Returns the fields dict, None for a
         malformed body, or the _OVERSIZED sentinel when the body exceeds
@@ -4087,7 +4132,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         parts = urllib.parse.urlsplit(self.path)
-        if parts.path == "/waitlist/confirm":
+        if parts.path == "/waitlist":
+            self._serve_form_page()
+        elif parts.path == "/waitlist/confirm":
             token = urllib.parse.parse_qs(parts.query).get("token", [None])[0]
             status, body = self.service.confirm_get(token)
             self._send(status, body)

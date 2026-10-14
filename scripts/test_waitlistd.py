@@ -630,7 +630,8 @@ def test_http_round_trip(live_server):
     # Token as a FORM FIELD confirms.
     status, body = _post(port, "/waitlist/confirm", {"token": token})
     assert status == 200 and "You\u2019re on the list" in body
-    # Unknown paths 404; GET on the form endpoint 404s (form lives on Pages).
+    # Unknown paths 404; GET on the form endpoint 404s (the endpoint is
+    # POST-only; the form PAGE is served by waitlistd at GET /waitlist).
     assert _get(port, "/nope")[0] == 404
     assert _get(port, "/waitlist/form")[0] == 404
     assert _get(port, "/waitlist/position?email=x@y.z")[0] == 404
@@ -707,6 +708,63 @@ def test_daemon_pages_pin_no_js_posture_in_headers(live_server):
     assert resp.getheader("Content-Security-Policy") is not None
     assert resp.getheader("X-Frame-Options") is None
     resp.read()
+
+
+def test_form_page_route_serves_waitlist_html(live_server):
+    # #1483: GET /waitlist serves site/waitlist.html through the
+    # daemon's standard page headers — this is the pin for the
+    # site/README.md + site/_headers "served by waitlistd, not Pages"
+    # claim, and it resolves the /waitlist "Go back" links the token
+    # pages render.
+    port, tmp = live_server
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist")
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8")
+    assert resp.status == 200
+    assert resp.getheader("Content-Type") == "text/html; charset=utf-8"
+    # Byte-identical to the pinned on-disk page: the daemon serves the
+    # file, not a re-render.
+    with open(os.path.join(os.path.dirname(wd.__file__),
+                           "waitlist.html"), encoding="utf-8") as fh:
+        assert body == fh.read()
+    # The page carries the working form, posting at this origin's
+    # form endpoint.
+    assert "<form" in body
+    assert "/waitlist/form" in body
+    # Same header discipline as the other daemon pages.
+    csp = resp.getheader("Content-Security-Policy")
+    assert csp is not None and "form-action 'self'" in csp
+    assert resp.getheader("X-Content-Type-Options") == "nosniff"
+    assert resp.getheader("Referrer-Policy") == "no-referrer"
+    assert resp.getheader("X-Robots-Tag") == "noindex, nofollow"
+    # Funnel query strings don't break the route: the /waitlist?src=
+    # CTAs resolve on this origin when the waitlist is live.
+    status, _ = _get(port, "/waitlist?src=hero")
+    assert status == 200
+
+
+def test_form_page_missing_file_fails_loud_500(live_server, monkeypatch,
+                                               capsys):
+    # #1483: a missing waitlist.html is an operator misconfiguration —
+    # the route must fail LOUD (500), not 404, so the §10 "form page
+    # served" check fails closed instead of looking unimplemented.
+    port, tmp = live_server
+    monkeypatch.setattr(wd, "FORM_PAGE_PATH", "/nonexistent/waitlist.html")
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist")
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8")
+    assert resp.status == 500
+    assert "Form unavailable" in body
+    # No filesystem path leaks to the requester.
+    assert "nonexistent" not in body
+    # Same page headers as every other _send path.
+    assert resp.getheader("Content-Security-Policy") is not None
+    assert resp.getheader("X-Content-Type-Options") == "nosniff"
+    # The misconfiguration is loud in the operator's logs.
+    captured = capsys.readouterr()
+    assert "waitlistd: cannot read form page" in captured.err
 
 
 def test_cli_config_fail_closed(tmp_path):

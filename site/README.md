@@ -229,7 +229,9 @@ directory's **static front-door set** on Cloudflare Pages:
   default-deny CSP on exactly the paths Pages serves with the no-JS /
   no-form guarantee (`/`, `/404.html`, `/go/*`). `waitlist.html` is
   deliberately excluded — its form posts to the control-plane origin
-  and it is served by `waitlistd`, not Pages (dead-form rule above).
+  and it is served by `waitlistd` at `GET /waitlist` (same `_send`
+  header discipline as the other daemon pages), not Pages (dead-form
+  rule above).
 - `go/selfhost/index.html` — the static `/go/selfhost` redirect shim
   (no-JS meta refresh to the repo README's self-host section).
 - `assets/og-persistence-pair.png` — the `og:image` asset.
