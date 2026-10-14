@@ -105,7 +105,7 @@ owner key, TLS):
 ```json
 { "secrets": [ { "name": "github-pat", "value": "<plaintext secret>",
   "ttl_seconds": 3600, "host_allowlist": ["api.github.com"],
-  "placement": ["bearer_header"] } ] }
+  "placement": ["bearer_header", {"custom_header": "X-Api-Key"}] } ] }
 ```
 
 Write/replace is per-box and **atomic**: the posted array becomes the
@@ -121,8 +121,20 @@ deleted. Validation failures are `400`:
 - `host_allowlist`: non-empty array; every entry a bare DNS hostname
   (no scheme, port, path, or userinfo); wildcard entries rejected in
   v1. An empty or missing allowlist is a `400`, never a fail-open vend.
-- `placement`: non-empty subset of
-  `bearer_header | custom_header | query_param | url_path_segment`.
+- `placement`: non-empty array of placement entries (issue #1404: the
+  pre-#1404 bare keywords carried no name for the proxy to enforce).
+  Each entry is either a bare string — `"bearer_header"` or
+  `"url_path_segment"`, the two bare forms the proxy accepts — or a
+  single-key object — `{"custom_header": name}`, `{"query_param": name}`,
+  or `{"url_path_segment": name}`. A `name` is 1–64 chars,
+  `[A-Za-z0-9._-]` (the `name` charset above — one charset for all three
+  kinds, so a name is valid wherever the placement puts it). Anything
+  else is a `400`: a bare `"custom_header"` / `"query_param"` string (no
+  name to enforce), a multi-key or empty object, an unknown kind, or a
+  missing/empty/over-long/off-charset name. The plane validates at write
+  time, so it never stores a shape the proxy would fail closed on at
+  swap time (issue #197) — fail-closed-at-write, not fail-closed-at-swap.
+  Duplicate entries are collapsed; the stored form is the deduped array.
 - `box_id`: must be an enrolled, non-revoked box; unknown box → `404`
   (no manifest rows for unenrolled boxes).
 
@@ -135,7 +147,8 @@ rows (see §2.5, §3).
 `GET /v1/owner/boxes/{box_id}/credentials/manifest` returns
 `{ "secrets": [ { "name", "ttl_seconds", "host_allowlist", "placement",
 "revoked_at", "updated_at", "updated_by" } ] }` — metadata only, never
-values.
+values. The `placement` in the `GET` response is the stored, validated
+array verbatim.
 
 ### 2.2 Mint request and response
 
@@ -172,18 +185,30 @@ Response (plane → box), `200`:
       "expires_at": "2026-10-03T18:00:00Z",
       "ttl_seconds": 3600,
       "host_allowlist": ["api.github.com"],
-      "placement": ["bearer_header"]
+      "placement": ["bearer_header", {"custom_header": "X-Api-Key"}]
     }
   ],
   "refused": ["openai-key"]
 }
+
+The mint response echoes the manifest's `placement` verbatim — the
+stored, validated array (§2.1a), so the box enforces exactly what the
+manifest declared.
 ```
 
 `host_allowlist` and `placement` carry the existing box-side discipline
 into the hosted shape: the box-side swapd enforces the same rules it
 enforces for human-filled secrets today (`hosts.allow` binding +
 placement restrictions `bearer_header` / `custom_header` / `query_param` /
-`url_path_segment` in `proxy/swap_addon.py`). The effective allowlist is
+`url_path_segment` in `proxy/swap_addon.py`). Enforcement granularity is
+the proxy's, and the contract does not overclaim it: for `custom_header`
+the proxy matches the named header case-insensitively; for `query_param`
+and `url_path_segment` the proxy enforces the AREA only — the name is
+carried, validated, echoed, and audited, but the current proxy does not
+match it against the request's parameter or segment name
+(`_placement_allows` receives no parameter/segment detail). The #891
+box-side build inherits this granularity; it must not invent
+name-matching the proxy does not do. The effective allowlist is
 the manifest `host_allowlist` **intersected with** the box's own
 `hosts.allow` — neither side widens the other; the box fails closed
 (loud, no swap) on a mint response with a missing or empty
