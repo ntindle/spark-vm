@@ -218,6 +218,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The plane-cron verification guide now states the true size of its test
+  suite (27 tests, not the stale 12 it claimed after the suite grew),
+  and a pin test fails loudly if the guide's count and the suite drift
+  apart again — previously the count drifted silently, so the guide
+  understated the coverage it described. (#1478)
+
 - The tenant onboarding status no longer reports a dead box as live:
   losing the provider demotes a live, waiting-on-approval, or approved
   box to box-unhealthy, losing the relay path suspends it as
