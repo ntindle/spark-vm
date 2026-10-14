@@ -98,6 +98,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   call or observation carrying thousands of misspelled fields names
   only the first five plus a count instead of echoing every key.
   (#1449, #1472)
+- Every page the waitlist daemon serves now carries a default-deny
+  content-security policy: the pages run no JavaScript today, and the
+  header makes that a machine-enforced guarantee instead of a
+  convention — a future edit cannot silently add script execution.
+  (Framing posture unchanged per the deliberate #1237 pin.) (#1484)
 
 ### Added
 

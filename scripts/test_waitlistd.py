@@ -671,6 +671,44 @@ def test_confirm_page_strips_preview_metadata(live_server):
     assert "twitter:" not in body
 
 
+def test_daemon_pages_pin_no_js_posture_in_headers(live_server):
+    # The daemon's pages carry no JavaScript (see
+    # test_pages_carry_no_page_js_and_escape_user_content) — pin that in
+    # the HTTP headers. form-action 'self' must stay: the
+    # confirm/forget/claim buttons POST back to this origin. Deliberately
+    # no framing directive in the policy (no frame-ancestors) and no
+    # X-Frame-Options header: the #1237 policy pins waitlistd's
+    # no-framing-protection delta on purpose (single-use token, no
+    # ambient session), asserted in both directions by
+    # scripts/test_http_hardening_headers.py.
+    port, tmp = live_server
+    _post(port, "/waitlist/form", {
+        "owner_email": "live3@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    token, _ = extract_token_from_spool(tmp)
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/confirm?token=" +
+                 urllib.parse.quote(token))
+    resp = conn.getresponse()
+    csp = resp.getheader("Content-Security-Policy")
+    assert csp is not None, "confirm page must send a CSP header"
+    assert "default-src 'none'" in csp
+    assert "form-action 'self'" in csp
+    assert "script-src" not in csp  # no script source may ever be added
+    assert "frame-ancestors" not in csp  # #1237 delta: no framing pin
+    assert resp.getheader("X-Frame-Options") is None  # #1237 delta
+    resp.read()
+    # Every _send path carries the CSP, including error pages.
+    status, _ = _get(port, "/nope")
+    assert status == 404
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/nope")
+    resp = conn.getresponse()
+    assert resp.getheader("Content-Security-Policy") is not None
+    assert resp.getheader("X-Frame-Options") is None
+    resp.read()
+
+
 def test_cli_config_fail_closed(tmp_path):
     env = dict(os.environ)
     env.pop("WAITLIST_HMAC_KEY", None)
