@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The credential-vending contract now pins the parameterized placement
+  shape the swap proxy actually enforces: each placement entry is the
+  bare `bearer_header` / `url_path_segment` string or a single-key
+  object naming its header, query parameter, or path segment (1–64
+  chars, letters/digits/dot/underscore/hyphen), validated at
+  manifest-write time (for query parameters and path segments the proxy
+  enforces the area only — the name is carried, not matched).
+  Previously the contract named bare keywords
+  with no name for the proxy to enforce, so a manifest it accepted
+  could fail closed — no swap — at request time. (#1404, #1453)
 - Every refusal line in the swap-proxy audit log now carries the flow
   correlator, so any refusal (request, JSON body, websocket, redirect,
   refresh, stream, authority-mismatch) can be joined to the same flow's
