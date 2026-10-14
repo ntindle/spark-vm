@@ -2669,23 +2669,26 @@ cmd_update() {
         failed_comps="${failed_comps:+$failed_comps }playwright"
     fi
 
-    # #1311: refresh the expected-browser-builds record after a
-    # playwright layer that converged (a failed layer leaves the cache
-    # not matching the dry-run, so publishing from it would be a lie).
-    # Same placement and loudness as the managed-targets refresh above:
-    # after the opt-out return, skipped on --dry-run (dry-run changes
-    # nothing, and the dry-run invoker's environment is not the timer's),
-    # log-loud but non-fatal — the record is an S1 visibility signal, not
-    # part of the update's safety.
+    # #1311: refresh the expected-browser-builds record. The record
+    # claims SHOULD-BE — the build names the currently installed,
+    # hash-verified package's dry-run names — not IS: it is refreshed on
+    # every real tick whether or not the playwright layer converged, so
+    # a failed layer still leaves S1 comparing against the fresh
+    # expectation (a stale record would read as a false clean). A blocked
+    # layer refreshes it too: the record tracks the installed package,
+    # not the converge, and the mismatch hint then persists until the
+    # block clears (S1 cannot read blocked.state — mode 700 — so the
+    # hint cannot know about the block; the update plane's `status`
+    # shows blocked layers). Skipped on --dry-run (dry-run changes
+    # nothing, and the dry-run invoker's environment is not the timer's).
+    # Log-loud but non-fatal — the record is an S1 visibility signal, not
+    # part of the update's safety. Residual: if the dry-run itself fails,
+    # the record stays stale until a tick where it succeeds; the layer
+    # failure is loud in the audit log.
     if [ "$dry" != "1" ]; then
-        case " $failed_comps " in
-            *" playwright "*)
-                ;;
-            *)
-                _publish_expected_playwright_browsers \
-                    "$PLAYWRIGHT_VENV/bin/playwright" \
-                    || log "update: WARNING: could not refresh expected Playwright browsers record $EXPECTED_PLAYWRIGHT_BROWSERS_FILE" ;;
-        esac
+        _publish_expected_playwright_browsers \
+            "$PLAYWRIGHT_VENV/bin/playwright" \
+            || log "update: WARNING: could not refresh expected Playwright browsers record $EXPECTED_PLAYWRIGHT_BROWSERS_FILE"
     fi
 
     if [ "$dry" = "1" ]; then
@@ -2972,7 +2975,7 @@ _publish_expected_playwright_browsers() {
     # record is an S1 visibility signal, not update safety — a wedged
     # carrier must not block the weekly converge.
     local cli="$1" pairs loc parent base first_parent names _tmp _dir expect_loc
-    local seen_parent=0
+    local seen_parent=0 count=0
     case "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE" in
         /*) ;;
         *) echo "ERROR: EXPECTED_PLAYWRIGHT_BROWSERS_FILE must be an absolute path" >&2; return 1 ;;
@@ -2986,6 +2989,16 @@ _publish_expected_playwright_browsers() {
         if [ "$expect_loc" = "1" ]; then
             loc="$line"
             expect_loc=0
+            # Defense-in-depth: _playwright_browser_pairs already
+            # enforces absolute locations, but the publisher must not
+            # depend on its caller for that — a relative location is
+            # refused here, not laundered into a basename.
+            case "$loc" in
+                /*) ;;
+                *)
+                    echo "ERROR: refusing non-absolute install location from --dry-run" >&2
+                    return 1 ;;
+            esac
             parent="${loc%/*}"
             base="${loc##*/}"
             # The basename is the whole record entry: it must be a plain
@@ -2993,9 +3006,12 @@ _publish_expected_playwright_browsers() {
             # by the ${##*/} split, but a trailing slash would empty it),
             # charset [A-Za-z0-9._-], bounded length (a hostile dry-run
             # must not bloat the record). Anything else fails closed.
+            # The refusal never echoes $base: it is untrusted dry-run
+            # output, and echoing it would let a hostile dry-run inject
+            # log lines / terminal escapes.
             case "$base" in
                 ''|.|..|*[!A-Za-z0-9._-]*)
-                    echo "ERROR: refusing unsafe browser build dir name from --dry-run: $base" >&2
+                    echo "ERROR: refusing unsafe browser build dir name from --dry-run" >&2
                     return 1 ;;
             esac
             if [ "${#base}" -gt 128 ]; then
@@ -3014,6 +3030,15 @@ _publish_expected_playwright_browsers() {
                 echo "ERROR: refusing --dry-run install locations with differing parents" >&2
                 return 1
             fi
+            # Total bound: a real Playwright dry-run names a handful of
+            # archives (3 for `install chromium`). An output naming
+            # hundreds is not a real dry-run — refuse rather than write
+            # a bloated record S1 would have to swallow.
+            count=$((count + 1))
+            if [ "$count" -gt 100 ]; then
+                echo "ERROR: refusing --dry-run output naming more than 100 browser archives" >&2
+                return 1
+            fi
             names="${names}${base}
 "
         else
@@ -3029,8 +3054,9 @@ _publish_expected_playwright_browsers() {
         return 1
     fi
     # Sorted + deduped: duplicate pairs name the same dir, and a stable
-    # record keeps S1 comparisons and operator diffs trivial.
-    names="$(printf '%s' "$names" | sort -u)"
+    # record keeps S1 comparisons and operator diffs trivial. LC_ALL=C:
+    # record byte order must not depend on the tick's locale.
+    names="$(printf '%s' "$names" | LC_ALL=C sort -u)"
     _dir="$(dirname -- "$EXPECTED_PLAYWRIGHT_BROWSERS_FILE")"
     _dir="$(readlink -m -- "$_dir")" \
         || { echo "ERROR: cannot canonicalize expected browsers dir" >&2; return 1; }

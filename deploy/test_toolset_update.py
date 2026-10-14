@@ -1863,7 +1863,12 @@ def test_playwright_refuses_on_wheel_hash_mismatch(env, tmp_path):
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0, r.stderr
     assert not piplog.exists(), "pip must never see a hash-mismatched wheel"
-    assert not pwlog.exists(), "no browser install after the hash refusal"
+    # The publish still runs its read-only `install --dry-run` after a
+    # failed layer (#1311 SHOULD-BE), so pwlog exists — but every line
+    # must be a dry-run: no browser/deps install may have run.
+    pw_calls = pwlog.read_text().splitlines() if pwlog.exists() else []
+    assert pw_calls, "the publish's dry-run must have run"
+    assert all("--dry-run" in c for c in pw_calls), pw_calls
     assert "playwright" in audit_lines(env)[-1]["failed"]
 
 
@@ -2341,7 +2346,12 @@ def test_playwright_pip_failure_fails_loud(env, tmp_path):
     stage_pw_venv(tmp_path, "1.61.0", piplog=piplog, pwlog=pwlog, pip_exit=1)
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0, r.stderr
-    assert not pwlog.exists(), "no browser/deps install after pip failure"
+    # The publish still runs its read-only `install --dry-run` after a
+    # failed layer (#1311 SHOULD-BE), so pwlog exists — but every line
+    # must be a dry-run: no browser/deps install may have run.
+    pw_calls = pwlog.read_text().splitlines() if pwlog.exists() else []
+    assert pw_calls, "the publish's dry-run must have run"
+    assert all("--dry-run" in c for c in pw_calls), pw_calls
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "failed"
     assert "playwright" in lines[-1]["failed"]
@@ -3709,6 +3719,20 @@ def test_install_defers_expected_browsers_when_cli_absent(env, tmp_path):
         in runlog.read_text()
 
 
+def test_install_warns_when_expected_publish_fails(env, tmp_path):
+    # A dry-run that names no archives (garbage output) fails the
+    # publish — install still succeeds, logs the warning, and publishes
+    # no record (the first update tick retries).
+    r, e = _install_with_targets(
+        env, tmp_path, extra={"PW_BROWSER_DRYRUN_TEXT": "garbage\n"})
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+    runlog = env["state"] / "toolset-update.log"
+    assert "could not publish expected Playwright browsers record" \
+        in runlog.read_text()
+
+
 def test_update_tick_refreshes_expected_browsers(env, tmp_path):
     # Every update tick refreshes the record: pre-seed a stale one (what
     # an install-time-only record would leave behind after a pin bump),
@@ -3725,13 +3749,83 @@ def test_update_tick_refreshes_expected_browsers(env, tmp_path):
 
 
 def test_update_dry_run_does_not_publish_expected_browsers(env, tmp_path):
-    # --dry-run changes nothing: no record appears.
+    # --dry-run changes nothing: no record appears, and a pre-seeded
+    # record stays byte-identical.
     e = dict(env["env"])
     e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
     r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert not (tmp_path / "pinshash"
                 / "expected_playwright_browsers").exists()
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "expected_playwright_browsers").write_text("chromium-0000\n")
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (carrier / "expected_playwright_browsers").read_text() \
+        == "chromium-0000\n"
+
+
+def test_update_tick_refreshes_expected_browsers_after_failed_layer(env,
+                                                                    tmp_path):
+    # #1311 + Security B3(a): the record claims SHOULD-BE, not IS — a
+    # failed playwright layer still refreshes it from the installed
+    # package's dry-run, so S1 compares against the fresh expectation
+    # instead of a stale record that would read as a false clean. The
+    # tick itself still fails (playwright in `failed`).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    shutil.rmtree(tmp_path / "pw-venv")
+    stage_pw_venv(tmp_path, "1.61.0", piplog=piplog, pwlog=pwlog,
+                  pip_exit=1)
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "expected_playwright_browsers").write_text("chromium-0000\n")
+    e["PINS_HASH_DIR"] = str(carrier)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
+    assert (carrier / "expected_playwright_browsers").read_text() \
+        == "chromium-1234\n"
+
+
+def test_update_tick_refreshes_expected_browsers_when_layer_blocked(env,
+                                                                    tmp_path):
+    # #1311 + Engineering B3(ii): a blocked-skip layer did not converge,
+    # but the record tracks the installed package, not the converge —
+    # the tick still refreshes it, and the mismatch hint persists until
+    # the block clears (S1 cannot read blocked.state). The tick itself
+    # still succeeds (a blocked-skip is not a failure).
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "expected_playwright_browsers").write_text("chromium-0000\n")
+    r0 = source_and('_blocked_mark playwright 1.62.0 "test-block"',
+                    env_extra=e)
+    assert r0.returncode == 0, r0.stderr
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (carrier / "expected_playwright_browsers").read_text() \
+        == "chromium-1234\n"
+    runlog = env["state"] / "toolset-update.log"
+    assert "playwright: BLOCKED" in runlog.read_text()
+
+
+def test_update_opted_out_leaves_expected_browsers_untouched(env, tmp_path):
+    # An opted-out tick returns before any refresh: a pre-seeded record
+    # stays byte-identical.
+    e = dict(env["env"])
+    e["PINS_HASH_DIR"] = str(tmp_path / "pinshash")
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    (carrier / "expected_playwright_browsers").write_text("chromium-0000\n")
+    env["optout"].write_text("")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (carrier / "expected_playwright_browsers").read_text() \
+        == "chromium-0000\n"
 
 
 def test_update_tick_survives_expected_publish_failure(env, tmp_path):
@@ -3824,6 +3918,110 @@ def test_publish_expected_browsers_refuses_relative_path(env, tmp_path):
                "relative/expected_playwright_browsers"})
     assert r.returncode != 0
     assert "must be an absolute path" in r.stderr
+
+
+def test_publish_expected_browsers_refuses_truncated_pair(env, tmp_path):
+    # A location line without its url line is a truncated pair: fail
+    # closed — a misaligned toggle would read a url as a location.
+    pairs = "/cache/chromium-1181\n"
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "truncated --dry-run pair" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_empty_pairs(env, tmp_path):
+    # No pairs at all names no builds: fail closed, publish nothing.
+    r = _publish_with_pairs(env, tmp_path, "")
+    assert r.returncode != 0
+    assert "no browser build dir names" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_overlong_name(env, tmp_path):
+    # A build dir name over the publisher's 128-char cap is refused.
+    name = "x" * 129
+    pairs = "/cache/%s\nhttps://cdn.playwright.dev/x/a.zip\n" % name
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "overlong browser build dir name" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_trailing_slash(env, tmp_path):
+    # A trailing-slash location empties the basename: fail closed.
+    pairs = ("/cache/chromium-1181/\n"
+             "https://cdn.playwright.dev/x/a.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "unsafe browser build dir name" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_nonabsolute_location(env, tmp_path):
+    # Defense-in-depth: the pairs helper already enforces absolute
+    # locations, but the publisher must not depend on its caller.
+    pairs = ("cache/chromium-1181\n"
+             "https://cdn.playwright.dev/x/a.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "non-absolute install location" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_expected_browsers_refuses_too_many_names(env, tmp_path):
+    # A real Playwright dry-run names a handful of archives; an output
+    # naming over 100 is not a real dry-run — refuse, publish nothing.
+    pairs = "".join(
+        "/cache/chromium-%04d\nhttps://cdn.playwright.dev/x/%d.zip\n"
+        % (i, i) for i in range(101))
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert "more than 100 browser archives" in r.stderr
+    assert not (tmp_path / "pinshash"
+                / "expected_playwright_browsers").exists()
+
+
+def test_publish_refusal_preserves_existing_record(env, tmp_path):
+    # A refusal must fail closed BEFORE mutating: a pre-existing valid
+    # record stays byte-identical (a refusal that truncated-and-aborted
+    # would leave S1 comparing against a torn record).
+    carrier = tmp_path / "pinshash"
+    carrier.mkdir()
+    rec = carrier / "expected_playwright_browsers"
+    rec.write_text("chromium-0000\n")
+    pairs = ("/cache/chromium 1181\nhttps://cdn.playwright.dev/x/a.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert rec.read_text() == "chromium-0000\n"
+    pairs = ("/cache-a/chromium-1181\nhttps://cdn.playwright.dev/x/a.zip\n"
+             "/cache-b/chromium_headless_shell-1181\n"
+             "https://cdn.playwright.dev/x/b.zip\n")
+    r = _publish_with_pairs(env, tmp_path, pairs)
+    assert r.returncode != 0
+    assert rec.read_text() == "chromium-0000\n"
+
+
+def test_publish_relative_path_refusal_writes_nothing(env, tmp_path):
+    # The relative-path refusal must also leave no file at the relative
+    # path (the privileged `install -d` must never run on it). The
+    # relative path resolves against the script's working directory
+    # (REPO) — the refusal happens before any file operation, so no
+    # file may appear there.
+    rel = os.path.join(REPO, "relative", "expected_playwright_browsers")
+    assert not os.path.exists(rel)
+    pairs = "/cache/chromium-1181\nhttps://cdn.playwright.dev/x/a.zip\n"
+    r = _publish_with_pairs(
+        env, tmp_path, pairs,
+        extra={"EXPECTED_PLAYWRIGHT_BROWSERS_FILE":
+               "relative/expected_playwright_browsers"})
+    assert r.returncode != 0
+    assert not os.path.exists(rel)
 
 
 def test_publish_fails_loud_when_pins_unhashable(env, tmp_path):

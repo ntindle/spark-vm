@@ -464,42 +464,67 @@ def _read_expected_playwright_browsers(path=None):
     record (missing, unreadable, malformed). None is the honest no-signal
     state: pre-#1311 installs publish no record, and a corrupt record is
     indistinguishable from absent to the unprivileged reader. Malformed
-    means: over the line cap, or any non-blank, non-comment line outside
-    the publisher's safe-name charset ([A-Za-z0-9._-], never "." or "..")
-    — the record is ignored wholesale rather than trusting the surviving
+    means: longer than the byte cap (a truncated prefix could name a
+    subset and fake a clean comparison), any padded line (the publisher
+    never writes padding — a padded line is corruption, not a name), any
+    line over the publisher's 128-char cap, any line containing a
+    `splitlines()` boundary char other than the record's own newline
+    separator (the #1412 lesson: `splitlines()` would let one crafted
+    line masquerade as two valid names), or any line outside the
+    publisher's safe-name charset ([A-Za-z0-9._-], never "." or "..").
+    The record is ignored wholesale rather than trusting the surviving
     lines, mirroring _read_managed_targets_record's fail-closed
-    whole-record rule.
+    whole-record rule. An empty / comment-only record is not a usable
+    record either (the publisher refuses to write a 0-name record): it
+    reads as None, never as an empty expectation that would report a
+    false clean.
     """
     if path is None:
         path = _EXPECTED_PLAYWRIGHT_BROWSERS_FILE
     try:
         with open(path, "r", encoding="utf-8") as f:
-            # Bounded read: the record is a handful of short lines; an
-            # unbounded read of a huge file must not hang the inventory.
-            lines = f.read(65536).splitlines()
+            # Bounded read with an over-cap check: read one byte past the
+            # cap so a longer record fails closed instead of being
+            # accepted as its truncated prefix.
+            data = f.read(65537)
     except (OSError, ValueError):
         # ValueError covers UnicodeDecodeError (non-UTF8 bytes) and the
         # NUL-byte path rejection — both fail closed like any other
         # unreadable record, instead of killing the status tool at import.
         return None
-    if len(lines) > 10000:
+    if len(data) > 65536:
         return None
     names = set()
-    for line in lines:
-        line = line.strip()
+    # Split on "\n" only: splitlines() would also split on \r \v \f
+    # \x1c-\x1e \x85 U+2028/2029, letting one crafted line masquerade
+    # as two valid names.
+    for line in data.split("\n"):
+        if line != line.strip():
+            return None
         if not line or line.startswith("#"):
             continue
-        if line in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+",
-                                                    line):
+        if (line in (".", "..") or len(line) > 128
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", line)
+                or any(c in line for c in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")):
             return None
         names.add(line)
+    if not names:
+        return None
     return names
 
 
 def _list_browser_builds(base):
-    """Build dir names in a Playwright browsers cache, or None when unreadable."""
+    """Build dir names in a Playwright browsers cache.
+
+    Returns [] when the cache dir is absent (a missing cache holds zero
+    builds — the updater converges to this same path, so a missing cache
+    is updater-clearable drift, not an unknowable state), and None when
+    the dir is unreadable for another reason (S1 cannot compare).
+    """
     try:
         entries = sorted(os.listdir(base))
+    except FileNotFoundError:
+        return []
     except OSError:
         return None
     return [e for e in entries
@@ -532,23 +557,36 @@ def probe_playwright_browsers(home=None, environ=None, pwd_module=None,
     browsers = _list_browser_builds(base)
     if browsers is None:
         return False, None, "no browser cache at %s (%s)" % (base, source)
-    if not browsers:
-        return False, None, (
-            "browser cache dir exists but is empty at %s (%s)"
-            % (base, source))
-    note = "%s; cache at %s (%s)" % (", ".join(browsers), base, source)
     expected = _read_expected_playwright_browsers(expected_path)
+    if not browsers:
+        # Empty or absent cache: every expected build is missing. The
+        # message names which case it is (an absent dir is not an empty
+        # one), and the DRIFT fragment names the missing builds — the
+        # empty-cache case must not stay silent while the top-level
+        # state reports mismatch.
+        if os.path.isdir(base):
+            note = ("browser cache dir exists but is empty at %s (%s)"
+                    % (base, source))
+        else:
+            note = "no browser cache at %s (%s)" % (base, source)
+        if expected:
+            note += ("; DRIFT: missing expected build(s): %s"
+                     % ", ".join(sorted(expected)))
+        return False, None, note
+    note = "%s; cache at %s (%s)" % (", ".join(browsers), base, source)
     if expected is not None:
         actual = set(browsers)
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
+        # Independent clauses, not if/elif: a cache that is both missing
+        # a build and carrying an extra one must name both.
         if missing:
             note += ("; DRIFT: missing expected build(s): %s"
                      % ", ".join(missing))
-        elif extra:
+        if extra:
             note += ("; unexpected extra build(s) (not drift — the updater "
                      "never prunes cache dirs): %s" % ", ".join(extra))
-        else:
+        if not missing and not extra:
             note += "; matches expected %d build(s)" % len(expected)
     return True, "%d build(s)" % len(browsers), note
 
@@ -558,10 +596,12 @@ def playwright_browsers_expected_state(home=None, environ=None,
     """Compare the probed cache against the published expected builds.
 
     Returns "match" (every expected build present), "mismatch" (at least
-    one expected build missing), or "unknown" (no usable expected record,
-    or the cache is unreadable — S1 cannot compare). Extra dirs never
-    produce "mismatch": the updater never prunes cache dirs, so an extra
-    dir is not updater-clearable drift (issue #1311). Never raises.
+    one expected build missing — including a wholly absent cache dir,
+    which holds zero builds and is updater-clearable drift), or "unknown"
+    (no usable expected record, or the cache is unreadable — S1 cannot
+    compare). Extra dirs never produce "mismatch": the updater never
+    prunes cache dirs, so an extra dir is not updater-clearable drift
+    (issue #1311). Never raises.
     """
     try:
         base, _source = _playwright_browsers_dir(home, environ, pwd_module)

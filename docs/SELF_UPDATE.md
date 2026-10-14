@@ -240,12 +240,25 @@ count — no drift signal existed at all. The privileged `install` step now
 publishes the expected build dir names (one per line, names only, never
 paths) to a world-readable record,
 `/var/lib/sparkvm-toolset/expected_playwright_browsers` (root-owned 0755
-carrier dir, 0644 file), and every `update` tick whose playwright layer
-converges refreshes it (a failed layer publishes nothing — the cache does
-not match the dry-run then; `--dry-run` publishes nothing). The status
+carrier dir, 0644 file), and every real `update` tick refreshes it from
+the installed package's dry-run — whether or not the playwright layer
+converged that tick. The record claims SHOULD-BE (what the installed
+package would install), not IS: a failed layer still refreshes it, so S1
+compares against the fresh expectation instead of a stale record that
+would read as a false clean. A blocked layer refreshes it too; the
+mismatch hint then persists until the block clears (S1 cannot read
+`blocked.state` — mode 700 — so the hint cannot know about the block;
+the update plane's `status` shows blocked layers). `--dry-run` publishes
+nothing. Residual: if the dry-run itself fails, the record stays stale
+until a tick where it succeeds, and the layer failure is loud in the
+audit log. Like the pins-hash and managed-targets paths, the record path
+is operator-trusted configuration: S1 honors
+`EXPECTED_PLAYWRIGHT_BROWSERS_FILE` from its environment. The status
 plane compares its probed cache against the record: `match` /
-`mismatch` (at least one expected build missing) / `unknown` (no record
-yet — pre-#1311 installs, or an unreadable record; silent by design). A
+`mismatch` (at least one expected build missing — including a wholly
+absent cache dir, which holds zero builds and is updater-clearable
+drift) / `unknown` (no record yet — pre-#1311 installs, or an unreadable
+record; silent by design). A
 mismatch renders the loud footer line "browser builds differ from
 expected — run `toolset-update.sh update`" and the
 `playwright_browsers_expected_state: "mismatch"` field in
