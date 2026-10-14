@@ -123,8 +123,7 @@ workers. Verified against the serial run with identical results:
 `scripts/` (667 passed, 1 skipped) and `hosted/` (404 passed plus the
 one pre-existing dashboard inline-copy failure) both agree serial vs
 parallel; on a 2-CPU box the parallel runs measured ~37s → ~28s
-(`scripts/`) and ~80s → ~67s (`hosted/`) — bigger boxes gain more,
-since the suite is dominated by a few long tests. The full suite has
+(`scripts/`) and ~80s → ~67s (`hosted/`). The full suite has
 not yet had a timed parallel run; the serial one-liner above remains
 the reference for the full run, and CI sharding is unchanged.
 
