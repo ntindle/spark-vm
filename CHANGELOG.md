@@ -218,6 +218,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The README repo-layout table no longer lists a `cred/` directory that
+  never existed: the `cred` CLI is a single file at the repo root and
+  `credlib/` is the library directory, and the row says so now. A pin
+  test fails loudly if any layout-table path stops resolving or a
+  directory/file is mislabeled again — previously the table drifted
+  silently, so a newcomer looked for a directory that isn't there.
+  (#1479)
+
 - The plane-cron verification guide now states the true size of its test
   suite (27 tests, not the stale 12 it claimed after the suite grew),
   and a pin test fails loudly if the guide's count and the suite drift
