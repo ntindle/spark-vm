@@ -167,6 +167,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The sentinel telemetry reference now documents the refused-egress audit
+  shape: when the egress guard kills a connection, the log carries a
+  `refused=egress` line with the same flow id as the earlier swap lines,
+  which means the swapped secret never left the box. Previously the
+  reference documented the other writer shapes and omitted this one, so
+  a reader following the reference would not know the line means a swap
+  was phantom. (#1447)
+
 - New contributors on stock Ubuntu 24.04 can now follow the test-setup
   instructions verbatim: the guide prescribes creating and activating a
   virtual environment before installing test dependencies, instead of a
