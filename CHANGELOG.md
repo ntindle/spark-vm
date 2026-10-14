@@ -89,13 +89,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Live-machine-control lane convergence pin: the first vision-vs-state
   pin for the hosted product's core control surface (#47) — every
-  acceptance checkbox is unmet: the dashboard is owner-key authed with
-  no tenant scoping, the provider contract cannot yet express
-  start/stop/restart, the dashboard polls every 30 seconds rather than
-  updating from live events, boat.dev is asserted but never verified,
-  and snapshot has a verb with no semantics. Two new gaps filed: the
-  snapshot semantics survey (#1455) and the boat.dev API verification
-  (#1456). (#47, #1455, #1456, #1457)
+  substantive acceptance checkbox is unmet (the Fly-fallback checkbox
+  is vacuous: nothing exists to be broken yet): the dashboard is
+  owner-key authed with no tenant scoping, the provider contract
+  cannot yet express start/stop/restart, the dashboard polls every
+  30 seconds rather than updating from live events, boat.dev is
+  asserted but never verified verb-by-verb, and snapshot has a verb
+  with no semantics. Three new gaps filed: the snapshot semantics
+  survey (#1455), the boat.dev API verification (#1456), and the
+  plane-to-browser push channel for live dashboard state (#1458).
+  (#47, #1455, #1456, #1458, #1457)
 - Credential-vending lane convergence pin: re-verified the lane at
   current main after the contract's no-oracle 401 + AES-128-GCM
   amendments (#1401, #1403 — contract halves landed, build halves still
