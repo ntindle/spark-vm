@@ -67,7 +67,7 @@ def all_test_files():
     found = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [
-            d for d in dirnames if d not in (".git", "__pycache__")
+            d for d in dirnames if d not in (".git", "__pycache__", ".venv")
         ]
         for name in filenames:
             if name.startswith("test_") and name.endswith(".py"):

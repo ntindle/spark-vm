@@ -108,9 +108,11 @@ keep the project's contribution rituals from drifting:
 
 - `test_local_gate.py` — pins the merge-gate script's behavior.
 - `test_contributing_ci_gates.py` / `test_contributing_suites.py` /
-  `test_ci_md_suite_inventory.py` / `test_pytest_ini_covers_all.py` —
+  `test_ci_md_suite_inventory.py` / `test_pytest_ini_covers_all.py` /
+  `test_contributing_venv.py` —
   the contributor guide's check list and every test suite stay wired to
-  what CI and `pytest.ini` actually enumerate.
+  what CI and `pytest.ini` actually enumerate; the venv pin keeps
+  CONTRIBUTING's venv-first install instructions from drifting.
 - `test_ci_shard_plan.py` — the shard inventory
   (`ci_shard_plan.py` — the single source CI's `python-tests` matrix
   fans out from) is a bijection with the real suite.
@@ -144,6 +146,7 @@ never drift from what's on disk.
 | `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
 | `test_contributing_ci_gates.py` | `CONTRIBUTING.md` merge-gate check list |
 | `test_contributing_suites.py` | `CONTRIBUTING.md` test-suite inventory |
+| `test_contributing_venv.py` | `CONTRIBUTING.md` venv-first install instructions |
 | `test_cut_release.py` | `cut-release.sh` release tooling |
 | `test_deploy_gate_tests_coverage.py` | `deploy/components.conf` gate test-file registration |
 | `test_docs_index_coverage.py` | `docs/` index coverage |

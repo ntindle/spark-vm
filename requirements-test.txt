@@ -1,5 +1,7 @@
-# Test dependencies: `pip install -r requirements-test.txt`
-# then `python3 -m pytest` from the repo root (see pytest.ini).
+# Test dependencies: activate the venv first (see CONTRIBUTING.md:
+# `python3 -m venv .venv`, `source .venv/bin/activate`), then
+# `pip install -r requirements-test.txt`, then `python3 -m pytest`
+# from the repo root (see pytest.ini).
 pytest>=8
 cryptography>=42  # confirm/test_push.py — VAPID / Web Push (confirm/push.py)
 pillow  # scripts/test_waitlist_page.py — og:image dimension/format assertions
