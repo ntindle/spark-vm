@@ -138,6 +138,25 @@ and feeds *into* this endpoint; it is never exposed raw, per
    suspension itself neither advances nor resets the 10-minute clock.
    Not entered from `provisioning` / `provisioning-failed` (no arc to
    suspend yet).
+   Liveness-loss transitions (pinned 2026-10-14, #1461/#1462):
+   `provider-dead` on a post-`live` arc (`live`, `waiting-on-approval`,
+   `approved`) demotes to `box-unhealthy` with `detail:
+   box-unhealthy: provider-dead` — a dead box after `live` is
+   `box-unhealthy` (rules 1/2/4); `relay-down` on a post-`live` arc
+   enters this suspension with `detail: relay-down` (the relay-half
+   suspension, distinct from `box-unhealthy`); `provider-dead` during a
+   suspension updates the latch to `box-unhealthy`, so recovery returns
+   the demoted code; `relay-recovered` re-checks `provider_running`
+   against the latch as a backstop (records persisted before this pin
+   may hold a stale latch) and demotes if the provider is dead. A
+   `relay-failure` arriving while already suspended refreshes the
+   suspension `detail` when one is supplied instead of raising — a
+   duplicate suspension signal is not an error.
+   `provider-dead` / `relay-down` at `provisioning` change only the
+   booleans (rule 1(a) hold); on terminal/operator codes they change
+   only the booleans (a verdict already ended the arc). Liveness flips
+   during `stuck` / `maintenance` do not update those latches (known
+   gap, left for a follow-up fix).
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
    `provisioning` (operator reprovision), `provisioning-failed` →
@@ -182,7 +201,9 @@ and feeds *into* this endpoint; it is never exposed raw, per
 - `status` — one of the §2 machine codes, exactly spelled (hyphens, no
   casing variants — the poll is machine-read).
 - `status_updated_at` — ISO-8601 UTC of the last transition. Pollers use
-  it, not their own clocks, to decide "the flip happened".
+  it, not their own clocks, to decide "the flip happened". Never empty
+  when `created_at` is present: a fresh arc defaults
+  `status_updated_at` to `created_at` (#1468).
 - `approvals_url` — **the G3 carrier**: the URL handed to the human at
   signup stage 2 (`FIRST_TEN_MINUTES_SPEC.md` §4) and read by the Muse at
   minute 4–5. The field is **non-null from signup stage 2 on** — the spec

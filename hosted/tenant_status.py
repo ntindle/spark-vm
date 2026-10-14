@@ -241,6 +241,13 @@ class BoxArc:
         check_code(self.code)
         if self.latched is not None:
             check_code(self.latched)
+        # #1468: a fresh arc that has never transitioned must not serve
+        # status_updated_at="" — default to created_at (contract §3:
+        # never empty when created_at is present). Also heals
+        # pre-fix persisted records (status_updated_at="") on read, since
+        # the store reconstructs arcs through this constructor.
+        if not self.status_updated_at:
+            self.status_updated_at = self.created_at
 
 
 def live_entry_ready(arc: BoxArc) -> bool:
@@ -291,6 +298,53 @@ _SUSPENSION_LATCH_EVENTS = frozenset(
 )
 
 
+# Post-live arc codes from which a liveness loss demotes/suspends the arc
+# (#1461/#1462): rules 2/3/4 each license box-unhealthy from these, and
+# rule 6 licenses the relay suspension from each. Terminal/operator codes
+# are never rewritten by a liveness flip — a denial, drop-off, or gate
+# verdict already ended the arc.
+_LIVENESS_DEMOTE_CODES = frozenset({"live", "waiting-on-approval", "approved"})
+
+
+def _demote_on_provider_death(arc: BoxArc) -> None:
+    """Apply a ``provider-dead`` flip to the arc code (#1461).
+
+    The provider layer says the box itself is dead — a dead box after
+    ``live`` is ``box-unhealthy`` (rules 1/2/4), never a return to
+    ``provisioning``. During a relay suspension the flip updates the
+    latch, so recovery returns the demoted code instead of a ``live``
+    code the dead provider no longer supports (#1462). Everywhere else
+    the flip is boolean-only: at ``provisioning`` the arc holds per rule
+    1(a) (reachability failure waits for the driver's terminal report),
+    and terminal/operator codes are never rewritten. ``stuck`` /
+    ``maintenance`` latches are not re-evaluated here (known gap, left
+    for a follow-up fix).
+    """
+    if arc.code in _LIVENESS_DEMOTE_CODES:
+        _move(arc, "box-unhealthy", detail="box-unhealthy: provider-dead")
+    elif (
+        arc.code == "connection-unreachable"
+        and arc.latched in _LIVENESS_DEMOTE_CODES
+    ):
+        arc.latched = "box-unhealthy"
+        arc.latched_detail = "box-unhealthy: provider-dead"
+
+
+def _suspend_on_relay_down(arc: BoxArc) -> None:
+    """Apply a ``relay-down`` flip to the arc code (#1461, relay half).
+
+    The relay/cert path is down — that is rule 6's suspension condition,
+    not ``box-unhealthy``: a post-``live`` arc enters
+    ``connection-unreachable`` with the sub-code in ``detail``. Already
+    suspended, at ``provisioning`` (rule 1(a) hold), terminal/operator,
+    or ``stuck`` / ``maintenance``: boolean flip only.
+    """
+    if arc.code in _LIVENESS_DEMOTE_CODES:
+        arc.latched = arc.code
+        arc.latched_detail = arc.detail
+        _touch(arc, "connection-unreachable", detail="relay-down")
+
+
 def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
     """Apply a producer *event* to *arc*, enforcing the §2 transition rules.
 
@@ -319,8 +373,10 @@ def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
         arc.relay_reachable = True
     elif event == "provider-dead":
         arc.provider_running = False
+        _demote_on_provider_death(arc)
     elif event == "relay-down":
         arc.relay_reachable = False
+        _suspend_on_relay_down(arc)
     else:
         _apply_arc_event(arc, event, **kw)
 
@@ -351,6 +407,15 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         # Rule 6: from any post-live arc code; latches the arc code at
         # suspension entry. Not entered from provisioning /
         # provisioning-failed (no arc to suspend yet).
+        # Re-entry while already suspended (e.g. relay-down already
+        # suspended the arc and the instrument follows with relay-failure
+        # for the same outage) refreshes the detail when one is supplied
+        # instead of raising — a duplicate suspension signal is not an
+        # error. The latch is untouched: the first suspension entry owns it.
+        if arc.code == "connection-unreachable":
+            if kw.get("detail") is not None:
+                arc.detail = kw["detail"]
+            return
         if arc.code not in ("live", "waiting-on-approval", "approved"):
             raise TransitionError(
                 f"relay suspension has no arc to suspend from {arc.code!r}"
@@ -363,7 +428,19 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         # latch) — never a blind stack-pop of a stale code.
         if arc.code != "connection-unreachable" or arc.latched is None:
             raise TransitionError("relay-recovered with no active suspension")
-        _touch(arc, arc.latched, arc.latched_detail)
+        # Backstop (#1462): provider death is provider-layer, independent
+        # of the relay instrument, so a latch the dead provider no longer
+        # supports demotes instead of restoring. This also heals
+        # pre-fix persisted records (latch written before provider-dead
+        # updated it). The relay input is NOT re-checked here:
+        # relay-recovered IS the relay recovery signal, and the
+        # instrument is authoritative for its own layer — a stale
+        # relay_reachable=False at recovery is a producer-disagreement
+        # question for the R3 wiring (#1416), not a demotion trigger.
+        if arc.latched in _LIVENESS_DEMOTE_CODES and not arc.provider_running:
+            _touch(arc, "box-unhealthy", "box-unhealthy: provider-dead")
+        else:
+            _touch(arc, arc.latched, arc.latched_detail)
         arc.latched = None
         arc.latched_detail = None
     elif event == "approval-filed":

@@ -216,7 +216,11 @@ def test_rule_5_operator_only_codes_are_end_states():
 
 
 def test_rule_6_relay_suspension_latches_and_re_evaluates():
-    arc = _arc(code="live", status_updated_at="2026-09-29T10:05:00Z")
+    # A post-live arc has provider_running=True (it entered live via the
+    # §4 AND-combine); the fixture pins that invariant so the
+    # relay-recovered provider re-check (#1462) sees a live provider.
+    arc = _arc(code="live", status_updated_at="2026-09-29T10:05:00Z",
+               provider_running=True, relay_reachable=True)
     apply_event(arc, "relay-failure")
     assert arc.code == "connection-unreachable"
     assert arc.latched == "live"
@@ -296,13 +300,132 @@ def test_smoke_report_failed_detail_format():
 
 def test_rule_6_suspension_from_approval_arc_and_approved():
     for start in ("waiting-on-approval", "approved"):
-        arc = _arc(code=start, status_updated_at="2026-09-29T10:05:00Z")
+        # Post-live invariant (see the rule-6 test above): the provider
+        # was running when the arc went post-live.
+        arc = _arc(code=start, status_updated_at="2026-09-29T10:05:00Z",
+                   provider_running=True, relay_reachable=True)
         apply_event(arc, "relay-failure")
         assert arc.code == "connection-unreachable"
         assert arc.latched == start
         apply_event(arc, "relay-recovered")
         assert arc.code == start
         assert arc.latched is None
+
+
+# ---------------------------------------------------------------------------
+# Liveness-loss transitions (#1461 / #1462) + fresh-arc timestamp (#1468)
+
+
+def _live_arc(**kw):
+    """A live arc in the consistent post-entry state (provider running,
+    relay reachable — the §4 AND-combine inputs that admitted it)."""
+    kw.setdefault("code", "live")
+    kw.setdefault("status_updated_at", "2026-09-29T10:05:00Z")
+    kw.setdefault("provider_running", True)
+    kw.setdefault("relay_reachable", True)
+    return _arc(**kw)
+
+
+def test_provider_dead_demotes_post_live_arcs_to_box_unhealthy():
+    # #1461: a dead box after live is box-unhealthy (rules 1/2/4), with
+    # the provider-death sub-code in detail — not sticky-live.
+    for start in ("live", "waiting-on-approval", "approved"):
+        arc = _live_arc(code=start)
+        apply_event(arc, "provider-dead")
+        assert arc.code == "box-unhealthy"
+        assert arc.detail == "box-unhealthy: provider-dead"
+        assert arc.provider_running is False
+
+
+def test_provider_dead_at_provisioning_holds_per_rule_1a():
+    # Reachability failure at provisioning holds (no bundle handed out)
+    # until the driver reports terminal failure — never a demotion.
+    arc = _arc()  # provisioning
+    apply_event(arc, "provider-dead")
+    assert arc.code == "provisioning"
+    assert arc.provider_running is False
+
+
+def test_provider_dead_leaves_terminal_and_operator_codes_alone():
+    # A verdict already ended the arc; provider death never rewrites it.
+    for start in ("human-denied", "human-drop-off", "provisioning-failed",
+                  "policy-misfire", "no-gated-action", "box-unhealthy"):
+        arc = _arc(code=start, status_updated_at="2026-09-29T10:05:00Z")
+        apply_event(arc, "provider-dead")
+        assert arc.code == start
+
+
+def test_relay_down_suspends_post_live_arcs():
+    # #1461, relay half: relay/cert-path failure is rule 6's suspension,
+    # not box-unhealthy — with the sub-code in detail.
+    for start in ("live", "waiting-on-approval", "approved"):
+        arc = _live_arc(code=start)
+        apply_event(arc, "relay-down")
+        assert arc.code == "connection-unreachable"
+        assert arc.latched == start
+        assert arc.detail == "relay-down"
+        assert arc.relay_reachable is False
+
+
+def test_relay_down_at_provisioning_holds_per_rule_1a():
+    arc = _arc()  # provisioning
+    apply_event(arc, "relay-down")
+    assert arc.code == "provisioning"
+    assert arc.relay_reachable is False
+
+
+def test_provider_dead_during_suspension_updates_the_latch():
+    # #1462 repro: live -> relay-failure -> provider-dead ->
+    # relay-recovered must NOT restore live with a dead provider.
+    arc = _live_arc()
+    apply_event(arc, "relay-failure")
+    assert arc.code == "connection-unreachable"
+    apply_event(arc, "provider-dead")
+    assert arc.code == "connection-unreachable"  # still showing suspension
+    assert arc.latched == "box-unhealthy"
+    assert arc.latched_detail == "box-unhealthy: provider-dead"
+    apply_event(arc, "relay-recovered")
+    assert arc.code == "box-unhealthy"
+    assert arc.detail == "box-unhealthy: provider-dead"
+    assert arc.latched is None
+
+
+def test_relay_recovered_rechecks_provider_as_backstop():
+    # #1462 backstop: a suspension record persisted before the fix (latch
+    # still live, provider already dead) demotes on recovery instead of
+    # restoring a live code the dead provider no longer supports.
+    arc = _live_arc(code="connection-unreachable", latched="live",
+                    provider_running=False)
+    apply_event(arc, "relay-recovered")
+    assert arc.code == "box-unhealthy"
+    assert arc.detail == "box-unhealthy: provider-dead"
+
+
+def test_relay_failure_reentry_while_suspended_refreshes_detail():
+    # relay-down suspends; the instrument's relay-failure for the same
+    # outage is a duplicate suspension signal, not an error.
+    arc = _live_arc()
+    apply_event(arc, "relay-down")
+    assert arc.code == "connection-unreachable"
+    apply_event(arc, "relay-failure", detail="cert-expired")
+    assert arc.code == "connection-unreachable"
+    assert arc.latched == "live"  # first suspension entry owns the latch
+    assert arc.detail == "cert-expired"
+    # A detail-less re-entry keeps the existing detail.
+    apply_event(arc, "relay-failure")
+    assert arc.detail == "cert-expired"
+
+
+def test_fresh_arc_defaults_status_updated_at_to_created_at():
+    # #1468: a fresh arc that has never transitioned must not serve "".
+    arc = BoxArc(box_id="b", created_at="2026-09-29T10:00:00Z")
+    assert arc.status_updated_at == "2026-09-29T10:00:00Z"
+    body = status_response(_tenant(boxes={"b": arc}))
+    assert body["status_updated_at"] == "2026-09-29T10:00:00Z"
+    # An explicit empty value (pre-fix persisted shape) heals the same way.
+    arc2 = BoxArc(box_id="b", created_at="2026-09-29T10:00:00Z",
+                  status_updated_at="")
+    assert arc2.status_updated_at == "2026-09-29T10:00:00Z"
 
 
 def test_approved_arc_stays_honest():

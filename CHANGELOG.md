@@ -196,6 +196,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The tenant onboarding status no longer reports a dead box as live:
+  losing the provider demotes a live, waiting, or approved box to
+  box-unhealthy, losing the relay path suspends it as
+  connection-unreachable, and recovery re-checks the provider before
+  restoring the previous status — previously both signals only flipped
+  internal flags, so a box that lost its provider and relay kept
+  polling live. A fresh onboarding record also reports its creation
+  time instead of an empty last-updated timestamp.
+  (#1461, #1462, #1468)
+
 - The self-update status inventory now reports the Playwright browser
   builds from the cache the updater actually converges: the
   `PLAYWRIGHT_BROWSERS_PATH` directory when that variable is set, else
