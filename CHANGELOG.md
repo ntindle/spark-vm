@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The credential-vending contract now pins the token-state gate for
+  issuance: minting and refreshing vended credentials requires a
+  `current` box token — a `grace` (post-rotation) token reads `401`
+  with a "re-mint with the current token" message and mints nothing.
+  The 15-minute rotation grace stays for continuity traffic (heartbeats,
+  uploads, command fetches); without this gate a compromised old token
+  would keep minting secrets for the whole grace window plus up to
+  24 hours of lease life per mint. (#1402, #1486)
 - The credential-vending contract now pins the parameterized placement
   shape the swap proxy actually enforces: each placement entry is the
   bare `bearer_header` / `url_path_segment` string or a single-key

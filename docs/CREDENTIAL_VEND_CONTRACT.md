@@ -92,7 +92,7 @@ regardless.)
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `POST /v1/boxes/{box_id}/credentials` | **box bearer** (#844) | Mint: the box requests named credentials, receives short-lived values. Auth failures collapse to a plain `401` on the whole box surface — `{box_id}` in the path must equal the token's box, but a wrong-box token reads the same unattributed `401` as an unknown token (the plane's no-oracle convention: a stolen box token presented against other box ids must not learn which ids are enrolled). Revoked and expired tokens also `401` (distinct holder-visible messages — "box revoked" / "token expired" — no cross-box probing). The vend route reuses the plane's shared box-auth gate, so it inherits this property. |
+| `POST /v1/boxes/{box_id}/credentials` | **box bearer** (#844) | Mint: the box requests named credentials, receives short-lived values. Auth failures collapse to a plain `401` on the whole box surface — `{box_id}` in the path must equal the token's box, but a wrong-box token reads the same unattributed `401` as an unknown token (the plane's no-oracle convention: a stolen box token presented against other box ids must not learn which ids are enrolled). Revoked and expired tokens also `401` (distinct holder-visible messages — "box revoked" / "token expired" — no cross-box probing). The mint endpoint is issuance-class: it requires a **`current`** box token — a `grace` token mints nothing and reads `401` with a rotation-naming message (see §2.1b). The vend route reuses the plane's shared box-auth gate, so it inherits the no-oracle property. |
 | `PUT /v1/owner/boxes/{box_id}/credentials/manifest` | **owner key** (#843) | Management: write/replace the box's secret manifest (metadata + source values, write-only). |
 | `GET /v1/owner/boxes/{box_id}/credentials/manifest` | **owner key** | Management: read manifest **metadata only — never secret values** (values are write-only after set; see §3). |
 | `DELETE /v1/owner/boxes/{box_id}/credentials/{name}` | **owner key** | Revoke: retains the manifest row as a tombstone and stamps `revoked_at` — a revoked name is never vended (mint lists it in `refused`); the stamp is cleared only by re-PUT with a fresh value. Propagation is bounded by §5. |
@@ -175,6 +175,41 @@ rows (see §2.5, §3).
 "revoked_at", "updated_at", "updated_by" } ] }` — metadata only, never
 values. The `placement` in the `GET` response is the stored, validated
 array verbatim.
+
+### 2.1b Token-state gate for issuance (issue #1402)
+
+The #846 rotation grace exists so rotation never stalls *continuity*
+traffic: heartbeats, command fetches, and filing uploads keep riding the
+previous token for 15 minutes (e.g. `POST /v1/boxes/{box_id}/approvals/file`
+accepts `current` **and** `grace` for exactly this reason). Secret
+*issuance* is different: during the grace window the old token — and
+compromise is the most common reason a box rotates — could still mint,
+and every mint carries up to the §2.3 maximum TTL, so a stolen old token
+would get 15 more minutes of minting plus up to 24 hours of lease life
+per mint.
+
+Rule, pinned: **grace is for continuity traffic; issuance requires
+`current`.** The `POST /v1/boxes/{box_id}/credentials` endpoint (mint and
+refresh alike — a refresh is a repeat `POST`, §2.2) accepts only a
+`current` box token. A `grace` token presented for issuance reads `401`
+with a rotation-naming message — e.g. "token superseded — re-mint with
+the current token" — never "token expired" (the old token is not
+expired; the message must say what to do). This coexists with the
+no-oracle convention the same way the existing "box revoked" / "token
+expired" messages do: the message is for the token's own holder and
+reveals nothing about other boxes' enrollment.
+
+Issuance is demand-driven, so the gate costs no continuity: the box
+orders `rotate → mint-with-new-token` instead of minting with the old
+one. Precedent: owner bootstrap (`_box_id_for_token`) already demands a
+`current` token for its issuance-class decision — "a revoked box's stale
+token must never bootstrap an owner key."
+
+**#891 build note (box-side fetch loop):** the box refresh loop treats
+this `401` as "re-mint with the new token", not as a fatal auth failure
+(refresh is retried against the post-rotation token). The box that lost
+the new token mid-rotation — it can no longer satisfy the `current`
+gate — falls back to the re-bootstrap path rather than wedging.
 
 ### 2.2 Mint request and response
 
