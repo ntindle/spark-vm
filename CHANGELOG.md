@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   The 15-minute rotation grace stays for continuity traffic (heartbeats,
   uploads, command fetches); without this gate a compromised old token
   would keep minting secrets for the whole grace window plus up to
-  24 hours of lease life per mint. (#1402, #TBD)
+  24 hours of lease life per mint. (#1402, #1486)
 - The credential-vending contract now pins the parameterized placement
   shape the swap proxy actually enforces: each placement entry is the
   bare `bearer_header` / `url_path_segment` string or a single-key
