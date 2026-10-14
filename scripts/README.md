@@ -155,6 +155,7 @@ never drift from what's on disk.
 | `test_http_hardening_headers.py` | localhost HTTP hardening-header pin test (issue #1237) |
 | `test_lint_changelog_ritual.py` | changelog ritual linter |
 | `test_local_gate.py` | `local-gate.sh` merge-gate runner |
+| `test_parallel_runner_docs.py` | CONTRIBUTING.md + docs/CI.md parallel-runner docs + pytest-xdist dependency |
 | `test_pytest_ini_covers_all.py` | `pytest.ini` testpaths reachability |
 | `test_pytest_warning_hygiene.py` | test-output hygiene: no invalid escapes / no bytes env writes |
 | `test_push_lane_decision_numbers.py` | push-lane D-series decision-number uniqueness |
