@@ -611,6 +611,37 @@ def _safe_key(key):
     return "<%s>" % type(key).__name__
 
 
+def _value_too_long(value):
+    """True when a raw value exceeds MAX_PARAM_LEN. The size scan the
+    action-level ``_check_action_size`` and the envelope-level
+    ``_check_envelope`` share, so both layers enforce the same bound.
+    Traverses dicts (keys as well as values): a dict-wrapped giant
+    string must fail the scan, or a validator's ``%r`` echo downstream
+    would print the whole value (the B8 bound). Iterative: a hostile
+    caller can nest containers arbitrarily deep, and a recursive scan
+    would die with RecursionError instead of failing loud. An
+    id()-visited set keeps cyclic in-process input terminating
+    (JSON, the wire format, is always acyclic; every object here stays
+    reachable from ``value``, so ids cannot be recycled mid-scan)."""
+    seen = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if len(item) > MAX_PARAM_LEN:
+                return True
+        elif isinstance(item, (list, tuple, dict)):
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if isinstance(item, dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+            else:
+                stack.extend(item)
+    return False
+
+
 def _check_action_size(obj, index):
     """Length-scan the raw action object before anything interprets it.
 
@@ -630,13 +661,6 @@ def _check_action_size(obj, index):
             % (index, type(obj).__name__),
         )
 
-    def too_long(value):
-        if isinstance(value, str):
-            return len(value) > MAX_PARAM_LEN
-        if isinstance(value, (list, tuple)):
-            return any(too_long(v) for v in value)
-        return False
-
     for key, value in obj.items():
         if isinstance(key, str) and len(key) > MAX_PARAM_LEN:
             raise ProtocolError(
@@ -644,7 +668,7 @@ def _check_action_size(obj, index):
                 "actions[%d]: parameter name exceeds %d chars (len %d)"
                 % (index, MAX_PARAM_LEN, len(key)),
             )
-        if too_long(value):
+        if _value_too_long(value):
             raise ProtocolError(
                 "bad_params",
                 "actions[%d] (%s): value exceeds %d chars"
@@ -700,6 +724,62 @@ def _check_post_navigation_rule(validated):
             navigated = True
 
 
+#: The fixed call-envelope key set (SPEC §5): a call is exactly
+#: ``session`` + ``actions`` + optional ``ref_scope``. Anything else is
+#: rejected with ``bad_envelope`` — a misspelled ``ref_scope`` must fail
+#: loud, never be silently dropped (the envelope analogue of the
+#: per-action unknown-param rule in ``_validate_action_object``).
+_ENVELOPE_KEYS = frozenset({"session", "actions", "ref_scope"})
+
+#: Cap on unknown envelope keys echoed in a rejection: the unknown-key
+#: error must not itself become an unbounded echo (the hole #1449 pins
+#: at the action level). First N keys, rendered via ``_safe_key`` (never
+#: raw), plus a count of the rest. Deliberately stricter than
+#: ``observation.validate_observation``'s raw ``sorted(unknown)`` echo.
+_MAX_UNKNOWN_ENVELOPE_KEYS_ECHO = 5
+
+
+def _check_envelope(payload):
+    """Pin the call envelope — size scan + key set — before anything
+    interprets the payload.
+
+    Size first: a giant unknown key/value fails on length alone and is
+    never echoed. Then the key set: unknown keys fail loud with
+    ``bad_envelope``. The ``actions`` value is skipped in the size
+    scan — each action object goes through ``_check_action_size``,
+    which owns that layer (and pins ``bad_params`` for malformed
+    actions, e.g. a non-dict action); the envelope scan must not
+    re-code those as ``bad_envelope``. ``session`` / ``ref_scope``
+    keep their own caps below; the scan here fails them with the
+    same ``bad_envelope`` code.
+    """
+    for key, value in payload.items():
+        if key == "actions":
+            continue
+        if isinstance(key, str) and len(key) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_envelope",
+                "call: envelope key exceeds %d chars (len %d)"
+                % (MAX_PARAM_LEN, len(key)),
+            )
+        if _value_too_long(value):
+            raise ProtocolError(
+                "bad_envelope",
+                "call (%s): envelope value exceeds %d chars"
+                % (_safe_key(key), MAX_PARAM_LEN),
+            )
+    unknown = set(payload) - _ENVELOPE_KEYS
+    if unknown:
+        shown = sorted(unknown, key=_safe_key)[:_MAX_UNKNOWN_ENVELOPE_KEYS_ECHO]
+        extra = len(unknown) - len(shown)
+        suffix = " and %d more" % extra if extra else ""
+        raise ProtocolError(
+            "bad_envelope",
+            "call: unknown envelope key(s) %s%s"
+            % (", ".join(_safe_key(k) for k in shown), suffix),
+        )
+
+
 def validate_call(payload, scope=None):
     """Validate a raw call dict against the protocol.
 
@@ -719,6 +799,7 @@ def validate_call(payload, scope=None):
     """
     if not isinstance(payload, dict):
         raise ProtocolError("bad_envelope", "call must be a JSON object")
+    _check_envelope(payload)
     session = payload.get("session")
     if not is_nonempty_str(session):
         raise ProtocolError("bad_envelope", "call.session must be non-empty")

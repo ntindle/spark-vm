@@ -189,6 +189,12 @@ shell, no CDP, no file access outside the profile:
 
 Anything outside this set is rejected, not interpreted.
 
+A call's top-level keys come only from `{session, actions,
+ref_scope}` (`ref_scope` optional — required when actions address
+refs); any other top-level key is rejected with `bad_envelope` (a
+misspelled `ref_scope` fails loud, never silently dropped), and
+envelope values go through the same size scan as action params.
+
 - Refs may address elements inside iframes (SSO and payment forms live
   there); the snapshot's AX tree includes frame boundaries and every
   ref is frame-scoped. Every action takes an optional `timeout_ms`.
