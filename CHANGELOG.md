@@ -177,6 +177,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The self-update status inventory now reports the Playwright browser
+  builds from the cache the updater actually converges: the
+  `PLAYWRIGHT_BROWSERS_PATH` directory when that variable is set, else
+  the Playwright user's cache, else the invoker's cache. Previously it
+  always probed the invoker's cache, so it reported the wrong browsers
+  whenever the invoker was not the Playwright user or the variable was
+  set. (#1311, #1454)
+
 - The sentinel telemetry reference now documents the refused-egress audit
   shape: when the egress guard kills a connection, the log carries a
   `refused=egress` line with the same flow id as the earlier swap lines,
