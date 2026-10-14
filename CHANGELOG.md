@@ -167,6 +167,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The browser driver now rejects calls with misspelled or extra
+  envelope fields instead of silently dropping them: a typo'd scope
+  field used to be absorbed while the call proceeded without a scope.
+  Rejection messages are now bounded too — error text that echoes
+  bad values is truncated, the size scan reaches inside nested
+  values, and a flood of unknown fields is summarized as a count
+  rather than listed in full, so a hostile call cannot bloat the
+  log pipeline. (#1448, #1449)
+
 - The sentinel telemetry reference now documents the refused-egress audit
   shape: when the egress guard kills a connection, the log carries a
   `refused=egress` line with the same flow id as the earlier swap lines,

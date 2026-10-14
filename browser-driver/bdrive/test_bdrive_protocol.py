@@ -941,3 +941,108 @@ def test_envelope_string_caps():
         O.validate_observation(obs)
     assert exc.value.code == "bad_observation"
     assert big not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# #1448 / #1449: pinned envelope keys + bounded error messages
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_envelope_key_rejected():
+    # #1448: a misspelled ref_scope must fail loud, not be absorbed
+    # while the call proceeds scopeless.
+    expect_code(
+        call([{"action": "look"}], ref_scpoe="tok"), "bad_envelope"
+    )
+    expect_code(
+        call([{"action": "look"}], zzz={"big": "x" * 1000}), "bad_envelope"
+    )
+    # The three known envelope keys still pass.
+    P.validate_call(call([{"action": "look"}]))
+
+
+def test_giant_unknown_envelope_value_rejected():
+    # #1448: a giant unknown envelope value used to pass through
+    # unexamined; now the key itself is rejected, bounded echo.
+    big = "x" * (2 * P.MAX_PARAM_LEN)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "look"}], zzz={"big": big}))
+    assert exc.value.code == "bad_envelope"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+
+
+def test_error_messages_bounded_for_container_values():
+    # #1449: dict/set values used to pass the size scan entirely, then
+    # get echoed whole by validators (28k-char errors for a 2000-key
+    # dict; a nested 1MiB+ string echoed in full).
+    wide = {("k%04d" % i): "v" for i in range(2000)}
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "click", "ref": wide}])
+        )
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "look", "timeout_ms": wide}])
+        )
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    # A giant string nested inside a dict is caught by the scan, not
+    # echoed by the validator.
+    big = "x" * (P.MAX_PARAM_LEN + 1)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "click", "ref": {"a": big}}])
+        )
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+    # A set value is scanned too (sets cannot arrive via JSON, but
+    # the validator must not echo one whole either).
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "click", "ref": {big}}])
+        )
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert big not in str(exc.value)
+
+
+def test_unknown_key_echo_capped():
+    # #1449: 10k unknown keys echoed as a 100k-char error; now the
+    # first 10 are named and the rest counted.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "look",
+                   **{("u%05d" % i): 1 for i in range(10000)}}])
+        )
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    assert "and 9990 more" in str(exc.value)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "look"}],
+                 **{("e%05d" % i): 1 for i in range(100)}))
+    assert exc.value.code == "bad_envelope"
+    assert len(str(exc.value)) < 10000
+    assert "and 90 more" in str(exc.value)
+
+
+def test_deeply_nested_value_fails_closed():
+    # #1449: adversarial nesting must fail loud with a bounded error,
+    # never recurse to a RecursionError. 5000-deep nesting blows past
+    # Python's recursion limit in the old unbounded scan; the depth
+    # cap fails it closed at the scan instead.
+    nested = "leaf"
+    for _ in range(5000):
+        nested = [nested]
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "click", "ref": nested}]))
+    assert exc.value.code == "bad_params"
+    assert len(str(exc.value)) < 10000
+    # Ordinary nesting still validates.
+    P.validate_call(
+        call([{"action": "upload", "ref": "@e1", "grant_ids": ["g1"]}])
+    )

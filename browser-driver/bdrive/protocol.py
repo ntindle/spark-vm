@@ -29,7 +29,8 @@ rejected (SPEC §4).
 
 Validation rules enforced here, beyond the fixed vocabulary:
 
-- unknown parameters fail loud — no silent absorption
+- unknown parameters fail loud — no silent absorption; the call
+  envelope itself is pinned to ``{session, actions, ref_scope}``
 - ``goto`` is restricted to http/https (no javascript:, file:, data:)
 - ``snapshot`` is an observation-only call: never combined with other
   actions in the same array
@@ -140,7 +141,7 @@ def _check_ref(value, what):
     if not is_nonempty_str(value) or not REF_RE.match(value):
         raise ProtocolError(
             "bad_params",
-            "%s must look like @e1, got %r" % (what, value),
+            "%s must look like @e1, got %s" % (what, _safe_repr(value)),
         )
 
 
@@ -150,8 +151,8 @@ def _check_timeout_ms(value):
             return
     raise ProtocolError(
         "bad_params",
-        "timeout_ms must be an int in [1, %d], got %r"
-        % (MAX_TIMEOUT_MS, value),
+        "timeout_ms must be an int in [1, %d], got %s"
+        % (MAX_TIMEOUT_MS, _safe_repr(value)),
     )
 
 
@@ -602,6 +603,11 @@ class ValidatedCall:
     actions: tuple
 
 
+#: The pinned call-envelope key set. Anything else is rejected with
+#: ``bad_envelope`` — never silently absorbed.
+_ENVELOPE_KEYS = frozenset({"session", "actions", "ref_scope"})
+
+
 def _safe_key(key):
     """A parameter key safe to embed in an error message."""
     if isinstance(key, str):
@@ -611,17 +617,63 @@ def _safe_key(key):
     return "<%s>" % type(key).__name__
 
 
+#: Max unknown keys named in one rejection message; the rest are
+#: counted, not listed — an unbounded key list is itself a
+#: log-pipeline DoS (10k unknown keys echoed as a 100k-char error).
+MAX_UNKNOWN_KEYS_SHOWN = 10
+
+
+def _format_unknown_keys(unknown):
+    """Render an unknown-key set for an error message, bounded.
+
+    First ``MAX_UNKNOWN_KEYS_SHOWN`` keys (each via ``_safe_key``),
+    then a count of the rest — never the whole set.
+    """
+    ordered = sorted(unknown, key=_safe_key)
+    shown = [_safe_key(k) for k in ordered[:MAX_UNKNOWN_KEYS_SHOWN]]
+    if len(ordered) > MAX_UNKNOWN_KEYS_SHOWN:
+        shown.append("…and %d more" % (len(ordered) - MAX_UNKNOWN_KEYS_SHOWN))
+    return "[%s]" % ", ".join(shown)
+
+
+#: Cap on ``repr`` length for attacker-controlled values echoed into
+#: error messages (same 200-char precedent as ``_action_entry``'s
+#: unknown-action echo). The scan bounds values at MAX_PARAM_LEN, but
+#: a 1MiB echo is still a log-pipeline DoS; truncation bounds the
+#: message regardless of what passed the scan.
+MAX_ERROR_REPR_CHARS = 200
+
+
+def _safe_repr(value):
+    """A value safe to embed in an error message: ``repr`` truncated
+    to ``MAX_ERROR_REPR_CHARS`` with the full length noted."""
+    text = repr(value)
+    if len(text) <= MAX_ERROR_REPR_CHARS:
+        return text
+    return text[:MAX_ERROR_REPR_CHARS] + "…(len %d)" % len(text)
+
+
+#: Depth cap for the recursive size scan: a deeply nested payload
+#: fails closed instead of recursing to a RecursionError (the daemon
+#: catches only ProtocolError). Legitimate action params nest at
+#: most a few levels (grant_ids is a flat list); 100 is far above
+#: any real shape.
+MAX_SCAN_DEPTH = 100
+
+
 def _check_action_size(obj, index):
     """Length-scan the raw action object before anything interprets it.
 
-    Validators and error paths use ``%r`` liberally; if a giant value
-    reaches a validator first, the rejection message echoes the whole
-    value into the error/log line — a log-pipeline DoS per request.
-    Keys, values (including nested list/tuple string members), the
-    action name, and ``timeout_ms`` are therefore scanned up front;
-    anything over MAX_PARAM_LEN fails loud here, with the length (never
-    the value) in the message. Values that pass the scan are at most
-    1MiB, which also bounds every downstream ``%r`` echo.
+    Validators and error paths use ``_safe_repr`` (truncated) for
+    echoed values, but the scan still runs first: a giant value must
+    fail loud here, not reach a validator at all. Keys, values
+    (including nested dict keys/values, set members, and list/tuple
+    string members — dicts and sets used to pass the scan entirely,
+    then get echoed by validators), the action name, and
+    ``timeout_ms`` are scanned up front; anything over MAX_PARAM_LEN
+    fails loud here, with the length (never the value) in the
+    message. Values that pass the scan are at most 1MiB, and the
+    truncated echoes bound every downstream error message.
     """
     if not isinstance(obj, dict):
         raise ProtocolError(
@@ -630,11 +682,20 @@ def _check_action_size(obj, index):
             % (index, type(obj).__name__),
         )
 
-    def too_long(value):
+    def too_long(value, depth=0):
+        # Fail closed past the depth cap: adversarial nesting must
+        # not recurse to a RecursionError.
+        if depth > MAX_SCAN_DEPTH:
+            return True
         if isinstance(value, str):
             return len(value) > MAX_PARAM_LEN
-        if isinstance(value, (list, tuple)):
-            return any(too_long(v) for v in value)
+        if isinstance(value, dict):
+            return any(
+                too_long(k, depth + 1) or too_long(v, depth + 1)
+                for k, v in value.items()
+            )
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(too_long(v, depth + 1) for v in value)
         return False
 
     for key, value in obj.items():
@@ -662,7 +723,7 @@ def _validate_action_object(obj, index):
         raise ProtocolError(
             "bad_params",
             "actions[%d] (%s): unknown parameter(s) %s"
-            % (index, name, sorted(unknown, key=_safe_key)),
+            % (index, name, _format_unknown_keys(unknown)),
         )
     validator(params)
     timeout_ms = obj.get("timeout_ms", 0)
@@ -702,7 +763,6 @@ def _check_post_navigation_rule(validated):
 
 def validate_call(payload, scope=None):
     """Validate a raw call dict against the protocol.
-
     ``scope`` is the session's :class:`RefScope` (or None for
     transport-level validation only). Raises :class:`ProtocolError`
     with a machine-readable ``code`` on any violation. Returns a
@@ -719,6 +779,19 @@ def validate_call(payload, scope=None):
     """
     if not isinstance(payload, dict):
         raise ProtocolError("bad_envelope", "call must be a JSON object")
+    # The envelope key set is pinned: an unknown envelope key fails
+    # loud (a misspelled ref_scope must not be silently absorbed and
+    # the call proceed scopeless). Rejection also subsumes the size
+    # scan for unknown envelope values — a giant unknown value is
+    # rejected outright, and the three known values are each covered
+    # elsewhere (session/ref_scope length caps, per-action scan).
+    unknown_envelope = set(payload) - _ENVELOPE_KEYS
+    if unknown_envelope:
+        raise ProtocolError(
+            "bad_envelope",
+            "call: unknown envelope key(s) %s"
+            % _format_unknown_keys(unknown_envelope),
+        )
     session = payload.get("session")
     if not is_nonempty_str(session):
         raise ProtocolError("bad_envelope", "call.session must be non-empty")
