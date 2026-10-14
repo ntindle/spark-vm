@@ -138,6 +138,46 @@ and feeds *into* this endpoint; it is never exposed raw, per
    suspension itself neither advances nor resets the 10-minute clock.
    Not entered from `provisioning` / `provisioning-failed` (no arc to
    suspend yet).
+   Liveness-loss transitions (pinned 2026-10-14, #1461/#1462):
+   - `provider-dead` on a post-`live` arc (`live`,
+     `waiting-on-approval`, `approved`) demotes to `box-unhealthy`
+     with `detail: box-unhealthy: provider-dead` — a dead box after
+     `live` is `box-unhealthy` (rules 1/2/4).
+   - `relay-down` on a post-`live` arc enters this suspension with
+     `detail: relay-down` (the relay-half suspension, distinct from
+     `box-unhealthy`).
+   - `provider-dead` during a latch-holding state (suspension,
+     `stuck`, `maintenance`) updates the latch to `box-unhealthy`
+     when the latch is a post-`live` code, so the exit restores the
+     demoted code. A verdict latch (`human-denied`,
+     `human-drop-off`) wins — provider death never rewrites it.
+   - Every latch-restoring exit re-evaluates the latch against
+     liveness inputs: `relay-recovered`, `stuck-cleared`, and
+     `maintenance-completed` demote to `box-unhealthy` when the
+     provider is dead (backstop: records persisted before this pin
+     may hold a stale latch). When the provider is alive but the
+     relay is down, `stuck-cleared` / `maintenance-completed` hand
+     the arc to this suspension with the latch preserved, so a
+     later `relay-recovered` restores it.
+   - Approval events during a provider-demoted suspension are
+     rejected (`TransitionError`, state preserved): a dead box does
+     not advance. The operator path is reprovision.
+   - A `relay-failure` arriving while already suspended refreshes
+     the suspension `detail` when a *different* one is supplied
+     instead of raising — a duplicate suspension signal is not an
+     error — and the refresh bumps `status_updated_at` (the served
+     body changed). A detail-less re-entry, or one repeating the
+     current detail, is a pure no-op.
+   - A `relay-down` arriving while already suspended is a pure
+     boolean flip: it carries no detail to refresh with.
+   - `relay-recovered` does not touch `relay_reachable`: the
+     instrument's recovery signal is authoritative for its own
+     layer, and the boolean is the S2 BoxStatus input — the producer
+     must send a separate `relay-reachable` event to flip it back.
+   - `provider-dead` / `relay-down` at `provisioning` change only
+     the booleans (rule 1(a) hold); on terminal/operator codes and
+     on `box-unhealthy` they change only the booleans (a verdict
+     already ended the arc; an unhealthy arc keeps its sub-code).
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
    `provisioning` (operator reprovision), `provisioning-failed` →
@@ -182,7 +222,9 @@ and feeds *into* this endpoint; it is never exposed raw, per
 - `status` — one of the §2 machine codes, exactly spelled (hyphens, no
   casing variants — the poll is machine-read).
 - `status_updated_at` — ISO-8601 UTC of the last transition. Pollers use
-  it, not their own clocks, to decide "the flip happened".
+  it, not their own clocks, to decide "the flip happened". Never empty
+  when `created_at` is present: a fresh arc defaults
+  `status_updated_at` to `created_at` (#1468).
 - `approvals_url` — **the G3 carrier**: the URL handed to the human at
   signup stage 2 (`FIRST_TEN_MINUTES_SPEC.md` §4) and read by the Muse at
   minute 4–5. The field is **non-null from signup stage 2 on** — the spec
