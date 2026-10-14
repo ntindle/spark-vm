@@ -388,8 +388,16 @@ def test_forget_intent_checked_before_intake_gate():
         assert wp.process_inbound(service, raw, auth="pass",
                                   inbox_addr=INBOX)["outcome"] == "accepted"
     assert service.by_email.get("o0@example.com")
-    forget_raw = make_msg("a@example.com", "Owner: o0@example.com\n"
-                                           "please forget me")
+    # #1482 deliberate precedence: with BOTH signals present (an
+    # explicit Owner: line AND forget intent), the Owner: line wins —
+    # the message is a signup, not a deletion request. a@example.com
+    # burned the 3/day budget above, so this lands on the intake gate,
+    # not the forget path.
+    both_raw = make_msg("a@example.com", "Owner: o0@example.com\n"
+                                         "please forget me")
+    result = wp.process_inbound(service, both_raw, auth="pass",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "intake_limited"
     # o0's owner is o0@example.com, not the sender — craft the owned row:
     owned = make_msg("b@example.com", "Owner: b@example.com")
     wp.process_inbound(service, owned, auth="pass", inbox_addr=INBOX)
@@ -427,6 +435,40 @@ def test_forget_intent_negation():
     assert not wp.detect_forget_intent("hi", "do not forget me, thanks")
     assert not wp.detect_forget_intent("hi", "never forget me")
     assert wp.detect_forget_intent("hi", "please forget me")
+
+
+def test_forget_mention_in_signup_body_does_not_hijack():
+    # #1482: a signup whose body mentions the forget feature must not be
+    # routed into the forget flow. Owner extraction runs before the
+    # forget check, so the candidate wins and the message is a signup.
+    service, tmp, clock = make_service()
+    raw = make_msg("muse@example.com",
+                   "Owner: owner@example.com\n"
+                   "How does the forget me flow work?")
+    result = wp.process_inbound(service, raw, auth="pass",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "accepted"
+    # Not the forget flow: no forget_request spooled, a confirm opener is.
+    kinds = [d.get("kind") for d in spool_docs(tmp)]
+    assert "forget_request" not in kinds
+    assert "confirm" in kinds
+
+
+def test_forget_mention_in_resubmit_body_does_not_hijack():
+    # #1482: same, on a re-submit — the outcome is a re-submit, not a
+    # forget confirmation.
+    service, tmp, clock = make_service()
+    first = make_msg("muse@example.com", "Owner: owner@example.com")
+    assert wp.process_inbound(service, first, auth="pass",
+                              inbox_addr=INBOX)["outcome"] == "accepted"
+    again = make_msg("muse@example.com",
+                     "Owner: owner@example.com\n"
+                     "Remind me how the forget-me link works?")
+    result = wp.process_inbound(service, again, auth="pass",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "resubmitted"
+    kinds = [d.get("kind") for d in spool_docs(tmp)]
+    assert "forget_request" not in kinds
 
 
 def test_load_config_missing_env(monkeypatch):

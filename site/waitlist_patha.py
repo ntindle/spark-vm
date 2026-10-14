@@ -34,8 +34,10 @@ primary) on top of waitlistd.WaitlistService:
       forgeable, that's a deletion oracle). The confirmation goes to the
       row's owner — the signed link (proving inbox access), not the
       From, is what authorizes the deletion. Forget intent is checked
-      BEFORE the per-sender intake gate: a spam-prevention limit must
-      never swallow a deletion request;
+      AFTER owner extraction (a message naming an owner candidate is a
+      signup, not a deletion request — #1482) but BEFORE the per-sender
+      intake gate: a spam-prevention limit must never swallow a deletion
+      request;
     - per-sender rate limit: 3 submissions / sender / day (§6).
 
 The parser never authenticates mail itself: the operator's inbound reader
@@ -245,12 +247,17 @@ def process_inbound(service, raw, *, auth, inbox_addr):
       "triage"                silent triage (unauthenticated or garbage);
                               outcome["reason"] + ["triage_file"] say why
 
-    Forget intent is checked BEFORE the intake gate (§5's deletion right
-    outranks the §6 spam budget): a sender who burned their 3/day and
-    then says "forget me" still gets the confirmation email. The intake
-    limit itself is enforced atomically inside submit_email (check +
-    ledger record under the lock), so process_inbound never pre-checks.
-    Clarification/triage replies do not consume intake budget.
+    Owner extraction is checked first: a message that names an owner
+    candidate is a signup (or re-submit), even when it also mentions
+    "forget me" — the old forget-first order hijacked such signups
+    into the forget flow (#1482). Forget intent is checked only when
+    extraction yields nothing, and still BEFORE the intake gate (§5's
+    deletion right outranks the §6 spam budget): a sender who burned
+    their 3/day and then says "forget me" still gets the confirmation
+    email. The intake limit itself is enforced atomically inside
+    submit_email (check + ledger record under the lock), so
+    process_inbound never pre-checks. Clarification/triage replies do
+    not consume intake budget.
     """
     if auth not in ("pass", "fail"):
         raise ValueError(f"auth must be 'pass' or 'fail', got {auth!r}")
@@ -264,10 +271,37 @@ def process_inbound(service, raw, *, auth, inbox_addr):
         service.triage_inbound(raw, "no usable From address")
         return {"outcome": "triage", "reason": "no_from"}
 
+    # (#1482) Owner extraction runs BEFORE the forget check: a message
+    # that names an owner candidate is a signup (or re-submit), never a
+    # deletion request. The old forget-first order let any non-negated
+    # "forget me" substring — e.g. "how does the forget me flow work?" —
+    # hijack a signup into the forget flow (live row → a confusing
+    # forget-confirmation email; no row → triaged, the signup silently
+    # swallowed). Only when extraction yields nothing does the parser
+    # check forget intent.
+    owner = extract_owner_candidate(body, from_raw, inbox_addr)
+    if owner is not None:
+        outcome, row = service.submit_email(
+            owner=owner, sender=sender, inbound_auth=(auth == "pass"),
+            pubkey=extract_pubkey(body), usecase=extract_usecase(body))
+        if outcome == "intake_limited":
+            triaged = service.triage_inbound(
+                raw, "per-sender intake limit (3/day)")
+            return {"outcome": "intake_limited", "triage_file": triaged}
+        result = {"outcome": {"created": "accepted"}.get(outcome, outcome),
+                  "entry_id": row["entry_id"] if row else None}
+        return result
+
     # The §5 forget path: a reply saying "forget me" is never honored on
     # its own — it triggers the confirmation email with the signed link.
-    # Checked before the intake gate: a deletion request must never be
-    # swallowed by a spam-prevention limit.
+    # Checked after owner extraction but before the intake gate: a
+    # deletion request must never be swallowed by a spam-prevention
+    # limit. (A genuine deletion reply normally carries no owner
+    # candidate — the From address is excluded from the heuristic
+    # candidate scan — but an explicit `Owner:` line beats forget intent
+    # by design: the override deliberately does not exclude From, so
+    # "Owner: me@example.com / please forget me" is treated as a
+    # signup, not a deletion request.)
     if detect_forget_intent(subject, body):
         outcome, row = service.handle_forget_reply(sender)
         if outcome == "no_row":
@@ -278,28 +312,15 @@ def process_inbound(service, raw, *, auth, inbox_addr):
         return {"outcome": outcome,
                 "entry_id": row["entry_id"] if row else None}
 
-    owner = extract_owner_candidate(body, from_raw, inbox_addr)
-    if owner is None:
-        if auth != "pass":
-            # §2/§6: clarification replies only on DMARC-aligned mail —
-            # unauthenticated mail is silently triaged (no backscatter).
-            triaged = service.triage_inbound(
-                raw, "ambiguous owner candidates, unauthenticated mail")
-            return {"outcome": "triage", "reason": "ambiguous_unauth",
-                    "triage_file": triaged}
-        sent = service.spool_clarification(sender)
-        return {"outcome": "clarified" if sent else "clarification_capped"}
-
-    outcome, row = service.submit_email(
-        owner=owner, sender=sender, inbound_auth=(auth == "pass"),
-        pubkey=extract_pubkey(body), usecase=extract_usecase(body))
-    if outcome == "intake_limited":
+    if auth != "pass":
+        # §2/§6: clarification replies only on DMARC-aligned mail —
+        # unauthenticated mail is silently triaged (no backscatter).
         triaged = service.triage_inbound(
-            raw, "per-sender intake limit (3/day)")
-        return {"outcome": "intake_limited", "triage_file": triaged}
-    result = {"outcome": {"created": "accepted"}.get(outcome, outcome),
-              "entry_id": row["entry_id"] if row else None}
-    return result
+            raw, "ambiguous owner candidates, unauthenticated mail")
+        return {"outcome": "triage", "reason": "ambiguous_unauth",
+                "triage_file": triaged}
+    sent = service.spool_clarification(sender)
+    return {"outcome": "clarified" if sent else "clarification_capped"}
 
 
 def load_config(argv):

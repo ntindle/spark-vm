@@ -223,6 +223,25 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The waitlist signup page is now actually served by the waitlist
+  daemon: `GET /waitlist` returns the signup form through the daemon's
+  standard page headers, so the "Go back" links on the confirmation
+  pages resolve instead of landing on a 404. Previously the site docs
+  claimed the daemon served the page while no such route existed — the
+  claim is now true, and the launch checklist gates the form page with
+  a done criterion (page loads, form posts to the live endpoint,
+  headers verified). (#1485, #1483)
+
+- The email signup parser no longer mistakes a signup that mentions
+  the forget feature for a deletion request: an inbound email that
+  names an owner address is treated as a signup even when its body
+  asks about "forget me" — previously the forget-intent check ran
+  first and hijacked such signups into the deletion-confirmation flow
+  (or silently triaged them when no waitlist row existed). A genuine
+  "forget me" reply — one with no owner address in it — still triggers
+  the deletion-confirmation email, and deletion requests are still
+  never swallowed by the spam limit. (#1485, #1482)
+
 - The README repo-layout table no longer lists a `cred/` directory that
   never existed: the `cred` CLI is a single file at the repo root and
   `credlib/` is the library directory, and the row says so now. A pin
