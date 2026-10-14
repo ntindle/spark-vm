@@ -101,6 +101,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-lane convergence pin (2026-10-14): re-verified the phone-approval buzz leg at today's main — the subscription dashboard half shipped, the plane half is tracked, the digest legs all shipped — and filed the two genuinely-new gaps it found: per-signup VAPID keypair issuance for a fresh tenant plane is unowned, and the service-worker byte-pin the subscription contract asserts has no enforcement mechanism. (#1475, #1476, #1477)
 - The self-update status report now compares the installed Playwright
   browser builds against the list the updater expects: a missing browser
   build shows up as drift with a loud "run `toolset-update.sh update`"
