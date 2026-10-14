@@ -139,24 +139,45 @@ and feeds *into* this endpoint; it is never exposed raw, per
    Not entered from `provisioning` / `provisioning-failed` (no arc to
    suspend yet).
    Liveness-loss transitions (pinned 2026-10-14, #1461/#1462):
-   `provider-dead` on a post-`live` arc (`live`, `waiting-on-approval`,
-   `approved`) demotes to `box-unhealthy` with `detail:
-   box-unhealthy: provider-dead` — a dead box after `live` is
-   `box-unhealthy` (rules 1/2/4); `relay-down` on a post-`live` arc
-   enters this suspension with `detail: relay-down` (the relay-half
-   suspension, distinct from `box-unhealthy`); `provider-dead` during a
-   suspension updates the latch to `box-unhealthy`, so recovery returns
-   the demoted code; `relay-recovered` re-checks `provider_running`
-   against the latch as a backstop (records persisted before this pin
-   may hold a stale latch) and demotes if the provider is dead. A
-   `relay-failure` arriving while already suspended refreshes the
-   suspension `detail` when one is supplied instead of raising — a
-   duplicate suspension signal is not an error.
-   `provider-dead` / `relay-down` at `provisioning` change only the
-   booleans (rule 1(a) hold); on terminal/operator codes they change
-   only the booleans (a verdict already ended the arc). Liveness flips
-   during `stuck` / `maintenance` do not update those latches (known
-   gap, left for a follow-up fix).
+   - `provider-dead` on a post-`live` arc (`live`,
+     `waiting-on-approval`, `approved`) demotes to `box-unhealthy`
+     with `detail: box-unhealthy: provider-dead` — a dead box after
+     `live` is `box-unhealthy` (rules 1/2/4).
+   - `relay-down` on a post-`live` arc enters this suspension with
+     `detail: relay-down` (the relay-half suspension, distinct from
+     `box-unhealthy`).
+   - `provider-dead` during a latch-holding state (suspension,
+     `stuck`, `maintenance`) updates the latch to `box-unhealthy`
+     when the latch is a post-`live` code, so the exit restores the
+     demoted code. A verdict latch (`human-denied`,
+     `human-drop-off`) wins — provider death never rewrites it.
+   - Every latch-restoring exit re-evaluates the latch against
+     liveness inputs: `relay-recovered`, `stuck-cleared`, and
+     `maintenance-completed` demote to `box-unhealthy` when the
+     provider is dead (backstop: records persisted before this pin
+     may hold a stale latch). When the provider is alive but the
+     relay is down, `stuck-cleared` / `maintenance-completed` hand
+     the arc to this suspension with the latch preserved, so a
+     later `relay-recovered` restores it.
+   - Approval events during a provider-demoted suspension are
+     rejected (`TransitionError`, state preserved): a dead box does
+     not advance. The operator path is reprovision.
+   - A `relay-failure` arriving while already suspended refreshes
+     the suspension `detail` when a *different* one is supplied
+     instead of raising — a duplicate suspension signal is not an
+     error — and the refresh bumps `status_updated_at` (the served
+     body changed). A detail-less re-entry, or one repeating the
+     current detail, is a pure no-op.
+   - A `relay-down` arriving while already suspended is a pure
+     boolean flip: it carries no detail to refresh with.
+   - `relay-recovered` does not touch `relay_reachable`: the
+     instrument's recovery signal is authoritative for its own
+     layer, and the boolean is the S2 BoxStatus input — the producer
+     must send a separate `relay-reachable` event to flip it back.
+   - `provider-dead` / `relay-down` at `provisioning` change only
+     the booleans (rule 1(a) hold); on terminal/operator codes and
+     on `box-unhealthy` they change only the booleans (a verdict
+     already ended the arc; an unhealthy arc keeps its sub-code).
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
    `provisioning` (operator reprovision), `provisioning-failed` →
