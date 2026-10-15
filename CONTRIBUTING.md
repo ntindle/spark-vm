@@ -196,8 +196,8 @@ first failure.
 `./scripts/local-gate.sh --quick` runs only the cheap checks (no suite);
 `./scripts/local-gate.sh --plan` prints the steps without running them.
 The two checks the script doesn't run — the markdown link check (no
-practical local equivalent) and the PNG screenshot smoke test (manual
-recipe, see below) — are named in the output, not run.
+practical local equivalent) and the PNG screenshot smoke test (one
+command, see below) — are named in the output, not run.
 
 The seven, with their local form — `local-gate.sh` runs the same checks in
 one invocation (its changed-paths evaluator is the script's CI-verbatim
@@ -279,11 +279,20 @@ replicates the pinned action's file selection — named shell files plus
 extension-less executables with a shell shebang — and is the single
 source of truth for both the gate step and the suite's pin.)
 
-The PNG screenshot smoke test is locally runnable too — CI's own steps are the
-recipe: with the venv activated (see above), `pip install playwright`, then the one-time
-`python3 -m playwright install --with-deps chromium` (installs OS deps,
-escalates internally), then `python3 scripts/pw-test.py` and
-`python3 scripts/png-check.py`.
+The PNG screenshot smoke test is locally runnable too — one command, with the
+venv activated (see above):
+
+```bash
+./scripts/png-smoke.sh
+```
+
+It installs the pinned playwright (`scripts/self_update_pins.conf`) into the
+venv only if the installed version differs, installs the Chromium browser
+(`./scripts/png-smoke.sh --with-deps` forwards `--with-deps` to
+`playwright install`, which installs OS deps and escalates internally), then
+runs `scripts/pw-test.py` + `scripts/png-check.py` — the same scripts CI's
+`png-check` job runs, against the same pin. `./scripts/png-smoke.sh --plan`
+prints the steps without running anything.
 
 Only the markdown link check has no practical local equivalent: lychee
 runs with a long bot-block exclusion list that lives in

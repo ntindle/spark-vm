@@ -76,7 +76,7 @@ the live repo state (see `deploy/rulesets/`). Applying rulesets is an
 owner decision; this script just makes the decision, once made, a single
 command.
 
-## Demo assets: `demo_confirmd.py` / `generate_demo_assets.py` / `pw-test.py`
+## Demo assets: `demo_confirmd.py` / `generate_demo_assets.py` / `pw-test.py` / `png-smoke.sh`
 
 `generate_demo_assets.py` builds the marketing/demo visuals (needs
 Playwright + Chromium; browser versions are pinned in
@@ -84,7 +84,13 @@ Playwright + Chromium; browser versions are pinned in
 `demo_confirmd.py` runs confirmd with demo-only overrides (the
 tailnet-identity auth gate is bypassed because the demo camera is
 localhost). `pw-test.py` takes a screenshot; `png-check.py` asserts it's
-a real PNG.
+a real PNG. `png-smoke.sh` is the one-command entry point for the
+screenshot smoke test: with the CONTRIBUTING.md venv activated it
+installs the pinned playwright (`self_update_pins.conf`) into the venv
+if needed, installs the Chromium browser, then runs `pw-test.py` +
+`png-check.py` — the same scripts CI's `png-check` job runs, against
+the same pin (`./scripts/png-smoke.sh --plan` prints the steps;
+`--with-deps` forwards to `playwright install` for OS deps).
 
 ## Funnel metrics: `funnel_metrics.py`
 
@@ -158,6 +164,7 @@ never drift from what's on disk.
 | `test_lint_changelog_ritual.py` | changelog ritual linter |
 | `test_local_gate.py` | `local-gate.sh` merge-gate runner |
 | `test_parallel_runner_docs.py` | CONTRIBUTING.md + docs/CI.md parallel-runner docs + pytest-xdist dependency |
+| `test_png_smoke.py` | `png-smoke.sh` PNG smoke runner + CI `png-check` playwright pin |
 | `test_pytest_ini_covers_all.py` | `pytest.ini` testpaths reachability |
 | `test_pytest_warning_hygiene.py` | test-output hygiene: no invalid escapes / no bytes env writes |
 | `test_push_lane_decision_numbers.py` | push-lane D-series decision-number uniqueness |

@@ -70,7 +70,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (top GHSA-r73q-gwx2-fpxm, Oct 13). Still no Vercel sandbox
   zero-day CVE/write-up/patch; Baseten's ~$26B round still unclosed;
   AgentComputer still publishes no egress pricing. (#1518)
-
+- One-command PNG screenshot smoke test for contributors: the screenshot
+  check CI runs is now a single command that installs the pinned
+  browser-automation package and the Chromium browser only when needed —
+  and CI's own smoke job now uses that same pinned version instead of
+  whatever is newest, so a new upstream release can't break the smoke
+  with no repo-side change. (#1519)
 - `fleet register` operator identity + release registration (#775 S2):
   the second key narrowing merge-to-main on the update plane. `init`
   pins the provisioned operator key's fingerprint for the store
