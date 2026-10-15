@@ -136,7 +136,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   next tick (nothing is ever skipped, only delayed), and the sweep
   summary's new `digests_truncated` field flags when a tick hit the
   cap — repeated truncation is the operator alert to raise the bound.
-  (#TBD)
+  (#1383, #1525)
 
 - Suspension-latch signal loss during relay outages (#1463): a relay/cert
   suspension (`connection-unreachable`) only recorded the four approval
