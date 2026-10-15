@@ -9,7 +9,7 @@ expiry, operator key via `WAITLIST_HMAC_KEY` — never in the repo), and
 `funnel_events` logging per `docs/FUNNEL_MEASUREMENT.md` §3.4
 (verified parseable by `scripts/funnel_metrics.py`). Slice 3a ships the
 waitlist lifecycle jobs (`site/waitlist_jobs.py` + `scripts/test_waitlist_jobs.py`,
-21 tests): the +7d reminder job and the 14d drop job, run as operator cron
+34 tests): the +7d reminder job and the 14d drop job, run as operator cron
 against the operator data dir with a cross-process data lock so they never
 race the live daemon. The drop deadline is fixed at first submission and
 never refreshed by re-submits; a cap-deferred reminder retries on the next
