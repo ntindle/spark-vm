@@ -66,7 +66,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   after S1 and S2 shipped — the S3 slice (attested event ingestion +
   the signed box-to-plane channel) had no owning issue, so this turn
   filed #1516 for it, carrying the "unattested events may be logged,
-  never gate-consumed" rule as an acceptance item. (#TBD)
+  never gate-consumed" rule as an acceptance item. (#1517)
 
 ### Security
 
