@@ -284,6 +284,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Corrected two more stale test-suite size claims the pin test didn't
+  cover yet: `confirm/`'s README understated its suite (275 tests without
+  the optional `cryptography` package, 320 with it — was 208/253) and
+  the waitlist daemon's README understated its suite (139 tests, was
+  25); both were already wrong the day they were written. The pin test
+  now covers both claims, so the docs can't silently disagree with the
+  code. (#1503)
+
 - The waitlist signup page is now actually served by the waitlist
   daemon: `GET /waitlist` returns the signup form through the daemon's
   standard page headers, so the "Go back" links on the confirmation
