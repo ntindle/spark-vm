@@ -165,7 +165,7 @@ headers, URL query string, URL path, and text/JSON bodies with the real
 value, but only for hosts listed in `/home/swapd/hosts.allow`. Non-listed
 hosts pass through byte-for-byte (a one-line warning is logged, no values).
 Every swap is audit-logged to `/home/swapd/swap.log` as
-`ts=<utc> host=<host> swapped=<placeholder>` — never values.
+`ts=<utc> host=<host> swapped=<placeholder> flow=<id>` — never values (`flow=` is the mitmproxy flow id, joining swap lines to the flow's egress verdict; `-` when no flow is in scope).
 
 Secret files live in `/home/swapd/secrets/` (0700, swapd-only — enforced by
 `proxy/deploy.sh` on every deploy; the proxy warns at load if the mode ever
