@@ -415,7 +415,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   operator docs — four were already wrong the day they were written, so
   contributors reading the docs saw the wrong suite size from the start.
   A pin test now fails CI if any claimed count ever drifts from its suite
-  again, so the docs can't silently disagree with the code. (#TBD)
+  again, so the docs can't silently disagree with the code. (#1491)
 
 ### Added
 
