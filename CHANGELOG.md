@@ -50,6 +50,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+
+- `fleet register` operator identity + release registration (#775 S2):
+  the second key narrowing merge-to-main on the update plane. `init`
+  pins the provisioned operator key's fingerprint for the store
+  (write-once: same digest idempotent, a different digest fails closed
+  rather than forking the attribution chain; key rotation stays with
+  issue #1407), and `register` journals the `registration` record
+  under that pinned identity — no `--actor-fingerprint` flag, so the
+  human registration path cannot self-attest a different identity.
+  `show-identity` is the read-only pin display; corrupt pins fail
+  closed as integrity errors. (#775, #TBD)
+
 ### Security
 
 - Suspension-latch signal loss during relay outages (#1463): a relay/cert
