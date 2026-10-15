@@ -94,6 +94,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Queued waitlist emails can no longer be silently dropped by a spool
+  filename race: each send is now published under an exclusive
+  128-bit-entropy name, so two racing sends retry with a fresh name
+  instead of one overwriting the other while the ledger claims it was
+  queued — and an unwinnable race fails loudly rather than losing the
+  send. (#1522)
 - The tenant status page's `detail` field can no longer carry raw
   producer-controlled text: control characters are stripped and the
   field is capped at 256 bytes (ellipsis-truncated) at construction
