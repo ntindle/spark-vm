@@ -18,9 +18,14 @@ post, opened to rule out the tracked SPACE Part II; it is not Part II,
 and it is this cycle's strongest in-window first-party item, filed as
 C84 below). **C11 FILE-ON-CLOSE NOT TRIGGERED** (Baseten ~$26B still in
 talks); C76 NOT advanced; C77 NOT advanced. **Corpus move this cycle:
-2 new filings (C84, C85), 3 folds, watch-doc deltas.** Captures:
-`hidden_files/agent_notes/surveyor-a|b-20261015-0910.md` (loop working
-notes, in the goal workspace — not part of this repo).
+2 new filings (C84, C85), 2 folds (3 folded items), watch-doc
+deltas.** Captures:
+`hidden_files/agent_notes/surveyor-a|b-20261015-0910.md` +
+`hidden_files/agent_notes/integrator-reads-20261015-0910.md` (the
+integrator's E2B Secrets, Agent37 pricing-blog, and Hugo-advisories
+full-page reads — provenance for the VENDOR-VERIFIED claims no
+surveyor capture covers). Loop working notes, in the goal workspace
+— not part of this repo).
 
 > **Timestamp provenance note:** the standing rule (no per-read times
 > in capture bodies) held this cycle. All verdicts below are
@@ -29,8 +34,9 @@ notes, in the goal workspace — not part of this repo).
 > **Count-honesty check:** surveyor A's self-reported header (17
 > VERIFIED NO-CHANGE, 1 DELTA, 1 UNVERIFIED) reconciles exactly with
 > its 18 item enumerations and its fetch stats (19 successful fetches
-> + 1 established 404 = 20 opens; the 21st open is a second render of
-> item 4b for a label question, documented in the capture). The
+> + 1 established 404 + 1 transport-failure open = 21 opens; the 4b
+> second render is one of the 19 successful fetches, and the Hugo
+> empty-body fetch is the transport-failure open). The
 > integrator's Hugo advisories re-read (this cycle, successful,
 > single first-try fetch) resolves the UNVERIFIED item to VERIFIED
 > NO-CHANGE — the effective A-lane score is 18 VERIFIED NO-CHANGE, 1
