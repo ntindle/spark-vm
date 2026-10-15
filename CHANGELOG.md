@@ -92,6 +92,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   filed #1516 for it, carrying the "unattested events may be logged,
   never gate-consumed" rule as an acceptance item. (#1517)
 
+### Fixed
+
+- Update journal operator reference: two precision corrections — the
+  chain rule now says registrations in the same library batch count
+  (the CLI journals one record per invocation, so the walk-through
+  chains across separate calls), and a drift between the module and the
+  doc is now recorded as a defect to resolve deliberately, never
+  silently blessed. The "not shipped yet" line for the fleet
+  registration CLI is updated now that it shipped. (#1505, #TBD)
+
 ### Security
 
 - Suspension-latch signal loss during relay outages (#1463): a relay/cert
