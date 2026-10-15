@@ -27,7 +27,20 @@ and hard delete-on-expiry. Revocation propagates within one refresh
 cadence (`max(300 s, ttl/3)`); the server-side `vend_audit` records
 every mint, refresh, revoke, and manifest write/read with no values.
 The self-hosted no-plane configuration works exactly as today (the §6
-dual-mode seam). Acceptance is the contract's §10 ten-item checklist.
+dual-mode seam). Acceptance is the contract's §10 twelve-item checklist.
+
+**2026-10-15 amendment (D-VD11 carry-through — #1402 / #1486 / #1498;
+gap turn slot 20261015-0159):** the "current+grace classes" phrasing in
+the first paragraph above predates the settled decision. The vend
+endpoint's **mint path requires a `current` box token** — a `grace`
+(post-rotation) token presented for issuance mints nothing and reads
+`401` with a rotation-naming message (contract §2.1b, §10 item 11).
+`grace` stays accepted on the non-secret-issuing box routes per the
+#952 precedent. The contract is authoritative on the gate; the rest of
+this doc's build guidance is unchanged. (Original phrasing kept for
+provenance. The 2026-10-13 convergence pin recorded the supersession in
+its own text without amending this document — this amendment closes
+that gap.)
 
 ## 2. What moved since the contract pin (2026-10-03 `35485f1`)
 
@@ -160,6 +173,13 @@ dual-mode seam). Acceptance is the contract's §10 ten-item checklist.
   Unknown/expired/revoked → 401; the #846 ±300 s window applies to
   token expiry checks. (The #952 gate is the precedent; the vend
   endpoint is its second application.)
+  **[Amended 2026-10-15 — D-VD11 carry-through (#1402 closed, #1486,
+  #1498; gap turn slot 20261015-0159):]** D-V2 as written above is
+  superseded for the **mint path**: issuance requires a `current`
+  token; a `grace` token mints nothing (contract §2.1b, §10 item 11).
+  What survives of D-V2 is the shared box-auth gate shape (no-oracle
+  401s, the #846 ±300 s expiry window, the #952 filing-endpoint
+  precedent). Original text retained for provenance.
 - **D-V3 — `credential_kill` is a plane-produced durable-command
   kind.** Until it ships, the contract's TTL cap remains the kill
   bound — honest sequencing, no silent upgrade of the revocation
