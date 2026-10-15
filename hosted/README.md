@@ -165,7 +165,7 @@ flag is the retirement hook for #958's Durable Object alarms. One
 clock reading per sweep, threaded through every pass. The per-minute
 cron trigger registration on the plane (D66/D72) is tracked in #1069.
 
-Tested by `test_push_sweep.py` (42 tests, neutering-verified
+Tested by `test_push_sweep.py` (47 tests, neutering-verified
 non-vacuous): due reminder pages exactly once; decided/expired
 approvals page zero times with zero audit rows; terminal-by-clock
 selections write exactly one idempotent audit row; corrupt records
