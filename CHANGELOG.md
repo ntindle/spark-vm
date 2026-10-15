@@ -52,6 +52,20 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Suspension-latch signal loss during relay outages (#1463): a relay/cert
+  suspension (`connection-unreachable`) only recorded the four approval
+  events into the latch — the other three arc-advancing events
+  (`smoke-report-failed`, `gate-policy-misfire`, `pilot-no-gated-action`)
+  raised `TransitionError` instead, so a smoke failure or gate/pilot
+  verdict landing mid-suspension was lost to any producer that did not
+  retry. The latch-swap path now routes all seven arc-advancing events
+  (the doc's §2 rule 6 always promised this), with the move licensed
+  from the *latched* code and state preserved on rejection. The same pin
+  makes nested suspensions mutually exclusive and explicit: one latch per
+  arc, so a second latch-holding entry (e.g. `relay-failure` during
+  `stuck`, `operator-mark-stuck` during `connection-unreachable`) fails
+  closed instead of composing silently. (#1463, #1513)
+
 - The tenant-status endpoint can no longer be wedged by a corrupt box
   record: an arc whose suspension latch is missing or is itself a
   suspension code used to crash multi-box selection (and every store
