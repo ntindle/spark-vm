@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   plane-side encryption primitive stays `aes-128-gcm` — the algorithm
   the stdlib-only worker can actually implement. The acceptance
   checklist gains matching denial-worded items, so the #890 plane
-  builder inherits the pins as testables. (#1401, #1402, #1403, #TBD)
+  builder inherits the pins as testables. (#1401, #1402, #1403, #1498)
 
 - The browser-driver now gives every action an explicit 30-second default
   timeout when none is supplied: an omitted `timeout_ms` used to mean
