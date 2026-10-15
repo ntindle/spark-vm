@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   under that pinned identity — no `--actor-fingerprint` flag, so the
   human registration path cannot self-attest a different identity.
   `show-identity` is the read-only pin display; corrupt pins fail
-  closed as integrity errors. (#775, #TBD)
+  closed as integrity errors. (#775, #1514)
 
 ### Security
 
