@@ -536,6 +536,8 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
         # the stuck/maintenance exits): provider death discovered while
         # stuck/in maintenance demotes the latch, so the exit restores
         # box-unhealthy instead of a live code the dead provider no
+        # longer supports. The constant literal still rides the scrub so
+        # the choke-point claim holds at every assignment site (#1466:
         # no-op by content, load-bearing as discipline).
         arc.latched = "box-unhealthy"
         arc.latched_detail = scrub_detail("box-unhealthy: provider-dead")
