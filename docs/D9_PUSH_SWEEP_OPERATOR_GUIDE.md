@@ -330,7 +330,7 @@ print(s)  # quiet sweep: empty maps, watchers {"skipped": True}
   the other watcher still runs.
 
 The repo's own suite is `python3 -m pytest hosted/test_push_sweep.py`
-(42 tests, neutering-verified non-vacuous) — run it after any change
+(47 tests, neutering-verified non-vacuous) — run it after any change
 to the sweep or its tables.
 
 ## 11. Known non-goals
