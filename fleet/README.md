@@ -73,6 +73,18 @@ box. No new box-side daemon, no new inbound port, no control plane.
   same discipline as inventory.py. Stdlib only.
 - `test_update_journal.py` — hermetic suite (run with `python3 -m pytest
   fleet/test_update_journal.py`).
+- `register.py` — operator identity pin + release registration (S2,
+  #775): `init` pins the provisioned operator key's fingerprint for
+  the store (write-once — same digest idempotent, different digest
+  fails closed; key rotation is issue #1407's design, not a silent
+  overwrite) and `register` journals the `registration` record under
+  that pinned identity (no `--actor-fingerprint` flag — the
+  registration path cannot self-attest a different identity;
+  delegates record validation and chaining to S1 and prints the
+  generated `registration_ref`); `show-identity` is the read-only pin
+  display. Corrupt pins fail closed as integrity errors. Stdlib only.
+- `test_register.py` — hermetic suite (run with `python3 -m pytest
+  fleet/test_register.py`).
 - `plane_waves.py` — rollout-controller wave assignment + promotion: the
   controller's brain (S2, #1285). `assign` computes wave assignments for
   a pinned template release (wave 0 is the canary — only explicitly
