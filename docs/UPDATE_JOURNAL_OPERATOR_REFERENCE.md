@@ -9,10 +9,7 @@ register` CLI, S3's attested ingestion) and the retention/tenant-read
 story (G19, #660) live in that doc's §5 and §6.
 
 Pinned to `fleet/update_journal.py` as merged on main `861b8ce`
-(2026-10-15). If the module's behavior drifts from this doc, the
-module wins and this doc needs a correction, not the other way around —
-every behavior claim below was exercised against the shipped CLI in a
-scratch store.
+(2026-10-15). If the module's behavior drifts from this doc, treat it as a defect in one of the two: fix the module when it breaks the documented contract, correct the doc when the behavior was deliberately changed and reviewed — never silently. Every behavior claim below was exercised against the shipped CLI in a scratch store.
 
 ## 1. What it is
 
@@ -161,8 +158,7 @@ shadowing each other is an attribution hazard in both directions.
 - **The chain is checked at append time.** Every record that cites a
   `registration_ref` must cite a registration already in this store
   under the same tenant — a reimage citing `reg-deadbeef` journals
-  nothing and exits 2. Registrations earlier in the same batch count,
-  so a register-then-chain sequence in one call works. Tenant scoping
+  nothing and exits 2. Registrations earlier in the same `append_records` batch count (library callers); the CLI appends one record per invocation, so the walk-through chains across sequential `append` calls. Tenant scoping
   crosses the chain too: a ref registered for tenant A is dangling
   for tenant B.
 - **`freeze`/`unfreeze` carry no ref.** They are operator-level,
@@ -227,7 +223,7 @@ plane) and the attestation requirement on the ingest path (S3,
 - **Not the retention policy.** How long records are kept and who
   may read them — G19 (#660), `UPDATE_AUDIT_RETENTION_AND_ACCESS.md`.
 - **Not the registry.** S2's `fleet register` CLI and operator
-  identity model are #775's next slice, not shipped yet.
+  identity model shipped (PR #1514); see `fleet/register.py`.
 - **Not the attested ingest.** S3's signed box→control-plane event
   channel is #775's remaining half.
 - **Not a gate.** Nothing here is consumed by an automated gate
