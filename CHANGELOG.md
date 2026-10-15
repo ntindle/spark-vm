@@ -151,6 +151,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The fleet's update journal now exists before the scheduler does: an
+  append-only audit log on the control plane records every update
+  decision — release registrations, wave assignments, promotions,
+  reimages, maintenance windows, freeze/halt overrides — plus the
+  deferred/skipped lines that prove a box was *not* updated and why, so
+  a silent absence can never read as success. Every entry carries the
+  authorizing operator's key fingerprint (never a bare name) and chains
+  back to the registration that authorized it, so a reimage can always
+  be traced to the human decision that allowed it. Malformed or
+  unattributed entries are refused loudly and never journaled.
+  (#775, #TBD)
 - Owner-visible alerting contract for the hosted lane: a new reference doc maps the eight alert classes an owner can hit — the six shipped push-lane mappings (approval filed, reminder, digest, heartbeat-stale, box-revoked, token-expiry warning) plus the two open gap classes (provisioned-but-never-paired #1214, phone-home channel dead while the heartbeat keeps flowing #1489) — with the dashboard-chip vs push-page vs digest channel matrix, the page-budget and dedup discipline that keeps a wedged box from spamming, and six pinned decisions including that heartbeat-only liveness stays the dashboard's sole freshness signal. (#1493)
 - Provisioned-image healthy-box verification + alerting contract: the pairing README's systemd/cron checklists now have a supervisord-shaped variant for provisioned boxes — expected `supervisorctl status` states per program (RUNNING for the three wired pairing programs, EXITED-by-design for the data-prep/identity-seed one-shots and the exit-1 human-attention daemon death, FATAL-after-crash-loops as the page trigger), the tick-failure signal map (`/var/log/pair-*.log` as the cron-redirect analogs, the `pair-*` log-path correction), and the heartbeat-only liveness pin carried over verbatim. (#1273, #1488)
 - Push-lane convergence pin (2026-10-14): re-verified the phone-approval buzz leg at today's main — the subscription dashboard half shipped, the plane half is tracked, the digest legs all shipped — and filed the two genuinely-new gaps it found: per-signup VAPID keypair issuance for a fresh tenant plane is unowned, and the service-worker byte-pin the subscription contract asserts has no enforcement mechanism. (#1475, #1476, #1477)
