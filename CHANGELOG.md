@@ -57,6 +57,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `@e1` locator twice is refused instead of leaving a `click @e1`
   ambiguous, so a duplicated locator can never act on the wrong
   element. (#1450, #1494)
+- The browser-driver now caps the accessibility tree it will accept: a
+  node whose accessible name, role, or frame label exceeds the
+  1 MiB page-string bound is rejected, and a tree wider than 50,000
+  total nodes is refused — previously a hostile page could hand the
+  driver a multi-megabyte tree with no protocol-level bound, wedging
+  its memory. Oversized trees are rejected outright, never truncated,
+  so the agent never acts on a silently partial view of the page.
+  (#1451, #1496)
 - Rejection errors for malformed browser-driver calls can no longer be
   forged into multi-line log entries: parameter keys and action names
   containing newlines or control characters are backslash-escaped
