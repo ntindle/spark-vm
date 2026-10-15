@@ -151,7 +151,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- The credential-vending lane's vision-vs-state picture is current again: the new vend-lane convergence note reconciles the three closed security gates (the no-oracle auth rule, the current-token-only mint gate, the pinned encryption primitive) with the four still-open pre-build gates (placement shape, the mint rate-limit mechanism, two-table write atomicity, key-rotation execution path), amends the design doc that still prescribed the losing side of the token-state decision, and files one new gap — the server-side vend audit should attribute box actors by key fingerprint the way the update journal does, not by a bare name. (#TBD)
+- The credential-vending lane's vision-vs-state picture is current again: the new vend-lane convergence note reconciles the three closed security gates (the no-oracle auth rule, the current-token-only mint gate, the pinned encryption primitive) with the four still-open pre-build gates (placement shape, the mint rate-limit mechanism, two-table write atomicity, key-rotation execution path), amends the design doc that still prescribed the losing side of the token-state decision, and files one new gap — the server-side vend audit should attribute box actors by key fingerprint the way the update journal does, not by a bare name. (#1501)
 
 - The fleet's update journal now exists before the scheduler does: an
   append-only audit log on the control plane records every update
