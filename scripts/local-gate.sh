@@ -6,7 +6,7 @@
 # by scripts/test_contributing_ci_gates.py). Six of the eight run in this
 # script in order; it fails on the first failure. The other two are named
 # in the output, not run: the markdown link check has no practical local
-# equivalent, and the PNG screenshot smoke test is a manual recipe
+# equivalent; the PNG screenshot smoke test runs via scripts/png-smoke.sh
 # (see CONTRIBUTING.md).
 #
 # Usage:
@@ -38,7 +38,7 @@
 #                             no docs-only carve-out)
 #   6. python tests          (python3 -m pytest, unless docs-only or --quick)
 #   7. markdown link check   (no local equivalent — named, not run)
-#   8. PNG screenshot smoke  (manual — recipe named, not run; needs a browser install)
+#   8. PNG screenshot smoke  (./scripts/png-smoke.sh — pinned; named, not run)
 #
 # Environment:
 #   LOCAL_GATE_NO_CD=1  — do not cd to the repo root first (tests use this
@@ -154,9 +154,8 @@ local-gate plan (nothing executed):
   6. python tests          — python3 -m pytest (skipped on --quick or docs-only)
   7. markdown link check   — no local equivalent (see CONTRIBUTING.md); check
                              the CI run on your PR instead
-  8. PNG screenshot smoke test — manual (see CONTRIBUTING.md: pip install
-                             playwright, playwright install chromium, then
-                             python3 scripts/pw-test.py + png-check.py)
+  8. PNG screenshot smoke test — ./scripts/png-smoke.sh (pinned playwright;
+                             named, not run — see CONTRIBUTING.md)
 EOF
 }
 
@@ -219,4 +218,4 @@ else
   python3 -m pytest
 fi
 
-echo "=== local-gate: PASS (markdown link check has no local equivalent; PNG smoke test is manual — see CONTRIBUTING.md; check the CI run on your PR for both) ==="
+echo "=== local-gate: PASS (markdown link check has no local equivalent; PNG smoke test via ./scripts/png-smoke.sh — see CONTRIBUTING.md; check the CI run on your PR for both) ==="

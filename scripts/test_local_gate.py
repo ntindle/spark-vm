@@ -57,10 +57,11 @@ def test_inventory_every_item_named_in_gate_script():
             assert "no local equivalent" in script or "no practical local equivalent" in script
             continue
         if item == "PNG screenshot smoke test":
-            # Manual-only (needs a browser install): must be named in the
-            # plan output with the recipe pointer, never silently dropped.
+            # One-command runner (scripts/png-smoke.sh), named but not
+            # executed by the gate: must be named in the plan output with
+            # the runner pointer, never silently dropped.
             assert item.lower() in script, "PNG smoke test dropped from the script"
-            assert "manual" in script
+            assert "png-smoke.sh" in script
             continue
         assert item.lower() in script, (
             f"merge-gate check {item!r} not named in scripts/local-gate.sh — "

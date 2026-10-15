@@ -651,7 +651,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: |
-          pip install playwright
+          # Pinned to scripts/self_update_pins.conf's playwright pin (the
+          # version the agent smoke tests were validated against) — an
+          # unpinned install floats on upstream releases. scripts/
+          # test_png_smoke.py fails if this pin drifts from the conf.
+          pip install "playwright==1.62.0"
           # --with-deps installs OS deps itself (escalates internally); a sudo
           # install-deps line would fail since root's Python lacks the runner
           # user's site-packages.
