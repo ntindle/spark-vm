@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Packaging gap analysis (2026-10-15): pinned the gap between spark-vm's
+  release machinery and an actual install story — releases are cut and tagged,
+  but there is no published artifact, no installer script, and no
+  version-pinned install path — with four build slices filed (installer
+  script, version-pinned install, installer provenance manifest, and the
+  one-release-truth design question). (#1530)
 - Cycle-71 competitor watch (2026-10-15): a full pass over the
   tracked agent-sandbox vendors — two new vendor-confirmed entries:
   Perplexity's "How SPACE routes requests to the right sandbox
