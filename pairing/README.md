@@ -504,10 +504,11 @@ hourly.
 | 5 | `phone-home` (#959/#976) | **daemon** under systemd — never cron | `.phone-home.lock` — flock EX, non-blocking, held for the daemon's life (a second instance exits instead of forking the generation counter) | `phone_home.log` in the state dir — connection-lifecycle events only, never per-keepalive pings | `phone_home_generation.json` (crash-safe durable generation counter) | exit 0 = clean stop on SIGTERM/SIGINT (no restart); exit 1 = deliberate human-attention exit (revoked token, protocol errors — the supervisor never restarts these); exit 2 = unexpected crash (uncaught exception — restarts under `on-failure`) |
 
 Known rough edges the checklist works around (not gaps in this doc):
-the failure logs are append-only and unbounded — bound them with
-logrotate or your aggregator until in-code bounding lands (#1020); a
-daemon restart resets the reconnect backoff to 1 s (accepted residual,
-#1022).
+the state-dir failure logs are capped at 1 MiB with single-generation
+rotation (D21, #1020 — the in-code bounding the earlier "unbounded"
+note waited on has landed; the supervisord outer logs rotate at
+10MB×5); a daemon restart resets the reconnect backoff to 1 s (accepted
+residual, #1022).
 
 ### Install checklist (fresh box)
 
@@ -578,6 +579,154 @@ daemon restart resets the reconnect backoff to 1 s (accepted residual,
   Never "fix" monitoring by watching the socket or the daemon's systemd
   state — a wedged-but-connected box is exactly the fake-liveness class
   the heartbeat contract was built to refuse.
+
+### Verification (healthy box) — provisioned image (supervisord)
+
+On a provisioned image there is no systemd and no cron: tini is PID 1
+and supervisord owns the daemons
+(`deploy/golden-image/supervisord.conf`). The two checklists above do
+not translate verbatim. The three pairing programs wired on the image
+today are `pair-heartbeat` (the every-minute heartbeat loop),
+`pair-rotate` (the hourly `rotate --auto` loop), and `pair-phone-home`
+(the persistent WSS daemon) — all as the `sparkpair` pairing-state
+service user, each inside `pair-tick-wrapper.sh`'s D-RW5 unenrolled-skip
+gate. `ingest` and `upload-filings` are NOT wired on the image yet
+(#1363 owns the store-access design they need), so this contract checks
+three pairing programs, not five — a checklist that demanded five
+RUNNING programs would fail on every real box.
+
+The pairing state dir on the image is `/home/sparkpair/.config/spark-pair`
+(HOME=`/home/sparkpair` under supervisord; 0700, `enrollment.json`
+0600). Run the checks below as root.
+
+#### Expected process states (`supervisorctl status`)
+
+| Program | Healthy state | Notes |
+|---|---|---|
+| `pair-heartbeat`, `pair-rotate` | RUNNING | The wrapper loops never exit on tick failure (cron semantics: the next tick retries). A RUNNING program whose ticks are failing is still RUNNING — tick failures surface in the logs below, never in process state. |
+| `pair-phone-home` | RUNNING | Post-redeem: the daemon. Pre-redeem: RUNNING inside the wrapper's sleep-poll gate (the gate execs the daemon only once `enrollment.json` lands). |
+| `pair-phone-home` | EXITED | After an exit-1 (revoked token, `superseded-generation`, identity-mismatch / protocol errors) — the supervisor stays dead **by design**; this is the human-attention class, never a restart target (see below). A stable EXITED can also be a clean exit-0 stop (e.g. a controlled SIGTERM); `supervisorctl status` does not say which — disambiguate via `phone_home.log`. |
+| `data-prep`, `identity-seed` | EXITED | One-shots with `autorestart=false`; EXITED is their healthy state, not a page — with the caveat that EXITED cannot distinguish a failed one-shot from a successful one. If a box never enrolls, read `/var/log/data-prep.err.log` and `/var/log/identity-seed.err.log` for their loud failures (both scripts log to stderr, so their stdout logs are expected-empty). |
+| any pairing program | FATAL | **Page.** supervisord FATALs a program after `startretries=3` quick crash-loops — the systemd restart-loop analog, and a real delta from a restart-forever unit. |
+
+The image's other programs (`sshd`, `swap-proxy`, `swap-inference`,
+`confirmd`, `push-worker`, `cred-ui`, `cua-*`) follow the same
+supervisord grammar; this contract covers the pairing ensemble.
+
+#### Verification checklist
+
+1. The three pairing programs are RUNNING (or `pair-phone-home` is
+   EXITED in the human-attention class):
+   `supervisorctl status pair-heartbeat pair-rotate pair-phone-home`
+2. The state dir holds `enrollment.json` (0600) plus the lock, log,
+   and lifecycle files the image-world runtime actually writes:
+   `.heartbeat.lock`, `.rotate.lock`, `.phone-home.lock`,
+   `heartbeat.log`, `phone_home.log`, `last_heartbeat.json`.
+   (`commands_cursor.json` belongs to the ingest path, which is not
+   wired on the image until #1363 — it joins this check with the
+   ingest leg.) `last_heartbeat.json`'s `last_ok_at` is younger than a
+   few minutes — the fleet dashboard marks a box stale after 300 s
+   (post-redeem only; an unenrolled box has no heartbeat yet).
+3. The failure logs are silent: the state dir's `heartbeat.log` grows
+   only on failure, so new lines mean something to read (`ingest.log`
+   and `upload-filings.log` join this check when #1363 wires them).
+   The tick failure channels on the image are the supervisord logs:
+   `/var/log/pair-heartbeat.err.log` (the heartbeat tick's `_fail`
+   stderr lines) and `/var/log/pair-rotate.log` (the rotate tick's
+   `rotate FAILED:` stdout lines) — these are the cron-shell-redirect
+   analogs, and they read the `pair-*` paths (deviating from D-RW6's
+   decided `spark-*` names). Steady growth in any of these is the page
+   trigger, verbatim from the hook above.
+4. The daemon is up: `supervisorctl status pair-phone-home` reports
+   RUNNING, and the last line of the state dir's `phone_home.log` is a
+   normal lifecycle event (`connecting (generation N) to …`,
+   `socket lost — reconnecting with backoff …`, or
+   `phone-home starting for box …`) — not a repeated `revoked`,
+   `superseded-generation`, or crash line. (Keepalive pings are answered
+   silently and never appear in the log.)
+5. The token is fresh: `enrollment.json`'s `token_expires_at` is well in
+   the future (a 401 in the rotate output means re-pair, not retry).
+   Read it without printing the token:
+   `python3 -c "import json,time; e=json.load(open('/home/sparkpair/.config/spark-pair/enrollment.json')); print('now:', int(time.time()), 'token_expires_at:', e.get('token_expires_at'))"`
+
+#### Signal map (systemd/cron → image)
+
+| Signal | systemd/cron world | Image world |
+|---|---|---|
+| Tick failure | `/var/log/spark-<tick>.log` (cron shell redirect) + state-dir `<tick>.log` | supervisord `/var/log/pair-heartbeat.err.log` + state-dir `heartbeat.log`; rotate → `/var/log/pair-rotate.log` (the rotate tick prints, it does not `_fail` — there is no state-dir rotate log) |
+| Daemon restart loop | alert on repeated unit restarts | **FATAL** on `pair-phone-home` (crash-loops trip `startretries=3`) |
+| Daemon up | `systemctl is-active spark-phone-home.service` | `supervisorctl status pair-phone-home` → RUNNING |
+| Deliberate human-attention death | unit stays dead on exit 1 | program shows EXITED; `phone_home.log` last line names the cause |
+| One-shot state | n/a | `data-prep` / `identity-seed` EXITED is healthy |
+| Heartbeat freshness | `last_heartbeat.json` | identical (post-redeem only) |
+| Token freshness | `token_expires_at` | identical |
+
+#### Alerting hooks (page vs ignore) — image translation
+
+- **Page:** any pairing program FATAL; any expected-RUNNING pairing
+  program in an unexpected state (BACKOFF or FATAL are the practically
+  observable ones for the `autorestart=true` loops — an unexplained
+  EXITED there is a near-unobservable catch-all; STOPPED is always
+  unexpected — except `pair-phone-home` EXITED, which is the
+  human-attention class); a daemon restart loop that never trips FATAL
+  (crashes slower than `startsecs=5` restart forever without FATAL —
+  watch for uptime churn in `supervisorctl status` and growth in
+  `/var/log/pair-phone-home.err.log`); steady growth in the state-dir
+  `heartbeat.log` or the tick logs (`/var/log/pair-heartbeat.err.log`,
+  `/var/log/pair-rotate.log`); `last_heartbeat.json` older than ~5 min
+  post-redeem (the box is offline to the fleet); `token_expires_at`
+  near or past with rotate failures.
+- **Human, not a restart:** `pair-phone-home` EXITED (exit 1 — revoked
+  token, `superseded-generation`, identity-mismatch / protocol errors,
+  enrollment / rotate failures). The supervisor stays dead on purpose;
+  read `phone_home.log`, re-pair or fix — never a blind
+  `supervisorctl restart`.
+- **Ignore:** `data-prep` / `identity-seed` EXITED; pre-redeem quiet
+  (the wrapper's D-RW5 gate: one loud block per program start in the
+  `/var/log/pair-*.log` stdout logs naming the manual `redeem` step,
+  then quiet until `enrollment.json` lands — #1274); quiet minute ticks
+  (success is silent by design); a single one-off failure line with a
+  clean next tick (transient plane blips heal on the next tick); a 1 s
+  initial backoff right after a daemon restart (in-memory backoff
+  resets — accepted until #1022).
+- **Liveness is heartbeat-only.** The pin from the systemd section holds
+  verbatim: `supervisorctl status` is process health, never fleet
+  liveness. A RUNNING `pair-phone-home` with a stale heartbeat is a
+  dead box; a dropped socket never makes a box "dead" beyond what the
+  heartbeat already says. Never "fix" monitoring by watching the
+  socket or the daemon's supervisord state.
+
+#### Pre-redeem vs post-redeem
+
+Before `redeem` lands there is no `enrollment.json`: the three pairing
+programs sit RUNNING inside the wrapper gate (one loud block each in
+the stdout logs, then quiet), heartbeat freshness and token checks are
+N/A, and unenrolled silence is NOT a page. Steps 2 and 4 of the
+checklist above are also N/A pre-redeem — no `enrollment.json`, no
+lock files (the gated ticks never ran, the daemon never exec'd), and
+no `phone_home.log` exists yet; healthy pre-redeem state is the gate
+RUNNING with no state-dir artifacts. Step 3's empty-or-absent logs are
+the healthy silence. After `redeem`: the full checklist applies; the
+gate re-arms on its own with no restart.
+
+#### Honesty notes
+
+- `ingest` and `upload-filings` are not wired on the image (the
+  supervisord recipe says so, citing #1363). The day #1363 lands, they
+  join the RUNNING check and their `ingest.log` / `upload-filings.log`
+  join the silent-logs check; until then, their absence is expected,
+  not a page.
+- The state-dir failure logs — `heartbeat.log`, `ingest.log`,
+  `upload-filings.log` (the `_fail` family) — are capped at 1 MiB with
+  single-generation rotation (D21, #1020): the "bound them with
+  logrotate" rough edge in the systemd section is closed for these
+  logs. `phone_home.log` is NOT capped — it is a plain append-only
+  lifecycle log, so do not assume it is bounded. The supervisord outer
+  logs rotate at 10MB×5 per `supervisord.conf`.
+- Claims verified against the wired configuration
+  (`deploy/golden-image/supervisord.conf`, `pair-tick-wrapper.sh`, the
+  pairing client): live-box end-to-end verification of the wired
+  runtime is still owed (#1219's remaining slice).
 
 ### Reconciling already-deployed units (F-BD-7)
 

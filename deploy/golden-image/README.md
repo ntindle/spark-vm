@@ -185,7 +185,9 @@ boot presents the token again — the plane 403s the consumed-token replay
 and the hook logs loudly instead of retry-looping); live-box end-to-end
 verification of the wired runtime is still owed (#1219 remaining slice);
 `ingest` + `upload-filings` wiring waits on the store-access design
-(#1363); the healthy-box verification + alerting contract is #1273's slice.
+(#1363); the healthy-box verification + alerting contract shipped as
+pairing/README.md § "Verification (healthy box) — provisioned image
+(supervisord)" (#1273).
 Log-path note (A1): the wired programs log to `/var/log/pair-{heartbeat,
 rotate, phone-home}.log` (10MB×5 rotation), deviating from D-RW6's decided
 names (`/var/log/spark-{heartbeat,rotate}.log`) — #1273's contract must
