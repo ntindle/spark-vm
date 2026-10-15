@@ -153,7 +153,7 @@ Implements the executable half of the R2 pre-seeded-harness contract
   rotation), and `claim-issue` / `claim-redeem` (slice S3: single-use
   claim codes with expiry — the key-loss upgrade path; the code is shown
   once, the store keeps only its hash). Stdlib only, no network. Covered
-  by `test_key_registry.py` (66 tests incl. a threaded contention test,
+  by `test_key_registry.py` (85 tests incl. a threaded contention test,
   stale-lock/corrupt-store fail-closed checks, and the claim-protocol
   suite). Design note:
   `docs/KEY_IDENTITY_REGISTRY.md`.

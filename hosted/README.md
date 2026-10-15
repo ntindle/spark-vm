@@ -70,7 +70,7 @@ proves the Python plane worker can do in-worker Web Push sending with no
 JS interop and no C extensions. Implements ECDH P-256, HKDF-SHA-256,
 AES-128-GCM, and RFC 6979 deterministic ECDSA (for VAPID JWTs, RFC 8292)
 in pure Python, and pins every step against the RFC 8291 section 5 /
-Appendix A worked example in `test_push_crypto.py` (22 tests).
+Appendix A worked example in `test_push_crypto.py` (25 tests).
 
 Result: validated — one full send (ephemeral keygen + ECDH + KDF +
 AES-GCM + VAPID sign, 200 B payload) costs ~38 ms on the loop's dev VM,
@@ -129,7 +129,7 @@ it returns a `PushResult`, never sleeps, never logs).
   unmeasured, and this is the load-bearing input to the
   inline-vs-outbox decision (#990).
 
-Tested by `test_push_sender.py` (43 tests, neutering-verified
+Tested by `test_push_sender.py` (36 tests, neutering-verified
 non-vacuous) against a stub push service; the stub speaks plain HTTP on
 localhost — the difference from production is documented and compensated
 by a dedicated test pinning the production transport's TLS policy.
@@ -165,7 +165,7 @@ flag is the retirement hook for #958's Durable Object alarms. One
 clock reading per sweep, threaded through every pass. The per-minute
 cron trigger registration on the plane (D66/D72) is tracked in #1069.
 
-Tested by `test_push_sweep.py` (19 tests, neutering-verified
+Tested by `test_push_sweep.py` (31 tests, neutering-verified
 non-vacuous): due reminder pages exactly once; decided/expired
 approvals page zero times with zero audit rows; terminal-by-clock
 selections write exactly one idempotent audit row; corrupt records

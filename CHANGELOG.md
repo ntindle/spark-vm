@@ -411,6 +411,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   test shards and image builds), so a wedged job fails in under an hour
   instead of burning the 6-hour runner default. (#1367)
 
+- Corrected six stale test-suite size claims in the component READMEs and
+  operator docs — four were already wrong the day they were written, so
+  contributors reading the docs saw the wrong suite size from the start.
+  A pin test now fails CI if any claimed count ever drifts from its suite
+  again, so the docs can't silently disagree with the code. (#TBD)
+
 ### Added
 
 - `muse-job decide` and `muse-job answer` now work while a job's turn
