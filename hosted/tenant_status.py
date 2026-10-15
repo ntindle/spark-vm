@@ -303,12 +303,27 @@ def _move(arc: BoxArc, target: str, detail: Optional[str] = None) -> None:
 # the same linked-key auth as the poll (§4: the implementation must not
 # invent an unauthenticated report endpoint).
 
-# Arc-advancing events that a relay suspension (rule 6) records into the
-# latch instead of displaying: the approval UI rides the magic-link
-# session, not the relay, so the human can tap Approve/Deny while the
-# suspension is showing.
+# Arc-advancing events routed into the latch instead of the displayed code
+# during a rule-6 relay suspension (#1463): the four approval events (the
+# approval UI rides the magic-link session, not the relay, so the human can
+# tap Approve/Deny while the suspension is showing) plus the three §2
+# arc-advancing events the contract always promised to record — the
+# post-live smoke report, the operator gate verdict, and the pilot verdict.
+# Moves are licensed from the *latched* code per the §2 table: an event
+# unlicensed from the latched code raises TransitionError with the arc
+# state untouched (never dropped, never partially applied — the same
+# fail-closed discipline as the provider-demoted suspension's rejection
+# of approval events).
 _SUSPENSION_LATCH_EVENTS = frozenset(
-    {"approval-filed", "approval-granted", "approval-denied", "approval-expired"}
+    {
+        "approval-filed",
+        "approval-granted",
+        "approval-denied",
+        "approval-expired",
+        "smoke-report-failed",
+        "gate-policy-misfire",
+        "pilot-no-gated-action",
+    }
 )
 
 
@@ -469,7 +484,18 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
             if kw.get("detail") is not None and kw["detail"] != arc.detail:
                 _touch(arc, arc.code, kw["detail"])
             return
+        # #1463: latch-holding states are mutually exclusive — the arc owns a
+        # single latch, so a second suspension never nests or queues. The
+        # operator clears the active one first (or operator-reprovisions
+        # after recovery); provider-dead / relay-down during a suspension
+        # stay boolean/latch-flip-only per the pins above.
         if arc.code not in ("live", "waiting-on-approval", "approved"):
+            if arc.code in SUSPENSION_CODES:
+                raise TransitionError(
+                    f"relay suspension is mutually exclusive with the "
+                    f"active latch-holding state {arc.code!r} — clear it "
+                    f"first"
+                )
             raise TransitionError(
                 f"relay suspension has no arc to suspend from {arc.code!r}"
             )
@@ -518,8 +544,20 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         # Operator-set until G9's S3 confidence bar is met; never exposed
         # as automatic. Latches the arc code for the clear path.
         if arc.code != "live":
+            # #1463: latch-holding states are mutually exclusive — see the
+            # pin on the relay-failure entry above. The mutual-exclusion
+            # suffix applies only when a latch is actually held; from
+            # latch-less codes (e.g. waiting-on-approval) the message stays
+            # the plain entry rule.
+            suffix = (
+                " (latch-holding states are mutually exclusive — clear "
+                "the active one first)"
+                if arc.code in SUSPENSION_CODES
+                else ""
+            )
             raise TransitionError(
                 f"stuck is only settable from a live arc, not {arc.code!r}"
+                f"{suffix}"
             )
         arc.latched = arc.code
         arc.latched_detail = arc.detail
@@ -540,8 +578,18 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         # Muse), only from live/approved. Detail: "maintenance:
         # <operation>".
         if arc.code not in ("live", "approved"):
+            # #1463: latch-holding states are mutually exclusive — see the
+            # pin on the relay-failure entry above. The mutual-exclusion
+            # suffix applies only when a latch is actually held.
+            suffix = (
+                " (latch-holding states are mutually exclusive — clear "
+                "the active one first)"
+                if arc.code in SUSPENSION_CODES
+                else ""
+            )
             raise TransitionError(
                 f"maintenance has no arc to maintain from {arc.code!r}"
+                f"{suffix}"
             )
         operation = kw.get("operation", "scheduled-update")
         arc.latched = arc.code

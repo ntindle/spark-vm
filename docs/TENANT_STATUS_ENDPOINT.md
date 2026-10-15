@@ -132,7 +132,20 @@ and feeds *into* this endpoint; it is never exposed raw, per
    suspension entry. Arc-advancing events during the suspension (the
    approval UI rides the magic-link session, not the relay — the human
    can tap Approve/Deny while the suspension is showing) are *recorded
-   and update the latch*, never dropped. On recovery the tenant layer
+   and update the latch*, never dropped. (Pinned 2026-10-15, #1463: the
+   routed set is the four approval events
+   (`approval-filed`/`approval-granted`/`approval-denied`/`approval-expired`)
+   plus the three §2 arc-advancing events the rule always named —
+   `smoke-report-failed`, `gate-policy-misfire`, and
+   `pilot-no-gated-action`; before the pin, the three non-approval events
+   raised `TransitionError` instead of latching.) The move is licensed from
+   the *latched* code per the §2 table — e.g. a suspension latched on
+   `live` records a smoke failure as `box-unhealthy` — and an event
+   unlicensed from the latched code raises `TransitionError` with the arc
+   state untouched (never dropped, never partially applied: the same
+   fail-closed discipline as the provider-demoted rejection below).
+
+   On recovery the tenant layer
    **re-evaluates** from current inputs (equivalently: returns the
    updated latch) — never a blind stack-pop of a stale code. The
    suspension itself neither advances nor resets the 10-minute clock.
@@ -178,6 +191,14 @@ and feeds *into* this endpoint; it is never exposed raw, per
      the booleans (rule 1(a) hold); on terminal/operator codes and
      on `box-unhealthy` they change only the booleans (a verdict
      already ended the arc; an unhealthy arc keeps its sub-code).
+   - Suspensions never nest or queue (pinned 2026-10-15, #1463): the
+     arc holds a single latch, so a latch-holding state
+     (`connection-unreachable`, `stuck`, `maintenance`) rejects the
+     entry of another one — e.g. `relay-failure` during `stuck` /
+     `maintenance`, or `operator-mark-stuck` / `maintenance-started`
+     during `connection-unreachable` — with `TransitionError` and the
+     state preserved. The operator clears the active suspension first
+     (or re-provisions after recovery).
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
    `provisioning` (operator reprovision), `provisioning-failed` →

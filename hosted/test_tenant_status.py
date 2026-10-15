@@ -317,6 +317,110 @@ def test_rule_6_suspension_from_approval_arc_and_approved():
         assert arc.latched is None
 
 
+def test_1463_issue_repro_smoke_failure_during_suspension_updates_latch():
+    # #1463 repro, verified on pristine: live -> relay-failure ->
+    # smoke-report-failed raised "TransitionError: illegal transition:
+    # 'connection-unreachable' -> 'box-unhealthy'" — the signal most
+    # likely to matter on recovery was lost to any producer that did not
+    # retry. The arc-advancing event now routes through the latch-swap
+    # path: the displayed code never changes during the suspension, and
+    # recovery restores the updated latch.
+    arc = _live_arc()
+    apply_event(arc, "relay-failure")
+    apply_event(arc, "smoke-report-failed", check="relay-dial")
+    assert arc.code == "connection-unreachable"
+    assert arc.latched == "box-unhealthy"
+    assert arc.latched_detail == "box-unhealthy: relay-dial"
+    apply_event(arc, "relay-recovered")
+    assert arc.code == "box-unhealthy"
+    assert arc.detail == "box-unhealthy: relay-dial"
+    assert arc.latched is None
+
+
+def test_1463_gate_and_pilot_verdicts_during_suspension_update_latch():
+    # The other two non-approval arc-advancing events route the same way.
+    for event, target in (
+        ("gate-policy-misfire", "policy-misfire"),
+        ("pilot-no-gated-action", "no-gated-action"),
+    ):
+        arc = _live_arc()
+        apply_event(arc, "relay-failure")
+        apply_event(arc, event)
+        assert arc.code == "connection-unreachable"
+        assert arc.latched == target
+        apply_event(arc, "relay-recovered")
+        assert arc.code == target
+        assert arc.latched is None
+
+
+def test_1463_latch_swap_moves_licensed_from_latched_code():
+    # The §2 table licenses from the latched code, not the suspension:
+    # pilot-no-gated-action is unlicensed from waiting-on-approval (rule 3
+    # never lists it), so it raises TransitionError with the arc state
+    # untouched — never dropped, never partially applied.
+    arc = _live_arc()
+    apply_event(arc, "approval-filed", check="gate-1")
+    assert arc.code == "waiting-on-approval"
+    apply_event(arc, "relay-failure")
+    assert arc.latched == "waiting-on-approval"
+    before = (arc.code, arc.detail, arc.latched, arc.latched_detail)
+    with pytest.raises(TransitionError):
+        apply_event(arc, "pilot-no-gated-action")
+    assert (arc.code, arc.detail, arc.latched, arc.latched_detail) == before
+    # Sanity: an event licensed from the latched code still routes.
+    apply_event(arc, "smoke-report-failed", check="gate-1")
+    assert arc.latched == "box-unhealthy"
+    apply_event(arc, "relay-recovered")
+    assert arc.code == "box-unhealthy"
+
+
+def test_1463_suspensions_are_mutually_exclusive():
+    # One latch per arc: entering a second latch-holding state while
+    # latched raises TransitionError, state preserved. The message pins
+    # the mutual-exclusion rule explicitly (fails on pristine, which used
+    # per-entry messages that never named the rule).
+    live = dict(code="live", status_updated_at="2026-09-29T10:05:00Z",
+                provider_running=True, relay_reachable=True)
+    # relay-failure during stuck / maintenance
+    for entry in ("operator-mark-stuck", "maintenance-started"):
+        arc = _arc(**live)
+        apply_event(arc, entry, operation="reimage")
+        before = (arc.code, arc.detail, arc.latched, arc.latched_detail)
+        with pytest.raises(TransitionError, match="mutually exclusive"):
+            apply_event(arc, "relay-failure")
+        assert (arc.code, arc.detail, arc.latched, arc.latched_detail) == before
+    # operator-mark-stuck / maintenance-started during connection-unreachable
+    arc = _arc(**live)
+    apply_event(arc, "relay-failure")
+    before = (arc.code, arc.detail, arc.latched, arc.latched_detail)
+    with pytest.raises(TransitionError, match="mutually exclusive"):
+        apply_event(arc, "operator-mark-stuck")
+    with pytest.raises(TransitionError, match="mutually exclusive"):
+        apply_event(arc, "maintenance-started", operation="reimage")
+    assert (arc.code, arc.detail, arc.latched, arc.latched_detail) == before
+    # maintenance-started during stuck
+    arc = _arc(**live)
+    apply_event(arc, "operator-mark-stuck")
+    before = (arc.code, arc.detail, arc.latched, arc.latched_detail)
+    with pytest.raises(TransitionError, match="mutually exclusive"):
+        apply_event(arc, "maintenance-started", operation="reimage")
+    assert (arc.code, arc.detail, arc.latched, arc.latched_detail) == before
+    # Negative pins: the mutual-exclusion message must only appear when a
+    # latch is actually held. From latch-less codes the guards keep their
+    # plain entry-rule messages (verified against the pre-pin wording).
+    arc = _arc()  # provisioning
+    with pytest.raises(TransitionError) as excinfo:
+        apply_event(arc, "relay-failure")
+    assert "no arc to suspend" in str(excinfo.value)
+    assert "mutually exclusive" not in str(excinfo.value)
+    for entry in ("operator-mark-stuck", "maintenance-started"):
+        arc = _arc(code="waiting-on-approval",
+                   status_updated_at="2026-09-29T10:05:00Z")
+        with pytest.raises(TransitionError) as excinfo:
+            apply_event(arc, entry, operation="reimage")
+        assert "mutually exclusive" not in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # Liveness-loss transitions (#1461 / #1462) + fresh-arc timestamp (#1468)
 
