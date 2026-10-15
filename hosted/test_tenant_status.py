@@ -35,8 +35,10 @@ from tenant_status import (
     TenantStatusService,
     TenantStore,
     TransitionError,
+    _CORRUPT_LATCH_RANK,
     _DUMMY_VERIFY_KEY,
     _effective_rank,
+    _quarantine_surface,
     apply_event,
     canonical_poll_message,
     human_key_for,
@@ -1327,7 +1329,9 @@ def test_post_init_rejects_suspension_valued_latch():
         for latch in _SUSPENSION_CODES:
             with pytest.raises(TenantStatusError) as ei:
                 _arc(code=code, latched=latch)
-            assert "#1464" in str(ei.value)
+            # QA round-1 N3: re-pin the message-substring the old
+            # fail-loud test carried — the corruption names the latch.
+            assert "#1464" in str(ei.value) and "latched" in str(ei.value)
     # Non-suspension latches still construct fine (incl. the legitimate
     # suspension entries, and the no-latch suspension shape selection
     # now degrades on instead of rejecting).
@@ -1400,39 +1404,303 @@ def test_store_create_and_response_withstand_corrupt_arc(store):
     assert rec.last_reported["code"] == "live"
 
 
-def test_legacy_corrupt_record_fails_loud_at_load(store, store_path):
-    # Deliberate residual, pinned (#1464 follow-up): a record persisted by
-    # a pre-fix build (suspension-valued latch in the JSON) now fails at
-    # load with an actionable message naming the corruption — not the
-    # opaque KeyError that used to surface mid-selection. Load-time
-    # healing/quarantine is the follow-up issue's scope, not this fix's.
-    raw = {
+# ---------------------------------------------------------------------------
+# #1509 — load-time quarantine for pre-#1464 corrupt suspension latches
+#
+# Closes the residual test_legacy_corrupt_record_fails_loud_at_load pinned:
+# a record persisted by a pre-#1464 build (suspension-valued latch in the
+# JSON) is no longer bricked at load. Quarantine was chosen over heal
+# deliberately — see the _to_record comment for the reasoning (a healed
+# latchless suspension is a silently unrecoverable state, and read-path
+# rewriting destroys the operator's only triage evidence).
+
+
+def _legacy_corrupt_raw(tenant_id="tnt_legacy", box_id="box-1", **box_over):
+    """One tenant as persisted by a pre-#1464 build: the box's latch is a
+    suspension code (corrupt by construction)."""
+    box = {
+        "created_at": "2026-10-14T00:00:00Z",
+        "code": "connection-unreachable",
+        "status_updated_at": "2026-10-14T00:00:00Z",
+        "detail": None,
+        "latched": "stuck",  # the pre-fix corruption
+        "latched_detail": None,
+        "provider_running": False,
+        "relay_reachable": False,
+        "session": 1,
+    }
+    box.update(box_over)
+    return {
         "version": 1,
         "tenants": {
-            "tnt_legacy": {
+            tenant_id: {
                 "stage": 2,
-                "approvals_url": "https://approve.example/a/tnt_legacy",
-                "boxes": {
-                    "box-1": {
-                        "created_at": "2026-10-14T00:00:00Z",
-                        "code": "connection-unreachable",
-                        "status_updated_at": "2026-10-14T00:00:00Z",
-                        "detail": None,
-                        "latched": "stuck",  # the pre-fix corruption
-                        "latched_detail": None,
-                        "provider_running": False,
-                        "relay_reachable": False,
-                        "session": 1,
-                    }
-                },
+                "approvals_url": f"https://approve.example/a/{tenant_id}",
+                "boxes": {box_id: box},
             }
         },
     }
+
+
+def _write_raw(store_path, raw):
     with open(store_path, "w", encoding="utf-8") as fh:
         json.dump(raw, fh)
-    with pytest.raises(TenantStatusError) as ei:
+
+
+def test_legacy_corrupt_record_loads_and_quarantines(store, store_path):
+    # The old pinned residual (fail-loud at load) is closed by this fix:
+    # the legacy record loads, the corrupt arc is quarantined (never
+    # served, never selected), and the raw entry is preserved verbatim.
+    _write_raw(store_path, _legacy_corrupt_raw())
+    rec = store.get("tnt_legacy")  # was: TenantStatusError naming #1464
+    assert rec.boxes == {}
+    q = rec.quarantined["box-1"]
+    assert q["latched"] == "stuck"
+    assert q["code"] == "connection-unreachable"
+    assert q["raw"]["latched"] == "stuck"  # verbatim, never rewritten
+    # The quarantine is load-derived, never persisted as such.
+    persisted = json.load(open(store_path))["tenants"]["tnt_legacy"]
+    assert "quarantined" not in persisted
+    assert persisted["boxes"]["box-1"]["latched"] == "stuck"
+
+
+def test_quarantine_serves_healthy_arcs_with_signal(store, store_path):
+    # The tenant serves again over its healthy arcs; the served body
+    # carries the operator-visible quarantine signal.
+    raw = _legacy_corrupt_raw(box_id="box-1")
+    raw["tenants"]["tnt_legacy"]["boxes"]["box-2"] = {
+        "created_at": "2026-10-15T00:00:00Z",
+        "code": "live",
+        "status_updated_at": "2026-10-15T00:00:00Z",
+        "detail": None,
+        "latched": None,
+        "latched_detail": None,
+        "provider_running": True,
+        "relay_reachable": True,
+        "session": 1,
+    }
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_legacy")
+    assert set(rec.boxes) == {"box-2"}
+    body = status_response(rec)
+    assert body["status"] == "live"
+    (entry,) = body["quarantine"]
+    assert entry["box_id"] == "box-1"
+    assert entry["latched"] == "stuck"
+    assert "#1464" in entry["reason"]
+
+
+def test_two_corrupt_arcs_both_signaled(store, store_path):
+    # QA round-1 N4: two corrupt arcs + one healthy — both are cut and
+    # both are signaled (sorted), the healthy arc still serves.
+    raw = _legacy_corrupt_raw(box_id="box-1")
+    raw["tenants"]["tnt_legacy"]["boxes"]["box-0"] = dict(
+        raw["tenants"]["tnt_legacy"]["boxes"]["box-1"], latched="maintenance"
+    )
+    raw["tenants"]["tnt_legacy"]["boxes"]["box-2"] = {
+        "created_at": "2026-10-15T00:00:00Z",
+        "code": "live",
+        "status_updated_at": "2026-10-15T00:00:00Z",
+        "detail": None,
+        "latched": None,
+        "latched_detail": None,
+        "provider_running": True,
+        "relay_reachable": True,
+        "session": 1,
+    }
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_legacy")
+    assert set(rec.boxes) == {"box-2"}
+    body = status_response(rec)
+    assert body["status"] == "live"
+    assert [e["box_id"] for e in body["quarantine"]] == ["box-0", "box-1"]
+    assert [e["latched"] for e in body["quarantine"]] == [
+        "maintenance", "stuck"]
+
+
+def test_quarantine_verbatim_round_trip(store, store_path):
+    # A store write (the _mutate/_save_record cycle) must not drop or
+    # rewrite the quarantined entry: it round-trips dict-equal (key order
+    # ignored), and the next load re-derives the quarantine.
+    _write_raw(store_path, _legacy_corrupt_raw())
+    before = json.load(open(store_path))["tenants"]["tnt_legacy"]["boxes"]
+    rec = store.get("tnt_legacy")
+    store.save(rec)
+    after = json.load(open(store_path))["tenants"]["tnt_legacy"]["boxes"]
+    assert after == before  # byte-identical under the dict compare
+    rec2 = store.get("tnt_legacy")  # re-derived, never sticky
+    assert set(rec2.quarantined) == {"box-1"}
+
+
+def test_quarantine_surface_scrubs_hostile_box_id(store, store_path):
+    # The box id is free-form (box-chosen at enrollment): a hostile one
+    # must not reach the served quarantine surface raw. Unit-asserted on
+    # the surface builder (the all-corrupt endpoint path is covered by
+    # test_all_corrupt_tenant_404s_with_quarantine_signal).
+    nasty = "kitchen-pi\x1b[2K\r\n" + "x" * 300
+    _write_raw(store_path, _legacy_corrupt_raw(box_id=nasty))
+    rec = store.get("tnt_legacy")
+    (entry,) = _quarantine_surface(rec.quarantined)
+    served_id = entry["box_id"]
+    assert "\x1b" not in served_id and "\r" not in served_id
+    assert "\n" not in served_id
+    assert len(served_id.encode("utf-8")) <= 64
+    assert served_id.startswith("kitchen-pi[2K")
+
+
+def test_all_corrupt_tenant_404s_with_quarantine_signal(store, store_path):
+    # No healthy arcs and no hold: fail-closed 404, but never
+    # bricked-silent — the quarantine signal rides on the 404 body.
+    _write_raw(store_path, _legacy_corrupt_raw())
+    rec = store.get("tnt_legacy")
+    rec.session_token = "sess-quar"
+    store.save(rec)
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=sess-quar"})
+    assert status == 404
+    assert body["error"] == "no_servable_tenant_record"
+    (entry,) = body["quarantine"]
+    assert entry["box_id"] == "box-1" and entry["latched"] == "stuck"
+
+
+def test_quarantine_signal_rides_the_hold_path(store, store_path):
+    # Engineering round-1 coverage gap / QA round-1 BLOCKING 1: an
+    # all-quarantined tenant WITH a §8 hold serves the hold over HTTP
+    # (200) plus the quarantine signal — the hold is not a silent cover
+    # for the cut arcs.
+    raw = _legacy_corrupt_raw()
+    raw["tenants"]["tnt_legacy"]["last_reported"] = {
+        "code": "live",
+        "status_updated_at": "2026-10-14T00:00:00Z",
+        "detail": "live: ok",
+    }
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_legacy")
+    rec.session_token = "sess-hold"
+    store.save(rec)
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=sess-hold"})
+    assert status == 200
+    assert body["status"] == "live"
+    assert "held: box deleted pre-live" in body["detail"]
+    (entry,) = body["quarantine"]
+    assert entry["box_id"] == "box-1" and entry["latched"] == "stuck"
+
+
+def test_quarantine_surface_tolerates_non_str_raw_code(store, store_path):
+    # A hand-corrupted JSON store could carry "code": 42 on the corrupt
+    # box — the served surface must not raise TypeError on it.
+    _write_raw(store_path, _legacy_corrupt_raw(box_id="box-1", code=42))
+    rec = store.get("tnt_legacy")
+    assert set(rec.quarantined) == {"box-1"}
+    (entry,) = _quarantine_surface(rec.quarantined)
+    assert entry["code"] is None
+    assert entry["latched"] == "stuck"
+
+
+def test_quarantine_survives_operator_mutation(store, store_path):
+    # An operator write (approvals-URL rotation here) persists the
+    # quarantined arc instead of dropping it — on both the save() and
+    # the _mutate() write paths (QA round-1 N4).
+    _write_raw(store_path, _legacy_corrupt_raw())
+    rec = store.get("tnt_legacy")
+    rec.approvals_url = "https://approve.example/rotated"
+    store.save(rec)
+    store.rotate_approvals_url(
+        "tnt_legacy", "https://approve.example/rotated-2",
+        reason="qa-probe",
+    )
+    persisted = json.load(open(store_path))["tenants"]["tnt_legacy"]
+    assert persisted["approvals_url"] == "https://approve.example/rotated-2"
+    assert persisted["boxes"]["box-1"]["latched"] == "stuck"
+    assert set(store.get("tnt_legacy").quarantined) == {"box-1"}
+
+
+def test_quarantine_scope_is_surgical_to_1509_shape(store, store_path):
+    # The quarantine predicate is the suspension-valued latch ALONE
+    # (QA round-1 correction: a record whose latch is suspension-valued
+    # AND whose code is non-vocabulary is quarantined too — the corrupt
+    # code never reaches the constructor, and the served surface reports
+    # it as code: None, fail-closed; see test_quarantine_both_bad below).
+    # A non-vocabulary code WITHOUT the suspension latch still fails
+    # loud at load — the #1510 residual is not smuggled through this path.
+    _write_raw(
+        store_path,
+        _legacy_corrupt_raw(box_id="box-1", code="bogus-not-a-code",
+                           latched=None),
+    )
+    with pytest.raises(TenantStatusError):
         store.get("tnt_legacy")
-    assert "latched" in str(ei.value) and "#1464" in str(ei.value)
+
+
+def test_quarantine_both_bad_stays_fail_closed(store, store_path):
+    # Both-bad: suspension-valued latch (quarantine trigger) plus a
+    # non-vocabulary code (would fail construction). The arc is
+    # quarantined — the bad code is swallowed into quarantine,
+    # fail-closed: never served, never selected, surfaced as code None.
+    _write_raw(
+        store_path,
+        _legacy_corrupt_raw(box_id="box-1", code="bogus-not-a-code"),
+    )
+    rec = store.get("tnt_legacy")  # no raise — the bad code never reaches it
+    assert rec.boxes == {}
+    assert set(rec.quarantined) == {"box-1"}
+    (entry,) = _quarantine_surface(rec.quarantined)
+    assert entry["code"] is None
+    assert entry["latched"] == "stuck"
+    assert "corrupt suspension latch" in entry["reason"]
+
+
+# ---------------------------------------------------------------------------
+# #1510 — fail-closed selection for invalid post-construction `code` shapes
+
+
+def test_effective_rank_bottom_for_unknown_code():
+    # The issue's exact repro: code is mutable post-construction, and
+    # every engine write goes through check_code, so a non-vocabulary
+    # code is constructible in-process only. Selection must bottom-rank
+    # it (the #1464 corrupt family) instead of raising KeyError out of
+    # _SELECTION_RANK. (Pre-fix: KeyError 'bogus-not-a-code'.)
+    healthy = _live_arc(box_id="box-healthy")
+    arc = _arc(code="live", box_id="box-corrupt")
+    arc.code = "bogus-not-a-code"
+    assert _effective_rank(arc) == _CORRUPT_LATCH_RANK == (2, 0)
+    # Never selected while a healthy candidate exists; a KeyError used
+    # to take down the whole selection here.
+    assert select_reported([arc, healthy]).box_id == "box-healthy"
+    # Below even terminal candidates: corrupt loses to everything.
+    assert _effective_rank(arc) > _effective_rank(_arc(code="approved"))
+
+
+def test_effective_rank_bottom_for_non_str_code():
+    # Engineering round-1 nit: a non-str code (post-construction mutation
+    # to 42, or an unhashable {}) bottom-ranks instead of raising
+    # KeyError/TypeError out of the membership tests.
+    healthy = _live_arc(box_id="box-healthy")
+    for bad_code in (42, 4.5, {}):
+        arc = _arc(code="live", box_id="box-corrupt")
+        arc.code = bad_code
+        assert _effective_rank(arc) == _CORRUPT_LATCH_RANK
+        assert select_reported([arc, healthy]).box_id == "box-healthy"
+
+
+def test_selection_all_unknown_codes_still_selects(store):
+    # Every arc corrupt by post-construction code mutation: selection
+    # itself no longer raises KeyError — the corrupt family is still
+    # served as the only candidate (the serve boundary's human_key_for
+    # check_code still fails loud on non-vocabulary codes, per its own
+    # §3 contract: `status` must be a §2 code).
+    arc = _arc(code="live", box_id="box-c1")
+    arc.code = "bogus-not-a-code"
+    assert select_reported([arc]).box_id == "box-c1"  # was: KeyError
+    # And the write path survives it: _save_record -> select_reported
+    # used to raise KeyError before persisting. The record persists with
+    # the mutated code; the NEXT load fails loud at the construction
+    # boundary with the actionable UnknownCodeError — never an opaque
+    # KeyError out of selection.
+    store.create(_tenant(boxes={"box-c1": arc}, tenant_id="tnt_bad"))
+    with pytest.raises(tenant_status.UnknownCodeError):
+        store.get("tnt_bad")
 
 
 def test_latch_swap_path_stays_fail_loud(store):

@@ -848,10 +848,24 @@ def _effective_rank(arc: BoxArc) -> Tuple[int, int]:
     underlying arc code — the suspension neither promotes nor demotes the
     candidate). Family 1: arc-terminal codes — they participate only while
     no non-terminal candidate exists (a dead box never outranks a
-    progressing one). Family 2 (#1464): corrupt suspension latch — never
+    progressing one). Family 2 (#1464/#1510): corrupt records — never
     selected while any healthy candidate exists.
     """
     code = arc.code
+    # #1510: a non-str or non-vocabulary *code* is corrupt by the same
+    # rule — reachable only by post-construction field mutation (the
+    # constructor's check_code rejects these for new data; the mutation
+    # channel is why the dataclass stays unfrozen per the #1464 review's
+    # pragmatic call). Bottom-rank to the #1464 corrupt family instead of
+    # raising KeyError/TypeError out of the membership tests: a bad
+    # record can neither take down the tenant's endpoint nor block
+    # store writes.
+    if not isinstance(code, str) or (
+        code not in SUSPENSION_CODES
+        and code not in TERMINAL_CODES
+        and code not in _SELECTION_RANK
+    ):
+        return _CORRUPT_LATCH_RANK
     if code in SUSPENSION_CODES:
         if (
             arc.latched is None
@@ -869,6 +883,9 @@ def _effective_rank(arc: BoxArc) -> Tuple[int, int]:
         code = arc.latched
     if code in TERMINAL_CODES:
         return (1, 0)
+    # By construction every code reaching this line is a rankable
+    # vocabulary code — the #1510 guard above already bottom-ranked the
+    # corrupt shapes — so this lookup never raises.
     return (0, _SELECTION_RANK[code])
 
 
@@ -900,6 +917,14 @@ class TenantRecord:
     muse_id: Optional[str] = None
     deleted: bool = False
     boxes: Dict[str, BoxArc] = field(default_factory=dict)
+    # #1509: load-quarantined box arcs — corrupt-by-construction records
+    # a pre-#1464 build persisted (suspension-valued ``latched``), split
+    # out of ``boxes`` at load so they are never served or selected. The
+    # entries are the VERBATIM persisted dicts (never rewritten, never
+    # served); the store persists them back unchanged, so the quarantine
+    # is re-derived — never sticky — on every load and no evidence is
+    # lost. The endpoint signals the quarantine in the response body.
+    quarantined: Dict[str, dict] = field(default_factory=dict)
     # §8 G7 rule 1: when the leading box is deleted pre-live with no other
     # candidates, the endpoint holds the last reported code with detail
     # noting the operator event. Refreshed on every store write that sees
@@ -959,10 +984,37 @@ class TenantStore:
     # -- record access ---------------------------------------------------
     @staticmethod
     def _to_record(tenant_id: str, raw: dict) -> TenantRecord:
-        boxes = {
-            box_id: BoxArc(box_id=box_id, **b)
-            for box_id, b in raw.get("boxes", {}).items()
-        }
+        boxes: Dict[str, BoxArc] = {}
+        quarantined: Dict[str, dict] = {}
+        for box_id, b in raw.get("boxes", {}).items():
+            # #1509: a record persisted by a pre-#1464 build can carry a
+            # suspension-valued latch — corrupt by construction. Quarantine
+            # the arc (exclude it from the served/selected set) instead of
+            # bricking the whole tenant at load with the #1464 constructor
+            # raise: the tenant serves again over its healthy arcs, and the
+            # quarantine is signaled in the response body (the only
+            # operator-visible channel — this endpoint serves JSON only
+            # and log_message is silenced). The raw entry is preserved
+            # VERBATIM in the quarantine map — never rewritten (the
+            # garbage latch is the operator's triage evidence), never
+            # served — and _from_record persists it back unchanged, so the
+            # quarantine is re-derived, never sticky, on every load. Heal
+            # was deliberately rejected: setting latched=None fabricates
+            # a suspension with no latch, which relay-recovered can never
+            # exit (TransitionError) — a silently unrecoverable state —
+            # and read-path rewriting would destroy the only evidence.
+            # Scope is surgical to the #1509 shape (suspension-valued
+            # latch): anything else that fails construction still raises
+            # (#1510 covers the post-construction code-shape residual).
+            latched = b.get("latched")
+            if latched is not None and latched in SUSPENSION_CODES:
+                quarantined[box_id] = {
+                    "code": b.get("code"),
+                    "latched": latched,
+                    "raw": dict(b),
+                }
+                continue
+            boxes[box_id] = BoxArc(box_id=box_id, **b)
         return TenantRecord(
             tenant_id=tenant_id,
             stage=raw.get("stage", 1),
@@ -972,11 +1024,31 @@ class TenantStore:
             muse_id=raw.get("muse_id"),
             deleted=raw.get("deleted", False),
             boxes=boxes,
+            quarantined=quarantined,
             last_reported=raw.get("last_reported"),
         )
 
     @staticmethod
     def _from_record(rec: TenantRecord) -> dict:
+        boxes = {
+            box_id: {
+                "created_at": a.created_at,
+                "code": a.code,
+                "status_updated_at": a.status_updated_at,
+                "detail": a.detail,
+                "latched": a.latched,
+                "latched_detail": a.latched_detail,
+                "provider_running": a.provider_running,
+                "relay_reachable": a.relay_reachable,
+                "session": a.session,
+            }
+            for box_id, a in rec.boxes.items()
+        }
+        # #1509: quarantined entries round-trip VERBATIM — they are the
+        # operator's evidence and the re-derivation source on the next
+        # load; the in-memory split is never persisted as such.
+        for box_id, q in rec.quarantined.items():
+            boxes[box_id] = dict(q["raw"])
         return {
             "stage": rec.stage,
             "approvals_url": rec.approvals_url,
@@ -985,20 +1057,7 @@ class TenantStore:
             "muse_id": rec.muse_id,
             "deleted": rec.deleted,
             "last_reported": rec.last_reported,
-            "boxes": {
-                box_id: {
-                    "created_at": a.created_at,
-                    "code": a.code,
-                    "status_updated_at": a.status_updated_at,
-                    "detail": a.detail,
-                    "latched": a.latched,
-                    "latched_detail": a.latched_detail,
-                    "provider_running": a.provider_running,
-                    "relay_reachable": a.relay_reachable,
-                    "session": a.session,
-                }
-                for box_id, a in rec.boxes.items()
-            },
+            "boxes": boxes,
         }
 
     def get(self, tenant_id: str) -> Optional[TenantRecord]:
@@ -1135,6 +1194,44 @@ class TenantStore:
 # §3 — response schema
 
 
+def _quarantine_surface(quarantined: Dict[str, dict]) -> List[dict]:
+    """#1509: the operator-visible signal for load-quarantined box arcs.
+
+    The endpoint serves JSON only and log_message is silenced, so the
+    served body is the quarantine's loud channel. Entries carry the
+    triage facts the operator needs (which box, the corrupt latch value)
+    plus a module-minted reason; nothing from the corrupt record reaches
+    the surface unsanitized: ``box_id`` is free-form (box-chosen at
+    enrollment) so it is scrubbed like every other served surface
+    (#1466), while ``latched`` is a §2 vocabulary code (validated in
+    SUSPENSION_CODES before quarantine) and ``code`` is only surfaced
+    when it too is a vocabulary code.
+    """
+    surface = []
+    for box_id in sorted(quarantined):
+        q = quarantined[box_id]
+        code = q.get("code")
+        # A hand-corrupted JSON store could carry a non-str code here
+        # (JSON allows "code": 42) — the isinstance guard keeps the serve
+        # path from raising TypeError on it (Engineering round-1 nit).
+        code = code if isinstance(code, str) and code in STATUS_CODES else None
+        surface.append(
+            {
+                "box_id": scrub_detail(str(box_id), 64),
+                "code": code,
+                "latched": q.get("latched"),
+                "reason": (
+                    "corrupt suspension latch (pre-#1464 persisted record): "
+                    "latched must be the non-suspension arc code held at "
+                    "suspension/maintenance entry; the arc is excluded "
+                    "from selection until the operator clears or repairs "
+                    "the record"
+                ),
+            }
+        )
+    return surface
+
+
 def status_response(rec: TenantRecord) -> dict:
     """Build the per-tenant §3 response body.
 
@@ -1178,6 +1275,10 @@ def status_response(rec: TenantRecord) -> dict:
         human_key = human_key_for(hold["code"])
         if human_key is not None:
             body["human_key"] = human_key
+        # #1509: quarantine is orthogonal to the G7 hold — a quarantined
+        # tenant with a hold still serves the hold, plus the signal.
+        if rec.quarantined:
+            body["quarantine"] = _quarantine_surface(rec.quarantined)
         return body
     reported = select_reported(arcs)
     body = {
@@ -1198,6 +1299,10 @@ def status_response(rec: TenantRecord) -> dict:
     human_key = human_key_for(reported.code)
     if human_key is not None:
         body["human_key"] = human_key
+    # #1509: the quarantine's loud channel — a tenant that serves over
+    # its healthy arcs must still show the operator which arcs were cut.
+    if rec.quarantined:
+        body["quarantine"] = _quarantine_surface(rec.quarantined)
     return body
 
 
@@ -1323,7 +1428,14 @@ class TenantStatusService:
             # serve) gets 404 — not 403, so the endpoint never confirms the
             # existence of other tenants. The §8 empty-candidate hold keeps
             # serving while last_reported exists.
-            return 404, {"error": "no_servable_tenant_record"}
+            body = {"error": "no_servable_tenant_record"}
+            # #1509: a tenant whose every arc was load-quarantined (no
+            # healthy boxes, no hold) lands here — fail-closed, but never
+            # bricked-silent: the quarantine signal rides on the 404 body
+            # so the operator sees exactly which record is cut and why.
+            if rec.quarantined:
+                body["quarantine"] = _quarantine_surface(rec.quarantined)
+            return 404, body
         return 200, status_response(rec)
 
 

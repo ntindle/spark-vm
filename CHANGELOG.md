@@ -11,7 +11,7 @@ its human-readable companion.
 This changelog only works if entries land with the change, not after it:
 
 1. **Every PR that changes anything user- or operator-visible adds one or
-   two bullets under `## [Unreleased]`**, in the right section
+   two bullets under `## [Unreleased]`, in the right section
    (`Added` / `Changed` / `Fixed` / `Security`). Write for the person
    running spark-vm, not the person who wrote the diff — no file paths,
    function names, or internal audit numbering — and link the PR number.
@@ -1151,6 +1151,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   treats bad bytes like a missing file — the host is appended and
   provisioning continues, while the proxy itself still refuses the
   corrupt file loudly at load time. (#1341)
+- Tenant status endpoint no longer bricks a tenant whose record was
+  persisted by a pre-fix build with a corrupt suspension latch: the
+  corrupt box is quarantined (excluded from selection instead of failing
+  the whole record at load) and the quarantine is signaled in the
+  response body, while the raw record is preserved verbatim for the
+  operator (#1509).
+- Box selection degrades fail-closed instead of raising when a box's
+  status code was mutated to an unknown value after construction — the
+  corrupt box bottom-ranks like the corrupt-latch family (#1510).
 
 ### Security
 
