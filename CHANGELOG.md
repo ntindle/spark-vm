@@ -52,6 +52,25 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Cycle-71 competitor watch (2026-10-15): a full pass over the
+  tracked agent-sandbox vendors — two new vendor-confirmed entries:
+  Perplexity's "How SPACE routes requests to the right sandbox
+  execution" (first-party blog, Oct 14 — signed execution-identity
+  routing with short-lived Ed25519 capabilities, VSOCK bridge
+  verification, and an Oct-8-checked industry comparison covering
+  NVIDIA OpenShell, E2B, and CubeSandbox; not the tracked SPACE
+  Part II), and E2B Secrets (launched Oct 7 — credentials held
+  outside the sandbox and injected into configured HTTPS request
+  headers; also surfaces E2B Embed for customer-environment
+  packaging). Folds: the two E2B items into the E2B row, and
+  Agent37's founder-published 15-provider pricing ladder (checked
+  Oct 10 — $4.76–$248.78/mo for 2vCPU/4GB) into the Agent37 row.
+  Watch-doc deltas only: Vercel changelog sitemap 1411→1413 (two
+  non-sandbox entries, no Drives GA); Hugo advisories re-verified
+  (top GHSA-r73q-gwx2-fpxm, Oct 13). Still no Vercel sandbox
+  zero-day CVE/write-up/patch; Baseten's ~$26B round still unclosed;
+  AgentComputer still publishes no egress pricing. (#1518)
+
 - `fleet register` operator identity + release registration (#775 S2):
   the second key narrowing merge-to-main on the update plane. `init`
   pins the provisioned operator key's fingerprint for the store
