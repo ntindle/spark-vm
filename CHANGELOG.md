@@ -52,6 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The browser-driver now rejects accessibility-tree observations whose
+  element locators are not unique: an observation carrying the same
+  `@e1` locator twice is refused instead of leaving a `click @e1`
+  ambiguous, so a duplicated locator can never act on the wrong
+  element. (#1450, #1494)
 - Rejection errors for malformed browser-driver calls can no longer be
   forged into multi-line log entries: parameter keys and action names
   containing newlines or control characters are backslash-escaped

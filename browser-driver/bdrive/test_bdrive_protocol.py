@@ -912,6 +912,54 @@ def test_observation_rejects_unknown_fields():
                             [_node(extra="nope")])
 
 
+def test_observation_rejects_duplicate_ref_siblings():
+    # Two siblings carrying the same ref make `click @e1` ambiguous —
+    # the daemon has no protocol-level rule for which node wins. The
+    # ref-scope machinery guarantees the refs came from the newest
+    # observation, but only uniqueness guarantees they are distinct
+    # within it.
+    with pytest.raises(P.ProtocolError) as exc:
+        O.build_observation(
+            "https://x", "t", "tgt", "rs",
+            [_node(ref="@e1"), _node(ref="@e1", role="link", name="Other")],
+        )
+    assert exc.value.code == "bad_observation"
+    assert "duplicate node ref" in str(exc.value)
+    assert "@e1" in str(exc.value)
+
+
+def test_observation_rejects_duplicate_ref_nested():
+    # Uniqueness is tree-wide: duplicates inside one subtree and
+    # duplicates across separate subtrees both fail.
+    with pytest.raises(P.ProtocolError) as exc:
+        O.build_observation(
+            "https://x", "t", "tgt", "rs",
+            [_node(ref="@e1", children=[_node(ref="@e1", role="link")])],
+        )
+    assert exc.value.code == "bad_observation"
+    assert "duplicate node ref" in str(exc.value)
+    with pytest.raises(P.ProtocolError) as exc:
+        O.build_observation(
+            "https://x", "t", "tgt", "rs",
+            [_node(ref="@e1", children=[_node(ref="@e2")]),
+             _node(ref="@e3", role="link", children=[_node(ref="@e2")])],
+        )
+    assert exc.value.code == "bad_observation"
+    assert "duplicate node ref" in str(exc.value)
+
+
+def test_observation_refs_not_shared_across_observations():
+    # The uniqueness set is per-observation: the same ref appearing
+    # in two different observations is the normal case (refs are only
+    # actionable within their own ref_scope) and must not fail.
+    obs1 = O.build_observation(
+        "https://x", "t", "tgt", "rs1", [_node(ref="@e1")])
+    obs2 = O.build_observation(
+        "https://x", "t", "tgt", "rs2", [_node(ref="@e1")])
+    O.validate_observation(obs1)
+    O.validate_observation(obs2)
+
+
 def test_redact_for_history_drops_tree_keeps_envelope():
     obs = O.build_observation(
         "https://example.com", "Example", "target-1", "rs_1_abc",
@@ -1241,12 +1289,20 @@ def test_non_ascii_ref_scope_rejected_as_protocol_error():
 
 
 def _deep_tree(depth):
-    node = {"ref": "@e1", "role": "button", "name": "x",
-            "enabled": True, "visible": True}
-    root = node
+    # Every node gets a distinct ref: uniqueness is enforced per
+    # observation (#1450), so a shared "@e1" would trip the duplicate
+    # check instead of the depth cap this helper exists to exercise.
+    counter = [0]
+
+    def make_node():
+        counter[0] += 1
+        return {"ref": "@e%d" % counter[0], "role": "button", "name": "x",
+                "enabled": True, "visible": True}
+
+    root = make_node()
+    node = root
     for _ in range(depth):
-        child = {"ref": "@e1", "role": "button", "name": "x",
-                 "enabled": True, "visible": True}
+        child = make_node()
         node["children"] = [child]
         node = child
     return [root]
