@@ -69,7 +69,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   non-sandbox entries, no Drives GA); Hugo advisories re-verified
   (top GHSA-r73q-gwx2-fpxm, Oct 13). Still no Vercel sandbox
   zero-day CVE/write-up/patch; Baseten's ~$26B round still unclosed;
-  AgentComputer still publishes no egress pricing. (#TBD)
+  AgentComputer still publishes no egress pricing. (#1518)
 
 - `fleet register` operator identity + release registration (#775 S2):
   the second key narrowing merge-to-main on the update plane. `init`
