@@ -62,6 +62,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   human registration path cannot self-attest a different identity.
   `show-identity` is the read-only pin display; corrupt pins fail
   closed as integrity errors. (#775, #1514)
+- Trust-model lane convergence pin (2026-10-15, #775): vision-vs-state
+  after S1 and S2 shipped — the S3 slice (attested event ingestion +
+  the signed box-to-plane channel) had no owning issue, so this turn
+  filed #1516 for it, carrying the "unattested events may be logged,
+  never gate-consumed" rule as an acceptance item. (#TBD)
 
 ### Security
 
