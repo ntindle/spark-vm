@@ -100,7 +100,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   chains across separate calls), and a drift between the module and the
   doc is now recorded as a defect to resolve deliberately, never
   silently blessed. The "not shipped yet" line for the fleet
-  registration CLI is updated now that it shipped. (#1505, #TBD)
+  registration CLI is updated now that it shipped. (#1505, #1520)
 
 ### Security
 
