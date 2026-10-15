@@ -1171,7 +1171,7 @@ def test_digest_post_fire_coalescing_does_not_refire(conn, owner, vapid):
 
     row = _digest_state_row(conn, owner, window)
     assert row[0] == 1 and row[1] is not None  # drift, not a refire
-    assert push_sweep.sweep_digests(conn, now=NOW) == {}
+    assert push_sweep.sweep_digests(conn, now=NOW).dispositions == {}
     assert len(tick.service.calls) == 1  # still exactly one buzz
 
 

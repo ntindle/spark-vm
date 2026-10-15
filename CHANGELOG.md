@@ -127,6 +127,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Hourly digest sweep is now bounded per tick (#1383): the digest pass
+  used to scan every pending digest window every minute, so sustained
+  budget suppression piled up one pending row per owner per hour and
+  each tick re-read and re-attempted all of them — linear write
+  amplification with no backstop. The pass now processes at most 1000
+  oldest-first windows per sweep; the deferred remainder heals on the
+  next tick (nothing is ever skipped, only delayed), and the sweep
+  summary's new `digests_truncated` field flags when a tick hit the
+  cap — repeated truncation is the operator alert to raise the bound.
+  (#TBD)
+
 - Suspension-latch signal loss during relay outages (#1463): a relay/cert
   suspension (`connection-unreachable`) only recorded the four approval
   events into the latch — the other three arc-advancing events
