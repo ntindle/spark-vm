@@ -86,7 +86,8 @@ Expect no reminders and no digests from a plane that never calls it.
 | `reminders`, `digests`, `stale_watchers`, `token_warnings` | disposition → count per pass (`reminders` reports `{"skipped": True}` when the flag is off; a watcher reports `{"skipped": True}` when its derivation is not wired; `digests` has no skip path and always runs) |
 | `candidates_seen` | reminder candidates the hint query returned this sweep |
 | `pages_truncated` | `True` when the reminder candidate pages hit `max_pages` (the D69 page cap) |
-| `budget_truncated` | `True` when any pass stopped early on the D103 time budget — deliberately distinct from `pages_truncated`: the page cap means "raise `max_pages`", the time budget means "raise `time_budget_s` or the cadence". The operator alert is `pages_truncated OR budget_truncated`. |
+| `digests_truncated` | `True` when the digest pending-window scan hit `max_windows` (the D1383 window cap) — deliberately distinct from `pages_truncated`: the window cap means "raise `max_windows`". |
+| `budget_truncated` | `True` when any pass stopped early on the D103 time budget — deliberately distinct from `pages_truncated` and `digests_truncated`: the page cap means "raise `max_pages`", the window cap means "raise `max_windows`", the time budget means "raise `time_budget_s` or the cadence". The operator alert is `pages_truncated OR digests_truncated OR budget_truncated`. |
 | `reminders_enabled` | echoes the flag |
 | `notes` | sweep-level annotations as `(key, message)` tuples — `tick_overrun` when the sweep exceeded its `tick_interval_s` schedule interval (D103); empty on a normal sweep |
 
@@ -188,6 +189,16 @@ reminder that coalesced into the digest this sweep is carried by the
 digest in the same sweep — the only ordering that cannot strand
 counts.
 
+The pending scan is bounded: at most `DEFAULT_MAX_DIGEST_WINDOWS`
+(1000) oldest-first windows are processed per sweep. If more windows
+are pending (the realistic pile-up is sustained budget suppression —
+every suppressed tick leaves another row with `enqueued_at` NULL),
+the remainder stays pending and is re-scanned next tick: the cap
+defers, never drops. The sweep summary's `digests_truncated` field is
+True when a sweep hit the cap; treat **repeated** truncation like
+`pages_truncated` — an operator alert meaning the cap no longer
+exceeds peak pending windows per tick.
+
 ## 6. The watcher pass
 
 `derive_stale(conn, moment)` and `derive_token_warnings(conn, moment)`
@@ -221,8 +232,9 @@ The D103 time budget has its own alert: repeated
 `budget_truncated = True` means ticks are doing partial work because
 the budget is too small for the candidate load — not because the
 page cap is too small. Remediation is per-cause: `pages_truncated`
-→ raise `max_pages` (then `page_size`); `budget_truncated` → raise
-`time_budget_s` or run the sweep more often. The two booleans are
+→ raise `max_pages` (then `page_size`); `digests_truncated` → raise
+`max_windows`; `budget_truncated` → raise
+`time_budget_s` or run the sweep more often. The three booleans are
 deliberately separate so the alert never prescribes the wrong fix.
 
 ## 8. The DO-alarm retirement
@@ -318,7 +330,7 @@ print(s)  # quiet sweep: empty maps, watchers {"skipped": True}
   the other watcher still runs.
 
 The repo's own suite is `python3 -m pytest hosted/test_push_sweep.py`
-(42 tests, neutering-verified non-vacuous) — run it after any change
+(47 tests, neutering-verified non-vacuous) — run it after any change
 to the sweep or its tables.
 
 ## 11. Known non-goals

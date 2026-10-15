@@ -121,12 +121,24 @@ from hosted import push_events
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 100
 
+# D1383 — bounded work per sweep, digest pass. The D76 pending-window
+# scan used to read every pending window every tick with no LIMIT; under
+# sustained budget suppression one row per (owner, hour) piles up with
+# enqueued_at NULL and each tick re-reads and re-attempts all of them —
+# linear write amplification per tick with no backstop, exactly the
+# shape D69 prevents on the reminders pass. The cap is a capacity
+# assumption, not a correctness bound: it must exceed peak pending
+# windows/tick; repeated truncation is an operator alert (the D75
+# self-healing discipline keeps truncation behavior-preserving — a
+# truncated window stays pending and is re-scanned next tick).
+DEFAULT_MAX_DIGEST_WINDOWS = 1000
+
 SweepSummary = namedtuple(
     "SweepSummary",
     ["reminders", "digests", "stale_watchers", "token_warnings",
      "candidates_seen", "pages_truncated", "reminders_enabled", "notes",
-     "budget_truncated"],
-    defaults=[(), False])
+     "budget_truncated", "digests_truncated"],
+    defaults=[(), False, False])
 # Each of reminders/digests/stale_watchers/token_warnings is a dict
 # disposition -> count, or {"skipped": True} when the pass did not run.
 # "notes" is a tuple of (key, message) sweep-level annotations — e.g.
@@ -151,6 +163,23 @@ ReminderPassResult = namedtuple(
 # copies them onto the SweepSummary's dedicated fields. budget_truncated
 # (D103) is distinct from pages_truncated (D69): time-budget stop vs.
 # page-cap stop — different remediations.
+
+DigestPassResult = namedtuple(
+    "DigestPassResult",
+    ["dispositions", "windows_seen", "windows_truncated",
+     "budget_truncated"],
+    defaults=[False])
+# The digest pass keeps its meta out of the disposition map, mirroring
+# the reminders pass: the per-pass map is disposition -> count only;
+# windows_seen, windows_truncated, and budget_truncated ride alongside,
+# and sweep_once copies windows_truncated onto the SweepSummary's
+# dedicated digests_truncated field. windows_truncated (the D1383
+# window cap) is deliberately distinct from pages_truncated (the D69
+# page cap) and budget_truncated (the D103 time budget): the three have
+# different remediations — raise max_windows vs. raise max_pages vs.
+# raise time_budget_s — so the operator alert reads
+# `pages_truncated OR digests_truncated OR budget_truncated`, never one
+# boolean for all.
 
 
 def _utcnow(now=None):
@@ -211,6 +240,19 @@ def _validate_budget_arg(name, value):
                               or value < 0):
         raise ValueError(
             "%s must be a finite non-negative number or None" % name)
+
+
+def _validate_positive_int(name, value):
+    """Fail-closed validation for the per-pass work-cap args.
+
+    A cap is a positive int — bool is rejected even though it is an
+    int subclass (True == 1 would silently mean "one window"). Shared
+    by sweep_digests and sweep_once so an invalid cap raises before
+    any pass runs, not after the reminders pass has committed work.
+    """
+    if not isinstance(value, int) or isinstance(value, bool) \
+            or value <= 0:
+        raise ValueError("%s must be a positive int" % name)
 
 
 def _deadline_reached(deadline):
@@ -561,8 +603,9 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
     return ReminderPassResult(counts, seen, truncated)
 
 
-def sweep_digests(conn, *, now=None, deadline=None):
-    """Pass 2: the D54 digest trigger (D64, D67, D76, D103).
+def sweep_digests(conn, *, now=None, deadline=None,
+                  max_windows=DEFAULT_MAX_DIGEST_WINDOWS):
+    """Pass 2: the D54 digest trigger (D64, D67, D76, D103, D1383).
 
     Fires `maybe_enqueue_digest` for every *pending* digest window —
     `count > 0` with `enqueued_at IS NULL` — oldest first (D76). The
@@ -581,22 +624,44 @@ def sweep_digests(conn, *, now=None, deadline=None):
     D103 — `deadline` is the sweep's absolute time.monotonic() budget
     (None = unbounded, the default): when it is reached the pass stops
     and records `budget_exhausted`; unfired windows stay pending for
-    the next tick. Returns a dict disposition -> count.
+    the next tick.
+    D1383 — `max_windows` bounds the pending-window scan per sweep
+    (the digest analog of the D69 page cap): the query takes
+    `max_windows` oldest-first windows, and a truncated remainder stays
+    pending for the next tick (the D75 self-healing discipline, so the
+    cap is behavior-preserving — no window is ever skipped, only
+    deferred). Truncation is reported as `windows_truncated` on the
+    result (and `digests_truncated` on the SweepSummary) — repeated
+    truncation is an operator alert, the same visibility D69 gives
+    the reminders pass.
+    Returns a DigestPassResult: the disposition -> count map plus the
+    pass meta (kept out of the map).
     """
+    _validate_positive_int("max_windows", max_windows)
     moment = _utcnow(now)
     if _deadline_reached(deadline):
         _loud("digests: time budget already exhausted — pass skipped;"
               " windows stay pending for the next tick")
-        return {"budget_exhausted": True}
+        return DigestPassResult({"budget_exhausted": True}, 0, False, True)
     current = push_enqueue.hour_bucket(moment)
-    pending = conn.execute(
+    # D1383: read one row past the cap — fetching exactly max_windows
+    # rows cannot distinguish "exactly full" from "truncated". The
+    # extra row is never processed; it is the truncation probe.
+    rows = conn.execute(
         "SELECT owner_principal, window_start FROM push_digest_state"
         " WHERE count > 0 AND enqueued_at IS NULL"
         " AND window_start <= ?"
-        " ORDER BY window_start, owner_principal",
-        (current,)).fetchall()
+        " ORDER BY window_start, owner_principal"
+        " LIMIT ?",
+        (current, max_windows + 1)).fetchall()
+    truncated = len(rows) > max_windows
+    if truncated:
+        _loud("digests: pending-window scan truncated at %d windows —"
+              " remainder stays pending for the next tick"
+              % max_windows)
     counts = {}
-    for owner_principal, window_start in pending:
+    seen = 0
+    for owner_principal, window_start in rows[:max_windows]:
         if _deadline_reached(deadline):
             counts["budget_exhausted"] = True
             _loud("digests: time budget exhausted — pass stops;"
@@ -610,7 +675,9 @@ def sweep_digests(conn, *, now=None, deadline=None):
         _isolate_candidate(
             counts, "digests",
             "owner=%r window=%r" % (owner_principal, window_start), _one)
-    return counts
+        seen += 1
+    return DigestPassResult(counts, seen, truncated,
+                            "budget_exhausted" in counts)
 
 
 def sweep_watchers(conn, *, now=None, resolve_owner=None,
@@ -675,7 +742,8 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
                page_size=DEFAULT_PAGE_SIZE, max_pages=DEFAULT_MAX_PAGES,
                reminders_enabled=True, derive_stale=None,
                derive_token_warnings=None,
-               time_budget_s=None, tick_interval_s=None):
+               time_budget_s=None, tick_interval_s=None,
+               max_windows=DEFAULT_MAX_DIGEST_WINDOWS):
     """Run one full D9 sweep: reminders, then digests, then watchers.
 
     `now` is taken once and threaded through every pass (D73).
@@ -693,6 +761,11 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
     can overlap. Both are validated fail-closed (finite non-negative
     number or None; NaN/inf/bool/str/negative are ValueError).
 
+    D1383 — `max_windows` (default DEFAULT_MAX_DIGEST_WINDOWS) bounds
+    the digest pass's pending-window scan per sweep, oldest first; a
+    truncated remainder stays pending for the next tick, and the
+    truncation is reported on the summary's `digests_truncated` field.
+
     Returns a SweepSummary. The D9 acceptance criterion reads off it:
     a due reminder produces exactly one `queued` disposition; a
     decided/expired approval is never a candidate, so it produces zero
@@ -704,6 +777,9 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
     """
     _validate_budget_arg("time_budget_s", time_budget_s)
     _validate_budget_arg("tick_interval_s", tick_interval_s)
+    # D1383: fail closed on the digest cap before any pass runs — a
+    # pass-level raise would come after the reminders pass committed.
+    _validate_positive_int("max_windows", max_windows)
     moment = _utcnow(now)
     # (D103) wall-clock, not the injected logical clock: the budget and
     # the overrun alarm measure how long the sweep *ran*, which is
@@ -717,7 +793,8 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
         record_adapter=record_adapter, page_size=page_size,
         max_pages=max_pages, reminders_enabled=reminders_enabled,
         deadline=deadline)
-    digests = sweep_digests(conn, now=moment, deadline=deadline)
+    dig = sweep_digests(conn, now=moment, deadline=deadline,
+                        max_windows=max_windows)
     watchers = sweep_watchers(
         conn, now=moment, resolve_owner=resolve_owner,
         derive_stale=derive_stale,
@@ -736,21 +813,24 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
         _loud("sweep_once: tick_overrun — " + msg)
         notes.append(("tick_overrun", msg))
     # D103/B2 — the operator alert reads `pages_truncated OR
-    # budget_truncated`: any pass stopping early on the time budget
-    # marks the sweep, so a tick that did partial work is visible even
-    # when the page cap was never hit.
+    # digests_truncated OR budget_truncated`: any pass stopping early on
+    # the time budget marks the sweep, so a tick that did partial work
+    # is visible even when the page cap was never hit; the D69 page cap
+    # and the D1383 window cap keep their own fields (different stops,
+    # different remediations — raise max_pages vs. raise max_windows).
     budget_truncated = (
         rem.budget_truncated
-        or "budget_exhausted" in digests
+        or "budget_exhausted" in dig.dispositions
         or "budget_exhausted" in watchers["stale"]
         or "budget_exhausted" in watchers["token_warnings"])
     return SweepSummary(
         reminders=rem.dispositions,
-        digests=digests,
+        digests=dig.dispositions,
         stale_watchers=watchers["stale"],
         token_warnings=watchers["token_warnings"],
         candidates_seen=rem.candidates_seen,
         pages_truncated=rem.pages_truncated,
         reminders_enabled=reminders_enabled,
         notes=tuple(notes),
-        budget_truncated=budget_truncated)
+        budget_truncated=budget_truncated,
+        digests_truncated=dig.windows_truncated)

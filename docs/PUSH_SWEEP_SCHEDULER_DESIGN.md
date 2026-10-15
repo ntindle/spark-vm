@@ -173,6 +173,17 @@ cadence the request path cannot supply.
   late (the realistic case is the final minute of the hour, healed on
   the next tick) — deliberately, since dropping a stranded digest
   would silently un-deliver its coalesced pages.
+  (Amended by #1383, 2026-10-15: the pending scan is now bounded per
+  sweep — `DEFAULT_MAX_DIGEST_WINDOWS` (1000) oldest-first windows —
+  the digest analog of the D69 page cap. Under sustained budget
+  suppression one row per (owner, hour) piles up with `enqueued_at`
+  NULL, and an unbounded scan re-reads and re-attempts all of them
+  every tick: linear write amplification with no backstop. A
+  truncated remainder stays pending and is re-scanned next tick (the
+  D75 self-healing discipline, so the cap defers windows, never
+  drops them); truncation is reported on the summary's
+  `digests_truncated` field — repeated truncation is an operator
+  alert, same visibility D69 gives the reminders pass.)
 - **D77. The digest's suppression audit uses a suffixed key
   (arch 20261006-0329).** `enqueue_page`'s `suppressed_budget` audit
   row for a *digest* is written with key `event_key +

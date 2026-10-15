@@ -526,6 +526,106 @@ def test_digest_pass_isolates_corrupt_window(conn, capsys):
     assert _digest_row(conn, "owner-1", ws)[1] is not None
 
 
+# --- D1383: bounded digest-window scan -------------------------------------
+
+def _seed_pending_windows(conn, owner, n, start_hour=0):
+    # n pending (count>0, enqueued_at NULL) past windows, oldest first.
+    windows = ["2026-10-05T%02d" % h for h in range(start_hour, start_hour + n)]
+    for w in windows:
+        _seed_digest(conn, owner, w, 2)
+    return windows
+
+
+def _suppress_digest_budget(conn, owner):
+    # Burn the owner's current-window budget so every digest attempt is
+    # `suppressed_budget` — the pass mechanics stay identical, the rows
+    # stay pending, and no page machinery is needed.
+    ws = push_enqueue.hour_bucket(T0)
+    for _ in range(10):
+        assert push_enqueue.reserve_budget(conn, None, owner, ws)
+    return ws
+
+
+def test_digest_scan_truncated_at_cap_reports_and_heals(conn, capsys):
+    # D1383: more pending windows than max_windows — the pass processes
+    # the oldest max_windows, reports windows_truncated, leaves the
+    # remainder pending (D75 self-healing), and the summary's
+    # digests_truncated marks the sweep for the operator alert.
+    windows = _seed_pending_windows(conn, "owner-1", 5)
+    ws = _suppress_digest_budget(conn, "owner-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              max_windows=3)
+    assert s.digests.get("suppressed_budget") == 3
+    assert s.digests_truncated is True
+    err = capsys.readouterr().err
+    assert "truncated at 3 windows" in err
+    # The two newest windows were never touched: still pending.
+    assert _digest_row(conn, "owner-1", windows[0])[1] is None
+    assert _digest_row(conn, "owner-1", windows[3])[1] is None
+    assert _digest_row(conn, "owner-1", windows[4])[1] is None
+    # Budget frees: the truncated remainder heals on a later tick.
+    for _ in range(10):
+        push_enqueue.release_reservation(conn, None, "owner-1", ws)
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                               max_windows=10)
+    assert s2.digests.get("queued") == 5
+    assert s2.digests_truncated is False
+
+
+def test_digest_scan_processes_oldest_first(conn):
+    # D1383: the cap must take the OLDEST windows — under persistent
+    # truncation, newest-first would starve old windows forever,
+    # converting the bound into a silent starvation mechanism.
+    windows = _seed_pending_windows(conn, "owner-1", 5)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              max_windows=3)
+    assert s.digests.get("queued") == 3
+    assert s.digests_truncated is True
+    for w in windows[:3]:
+        assert _digest_row(conn, "owner-1", w)[1] is not None
+    for w in windows[3:]:
+        assert _digest_row(conn, "owner-1", w)[1] is None
+
+
+def test_digest_scan_no_truncation_under_cap(conn):
+    # D1383: under the cap nothing is truncated and the summary flag
+    # stays False — no false-positive operator alert.
+    _seed_pending_windows(conn, "owner-1", 2)
+    _suppress_digest_budget(conn, "owner-1")
+    reg = _registry({"box-1": "owner-1"})
+    r = push_sweep.sweep_digests(conn, now=T0, max_windows=5)
+    assert r.windows_truncated is False
+    assert r.windows_seen == 2
+    assert r.dispositions.get("suppressed_budget") == 2
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              max_windows=5)
+    assert s.digests_truncated is False
+
+
+def test_digest_scan_exactly_at_cap_is_not_truncation(conn):
+    # D1383: exactly max_windows pending windows is "full", not
+    # truncated — the LIMIT+1 probe row distinguishes the two.
+    _seed_pending_windows(conn, "owner-1", 3)
+    _suppress_digest_budget(conn, "owner-1")
+    r = push_sweep.sweep_digests(conn, now=T0, max_windows=3)
+    assert r.windows_truncated is False
+    assert r.windows_seen == 3
+
+
+def test_digest_scan_max_windows_validation(conn):
+    # D1383: the cap is validated fail-closed like the reminders
+    # page_size/max_pages pair (bools are ints in Python — rejected).
+    for bad in (0, -1, True, "10", 2.5):
+        with pytest.raises(ValueError):
+            push_sweep.sweep_digests(conn, now=T0, max_windows=bad)
+        with pytest.raises(ValueError):
+            push_sweep.sweep_once(conn, now=T0,
+                                  resolve_owner=_registry({}),
+                                  max_windows=bad)
+
+
 def test_watchers_isolate_per_candidate_errors(conn, capsys):
     # D78: a raising candidate in one watcher is a loud `poisoned`
     # count; the sibling candidate and the other watcher still run.
