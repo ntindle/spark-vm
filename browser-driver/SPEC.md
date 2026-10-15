@@ -157,7 +157,9 @@ The interview confirmed the managed agent's primary sense is the
 - `wait` — exactly one of `text` (exact page text to appear),
   `text_gone` (exact text to disappear), or `time_ms` (blind pause
   **only** for a duration the page itself states, e.g. a queue timer —
-  never for navigation, loads, search, or hydration).
+  never for navigation, loads, search, or hydration). A `text` /
+  `text_gone` wait with no explicit `timeout_ms` is bounded by the
+  30,000 ms default timeout — it can never wait indefinitely.
 - Post-navigation rule: after `goto`, only exact-text `wait` or
   ref-free `look` / `get_text` / `get_html` / `state` may follow in the
   same array — never `snapshot`, never a locator action on the old tree.
@@ -221,7 +223,19 @@ on size alone instead of being echoed by a validator.
 
 - Refs may address elements inside iframes (SSO and payment forms live
   there); the snapshot's AX tree includes frame boundaries and every
-  ref is frame-scoped. Every action takes an optional `timeout_ms`.
+  ref is frame-scoped. Every action takes an optional `timeout_ms`
+  (1–300,000 ms). When absent, the action gets the default timeout of
+  30,000 ms — absent never means "no timeout". The effective timeout
+  bounds how long the backend may spend *attempting* the action;
+  caller-stated deterministic durations (`wait.time_ms`,
+  `gesture.click_hold_ms`) are authoritative — they carry their own
+  caps and are never truncated by the timeout (the timeout governs the
+  open-ended part of the attempt: waiting for text to appear, a
+  navigation completing). The call-level duration budget sums each
+  action's effective timeout plus `wait.time_ms` and
+  `gesture.click_hold_ms`, and rejects the call past 600,000 ms, so a
+  text-wait with no timeout can no longer wedge the driver while the
+  budget check passes.
   `look` screenshots are size-capped (bounded viewport; full-page on
   explicit request). The job's download dir is group-readable by the
   orchestrator's login so artifacts can be fetched over SSH. (Review

@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The browser-driver now gives every action an explicit 30-second default
+  timeout when none is supplied: an omitted `timeout_ms` used to mean
+  "no timeout" in the call-level duration budget, so a single text-wait
+  with no timeout could tie up the driver indefinitely while the budget
+  check passed. The budget now sums the effective timeout of every
+  action, and the protocol contract pins the default for the execution
+  backend — an action is never unbounded. (#1452, #1497)
+
 - The browser-driver now rejects accessibility-tree observations whose
   element locators are not unique: an observation carrying the same
   `@e1` locator twice is refused instead of leaving a `click @e1`

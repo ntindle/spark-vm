@@ -560,7 +560,12 @@ def test_all_spec_actions_accepted():
     ]
     scope = P.RefScope()
     token = scope.rotate()
-    validated = P.validate_call(call(actions, ref_scope=token), scope=scope)
+    # #1452: an action without an explicit timeout contributes the
+    # 30 s default to the call budget, so this 29-action probe carries
+    # small explicit timeouts — it exercises the vocabulary, not the
+    # budget (29 x 1 s + the 500 ms wait << 600 s).
+    timed = [dict(a, timeout_ms=1000) for a in actions]
+    validated = P.validate_call(call(timed, ref_scope=token), scope=scope)
     assert [a.name for a in validated.actions] == [a["action"] for a in actions]
     # A lone snapshot is valid on its own, no ref_scope needed.
     P.validate_call(call([{"action": "snapshot"}], ref_scope=None))
@@ -1154,7 +1159,12 @@ def test_actions_array_capped():
         call([{"action": "state"}] * (P.MAX_ACTIONS_PER_CALL + 1)),
         "too_many_actions",
     )
-    P.validate_call(call([{"action": "state"}] * P.MAX_ACTIONS_PER_CALL))
+    # #1452: 256 actions at the 30 s default would exceed the call
+    # budget, so the boundary probe carries 1 ms explicit timeouts —
+    # it exercises the array cap, not the budget.
+    P.validate_call(
+        call([{"action": "state", "timeout_ms": 1}] * P.MAX_ACTIONS_PER_CALL)
+    )
 
 
 def test_wait_text_must_be_non_empty():
@@ -1268,9 +1278,67 @@ def test_call_result_to_dict_with_observation():
     assert out["receipts"] == [{"action": "goto", "status": "completed"}]
 
 
-def test_validated_action_timeout_defaults_to_zero():
+def test_validated_action_timeout_defaults_to_default_timeout_ms():
+    # #1452: absent timeout_ms is DEFAULT_TIMEOUT_MS (30 s), never "no
+    # timeout" — the execution backend gets a hard bound for every
+    # action, and the call-level budget sums it.
     validated = P.validate_call(call([{"action": "snapshot"}], ref_scope=None))
-    assert validated.actions[0].timeout_ms == 0
+    assert validated.actions[0].timeout_ms == P.DEFAULT_TIMEOUT_MS == 30_000
+    # An explicit timeout still wins over the default.
+    validated = P.validate_call(
+        call([{"action": "snapshot", "timeout_ms": 15000}], ref_scope=None)
+    )
+    assert validated.actions[0].timeout_ms == 15_000
+
+
+def test_absent_timeout_contributes_to_call_budget():
+    # #1452 repro: a text-wait with no timeout_ms contributed 0 to the
+    # budget while able to block indefinitely. Now every absent timeout
+    # contributes DEFAULT_TIMEOUT_MS, so the budget bounds the wedge.
+    scope = P.RefScope()
+    token = scope.rotate()
+    # 20 x 30 s default = exactly the 600 s budget: fine.
+    P.validate_call(
+        call([{"action": "wait", "text": "loaded"}] * 20, ref_scope=token),
+        scope=scope,
+    )
+    # 21 x 30 s = 630 s > budget: rejected.
+    expect_code(
+        call([{"action": "wait", "text": "loaded"}] * 21, ref_scope=token),
+        "call_budget_exceeded",
+        scope=scope,
+    )
+    # The old hole shape: 256 text-waits with no timeouts used to
+    # contribute 0 and validate; now they exceed the budget.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "wait", "text": "loaded"}] * 256, ref_scope=token),
+            scope=scope,
+        )
+    assert exc.value.code == "call_budget_exceeded"
+
+
+def test_budget_error_names_default_attribution():
+    # #1452: the rejection must explain the 30 s/action attribution so
+    # the caller can fix the call (explicit timeouts or a shorter
+    # array) instead of guessing why durations they never stated
+    # tripped the budget.
+    scope = P.RefScope()
+    token = scope.rotate()
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "wait", "text": "loaded"}] * 21, ref_scope=token),
+            scope=scope,
+        )
+    assert exc.value.code == "call_budget_exceeded"
+    # Assert the full attribution clause, not just "30000" — the
+    # budget figure itself (e.g. 630000) contains "30000" as a
+    # substring, so the bare-number assertion would pass on the old
+    # message and pin nothing.
+    assert (
+        "actions without an explicit timeout_ms count as 30000 ms each"
+        in str(exc.value)
+    )
 
 
 def test_config_empty_values_fail_loud():
@@ -1384,6 +1452,8 @@ def test_deeply_nested_ax_tree_rejected_as_protocol_error():
 
 def test_call_duration_budget():
     # B3: 256 x 300s waits must not validate (a 21.3h serial wedge).
+    # Each action also carries the 30 s default timeout in the budget
+    # (#1452), so the arithmetic below includes it.
     scope = P.RefScope()
     token = scope.rotate()
     with pytest.raises(P.ProtocolError) as exc:
@@ -1393,9 +1463,10 @@ def test_call_duration_budget():
             scope=scope,
         )
     assert exc.value.code == "call_budget_exceeded"
-    # At the budget (2 x 300s) is fine.
+    # At the budget is fine: 2 x (270 s time_ms + 30 s default
+    # timeout) = exactly 600 s.
     P.validate_call(
-        call([{"action": "wait", "time_ms": 300_000}] * 2,
+        call([{"action": "wait", "time_ms": 270_000}] * 2,
              ref_scope=token),
         scope=scope,
     )

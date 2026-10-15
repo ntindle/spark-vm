@@ -39,6 +39,9 @@ Validation rules enforced here, beyond the fixed vocabulary:
 - durations are capped at ``MAX_TIMEOUT_MS`` and the actions array at
   ``MAX_ACTIONS_PER_CALL`` — a compromised orchestrator cannot wedge
   the driver or DoS it with a giant array
+- an action with no ``timeout_ms`` gets ``DEFAULT_TIMEOUT_MS`` (30 s) —
+  absent never means "no timeout"; the call budget sums effective
+  timeouts, so every potentially-blocking action contributes (#1452)
 - ``fill_card`` carries only a job id; any value payload is rejected —
   card values flow through the dedicated issuer pathway (SPEC §7),
   never through this protocol
@@ -113,6 +116,16 @@ SCROLL_DIRECTIONS = ("up", "down", "left", "right", "top", "bottom")
 #: Hard ceiling on per-action timeouts: a driver that hangs for five
 #: minutes is wedged; fail loud instead of blocking the agent loop.
 MAX_TIMEOUT_MS = 300_000
+
+#: Default per-action timeout when ``timeout_ms`` is absent: 30 s.
+#: Absent never means "no timeout" — every action carries an explicit
+#: worst-case duration that the call-level budget (``MAX_CALL_BUDGET_MS``)
+#: sums, so a text-wait with no ``timeout_ms`` can no longer wedge the
+#: driver while the budget check passes (SPEC §5; #1452). The effective
+#: timeout bounds the backend's *attempt* of the action; caller-stated
+#: deterministic durations (``wait.time_ms``, ``gesture.click_hold_ms``)
+#: are authoritative and are never truncated by it.
+DEFAULT_TIMEOUT_MS = 30_000
 
 #: Hard ceiling on the actions array in one call: an unbounded array
 #: is a CPU/memory DoS vector from a compromised orchestrator.
@@ -575,11 +588,16 @@ class ValidatedAction:
     """One validated action. ``params`` is deeply frozen (MappingProxyType
     / tuples): the "validated" object cannot be mutated after validation,
     and nested values are detached from the caller's payload. Lists in
-    the payload (e.g. ``grant_ids``) surface as tuples."""
+    the payload (e.g. ``grant_ids``) surface as tuples.
+
+    ``timeout_ms`` is always the EFFECTIVE timeout: the explicit value
+    when the action carried one, ``DEFAULT_TIMEOUT_MS`` when it did not.
+    0 is never a valid validated value — a present-but-falsy timeout
+    fails loud at validation, and absence takes the default (#1452)."""
 
     name: str
     params: Mapping
-    timeout_ms: int = 0
+    timeout_ms: int = DEFAULT_TIMEOUT_MS
 
     def redacted_params(self):
         """Params safe for logging: SPEC §13 declares field contents
@@ -807,15 +825,20 @@ def _validate_action_object(obj, index):
             % (index, name, format_unknown_keys(unknown)),
         )
     validator(params)
-    timeout_ms = obj.get("timeout_ms", 0)
-    if timeout_ms:
+    if "timeout_ms" in obj:
+        # Present: must be a positive int within the cap — 0, False,
+        # None, negatives, and non-ints fail loud, never silently fall
+        # back to the default.
+        timeout_ms = obj["timeout_ms"]
         _check_timeout_ms(timeout_ms)
-    elif "timeout_ms" in obj:
-        raise ProtocolError(
-            "bad_params",
-            "actions[%d] (%s): timeout_ms must be a positive int"
-            % (index, name),
-        )
+    else:
+        # Absent: DEFAULT_TIMEOUT_MS, never "no timeout" (#1452). The
+        # execution backend must treat this as a hard bound on the
+        # action's *attempt* (caller-stated deterministic durations like
+        # wait.time_ms are authoritative and never truncated — see
+        # SPEC §5); the call-level budget sums it like any explicit
+        # value.
+        timeout_ms = DEFAULT_TIMEOUT_MS
     return ValidatedAction(
         name=name, params=_freeze(params), timeout_ms=timeout_ms
     )
@@ -939,7 +962,8 @@ def validate_call(payload, scope=None):
         )
     _check_post_navigation_rule(validated)
 
-    # Cumulative duration budget: timeout_ms + wait.time_ms +
+    # Cumulative duration budget: effective per-action timeouts (absent
+    # timeout_ms = DEFAULT_TIMEOUT_MS, #1452) + wait.time_ms +
     # gesture.click_hold_ms across the whole array. Per-action caps do
     # not stop a serial wedge (256 x 300s waits); the call-level budget
     # does.
@@ -952,8 +976,9 @@ def validate_call(payload, scope=None):
     if budget > MAX_CALL_BUDGET_MS:
         raise ProtocolError(
             "call_budget_exceeded",
-            "call's cumulative duration %d ms exceeds budget %d ms"
-            % (budget, MAX_CALL_BUDGET_MS),
+            "call's cumulative duration %d ms exceeds budget %d ms; "
+            "actions without an explicit timeout_ms count as %d ms each"
+            % (budget, MAX_CALL_BUDGET_MS, DEFAULT_TIMEOUT_MS),
         )
 
     ref_scope = payload.get("ref_scope")
