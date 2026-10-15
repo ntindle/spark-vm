@@ -566,6 +566,19 @@ is already explicit in the H11 audit (§3).
    keeps swapping until expiry — documented behavior, not silent (§4).
 9. A box bearer presented at any `/v1/owner/.../credentials/*`
    endpoint → 401 (auth-class namespace separation, §2.1).
+10. The mint endpoint's auth surface is fully `401`, never `403` or an
+    enrollment oracle: a wrong-box or unknown box token reads the same
+    plain unattributed `401` as every other box-route failure (the
+    no-oracle convention, §2.1); revoked and expired tokens read `401`
+    with their distinct holder-visible messages. Issue #1401.
+11. A `grace` (post-rotation) box token presented at the mint endpoint
+    reads `401` with a rotation-naming message and mints nothing —
+    never `200`, and never "token expired"; mint and refresh alike
+    require a `current` token (the §2.1b token-state gate). Issue #1402.
+12. `vend_values.alg` is exactly `aes-128-gcm` — the plane-side
+    encryption primitive is the vendored AES-128-GCM from
+    `hosted/push_crypto.py`, not an AES-256 the stdlib-only worker
+    cannot implement (§2.4, §3). Issue #1403.
 
 ## 11. What's next
 

@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The credential-vending contract's three security pins are now
+  machine-checked by a pin test: the mint endpoint's auth surface stays
+  the plane's no-oracle `401` convention (a wrong-box token reads the
+  same plain `401` as an unknown token, so a stolen token can't probe
+  other boxes' enrollment), secret issuance keeps requiring a `current`
+  box token (a post-rotation `grace` token mints nothing), and the
+  plane-side encryption primitive stays `aes-128-gcm` — the algorithm
+  the stdlib-only worker can actually implement. The acceptance
+  checklist gains matching denial-worded items, so the #890 plane
+  builder inherits the pins as testables. (#1401, #1402, #1403, #TBD)
+
 - The browser-driver now gives every action an explicit 30-second default
   timeout when none is supplied: an omitted `timeout_ms` used to mean
   "no timeout" in the call-level duration budget, so a single text-wait

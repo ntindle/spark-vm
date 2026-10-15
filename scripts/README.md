@@ -147,6 +147,7 @@ never drift from what's on disk.
 | `test_contributing_ci_gates.py` | `CONTRIBUTING.md` merge-gate check list |
 | `test_contributing_suites.py` | `CONTRIBUTING.md` test-suite inventory |
 | `test_contributing_venv.py` | `CONTRIBUTING.md` venv-first install instructions |
+| `test_credential_vend_contract.py` | CREDENTIAL_VEND_CONTRACT.md security pins (#1401/#1402/#1403) |
 | `test_cut_release.py` | `cut-release.sh` release tooling |
 | `test_deploy_gate_tests_coverage.py` | `deploy/components.conf` gate test-file registration |
 | `test_docs_index_coverage.py` | `docs/` index coverage |
