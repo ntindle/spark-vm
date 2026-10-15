@@ -1707,11 +1707,12 @@ def test_claimed_row_by_email_matches_only_signed_up():
 
 
 def test_write_spool_writes_complete_doc_no_tmp_left():
-    # #389: the spool writer commits via tmp + os.replace — a completed
-    # write leaves exactly one final file and no *.tmp-* leftovers for
-    # the operator's sender to choke on.
+    # #389: the spool writer commits via tmp + exclusive os.link — a
+    # completed write leaves exactly one final file and no *.tmp-*
+    # leftovers for the operator's sender to choke on.
     svc, tmp = make_service()
-    svc._write_spool("x.json", {"a": 1})
+    got = svc._write_spool(lambda: "x.json", {"a": 1})
+    assert got == "x.json"
     files = spool_files(tmp)
     assert files == ["x.json"]
     with open(os.path.join(tmp, "spool", "x.json"),
@@ -1724,18 +1725,101 @@ def test_write_spool_failure_removes_partial_and_raises():
     # propagates so the caller's contract is unchanged (invite path
     # catches OSError and commits nothing; others treat it as fatal).
     svc, tmp = make_service()
-    real_replace = os.replace
+    real_link = os.link
 
     def boom(src, dst):
         raise OSError("disk full")
 
-    os.replace = boom
+    os.link = boom
     try:
         with pytest.raises(OSError):
-            svc._write_spool("y.json", {"a": 1})
+            svc._write_spool(lambda: "y.json", {"a": 1})
     finally:
-        os.replace = real_replace
+        os.link = real_link
     assert spool_files(tmp) == []  # no torn file, no tmp leftover
+
+
+def test_spool_name_uses_128bit_entropy():
+    # #1522: 32-bit spool names (token_hex(4)) were birthdays away from a
+    # silent overwrite; new names carry 128-bit entropy like #401's
+    # triage names.
+    name = wd._spool_name("patha-1728900000")
+    assert re.fullmatch(r"patha-1728900000-[0-9a-f]{32}\.json", name), \
+        f"unexpected spool name shape: {name!r}"
+    assert wd._spool_name("p") != wd._spool_name("p"), \
+        "successive mints must differ"
+
+
+def test_spool_patha_email_name_uses_128bit_entropy():
+    # #1522 end-to-end: a real spool path must mint the 128-bit shape,
+    # not the old 32-bit one.
+    svc, tmp = make_service()
+    assert svc._spool_patha_email("x@example.com", "s", "b", "clarify")
+    names = os.listdir(os.path.join(tmp, "spool"))
+    assert len(names) == 1
+    assert re.fullmatch(r"patha-\d+-[0-9a-f]{32}\.json", names[0]), \
+        f"unexpected spool name shape: {names[0]!r}"
+
+
+def test_write_spool_collision_retries_with_fresh_entropy(monkeypatch):
+    # #1522: a lost name race must retry with fresh entropy — the
+    # winner's send is never truncated, and the retried write lands.
+    real_token_hex = secrets.token_hex
+    collide = "ab" * 16
+    calls = {"n": 0}
+
+    def stub(n):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return collide
+        return real_token_hex(n)
+
+    monkeypatch.setattr(wd.secrets, "token_hex", stub)
+    svc, tmp = make_service()
+    spool_dir = os.path.join(tmp, "spool")
+    victim_name = f"p-{collide}.json"
+    victim = os.path.join(spool_dir, victim_name)
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write('{"sent": "first"}')
+    mints = []
+
+    def mint():
+        mints.append(1)
+        return wd._spool_name("p")
+
+    got = svc._write_spool(mint, {"sent": "second"})
+    assert len(mints) == 2, \
+        "the stub must force exactly one collision plus one retry"
+    assert got != victim_name, \
+        "a name collision must be retried, not overwritten"
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == '{"sent": "first"}', \
+            "the colliding file's content must be untouched"
+    with open(os.path.join(spool_dir, got), encoding="utf-8") as fh:
+        assert json.load(fh) == {"sent": "second"}, \
+            "the retried write must land under a fresh name"
+    assert not [f for f in os.listdir(spool_dir) if ".tmp-" in f], \
+        "the losing attempt's staging file must be dropped"
+
+
+def test_write_spool_persistent_collision_fails_loud(monkeypatch):
+    # #1522: an unwinnable name race must fail loud — never silently
+    # overwrite — and must leave no partial file behind.
+    collide = "cd" * 16
+    monkeypatch.setattr(wd.secrets, "token_hex", lambda n: collide)
+    svc, tmp = make_service()
+    spool_dir = os.path.join(tmp, "spool")
+    victim_name = f"p-{collide}.json"
+    victim = os.path.join(spool_dir, victim_name)
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write('{"sent": "first"}')
+    with pytest.raises(OSError):
+        svc._write_spool(lambda: wd._spool_name("p"), {"sent": "second"})
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == '{"sent": "first"}', \
+            "the colliding file's content must be untouched"
+    assert os.listdir(spool_dir) == [victim_name], \
+        "a failed write must leave no staging leftovers"
 
 
 def _rows_on_disk(tmp):
@@ -2068,7 +2152,7 @@ def _spool_doc(svc, name, kind=None, queued_at=None):
            "entry_id": "e1"}
     if kind is not None:
         doc["kind"] = kind
-    svc._write_spool(name, doc)
+    svc._write_spool(lambda: name, doc)
 
 
 def test_status_snapshot_spool_backlog():

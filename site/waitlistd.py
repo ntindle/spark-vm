@@ -187,6 +187,26 @@ TRIAGE_RETENTION_SECONDS = 2 * 86400
 # the entropy's suspenders — but a *failed* retry still fails loud
 # rather than silently overwriting another invocation's triaged mail.
 TRIAGE_CREATE_RETRIES = 8
+# #1522: the spool/ final-name race gets the same belt-and-suspenders as
+# triage/: a _write_spool that loses the exclusive-publish race retries
+# with fresh entropy this many times before failing loud. With 128-bit
+# names the race is effectively unwinnable, but a *failed* retry still
+# fails loud rather than silently overwriting (and ledger-claiming)
+# another invocation's send.
+SPOOL_CREATE_RETRIES = 8
+
+
+def _spool_name(prefix):
+    """Mint one spool/ filename: ``<prefix>-<128-bit hex>.json`` (#1522).
+
+    128-bit entropy mirrors the #401 triage names — at 2**128 a name
+    race between lockless patha invocations is effectively impossible,
+    and the residual is closed by _write_spool's exclusive publish
+    (os.link raises instead of overwriting). The prefix keeps the
+    operator-eyeballable shape (kind/entry/ts); the sender parses the
+    JSON doc, never the name.
+    """
+    return f"{prefix}-{secrets.token_hex(16)}.json"
 # #897: funnel_events.jsonl retention — events older than this that are
 # not coverage-pinned rotate out of the hot file into dated archives
 # (WAITLIST_OPERATIONS.md §5). 90d is ~2x the dropped-row purge horizon
@@ -1115,39 +1135,78 @@ class WaitlistService:
         return (self._email_send_allowed(row)
                 and self._patha_send_allowed(row["owner_email"]))
 
-    def _write_spool(self, name, doc):
-        """Atomically write one spool doc — closes #389.
+    def _write_spool(self, mint, doc):
+        """Atomically publish one spool doc — closes #389, #1522.
 
         Spool files are drained by the operator's sender as JSON; a torn
         partial file (crash/full disk mid-write) would leave a committed
         row claiming an email was queued alongside a half-written file
-        the sender could choke on or send half of. Write to a unique tmp
-        name in spool/ + flush + fsync + os.replace() (the same
-        discipline as _rewrite_rows): a kill -9 mid-write leaves either
-        the old file (never — spool names are unique per send) or the
-        new one, never a torn one. The tmp is removed on failure so no
-        partial file is ever left behind for the sender. OSError
+        the sender could choke on or send half of. The write goes to a
+        unique tmp name in spool/ + flush + fsync, then the final name is
+        published with os.link(): the link is atomic AND exclusive — the
+        final name appears with complete content or not at all, and a
+        name race raises FileExistsError instead of silently overwriting
+        the loser's send while the ledger claims it happened (#1522).
+        link() is chosen over the triage O_CREAT|O_EXCL reservation
+        deliberately: a reservation creates the final name *empty* first,
+        so a kill -9 between reserve and publish would leave an empty
+        .json the sender must interpret; link() has no such window —
+        kill -9 leaves at most a complete final file plus a complete
+        .tmp-* leftover (the same known-orphan class #389 already
+        accepts, excluded from every spool reader by the ".tmp-" name
+        filter). tmp and final live in spool/, so the link never crosses
+        filesystems.
+
+        On a name race the tmp is dropped and the write retries with
+        fresh entropy from mint() (SPOOL_CREATE_RETRIES); a persistent
+        collision raises OSError — fail loud, never silent. OSError
         propagates — every caller catches it and commits nothing (#406):
-        the invite, confirm, reminder, and path-A queue paths all return
-        False with the row/ledger state untouched, and the next retry
-        (wave, re-submit, reminder job, path-A re-drive) picks the send
-        up cleanly.
+        the invite, confirm, reminder, path-A, and deletion-notice paths
+        all return False with the row/ledger state untouched, and the
+        next retry (wave, re-submit, reminder job, path-A re-drive)
+        picks the send up cleanly. Returns the published filename.
+
+        mint: zero-arg callable returning the desired final filename;
+        called once per attempt so a retry re-mints with fresh entropy.
         """
-        path = os.path.join(self.spool_dir, name)
-        tmp = f"{path}.tmp-{secrets.token_hex(4)}"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(doc, fh, indent=2, sort_keys=True)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        except BaseException:
-            # Never leave a partial tmp behind for the sender to choke on.
+        for _ in range(SPOOL_CREATE_RETRIES):
+            name = mint()
+            path = os.path.join(self.spool_dir, name)
+            tmp = f"{path}.tmp-{secrets.token_hex(16)}"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(doc, fh, indent=2, sort_keys=True)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                # Exclusive publication: raises FileExistsError when a
+                # racing writer claimed this name first — never silently
+                # overwrites. Same-filesystem (spool/) by construction.
+                os.link(tmp, path)
+            except FileExistsError:
+                # Name race lost: drop our staging file and retry with
+                # fresh entropy from mint(). The winner's file is
+                # untouched — link() never truncates.
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                continue
+            except BaseException:
+                # Never leave a partial tmp behind for the sender to
+                # choke on.
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-            raise
+            return name
+        raise OSError(
+            f"spool/ name collision persists after "
+            f"{SPOOL_CREATE_RETRIES} attempts; refusing to overwrite")
 
     def status_snapshot(self):
         """Operator observability for #392: spool backlog + row counts.
@@ -1271,11 +1330,14 @@ class WaitlistService:
             "queued_at": iso_z(self.clock()),
             "entry_id": row["entry_id"],
         }
-        name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.json")  # unique per send: two
-        # sends in the same second for one row must not share a filename
+        ts = int(self.clock().timestamp())
+        prefix = f"{row['entry_id']}-{ts}"
         try:
-            self._write_spool(name, doc)  # atomic — #389
+            # #1522: the minter re-mints with fresh 128-bit entropy when
+            # a name race loses the exclusive publish — two sends in the
+            # same second for one row never share a filename, and never
+            # silently overwrite each other.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
         except OSError:
             # #406: mirror the invite path's return-False handling — a
             # spool failure (disk-full, spool-dir permission) commits
@@ -1407,10 +1469,13 @@ class WaitlistService:
             "queued_at": iso_z(self.clock()),
             "entry_id": row["entry_id"],
         }
-        name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.json")
+        ts = int(self.clock().timestamp())
+        prefix = f"{row['entry_id']}-{ts}"
         try:
-            self._write_spool(name, doc)  # atomic — #389
+            # #1522: minter re-mints with fresh entropy on a lost name
+            # race — the reminder never silently overwrites a colliding
+            # send.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
         except OSError:
             # #406: mirror the invite path — commit nothing. The old
             # token stays live, no email_sends ledger entry, no
@@ -2024,10 +2089,13 @@ class WaitlistService:
             "queued_at": iso_z(self.clock()),
             "entry_id": entry_id,
         }
-        name = (f"patha-{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.json")
+        ts = int(self.clock().timestamp())
+        prefix = f"patha-{ts}"
         try:
-            self._write_spool(name, doc)  # atomic — #389
+            # #1522: minter re-mints with fresh entropy on a lost name
+            # race — the lockless patha CLI never silently overwrites a
+            # colliding send.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
         except OSError:
             # #406: mirror the invite path — the ledgers see the send
             # only when the spool actually landed. Callers map False to
@@ -2615,9 +2683,11 @@ class WaitlistService:
             "queued_at": iso_z(self.clock()),
             "entry_id": entry_id,
         }
-        name = (f"{entry_id}-deleted-{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.json")
-        self._write_spool(name, doc)  # atomic — #389
+        ts = int(self.clock().timestamp())
+        prefix = f"{entry_id}-deleted-{ts}"
+        # #1522: exclusive publish — the deletion notice can never
+        # silently overwrite a colliding send.
+        self._write_spool(lambda: _spool_name(prefix), doc)  # #389
         return True
 
 
@@ -2824,10 +2894,13 @@ class WaitlistService:
             "queued_at": iso_z(self.clock()),
             "entry_id": row["entry_id"],
         }
-        name = (f"{row['entry_id']}-invite-{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.json")
+        ts = int(self.clock().timestamp())
+        prefix = f"{row['entry_id']}-invite-{ts}"
         try:
-            self._write_spool(name, doc)  # atomic — #389
+            # #1522: minter re-mints with fresh entropy on a lost name
+            # race — the invite never silently overwrites a colliding
+            # send.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
         except OSError:
             # Spool failed: commit nothing. The old token (if any) stays
             # live, the minted token is never referenced, and the row is
@@ -2866,10 +2939,10 @@ class WaitlistService:
         spool-failed rows — still confirmed, cleanly retried by the next
         wave).
 
-        Written atomically (tmp + fsync + os.replace, the _write_spool
-        discipline) into wave_manifests/, one uniquely-named file per
-        invocation; the caller holds data_lock. Returns the manifest
-        path.
+        Written atomically (tmp + fsync + exclusive publish, the
+        _write_spool discipline) into wave_manifests/, one uniquely-named
+        file per invocation; the caller holds data_lock. Returns the
+        manifest path.
 
         A manifest write failure is non-fatal: rows.jsonl + the
         invite_sent events remain the source of truth, and the missing
