@@ -151,6 +151,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The push-notification sweep that pages owners about pending approvals
+  now has a per-tick time limit: previously a stalled data source could
+  hang a sweep indefinitely while the every-minute scheduler kept
+  starting new ones. The sweep now stops cleanly when its time budget
+  is spent (unfinished work stays queued for the next tick) and the
+  run summary flags it when a sweep overruns its schedule, so an
+  operator sees the pile-up risk before it becomes one. (#1508)
+
 - The credential-vending lane's vision-vs-state picture is current again: the new vend-lane convergence note reconciles the three closed security gates (the no-oracle auth rule, the current-token-only mint gate, the pinned encryption primitive) with the four still-open pre-build gates (placement shape, the mint rate-limit mechanism, two-table write atomicity, key-rotation execution path), amends the design doc that still prescribed the losing side of the token-state decision, and files one new gap — the server-side vend audit should attribute box actors by key fingerprint the way the update journal does, not by a bare name. (#1501)
 
 - The fleet's update journal now exists before the scheduler does: an

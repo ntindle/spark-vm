@@ -85,8 +85,10 @@ Expect no reminders and no digests from a plane that never calls it.
 | --- | --- |
 | `reminders`, `digests`, `stale_watchers`, `token_warnings` | disposition → count per pass (`reminders` reports `{"skipped": True}` when the flag is off; a watcher reports `{"skipped": True}` when its derivation is not wired; `digests` has no skip path and always runs) |
 | `candidates_seen` | reminder candidates the hint query returned this sweep |
-| `pages_truncated` | `True` when the reminder candidate pages hit `max_pages` |
+| `pages_truncated` | `True` when the reminder candidate pages hit `max_pages` (the D69 page cap) |
+| `budget_truncated` | `True` when any pass stopped early on the D103 time budget — deliberately distinct from `pages_truncated`: the page cap means "raise `max_pages`", the time budget means "raise `time_budget_s` or the cadence". The operator alert is `pages_truncated OR budget_truncated`. |
 | `reminders_enabled` | echoes the flag |
+| `notes` | sweep-level annotations as `(key, message)` tuples — `tick_overrun` when the sweep exceeded its `tick_interval_s` schedule interval (D103); empty on a normal sweep |
 
 The disposition vocabulary (verified against the real module):
 
@@ -123,6 +125,21 @@ The disposition vocabulary (verified against the real module):
 - `skipped` — the pass did not run at all: `reminders_enabled=False`
   for reminders; a watcher whose derivation is not wired (the default —
   derivations are plane-side caller logic, §6).
+- `budget_exhausted` — the pass hit the D103 `time_budget_s` tick
+  bound and stopped early; the unreached candidates stay due for the
+  next tick (the self-healing half of the truncation contract — the
+  alert/remediation half is separate: see `budget_truncated`). If you
+  see this repeatedly, the sweep is under-provisioned for its
+  candidate load — raise the budget or the cadence, because every
+  tick is now doing partial work by design.
+
+Sweep-level notes (the summary's `notes` field, not a disposition):
+`tick_overrun` means the whole sweep ran longer than its
+`tick_interval_s` schedule interval — the next cron tick may already
+have overlapped. One occasional overrun is noise; a regular pattern
+is the #1506 pile-up mode (a wedged watcher derivation) made visible
+— check the pass maps for `budget_exhausted` and the handler log for
+the loud lines.
 
 A decided or expired approval is never a candidate, so it produces
 zero pages **and** zero audit rows — operator visibility for those is
@@ -194,10 +211,19 @@ verified defaults are 100 × 100. The cap is a **capacity assumption,
 not a correctness bound**: truncation is self-healing (D75), so an
 undersized cap degrades to "remainder next tick," not lost pages.
 Repeated `pages_truncated = True` on the summary is the operator
-alert — no alert sink is wired in-repo, so the deployment that drives
-the sweep (#1069) must watch the summary. When raising the cap, raise
-`max_pages` before `page_size`: more pages keeps each query bounded;
-a larger page makes each query heavier.
+alert for the page cap — no alert sink is wired in-repo, so the
+deployment that drives the sweep (#1069) must watch the summary.
+When raising the cap, raise `max_pages` before `page_size`: more
+pages keeps each query bounded; a larger page makes each query
+heavier.
+
+The D103 time budget has its own alert: repeated
+`budget_truncated = True` means ticks are doing partial work because
+the budget is too small for the candidate load — not because the
+page cap is too small. Remediation is per-cause: `pages_truncated`
+→ raise `max_pages` (then `page_size`); `budget_truncated` → raise
+`time_budget_s` or run the sweep more often. The two booleans are
+deliberately separate so the alert never prescribes the wrong fix.
 
 ## 8. The DO-alarm retirement
 
@@ -276,6 +302,10 @@ print(s)  # quiet sweep: empty maps, watchers {"skipped": True}
   (`candidates_seen == 0`, no duplicate page).
 - **Truncation:** `page_size=1, max_pages=1` with three due
   candidates → `pages_truncated is True`, `candidates_seen == 1`.
+- **D103 time budget:** `time_budget_s=0` with a due candidate →
+  `reminders == {"budget_exhausted": True}`, `budget_truncated is
+  True`, `pages_truncated is False`, no rows enqueued; a second sweep
+  with no budget pages it normally.
 - **Digest late fire:** a pending window row (`count = 2`,
   `enqueued_at IS NULL`) → `digests == {"queued": 1}` and
   `enqueued_at` stamped with the sweep's `now`.
@@ -288,7 +318,7 @@ print(s)  # quiet sweep: empty maps, watchers {"skipped": True}
   the other watcher still runs.
 
 The repo's own suite is `python3 -m pytest hosted/test_push_sweep.py`
-(31 tests, neutering-verified non-vacuous) — run it after any change
+(42 tests, neutering-verified non-vacuous) — run it after any change
 to the sweep or its tables.
 
 ## 11. Known non-goals

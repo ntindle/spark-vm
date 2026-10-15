@@ -210,6 +210,47 @@ cadence the request path cannot supply.
   a repair path that does not exist (no repair API, no operator alert
   sink beyond #1069's handler log) — the per-tick loud retry is the
   honest failure mode until one does.
+- **D103. Per-tick work bound (arch 20261015-0429, #1506).** D69's
+  "bounded work per sweep" covered only the reminders pass (page cap)
+  and the digest pass (bounded pending set): the watcher derivations
+  are caller-supplied generators with no termination guarantee, so a
+  wedged derivation hung the sweep forever and the per-minute cron
+  piled up overlapping sweeps — D69's overlap-safety argument
+  (idempotency) covers correctness of overlapping *terminating*
+  sweeps, not accumulation. `sweep_once` now takes an optional
+  `time_budget_s`: one `time.monotonic()` deadline shared across all
+  three passes, checked at the top of every candidate loop iteration
+  (before `next()`, so a derivation that blocks pre-first-yield and an
+  already-exhausted budget are both caught without spending one more
+  derivation call). On exhaustion the pass stops, the summary map
+  records `budget_exhausted`, and the unreached candidates stay due
+  for the next tick — the *self-healing half* of the D75 truncation
+  contract. The alert/remediation half is deliberately separate: the
+  summary carries `budget_truncated` (any pass stopped on the time
+  budget), distinct from `pages_truncated` (the D69 page cap), because
+  the remediations differ (raise `time_budget_s` / the cadence vs.
+  raise `max_pages`). An optional `tick_interval_s` fires a
+  `tick_overrun` note on the summary when the sweep exceeds its
+  schedule interval, so the operator sees the pile-up risk before it
+  becomes one. Both default to None (unbounded, the previous
+  behavior) and are validated fail-closed: a bound is a finite
+  non-negative number or None — NaN/inf/bool/str/negative are
+  `ValueError`, because `elapsed >= nan` is always False and a NaN
+  budget would silently disable the bound while appearing configured.
+  Priority under sustained exhaustion is explicit: the passes run
+  reminders → digests → watchers under one shared deadline, so later
+  passes starve first, by design (per-pass `budget_exhausted` makes
+  the starvation visible). Abandonment contract, pinned while the
+  plane-side derivations are still unwritten (#1069): derivations must
+  tolerate abandonment at any yield — no open transactions across
+  yields; resources released via `try/finally`. The sweep `close()`s
+  the abandoned generator (deterministic GeneratorExit delivery, no
+  GC-timing assumption) and guarantees nothing more about
+  derivation-held resources. Cooperative residual, stated honestly:
+  the bound is checked *between* candidates and cannot preempt a
+  single `next()` — or a single candidate's processing — that blocks
+  indefinitely; derivations must not block unboundedly within one
+  step, and `tick_overrun` is the operator signal when one does.
 
 ## 3. What the build slice implements (#1063)
 

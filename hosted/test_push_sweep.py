@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hosted import push_enqueue, push_sweep
+from hosted import push_enqueue, push_events, push_sweep
 
 DDL_APPROVALS = """
 CREATE TABLE approvals (
@@ -627,3 +627,199 @@ def test_utcnow_accepts_finite_epoch():
     assert push_sweep._utcnow(0.0) == datetime(1970, 1, 1,
                                               tzinfo=timezone.utc)
     assert push_sweep._utcnow(1700000000).year == 2023
+
+
+# --- D103: per-tick work bound (#1506) ---------------------------------------
+
+def test_time_budget_zero_stops_reminder_pass(conn):
+    # A zero budget stops the reminders pass before the first
+    # candidate: nothing is enqueued, the pass reports
+    # budget_exhausted, and the summary reports budget_truncated (not
+    # pages_truncated — the D69 page cap is a different stop with a
+    # different remediation). The unreached candidates stay due.
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              time_budget_s=0)
+    assert s.reminders.get("budget_exhausted") is True
+    assert s.reminders.get("queued") is None
+    assert s.pages_truncated is False
+    assert s.budget_truncated is True
+    assert s.candidates_seen == 0
+    assert _queued(conn, "reminder") == []
+
+
+def test_time_budget_zero_stops_watcher(conn):
+    # An already-exhausted budget skips the watcher without invoking
+    # the derivation at all (B1: no post-budget derivation work).
+    reg = _registry({"box-1": "owner-1"})
+    called = []
+
+    def recording_derive(c, m):
+        called.append(True)
+        return [("box-1", "epoch-1")]
+
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_stale=recording_derive,
+        time_budget_s=0)
+    assert called == []
+    assert s.stale_watchers.get("budget_exhausted") is True
+    assert s.stale_watchers.get("queued") is None
+    assert s.budget_truncated is True
+    assert _queued(conn, "heartbeat_stale") == []
+
+
+def test_time_budget_zero_stops_digest_pass(conn):
+    _seed_digest(conn, "owner-1", "2026-10-05T12", 3)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              time_budget_s=0)
+    assert s.digests.get("budget_exhausted") is True
+    assert s.budget_truncated is True
+    assert _queued(conn, "digest") == []
+    # The window stays pending — the next tick still owes it a digest.
+    assert _digest_row(conn, "owner-1", "2026-10-05T12") == (3, None)
+
+
+def test_budget_stops_wedged_derivation(conn):
+    # The #1506 failure mode, shrunk: an infinite-yielding derivation
+    # must terminate the sweep via the budget instead of hanging it.
+    # (Without the D103 check this test never returns.)
+    reg = _registry({"box-1": "owner-1"})
+
+    def wedged(c, m):
+        n = 0
+        while True:
+            n += 1
+            yield ("box-1", "epoch-%d" % n)
+
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              derive_stale=wedged, time_budget_s=0.2)
+    assert s.stale_watchers.get("budget_exhausted") is True
+    # The sweep-level flag aggregates all passes: a watcher-only
+    # exhaustion still marks the sweep, while the D69 page cap stays
+    # False (different stop, different remediation).
+    assert s.budget_truncated is True
+    assert s.pages_truncated is False
+
+
+def test_abandoned_derivation_gets_generator_exit(conn):
+    # B3: abandoning a derivation on the budget path delivers
+    # GeneratorExit deterministically via close() — no GC-timing
+    # assumption, and try/finally cleanup in the derivation runs.
+    reg = _registry({"box-1": "owner-1"})
+    closed = []
+
+    def gen(c, m):
+        try:
+            n = 0
+            while True:
+                n += 1
+                yield ("box-1", "epoch-%d" % n)
+        finally:
+            closed.append(True)
+
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              derive_stale=gen, time_budget_s=0.2)
+    assert s.stale_watchers.get("budget_exhausted") is True
+    assert closed == [True]
+
+
+def test_abandoned_non_generator_derivation_tolerated(conn):
+    # B3: derivations returning plain iterables (no close() — e.g. a
+    # list_iterator) are tolerated on the budget path: close is
+    # best-effort, never assumed.
+    reg = _registry({"box-1": "owner-1"})
+
+    class NoCloseIter:
+        def __init__(self):
+            self.n = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.n += 1
+            return ("box-1", "epoch-%d" % self.n)
+
+    assert getattr(NoCloseIter(), "close", None) is None
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              derive_stale=lambda c, m: NoCloseIter(),
+                              time_budget_s=0.2)
+    assert s.stale_watchers.get("budget_exhausted") is True
+
+
+def test_budget_args_rejected_fail_closed(conn):
+    # The D96 discipline: a bound is a finite non-negative number or
+    # None. NaN/inf/bool/str/negative are ValueError — a NaN budget
+    # would silently disable the bound while appearing configured.
+    reg = _registry({"box-1": "owner-1"})
+    bad = (float("nan"), float("inf"), float("-inf"), -1, -0.5,
+           True, False, "60", (1,), [2])
+    for value in bad:
+        with pytest.raises(ValueError):
+            push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                                  time_budget_s=value)
+        with pytest.raises(ValueError):
+            push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                                  tick_interval_s=value)
+    # Boundary values are accepted: 0 stops immediately, None is the
+    # unbounded default (existing tests pin the default behavior).
+    # (A pass with zero candidates reports nothing — budget_exhausted
+    # means "stopped early with work unreached".)
+    _file_approval(conn, "box-1", "aid-1")
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              time_budget_s=0, tick_interval_s=0)
+    assert s.reminders.get("budget_exhausted") is True
+    assert [k for k, _ in s.notes] == ["tick_overrun"]
+
+
+def test_tick_overrun_note(conn):
+    # A sweep that exceeds its schedule interval reports tick_overrun
+    # on the summary notes so the operator sees the pile-up risk.
+    import time as _time
+    reg = _registry({"box-1": "owner-1"})
+
+    def slow_derive(c, m):
+        _time.sleep(0.05)
+        return []
+
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              derive_stale=slow_derive,
+                              tick_interval_s=0)
+    keys = [k for k, _ in s.notes]
+    assert keys == ["tick_overrun"]
+    assert "0.0s schedule interval" in s.notes[0][1]
+
+
+def test_notes_default_empty_on_normal_sweep(conn):
+    # Backward compatibility: sweeps that never configure the D103
+    # args carry an empty notes tuple.
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.notes == ()
+    assert s.reminders.get("queued") == 1
+
+
+# --- #1507: REMINDER_MIN_TTL_SECONDS single-sourced --------------------------
+
+def test_reminder_ttl_constant_single_sourced():
+    # The sweep must not redefine the policy's constant: a second
+    # definition would let a one-sided future change silently miss
+    # reminders (or waste work on candidates the policy rejects).
+    assert "REMINDER_MIN_TTL_SECONDS" not in vars(push_sweep)
+    assert push_events.REMINDER_MIN_TTL_SECONDS == 300
+
+
+def test_sweep_hint_tracks_policy_ttl_constant(conn, monkeypatch):
+    # Behavioral pin: the sweep's hint reads the policy's constant at
+    # call time. Raise the policy bound above this approval's TTL and
+    # the hint must stop admitting it.
+    _file_approval(conn, "box-1", "aid-1", ttl=600, age=400)
+    reg = _registry({"box-1": "owner-1"})
+    monkeypatch.setattr(push_events, "REMINDER_MIN_TTL_SECONDS", 10 ** 9)
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.reminders.get("queued") is None
+    assert s.candidates_seen == 0
