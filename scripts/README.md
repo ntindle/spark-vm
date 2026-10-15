@@ -160,6 +160,7 @@ never drift from what's on disk.
 | `test_pytest_warning_hygiene.py` | test-output hygiene: no invalid escapes / no bytes env writes |
 | `test_push_lane_decision_numbers.py` | push-lane D-series decision-number uniqueness |
 | `test_readme_inventories.py` | this README's gate-steps + test inventory (this table) |
+| `test_readme_test_count_pins.py` | README/docs "(N tests)" claims ↔ test-file function counts |
 | `test_readme_layout_paths.py` | README repo-layout table path existence + file/dir kind |
 | `test_sentinel_s2_doc.py` | SENTINEL_TELEMETRY_SURFACES.md S2 row ↔ swap.log writer shapes |
 | `test_self_update.py` | `self_update.py` read-only toolset inventory |
