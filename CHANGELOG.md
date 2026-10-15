@@ -75,7 +75,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   browser-automation package and the Chromium browser only when needed —
   and CI's own smoke job now uses that same pinned version instead of
   whatever is newest, so a new upstream release can't break the smoke
-  with no repo-side change. (#TBD)
+  with no repo-side change. (#1519)
 - `fleet register` operator identity + release registration (#775 S2):
   the second key narrowing merge-to-main on the update plane. `init`
   pins the provisioned operator key's fingerprint for the store
