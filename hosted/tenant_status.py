@@ -241,6 +241,20 @@ class BoxArc:
         check_code(self.code)
         if self.latched is not None:
             check_code(self.latched)
+        # #1464: a suspension code can never be the latched underlying arc
+        # — the latch records the arc code held at suspension/maintenance
+        # entry, which the rule-6/rule-8 entry paths always set to the
+        # pre-suspension (non-suspension) code. A suspension-valued latch is
+        # corrupt by construction, so reject it here: this also guards the
+        # store's read path — a pre-fix persisted record carrying it fails
+        # at load with this actionable message instead of an opaque
+        # KeyError surfacing mid-selection.
+        if self.latched is not None and self.latched in SUSPENSION_CODES:
+            raise TenantStatusError(
+                f"corrupt arc {self.box_id!r}: latched={self.latched!r} is a "
+                "suspension code; the latch must be the non-suspension arc "
+                "code held at suspension/maintenance entry (#1464)"
+            )
         # #1468: a fresh arc that has never transitioned must not serve
         # status_updated_at="" — default to created_at (contract §3:
         # never empty when created_at is present). Also heals
@@ -587,6 +601,18 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
 # §8 rule-1 — multi-box selection: per-box arc records are
 # evaluation-internal; the response schema is unchanged (per-tenant).
 
+# #1464: the bottom rank for a corrupt suspension latch. A suspension whose
+# latch is missing, is itself a suspension code, or is un-rankable (a
+# non-vocabulary code via post-construction field mutation — reachable
+# because the dataclass fields are mutable; the constructor rejects all
+# three shapes for new data) cannot be compared by the §8 amendment's
+# latched-code rule. Selection must not raise on it:
+# the corrupt arc ranks below every healthy candidate (families 0 and 1),
+# so one bad record can neither take down the tenant's endpoint nor block
+# store writes. When every arc is corrupt the endpoint still serves — the
+# reported code is the suspension itself, a valid §2 code.
+_CORRUPT_LATCH_RANK = (2, 0)
+
 
 def _effective_rank(arc: BoxArc) -> Tuple[int, int]:
     """Sort key for rule-1 selection: (family, rank). Lower wins.
@@ -595,12 +621,24 @@ def _effective_rank(arc: BoxArc) -> Tuple[int, int]:
     underlying arc code — the suspension neither promotes nor demotes the
     candidate). Family 1: arc-terminal codes — they participate only while
     no non-terminal candidate exists (a dead box never outranks a
-    progressing one).
+    progressing one). Family 2 (#1464): corrupt suspension latch — never
+    selected while any healthy candidate exists.
     """
     code = arc.code
     if code in SUSPENSION_CODES:
-        if arc.latched is None:
-            raise TenantStatusError(f"suspension code {code!r} with no latch")
+        if (
+            arc.latched is None
+            or arc.latched in SUSPENSION_CODES
+            # #1464 (QA round-1): an un-rankable latch — e.g. mutated
+            # post-construction to a non-vocabulary code — is corrupt the
+            # same way. Bottom-rank it so selection stays fail-closed
+            # instead of raising KeyError out of _SELECTION_RANK.
+            or (
+                arc.latched not in TERMINAL_CODES
+                and arc.latched not in _SELECTION_RANK
+            )
+        ):
+            return _CORRUPT_LATCH_RANK
         code = arc.latched
     if code in TERMINAL_CODES:
         return (1, 0)

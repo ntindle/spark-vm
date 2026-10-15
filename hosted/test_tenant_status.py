@@ -35,6 +35,7 @@ from tenant_status import (
     TenantStore,
     TransitionError,
     _DUMMY_VERIFY_KEY,
+    _effective_rank,
     apply_event,
     canonical_poll_message,
     human_key_for,
@@ -1190,3 +1191,149 @@ def test_serve_refuses_trusting_verify():
         raise RuntimeError("boom")
 
     _fail_closed_self_test(raising)  # a raising verifier fails closed too
+
+
+# ---------------------------------------------------------------------------
+# #1464: corrupt suspension latch — construction gate + fail-closed selection
+
+_SUSPENSION_CODES = ("stuck", "connection-unreachable", "maintenance")
+
+
+def _corrupt_latch_arc(latched_value, **kw):
+    """Simulate the #1464 corrupt shape: a suspension code whose latch is
+    missing or is itself a suspension code.
+
+    The constructor rejects this shape for new data (#1464 half 1), so
+    corrupt state is simulated through the one remaining channel — the
+    dataclass fields are mutable after construction (and a pre-fix build
+    could have persisted such a record).
+    """
+    kw.setdefault("box_id", "box-corrupt")
+    arc = _arc(code="connection-unreachable", latched="live", **kw)
+    arc.latched = latched_value
+    return arc
+
+
+def test_post_init_rejects_suspension_valued_latch():
+    # The issue's exact repro shape: every suspension-latched combination
+    # is rejected at construction, with the issue number in the message.
+    for code in _SUSPENSION_CODES:
+        for latch in _SUSPENSION_CODES:
+            with pytest.raises(TenantStatusError) as ei:
+                _arc(code=code, latched=latch)
+            assert "#1464" in str(ei.value)
+    # Non-suspension latches still construct fine (incl. the legitimate
+    # suspension entries, and the no-latch suspension shape selection
+    # now degrades on instead of rejecting).
+    _arc(code="connection-unreachable", latched="live")
+    _arc(code="stuck", latched="waiting-on-approval")
+    _arc(code="connection-unreachable", latched=None)
+
+
+def test_effective_rank_bottom_for_corrupt_latch():
+    healthy = _live_arc(box_id="box-healthy")
+    for latched_value in (None, *_SUSPENSION_CODES):
+        corrupt = _corrupt_latch_arc(latched_value)
+        rank = _effective_rank(corrupt)
+        # Below every healthy family (0 non-terminal, 1 terminal): the
+        # corrupt arc can never win while a healthy candidate exists.
+        assert rank > _effective_rank(healthy)
+        assert rank > _effective_rank(_arc(code="approved"))
+    # A healthy suspension arc still compares by its latched code.
+    assert _effective_rank(_arc(code="stuck", latched="live")) == (
+        0,
+        0,
+    )  # rank of "live"
+
+
+def test_effective_rank_bottom_for_unknown_latch():
+    # QA round-1: a latch mutated post-construction to a non-vocabulary
+    # code is corrupt the same way — selection must not raise KeyError
+    # out of _SELECTION_RANK.
+    healthy = _live_arc(box_id="box-healthy")
+    arc = _arc(code="stuck", latched="live", box_id="box-corrupt")
+    arc.latched = "bogus-not-a-code"
+    assert _effective_rank(arc) == (2, 0)
+    assert select_reported([arc, healthy]).box_id == "box-healthy"
+
+
+def test_selection_skips_corrupt_arc_for_healthy_candidate():
+    healthy = _live_arc(box_id="box-healthy")
+    corrupt = _corrupt_latch_arc("stuck")
+    # Corrupt first in the list on purpose: min() must not pick it.
+    assert select_reported([corrupt, healthy]).box_id == "box-healthy"
+    # A latchless suspension is skipped the same way (was: TenantStatusError
+    # out of selection).
+    latchless = _corrupt_latch_arc(None)
+    assert select_reported([latchless, healthy]).box_id == "box-healthy"
+
+
+def test_selection_all_corrupt_still_serves_valid_code():
+    # No healthy candidate: the endpoint must still serve a valid §2 code
+    # (the suspension itself) instead of dropping the connection.
+    corrupt = _corrupt_latch_arc("stuck", box_id="box-c1")
+    reported = select_reported([corrupt])
+    assert reported.code in STATUS_CODES
+    rec = _tenant(boxes={"box-c1": corrupt})
+    body = status_response(rec)
+    assert body["status"] in STATUS_CODES
+
+
+def test_store_create_and_response_withstand_corrupt_arc(store):
+    # The issue's "blocks all its writes" half: create() used to raise
+    # KeyError out of _save_record -> select_reported. The in-memory
+    # record carries the corrupt arc (the pre-gate state); the write path
+    # and the endpoint both degrade instead of raising.
+    healthy = _live_arc(box_id="box-healthy")
+    corrupt = _corrupt_latch_arc("stuck", box_id="box-corrupt")
+    rec = _tenant(boxes={"box-healthy": healthy, "box-corrupt": corrupt})
+    store.create(rec)  # was: KeyError 'stuck'
+    body = status_response(rec)
+    assert body["status"] == "live"  # the healthy arc is what serves
+    # The hold snapshot also holds the healthy arc, not the corrupt one.
+    assert rec.last_reported["code"] == "live"
+
+
+def test_legacy_corrupt_record_fails_loud_at_load(store, store_path):
+    # Deliberate residual, pinned (#1464 follow-up): a record persisted by
+    # a pre-fix build (suspension-valued latch in the JSON) now fails at
+    # load with an actionable message naming the corruption — not the
+    # opaque KeyError that used to surface mid-selection. Load-time
+    # healing/quarantine is the follow-up issue's scope, not this fix's.
+    raw = {
+        "version": 1,
+        "tenants": {
+            "tnt_legacy": {
+                "stage": 2,
+                "approvals_url": "https://approve.example/a/tnt_legacy",
+                "boxes": {
+                    "box-1": {
+                        "created_at": "2026-10-14T00:00:00Z",
+                        "code": "connection-unreachable",
+                        "status_updated_at": "2026-10-14T00:00:00Z",
+                        "detail": None,
+                        "latched": "stuck",  # the pre-fix corruption
+                        "latched_detail": None,
+                        "provider_running": False,
+                        "relay_reachable": False,
+                        "session": 1,
+                    }
+                },
+            }
+        },
+    }
+    with open(store_path, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh)
+    with pytest.raises(TenantStatusError) as ei:
+        store.get("tnt_legacy")
+    assert "latched" in str(ei.value) and "#1464" in str(ei.value)
+
+
+def test_latch_swap_path_stays_fail_loud(store):
+    # Deliberate residual, pinned: applying an approval event to a
+    # latchless suspension still raises at the mutation point — the
+    # human's decision is never silently dropped. Selection failing
+    # closed does not mean the engine swallows the event.
+    arc = _corrupt_latch_arc(None)
+    with pytest.raises(TenantStatusError):
+        apply_event(arc, "approval-filed", check="gate-1")
