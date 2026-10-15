@@ -160,6 +160,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The control plane can now actively verify a tenant's relay path instead
+  of only watching it passively: a new handshake-only prober dials the
+  relay exactly as a tenant would, checks the box's host key against the
+  session's pinned fingerprint, and reports which leg is at fault when
+  something breaks — the relay listener, the host key, or the box's
+  private leg — so relay outages are never blamed on the tenant's agent.
+  It never logs in (the session closes before authentication) and probe
+  traffic is excluded from the session journal. (#1512)
+
 - The push-notification sweep that pages owners about pending approvals
   now has a per-tick time limit: previously a stalled data source could
   hang a sweep indefinitely while the every-minute scheduler kept
