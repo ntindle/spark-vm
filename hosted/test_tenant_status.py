@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tenant_status
 from tenant_status import (
+    MAX_DETAIL_BYTES,
     OPERATOR_ONLY,
     STATUS_CODES,
     TERMINAL_CODES,
@@ -40,6 +41,7 @@ from tenant_status import (
     canonical_poll_message,
     human_key_for,
     live_entry_ready,
+    scrub_detail,
     select_reported,
     status_response,
 )
@@ -1441,3 +1443,223 @@ def test_latch_swap_path_stays_fail_loud(store):
     arc = _corrupt_latch_arc(None)
     with pytest.raises(TenantStatusError):
         apply_event(arc, "approval-filed", check="gate-1")
+
+
+# ---------------------------------------------------------------------------
+# #1466 — endpoint-side detail scrub (construction-time, byte-capped)
+
+
+def test_detail_scrubs_producer_control_chars():
+    # A hostile/buggy producer's ANSI escapes and line breaks in the
+    # event kwargs must not reach the human-rendered detail.
+    arc = _arc()
+    apply_event(
+        arc, "stack-deploy-failed", stage="build\x1b[31mRED\r\ninjected"
+    )
+    assert arc.detail == "stack-deploy:build[31mREDinjected"
+    assert not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in arc.detail)
+
+
+def test_detail_byte_cap_ellipsis_codepoint_safe():
+    # An unbounded producer substring is cut to MAX_DETAIL_BYTES UTF-8
+    # bytes with an ellipsis, never splitting a code point.
+    pad = "é" * 300  # 2 bytes each — 600 bytes of producer text
+    arc = _arc()
+    apply_event(arc, "smoke-report-failed", check=pad)
+    encoded = arc.detail.encode("utf-8")
+    assert len(encoded) <= MAX_DETAIL_BYTES
+    assert arc.detail.endswith("…")
+    # Decodes cleanly (no split code point) and keeps the sub-code prefix.
+    arc.detail.encode("utf-8").decode("utf-8")
+    assert arc.detail.startswith("box-unhealthy: ")
+
+
+def test_detail_non_str_kwarg_fails_closed():
+    # A non-str detail kwarg from a hostile producer fails loud at the
+    # construction boundary — never stringified silently into the
+    # served surface.
+    arc = _arc(code="live")
+    with pytest.raises(TypeError):
+        apply_event(arc, "relay-failure", detail={"not": "a str"})
+
+
+def test_serve_scrubs_box_id_suffix():
+    # The §3 multi-box "@ box=<box-name>" suffix interpolates the
+    # free-form box id into the served detail — the assembled surface
+    # is scrubbed at serve time, not just the stored arc detail.
+    nasty = "kitchen-pi\x1b[2K\r\n" + "x" * 300
+    # Newer created_at so this arc wins selection and its detail is served;
+    # same code as the other arc so the rank ties and recency decides.
+    arc = _arc(
+        box_id=nasty,
+        code="provisioning",
+        detail="provisioning: ok",
+        created_at="2026-09-29T11:00:00Z",
+    )
+    body = status_response(_tenant(boxes={"a": arc, "b": _arc(box_id="b")}))
+    served = body["detail"]
+    assert "\x1b" not in served and "\r" not in served and "\n" not in served
+    assert len(served.encode("utf-8")) <= MAX_DETAIL_BYTES
+    assert "provisioning: ok" in served
+    # The disambiguating suffix survives the scrub (Security round-1 B1):
+    # the hostile box id is truncated to its own budget, never dropped.
+    assert " @ box=kitchen-pi[2K" in served
+    assert served.endswith("…")
+
+
+def test_hostile_detail_cannot_crowd_out_box_suffix():
+    # Security round-1 BLOCKING 1: a hostile 256-byte detail must not
+    # crowd the "@ box=" disambiguator out of the byte budget — during
+    # multi-box onboarding the human must always see which box a status
+    # belongs to. Both arcs share the code so the rank ties and the
+    # victim's newer created_at wins selection.
+    victim = _arc(box_id="victim-box", created_at="2026-09-29T11:00:00Z")
+    apply_event(victim, "stack-deploy-failed", stage="z" * 300)
+    other = _arc(box_id="b", created_at="2026-09-29T10:00:00Z")
+    apply_event(other, "stack-deploy-failed", stage="short")
+    assert len(victim.detail.encode("utf-8")) <= MAX_DETAIL_BYTES
+    body = status_response(_tenant(boxes={"a": victim, "b": other}))
+    served = body["detail"]
+    assert len(served.encode("utf-8")) <= MAX_DETAIL_BYTES
+    assert served.endswith(" @ box=victim-box")
+
+
+def test_constructor_scrubs_persisted_detail():
+    # A record persisted by a pre-fix writer carries raw detail in the
+    # JSON — the constructor scrub heals it on the load path, so the
+    # store never re-serves unscrubbed text.
+    arc = BoxArc(
+        box_id="box-1",
+        created_at="2026-10-15T00:00:00Z",
+        detail="box-unhealthy: \x1b[31mRED",
+        latched_detail="y" * 400,
+    )
+    assert arc.detail == "box-unhealthy: [31mRED"
+    assert arc.latched_detail.endswith("…")
+    assert len(arc.latched_detail.encode("utf-8")) <= 256
+
+
+# ---------------------------------------------------------------------------
+# #1467 — newest-wins compares parsed instants, not inverted strings
+
+
+def test_created_at_fractional_newest_wins():
+    # The issue's exact repro: "2026-09-29T10:00:00Z" vs
+    # "2026-09-29T10:00:00.5Z" — the old complement-inversion picked the
+    # OLDER arc; the parsed-instant key picks the newer one.
+    older = _arc(box_id="a", created_at="2026-09-29T10:00:00Z")
+    newer = _arc(box_id="b", created_at="2026-09-29T10:00:00.5Z")
+    assert select_reported([older, newer]).box_id == "b"
+    assert select_reported([newer, older]).box_id == "b"
+
+
+def test_created_at_offset_equivalence():
+    # Same instant in two spellings must tie and fall through to box-id
+    # lexical — not misorder on string length. (The old
+    # complement-inversion picked "b-box" here: at the first differing
+    # character "2" inverts smaller than "0".)
+    a = _arc(box_id="b-box", created_at="2026-09-29T12:00:00+02:00")
+    b = _arc(box_id="a-box", created_at="2026-09-29T10:00:00Z")
+    assert select_reported([a, b]).box_id == "a-box"
+    # And a genuinely later instant still wins regardless of format.
+    c = _arc(box_id="c-box", created_at="2026-09-29T12:00:01+02:00")
+    assert select_reported([a, c]).box_id == "c-box"
+
+
+def test_created_at_unparseable_sorts_oldest():
+    # A malformed created_at can never outrank a real timestamp, and two
+    # malformed records still order deterministically by box id.
+    real = _arc(box_id="b", created_at="2026-09-29T10:00:00Z")
+    junk = _arc(box_id="a", created_at="not-a-timestamp")
+    assert select_reported([junk, real]).box_id == "b"
+    junk2 = _arc(box_id="c", created_at=None)
+    assert select_reported([junk, junk2]).box_id == "a"
+
+
+def test_created_at_naive_treated_as_utc():
+    # A naive timestamp reads as UTC (not local time): it ties with the
+    # same instant's Z spelling, and the tie falls through to box-id
+    # lexical. (The old inversion hit the exact prefix bug here — the
+    # 19-char naive string is a prefix of the 20-char Z spelling, so
+    # min() picked the naive arc instead of tying.)
+    naive = _arc(box_id="b-box", created_at="2026-09-29T10:00:00")
+    zoned = _arc(box_id="a-box", created_at="2026-09-29T10:00:00Z")
+    assert select_reported([naive, zoned]).box_id == "a-box"
+    # And a later naive instant still wins outright.
+    later = _arc(box_id="c-box", created_at="2026-09-29T10:00:01")
+    assert select_reported([zoned, later]).box_id == "c-box"
+
+
+def test_scrub_detail_strips_lone_surrogates():
+    # Engineering round-1 BLOCKING 1: the persisted store is JSON on
+    # disk, and json.loads happily produces lone surrogates from
+    # "\ud800" escapes — so scrub_detail must strip them, never raise.
+    # A raise here would brick the tenant at load (the #1509 failure
+    # mode the constructor healing exists to avoid).
+    assert scrub_detail("a\ud800b") == "ab"
+    assert scrub_detail("\udc00\udfff") == ""
+    arc = BoxArc(
+        box_id="box-1",
+        created_at="2026-10-15T00:00:00Z",
+        detail="pre-fix \ud800 raw",
+    )
+    assert arc.detail == "pre-fix  raw"
+
+
+def test_hold_branch_scrubs_prefixed_last_reported():
+    # Engineering round-1 BLOCKING 2: status_response's no-arcs hold
+    # branch is a third serve assembly point — a pre-fix persisted
+    # last_reported.detail (raw producer text) must be scrubbed and
+    # capped at serve time, not served raw forever.
+    raw_detail = "box-unhealthy: \x1b[31mRED" + "y" * 400
+    rec = TenantRecord(
+        tenant_id="tnt_hold",
+        stage=2,
+        approvals_url="https://approve.example/a/tnt_hold",
+        boxes={},
+        last_reported={
+            "code": "box-unhealthy",
+            "status_updated_at": "2026-10-15T00:00:00Z",
+            "detail": raw_detail,
+        },
+    )
+    body = status_response(rec)
+    served = body["detail"]
+    assert "\x1b" not in served
+    assert len(served.encode("utf-8")) <= MAX_DETAIL_BYTES
+    # The hostile prior is truncated (ellipsis), but the endpoint-minted
+    # hold note — the safety-relevant part — survives intact at the end.
+    assert served.endswith("… — held: box deleted pre-live")
+    assert "held: box deleted pre-live" in served
+
+
+def test_detail_truncation_never_splits_four_byte_char():
+    # QA round-1 nit 3: a 4-byte char straddling the byte boundary is
+    # dropped whole — the result stays byte-exact and decodes cleanly.
+    pad = "x" * 253 + "𐍈"  # 253 + 4 = 257 bytes: the char must go
+    out = scrub_detail(pad)
+    assert out == "x" * 253 + "…"
+    assert len(out.encode("utf-8")) == MAX_DETAIL_BYTES
+    out.encode("utf-8").decode("utf-8")
+
+
+def test_created_at_extra_fraction_digits_truncate_deterministically():
+    # QA round-1 nit 3: >6 fractional digits are truncated to
+    # microseconds by fromisoformat (deterministic, not rejected) —
+    # ordering still follows the instant.
+    a = _arc(box_id="a", created_at="2026-09-29T10:00:00.123456789Z")
+    b = _arc(box_id="b", created_at="2026-09-29T10:00:00.123456Z")
+    # Same microsecond instant -> tie -> box-id lexical.
+    assert select_reported([b, a]).box_id == "a"
+    c = _arc(box_id="c", created_at="2026-09-29T10:00:00.123457Z")
+    assert select_reported([a, c]).box_id == "c"
+
+
+def test_touch_leaves_arc_untouched_on_hostile_detail():
+    # Security round-1 N1 / QA round-1 nit 2: a hostile non-str detail
+    # kwarg fails closed with the arc untouched — never half-mutated.
+    arc = _arc(code="live", detail="live-detail")
+    with pytest.raises(TypeError):
+        apply_event(arc, "relay-failure", detail=["not", "a", "str"])
+    assert arc.code == "live"
+    assert arc.detail == "live-detail"

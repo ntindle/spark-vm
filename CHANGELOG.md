@@ -94,6 +94,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The tenant status page's `detail` field can no longer carry raw
+  producer-controlled text: control characters are stripped and the
+  field is capped at 256 bytes (ellipsis-truncated) at construction
+  time, before it is stored or served — including the `@ box=<name>`
+  suffix and records persisted before the fix. (#1466)
+- The tenant status multi-box tie-break no longer misorders timestamps
+  of different lengths: "newest wins" now compares parsed instants
+  (offsets and fractional seconds handled), so a box created at
+  `10:00:00.5Z` correctly outranks one created at `10:00:00Z`; malformed
+  timestamps sort as oldest and can never outrank a real one. (#1467)
 - The waitlist's raw-mail triage folder can no longer lose mail to a
   filename collision: triage filenames now carry 128-bit entropy and are
   created with exclusive create, so two simultaneous inbox-processing

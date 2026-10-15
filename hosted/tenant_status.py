@@ -53,11 +53,13 @@ import argparse
 import base64
 import binascii
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -260,6 +262,14 @@ class BoxArc:
         # never empty when created_at is present). Also heals
         # pre-fix persisted records (status_updated_at="") on read, since
         # the store reconstructs arcs through this constructor.
+        # #1466: heal pre-fix persisted records on the load path — the store
+        # reconstructs arcs through this constructor, so scrubbing here
+        # closes the unscrubbed ``detail``/``latched_detail`` a pre-fix
+        # writer persisted. Scrubbing is lossy-but-safe (never raises on
+        # strings), so unlike a rejecting validator it cannot brick a
+        # tenant at load.
+        self.detail = scrub_detail(self.detail)
+        self.latched_detail = scrub_detail(self.latched_detail)
         if not self.status_updated_at:
             self.status_updated_at = self.created_at
 
@@ -281,8 +291,169 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# ---------------------------------------------------------------------------
+# #1466 — endpoint-side detail scrub. ``detail`` is a human-rendered field
+# (the signup page serves it per §3), but producer/box-controlled
+# substrings flow into it unscrubbed and unbounded (``stage``/``check`` /
+# ``operation`` kwargs, raw ``detail`` kwargs, and the ``@ box=<box-name>``
+# suffix assembled at serve/snapshot time from the free-form box id).
+# The construction rule mirrors the push lane's ``scrub_push_text``
+# (#970): strip C0/C1 controls (ANSI escapes die here), then enforce a
+# byte-exact bound with an ellipsis, never splitting a UTF-8 code point.
+# Responsibility is pinned endpoint-side at construction — the page never
+# re-escapes what the endpoint already scrubbed.
+
+# The control-char class mirrors the push lane's rule (#970): strip C0
+# and C1 controls (ANSI escapes die here). Surrogates (\ud800-\udfff)
+# are stripped too — unlike the push lane, where a lone surrogate
+# raising UnicodeEncodeError is a deliberate fail-closed choice
+# ("unreachable over the real WSS path"), the tenant-status store is
+# JSON on disk and json.loads happily produces lone surrogates from
+# "\ud800" escapes — so raising here would brick a tenant at load
+# (the #1509 failure mode). Stripping keeps the "never raises on
+# strings" promise the load-path healing depends on.
+_DETAIL_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
+
+# Maximum served detail size: byte-exact, enforced on the UTF-8 encoding
+# (not the str length) so multi-byte text cannot smuggle more bytes than
+# the bound. Same bound as the push lane's summary (#970).
+MAX_DETAIL_BYTES = 256
+
+_DETAIL_ELLIPSIS = "…"  # 3 bytes in UTF-8; accounted inside the bound
+
+
+def scrub_detail(value: Optional[str], max_bytes: int = MAX_DETAIL_BYTES) -> Optional[str]:
+    """Scrub one producer/box-controlled string for the served ``detail``.
+
+    ``None`` (no sub-decision) stays ``None``. Strips C0/C1 control
+    characters and lone surrogates, then truncates to ``max_bytes``
+    UTF-8 bytes with an ellipsis appended, never splitting a code point.
+    Idempotent: a previously-scrubbed value passes through unchanged.
+    Never raises on a str — the load-path healing depends on it (JSON
+    on disk can carry lone surrogates via "\\ud800" escapes).
+
+    Raises TypeError on a non-str, non-None ``value`` (fail-closed), and
+    ValueError on a ``max_bytes`` that cannot hold even the ellipsis.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(
+            "scrub_detail requires a str or None, got %s"
+            % type(value).__name__
+        )
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool):
+        raise TypeError("max_bytes must be an int")
+    ellipsis_bytes = len(_DETAIL_ELLIPSIS.encode("utf-8"))
+    if max_bytes < ellipsis_bytes:
+        raise ValueError("max_bytes must be at least %d" % ellipsis_bytes)
+    stripped = _DETAIL_CONTROL_CHARS.sub("", value)
+    encoded = stripped.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return stripped
+    budget = max_bytes - ellipsis_bytes
+    used = 0
+    kept = []
+    for ch in stripped:
+        ch_bytes = len(ch.encode("utf-8"))
+        if used + ch_bytes > budget:
+            break
+        kept.append(ch)
+        used += ch_bytes
+    return "".join(kept) + _DETAIL_ELLIPSIS
+
+
+# The "@ box=<name>" disambiguator is the §3/§8 multi-box identity the
+# human needs during onboarding — it must SURVIVE the scrub. Scrubbing
+# the assembled string lets a hostile 256-byte detail crowd the suffix
+# out of the byte budget entirely (Security round-1 B1), so the
+# producer-controlled parts are scrubbed into a reserved budget and the
+# suffix is assembled from scrubbed parts.
+_BOX_SUFFIX_SEP = " @ box="
+_BOX_ID_MAX_BYTES = 48  # scrubbed bytes reserved for the box-id tail
+
+
+def _detail_with_box_suffix(
+    detail: Optional[str], code: str, box_id: str
+) -> str:
+    """Assemble the §3 multi-box ``detail`` with its box-identity suffix.
+
+    ``detail`` (or the machine ``code`` when there is none) is scrubbed
+    into the budget left after reserving the separator and the box-id
+    tail; the box id itself is scrubbed to its own small budget. The
+    suffix always survives — a hostile detail can truncate the sub-code,
+    never the disambiguator.
+    """
+    sub_budget = MAX_DETAIL_BYTES - len(_BOX_SUFFIX_SEP.encode("utf-8"))
+    sub_budget -= _BOX_ID_MAX_BYTES
+    sub = scrub_detail(detail if detail else code, sub_budget)
+    box = scrub_detail(box_id, _BOX_ID_MAX_BYTES)
+    return f"{sub}{_BOX_SUFFIX_SEP}{box}"
+
+
+# ---------------------------------------------------------------------------
+# #1467 — the newest-wins tie-break must compare parsed instants, not
+# complement-inverted strings. The old ``_neg_created`` inverted each
+# character for ``min()``, which is correct only for equal-length
+# strings: in the prefix case the shorter inverted string is a prefix of
+# the longer, so ``min()`` picked the SHORTER — i.e. the OLDER —
+# timestamp ("2026-09-29T10:00:00Z" vs "...00.5Z" picked the former).
+# Parsed-instant comparison is also the deliberately chosen alternative
+# to validating ``created_at`` as fixed-format in ``__post_init__``: a
+# rejecting validator would brick pre-fix tenants carrying
+# fractional-second timestamps at load (the #1509 fail-loud concern),
+# while parsing never rejects — unparseable values sort as oldest.
+
+
+def _created_epoch(created_at: object) -> Optional[float]:
+    """Parse an ISO-8601 instant to epoch seconds. ``None`` when the value
+    is not a parseable instant (fail-safe: never raises)."""
+    if not isinstance(created_at, str):
+        return None
+    text = created_at
+    if text.endswith(("Z", "z")):
+        # datetime.fromisoformat accepts 'Z' on 3.11+; normalize so the
+        # module keeps its stdlib-only promise on older interpreters too.
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # Naive timestamps: the writers emit UTC ("_now_iso" Z-format),
+        # so interpret naive as UTC rather than local time.
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return dt.timestamp()
+    except (OverflowError, OSError):
+        # Extreme years can overflow the platform timestamp conversion —
+        # unrepresentable, not newer; sort as oldest.
+        return None
+
+
+def _neg_created(arc: BoxArc) -> float:
+    """Newest-created_at wins: negate the parsed epoch for ``min()``.
+
+    Unparseable ``created_at`` values sort as OLDEST (``inf`` under the
+    negation) — a malformed record can never outrank a real timestamp,
+    and the ``box_id`` lexical fallback stays deterministic. Instants
+    closer than float64 resolution at current epochs (~240ns) tie and
+    fall through to ``box_id`` — harmless at real ``created_at``
+    resolutions.
+    """
+    epoch = _created_epoch(arc.created_at)
+    if epoch is None:
+        return float("inf")
+    return -epoch
+
+
 def _touch(arc: BoxArc, code: str, detail: Optional[str] = None) -> None:
-    arc.code = check_code(code)
+    # Validate/scrub into locals BEFORE mutating the arc: a hostile
+    # non-str detail must fail with the arc untouched, never half-mutated
+    # (Security round-1 N1 / QA round-1 nit 2).
+    code = check_code(code)
+    detail = scrub_detail(detail)
+    arc.code = code
     arc.status_updated_at = _now_iso()
     arc.detail = detail
 
@@ -354,7 +525,10 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
         arc.latched in _LIVENESS_DEMOTE_CODES
     ):
         arc.latched = "box-unhealthy"
-        arc.latched_detail = "box-unhealthy: provider-dead"
+        # #1466: route even constant literals through the scrub so the
+        # choke-point claim holds at every assignment site (no-op by
+        # content, load-bearing as discipline).
+        arc.latched_detail = scrub_detail("box-unhealthy: provider-dead")
     elif arc.code in ("stuck", "maintenance") and (
         arc.latched in _LIVENESS_DEMOTE_CODES
     ):
@@ -362,9 +536,9 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
         # the stuck/maintenance exits): provider death discovered while
         # stuck/in maintenance demotes the latch, so the exit restores
         # box-unhealthy instead of a live code the dead provider no
-        # longer supports.
+        # no-op by content, load-bearing as discipline).
         arc.latched = "box-unhealthy"
-        arc.latched_detail = "box-unhealthy: provider-dead"
+        arc.latched_detail = scrub_detail("box-unhealthy: provider-dead")
 
 
 def _suspend_on_relay_down(arc: BoxArc) -> None:
@@ -413,7 +587,10 @@ def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
     """Apply a producer *event* to *arc*, enforcing the §2 transition rules.
 
     Mutates and returns *arc*. Raises :class:`TransitionError` on an
-    illegal move, :class:`TenantStatusError` on an unknown event.
+    illegal move, :class:`TenantStatusError` on an unknown event, and
+    :class:`TypeError` on a non-str ``detail`` kwarg (#1466: a hostile
+    producer's detail fails closed at the construction boundary, with
+    the arc left untouched).
     """
     # Rule 6: arc-advancing events during a relay suspension update the
     # latch, never the displayed code, never dropped. The latch carries
@@ -707,11 +884,6 @@ def select_reported(arcs: List[BoxArc]) -> BoxArc:
     )
 
 
-def _neg_created(arc: BoxArc) -> str:
-    """Newest-created_at wins: invert the ISO string for min()."""
-    return "".join(chr(0x10FFFF - ord(c)) for c in arc.created_at)
-
-
 # ---------------------------------------------------------------------------
 # Tenant-record store (G8/§8) — write-if-absent + re-read, mint-once.
 
@@ -851,8 +1023,13 @@ class TenantStore:
             reported = select_reported(list(rec.boxes.values()))
             detail = reported.detail
             if len(rec.boxes) > 1:
-                sub = detail if detail else reported.code
-                detail = f"{sub} @ box={reported.box_id}"
+                # #1466: box_id is free-form (box-chosen at enrollment) and
+                # lands in the served surface here — the suffix is
+                # assembled from scrubbed parts with a reserved budget so
+                # a hostile detail cannot crowd it out (Security B1).
+                detail = _detail_with_box_suffix(
+                    detail, reported.code, reported.box_id
+                )
             rec.last_reported = {
                 "code": reported.code,
                 "status_updated_at": reported.status_updated_at,
@@ -982,7 +1159,20 @@ def status_response(rec: TenantRecord) -> dict:
         }
         note = "held: box deleted pre-live"
         prior = hold.get("detail")
-        body["detail"] = f"{prior} — {note}" if prior else note
+        # #1466: the hold is a third serve assembly point — a pre-fix
+        # persisted last_reported.detail reaches the served body raw
+        # (the store passes it straight through), so scrub it here. The
+        # endpoint-minted hold note is safety-relevant (it explains WHY
+        # the status is held), so its bytes are reserved out of the cap
+        # first: the note is never truncated away by a hostile prior. A
+        # corrupt non-str prior (pre-fix writers only ever wrote str/None)
+        # is dropped to the bare note — the endpoint serves, never 500s.
+        suffix = f" — {note}"
+        if isinstance(prior, str) and prior:
+            prior_budget = MAX_DETAIL_BYTES - len(suffix.encode("utf-8"))
+            body["detail"] = f"{scrub_detail(prior, prior_budget)}{suffix}"
+        else:
+            body["detail"] = note
         human_key = human_key_for(hold["code"])
         if human_key is not None:
             body["human_key"] = human_key
@@ -997,9 +1187,10 @@ def status_response(rec: TenantRecord) -> dict:
     detail = reported.detail
     if len(arcs) > 1:
         # §3 exception / §8: disambiguate which box the reported arc belongs
-        # to whenever more than one box is still onboarding.
-        sub = detail if detail else reported.code
-        detail = f"{sub} @ box={reported.box_id}"
+        # to whenever more than one box is still onboarding. #1466: box_id
+        # is free-form, so the suffix is assembled from scrubbed parts
+        # with a reserved budget (Security round-1 B1).
+        detail = _detail_with_box_suffix(detail, reported.code, reported.box_id)
     if detail is not None:
         body["detail"] = detail
     human_key = human_key_for(reported.code)

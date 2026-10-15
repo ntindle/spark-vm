@@ -273,6 +273,20 @@ and feeds *into* this endpoint; it is never exposed raw, per
   Absent on
   the arc-terminal codes (`approved`, `human-denied`, `human-drop-off`,
   `provisioning-failed`).
+  **Scrub pin (#1466):** `detail` is a human-rendered field (this page),
+  so escaping responsibility is pinned endpoint-side at construction:
+  every `detail` value — event kwargs, raw `detail` kwargs, the
+  `@ box=<box-name>` suffix assembled at serve time, and pre-fix
+  persisted values healed on load — is stripped of C0/C1 control
+  characters and capped at 256 UTF-8 bytes (ellipsis-truncated, never
+  splitting a code point) before it is stored or served. The page never
+  re-escapes what the endpoint already scrubbed; a non-string `detail`
+  fails closed (TypeError) instead of stringifying silently. Lone
+  surrogates are stripped (the on-disk JSON store can carry them — no
+  fail-closed raise, so a persisted record can never brick the tenant
+  at load). Explicitly out of scope: Cf format characters (bidi
+  overrides, zero-width) — same as the push lane's #970 rule; the page
+  contract owns HTML-escaping for the human render.
   The human page never renders it raw.
 - `human_key` — the `FIRST_TEN_MINUTES_SPEC.md` §4 rendering key. The
   signup page holds the human copy (the spec §4's "exact sentences the
@@ -469,7 +483,11 @@ Rules:
    or maintenance itself neither promotes nor demotes the candidate. Ties (same effective code) break by newest
    box-record `created_at`, then box-id lexical — so the reported box
    identity in `detail` cannot flap between polls when a batch shares
-   `created_at`. Arc transitions are forward moves, not
+   `created_at`. "Newest" compares parsed instants (#1467: ISO-8601 with
+   offsets and fractional seconds — not the old complement-inverted
+   string comparison, which misordered variable-length timestamps);
+   malformed `created_at` values sort as oldest and can never outrank a
+   real timestamp. Arc transitions are forward moves, not
    regressions: `provisioning → box-unhealthy` per transition rule 1 is
    the ordinary single-box failure path, and the monotonicity invariant
    below constrains *cross-box selection switches*, not arc
