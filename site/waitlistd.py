@@ -2939,10 +2939,11 @@ class WaitlistService:
         spool-failed rows — still confirmed, cleanly retried by the next
         wave).
 
-        Written atomically (tmp + fsync + exclusive publish, the
-        _write_spool discipline) into wave_manifests/, one uniquely-named
-        file per invocation; the caller holds data_lock. Returns the
-        manifest path.
+        Written atomically (tmp + fsync + os.replace, the same discipline
+        as the rows rewrite) into wave_manifests/, one uniquely-named
+        file per invocation; the caller holds data_lock, so the
+        non-exclusive replace cannot race a concurrent invocation.
+        Returns the manifest path.
 
         A manifest write failure is non-fatal: rows.jsonl + the
         invite_sent events remain the source of truth, and the missing
