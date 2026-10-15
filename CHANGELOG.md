@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The tenant-status endpoint can no longer be wedged by a corrupt box
+  record: an arc whose suspension latch is missing or is itself a
+  suspension code used to crash multi-box selection (and every store
+  write) with an opaque error. The bad shape is now rejected at
+  construction, and selection degrades gracefully — the corrupt arc is
+  ranked below every healthy candidate instead of raising, so one bad
+  record neither takes down the tenant's endpoint nor blocks its
+  writes. (#1511)
+
 - The credential-vending contract's three security pins are now
   machine-checked by a pin test: the mint endpoint's auth surface stays
   the plane's no-oracle `401` convention (a wrong-box token reads the

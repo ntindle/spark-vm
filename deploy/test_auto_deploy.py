@@ -202,7 +202,7 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         "/etc/sudoers.d/swapd",
         "/usr/local/share/with-proxy-ca/ca-bundle.crt",
         "/etc/logrotate.d/swap-proxy",  # QA follow-up: deploy.sh writes
-        # it (line 177) but the required set never checked it
+        # it (line 217) but the required set never checked it
         "/home/swapd/host_match.py",  # issue #261: the shared matcher
         # swap_addon.py hard-imports at load -- rollback must restore it
         # with the addon, or the box reverts to an addon-less proxy with
