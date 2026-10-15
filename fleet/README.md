@@ -59,6 +59,20 @@ box. No new box-side daemon, no new inbound port, no control plane.
   D-RC-5 refusals, and fail-closed pin reads, plus in-process tests that
   inject a fake deployer for the push seam (run with `python3 -m pytest
   fleet/test_plane_deploy.py`).
+- `update_journal.py` — control-plane update journal (S1, #775): the
+  `TENANT_UPDATE_TRUST_MODEL.md` §2 JSONL audit landing — `append`
+  journals §2 records (registration, wave_assignment, promotion,
+  reimage, maintenance, freeze/halt/unfreeze/promote, deferred/skipped)
+  with fail-closed attribution validation (tenant_id required, no
+  default; actor_fingerprint shape-enforced — never a bare name;
+  registration_ref generated on registration and chained on every
+  other rollout record; schema-exact, unknown fields rejected;
+  advisory_ref required on security-channel registration) and `read`
+  dumps the journal (malformed lines reported as skipped, never
+  gate-consumed). O_APPEND + fsync under the store-scoped journal lock,
+  same discipline as inventory.py. Stdlib only.
+- `test_update_journal.py` — hermetic suite (run with `python3 -m pytest
+  fleet/test_update_journal.py`).
 - `plane_waves.py` — rollout-controller wave assignment + promotion: the
   controller's brain (S2, #1285). `assign` computes wave assignments for
   a pinned template release (wave 0 is the canary — only explicitly
