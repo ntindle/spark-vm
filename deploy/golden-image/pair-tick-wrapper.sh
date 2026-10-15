@@ -28,7 +28,8 @@
 # Failure visibility (A4): a persistently failing tick is invisible to
 # supervisord by design — the loop never exits on tick failure (cron
 # semantics: the next tick retries). Tick-failure detail is the client
-# state-dir's append-only failure logs; #1020 still owns their bounding.
+# state-dir's append-only failure logs; their 1 MiB single-generation
+# bounding is in-code (D21, #1020 — landed).
 #
 # Test seams (documented, test-only): PAIR_WRAPPER_MAX_TICKS makes `loop`
 # exit 0 after N ticks; PAIR_WRAPPER_BACKOFF_BASE sets the daemon poll's
