@@ -109,7 +109,7 @@ live services, no browser — the asset renders terminal frames with PIL):
 - The journal line is **byte-for-byte the output of the real
   `proxy/swap_addon.py` `SwapAddon._audit()` code path**, called from the
   generator with `SWAP_LOG_FILE` pointed at a scratch journal:
-  `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=-`
+  `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=- flow=-`
 - The three frames are genuine command transcripts: the generator runs
   `cat demo-agent-config.json`, `tail -1 demo-swap.log`, and
   `grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || echo '...'` for real
