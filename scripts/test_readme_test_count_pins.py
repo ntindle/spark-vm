@@ -73,6 +73,15 @@ _CLAIMS = [
         # backtick before the path).
         r"hosted/test_push_sweep\.py`\s*\((\d+) tests",
     ),
+    (
+        # Second mention of the plane-cron suite's count outside its own
+        # README (which has its own precedent pin): the registry must cover
+        # every doc that states a count, or the class recurs through the
+        # unpinned mention.
+        "docs/SCHEDULER_HOME_CONVERGENCE_2026-10-12.md",
+        "deploy/plane-cron/test_verify_plane_cron.py",
+        r"`test_verify_plane_cron\.py` \((\d+) tests\)",
+    ),
 ]
 
 
