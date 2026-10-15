@@ -27,7 +27,11 @@ Contract (extends the deploy/plane-cron precedent,
   function was updated instead of the number.)
 
 To pin a new claim: add one registry entry. To change a suite: update the
-stated count in the doc in the same PR — CI fails otherwise.
+stated count in the doc in the same PR — CI fails otherwise. And the
+anti-drift test at the bottom of this file (`test_all_test_count_claims_are_registered`)
+scans every `*.md` for the claim shape and fails CI on any claim not covered by
+a registry entry — so a new claim can never land unregistered the way the
+`scripts/test_waitlist_jobs.py` claim did.
 """
 
 import ast
@@ -90,6 +94,14 @@ _CLAIMS = [
         "site/README.md",
         "scripts/test_waitlistd.py",
         r"`scripts/test_waitlistd\.py`, (\d+) tests",
+    ),
+    (
+        # The slice-3a README wrote its count claim without registering it,
+        # and the claim was wrong at write time (21 vs 33 actual) — the
+        # failure mode the anti-drift test below exists to close.
+        "site/README.md",
+        "scripts/test_waitlist_jobs.py",
+        r"`scripts/test_waitlist_jobs\.py`,\s*(\d+) tests",
     ),
 ]
 
@@ -248,3 +260,78 @@ def test_confirm_readme_directory_counts_match():
             f"gated-file assumption"
         )
     assert not failures, "stale confirm/ test-count claims:\n" + "\n".join(failures)
+
+
+# A `test_*.py` mention followed (within a short window, spanning an
+# optional line break and comma/paren) by an "(N tests)"-shaped count is a
+# stated suite-size claim — the shape the registry above pins.
+_CLAIM_FILE_RE = re.compile(r"(?<![\w/.-])([\w./-]*test_[\w.-]*\.py)")
+_CLAIM_COUNT_RE = re.compile(r"^`?\s*[,(]?\s*(\d+)\s+tests?\b")
+_CLAIM_WINDOW = 100
+
+
+def _resolve_test_file(mention):
+    """Resolve a doc's test-file mention to a repo-relative path.
+
+    A bare basename is resolved by searching the tree; it must be unique.
+    A literal relative path must exist. Failure is loud — an unresolvable
+    mention is itself a doc defect.
+    """
+    direct = REPO / mention
+    if direct.is_file():
+        return direct.relative_to(REPO).as_posix()
+    candidates = sorted(
+        p.relative_to(REPO).as_posix()
+        for p in REPO.rglob(mention.split("/")[-1])
+        if p.is_file() and ".git" not in p.parts
+    )
+    assert candidates, (
+        f"doc mentions test file {mention!r} which does not exist in the repo"
+    )
+    assert len(candidates) == 1, (
+        f"doc mentions ambiguous test file {mention!r}: {candidates} — "
+        "disambiguate with a path"
+    )
+    return candidates[0]
+
+
+def test_all_test_count_claims_are_registered():
+    """Anti-drift: every stated suite-size claim must be pinned.
+
+    A claim that never gets a _CLAIMS entry rots silently — the
+    `scripts/test_waitlist_jobs.py` claim sat in site/README.md for weeks
+    wrong at write time (21 vs 33 actual) with nothing able to catch it,
+    because the count-pinning test only checks registered claims. This
+    scanner finds every `test_*.py` (N tests)-shaped claim in every `*.md`
+    and requires its (doc, test file) pair to be in the registry, so a new
+    claim fails CI until it is pinned in the same PR.
+    """
+    registered = {(doc, test) for doc, test, _anchor in _CLAIMS}
+    unregistered = []
+    failures = []
+    for md in sorted(REPO.rglob("*.md")):
+        if ".git" in md.parts:
+            continue
+        text = md.read_text(encoding="utf-8")
+        for m in _CLAIM_FILE_RE.finditer(text):
+            window = text[m.end() : m.end() + _CLAIM_WINDOW]
+            cm = _CLAIM_COUNT_RE.match(window)
+            if not cm:
+                continue
+            mention = m.group(1)
+            try:
+                resolved = _resolve_test_file(mention)
+            except AssertionError as e:
+                failures.append(f"{md.relative_to(REPO)}: {e}")
+                continue
+            pair = (md.relative_to(REPO).as_posix(), resolved)
+            if pair not in registered:
+                unregistered.append(
+                    f"{pair[0]}: claim about {resolved} ({cm.group(1)} tests) "
+                    "has no _CLAIMS entry — register it in this file's "
+                    "registry in the same PR"
+                )
+    assert not failures, "\n".join(failures)
+    assert not unregistered, (
+        "unregistered test-count claims:\n" + "\n".join(unregistered)
+    )

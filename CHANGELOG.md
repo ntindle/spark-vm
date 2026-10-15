@@ -100,6 +100,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The waitlist site README's suite-size claim for the lifecycle-job tests
+  said 21 and the suite holds 34 — already wrong the day it was written,
+  because the claim was never registered with the test-count pin. The
+  claim is corrected and registered, and the pin now scans every doc for
+  the claim shape and fails CI on any claim that isn't registered, so a
+  new claim can never rot unnoticed again. (#TBD)
+
 - Queued waitlist emails can no longer be silently dropped by a spool
   filename race: each send is now published under an exclusive
   128-bit-entropy name, so two racing sends retry with a fresh name
