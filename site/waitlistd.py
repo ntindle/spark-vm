@@ -1160,11 +1160,12 @@ class WaitlistService:
         On a name race the tmp is dropped and the write retries with
         fresh entropy from mint() (SPOOL_CREATE_RETRIES); a persistent
         collision raises OSError — fail loud, never silent. OSError
-        propagates — every caller catches it and commits nothing (#406):
-        the invite, confirm, reminder, path-A, and deletion-notice paths
-        all return False with the row/ledger state untouched, and the
-        next retry (wave, re-submit, reminder job, path-A re-drive)
-        picks the send up cleanly. Returns the published filename.
+        propagates — the invite, confirm, reminder, and path-A queue
+        paths catch it and commit nothing (#406): all return False with
+        the row/ledger state untouched, and the next retry (wave,
+        re-submit, reminder job, path-A re-drive) picks the send up
+        cleanly. The deletion-notice path lets OSError propagate, as
+        before the change. Returns the published filename.
 
         mint: zero-arg callable returning the desired final filename;
         called once per attempt so a retry re-mints with fresh entropy.
@@ -1219,7 +1220,7 @@ class WaitlistService:
 
         Pure read: spool dir listing + file mtimes/queued_at, and a
         lock-copied view of self.rows. Spool names are unique per send and
-        written atomically (os.replace), so a file that cannot be parsed
+        written atomically (exclusive os.link publish), so a file that cannot be parsed
         is the sender's artifact, not ours — it is skipped, never fatal
         (the read catch is (OSError, ValueError): JSONDecodeError and
         UnicodeDecodeError are both ValueError subclasses). Partial-write
