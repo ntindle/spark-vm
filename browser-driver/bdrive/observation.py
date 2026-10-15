@@ -31,10 +31,16 @@ from bdrive.protocol import (
 MAX_AX_DEPTH = 1000
 
 
-def _check_node(node, path):
+def _check_node(node, path, seen_refs):
     # Iterative: an explicit stack of (node, path, depth) instead of
     # recursion, so a hostile page cannot crash the daemon via
     # RecursionError (the daemon catches only ProtocolError).
+    # ``seen_refs`` is shared across the whole tree (every top-level
+    # _check_node call from validate_observation gets the same set):
+    # refs must be unique within one observation, so a locator can
+    # never be ambiguous (a duplicate indicates a daemon
+    # ref-assignment bug, and validation is the backstop that
+    # catches it).
     stack = [(node, path, 0)]
     while stack:
         node, path, depth = stack.pop()
@@ -52,6 +58,12 @@ def _check_node(node, path):
             raise ProtocolError(
                 "bad_observation", "%s: node ref must look like @e1" % path
             )
+        if ref in seen_refs:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: duplicate node ref %r (refs must be unique within one observation)" % (path, ref),
+            )
+        seen_refs.add(ref)
         if not is_nonempty_str(node.get("role")):
             raise ProtocolError(
                 "bad_observation", "%s: node role must be non-empty" % path
@@ -135,8 +147,11 @@ def validate_observation(obs):
     nodes = obs.get("ax")
     if not isinstance(nodes, list):
         raise ProtocolError("bad_observation", "observation.ax must be an array")
+    # One set across every top-level node: uniqueness is tree-wide,
+    # covering duplicates in siblings and in nested children alike.
+    seen_refs = set()
     for i, node in enumerate(nodes):
-        _check_node(node, "ax[%d]" % i)
+        _check_node(node, "ax[%d]" % i, seen_refs)
     unknown = set(obs) - {"url", "title", "target", "ref_scope", "ax"}
     if unknown:
         raise ProtocolError(

@@ -132,6 +132,11 @@ The interview confirmed the managed agent's primary sense is the
   exact observation that supplied them, and only the **newest**
   observation's tree is actionable — older trees are redacted. The
   driver rejects stale refs instead of guessing.
+- Element locators are **unique** within one observation: a tree that
+  carries the same ref twice (siblings or nested) is rejected, so a
+  locator action can never be ambiguous. Duplicates today would
+  indicate a daemon ref-assignment bug — validation is the backstop
+  that catches it.
 - A fresh AX capture is automatic after every action call (terminal
   observation), so the agent always decides from current state.
 - `snapshot` — observation-only call; never combined with actions.
