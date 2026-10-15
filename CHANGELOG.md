@@ -64,7 +64,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   makes nested suspensions mutually exclusive and explicit: one latch per
   arc, so a second latch-holding entry (e.g. `relay-failure` during
   `stuck`, `operator-mark-stuck` during `connection-unreachable`) fails
-  closed instead of composing silently. (#1463)
+  closed instead of composing silently. (#1463, #1513)
 
 - The tenant-status endpoint can no longer be wedged by a corrupt box
   record: an arc whose suspension latch is missing or is itself a
