@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   with no timeout could tie up the driver indefinitely while the budget
   check passed. The budget now sums the effective timeout of every
   action, and the protocol contract pins the default for the execution
-  backend — an action is never unbounded. (#1452)
+  backend — an action is never unbounded. (#1452, #1497)
 
 - The browser-driver now rejects accessibility-tree observations whose
   element locators are not unique: an observation carrying the same
