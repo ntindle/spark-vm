@@ -89,7 +89,7 @@ exercised end to end.
 **#1489 (p3) — owner-visible alert when `pair-phone-home` enters the
 human-attention class while the heartbeat keeps flowing.** The #1488
 contract made the supervisord grammar precise — EXITED exit-1
-(superseded-generation, identity-mismatch, protocol errors) is the
+the valid-token subset of the human-attention class (superseded-generation, identity-mismatch, protocol errors) is the
 human-attention class, never a restart target — but on a provisioned
 box there is no human watching `supervisorctl`, and the heartbeat keeps
 200ing through the still-valid-token closes: verified this turn,
@@ -109,7 +109,7 @@ Pointers will ride the #851 and #958 bodies.
 ## 4. Remaining (re-verified 2026-10-14)
 
 - **#905** (Fly driver build — FLY_DRIVER_DESIGN_AHEAD is its input
-  contract; build order in its §4; D-D8's host-key contract above is
+  contract; build order in its §4; D-D3's host-key contract above is
   new since the design-ahead landed).
 - **#906** (claim→provision orchestrator), **#907** (plane-attested
   pairing), **#908**'s spend-cap slices (**#1074**–**#1077**),
@@ -139,7 +139,7 @@ PR #1395), **#1273** (this window, PR #1488). #851 stays OPEN
   as seen from provisioning — the #1363 store-access decision is now
   the single named gate for two lanes (approvals ingest + filing
   upload) and the image's program set.
-- **2026-10-14:** the golden-image README's "Known rough edges" was
+- **2026-10-14:** the pairing README's "Known rough edges" was
   already corrected by #1488 (failure logs are 1 MiB-capped per
   D21/#1020) — no stale "unbounded logs" claim survives on the lane.
 
