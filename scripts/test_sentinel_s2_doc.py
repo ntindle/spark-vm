@@ -115,8 +115,11 @@ class TestSentinelS2Doc(unittest.TestCase):
         for name, fn in inspect.getmembers(
                 sa.SwapAddon, predicate=inspect.isfunction):
             # Call-pattern scan, not a bare-name scan: a bare
-            # "_open_audit_log" also matches comment mentions (e.g. the
-            # line-399 comment in module-level _stamp_expired_consumed).
+            # "_open_audit_log" would also match comment mentions —
+            # e.g. the line-399 comment inside module-level
+            # _stamp_expired_consumed, which illustrates the mention
+            # class but sits outside the scanned SwapAddon methods, so
+            # it could never be a hit of this scan.
             if "with _open_audit_log()" in inspect.getsource(fn):
                 writers.add(name)
         self.assertEqual(
