@@ -105,7 +105,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   because the claim was never registered with the test-count pin. The
   claim is corrected and registered, and the pin now scans every doc for
   the claim shape and fails CI on any claim that isn't registered, so a
-  new claim can never rot unnoticed again. (#TBD)
+  new claim can never rot unnoticed again. (#1531)
 
 - Queued waitlist emails can no longer be silently dropped by a spool
   filename race: each send is now published under an exclusive
