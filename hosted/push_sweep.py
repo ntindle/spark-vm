@@ -10,7 +10,8 @@ watchers — and lets the policy, the gate-1 re-read (D59/D12), and the
 enqueue boundary (`hosted/push_enqueue.py`, D50-D57) make every timing,
 dedup, and budget decision.
 
-Decisions D66-D75 live in `docs/PUSH_SWEEP_SCHEDULER_DESIGN.md`; this
+Decisions D66-D75 live in `docs/PUSH_SWEEP_SCHEDULER_DESIGN.md` (D103,
+the per-tick work bound, is pinned there too); this
 module is that doc's §3 build slice. The points the doc pins on the
 plane worker — the per-minute `scheduled` cron trigger (D66) and the
 deploy-side trigger-registration check (D72) — are tracked in #1069
@@ -67,6 +68,19 @@ Design summary (see the design doc for the full D-series):
   other watcher still runs. Infrastructure failures (the candidate
   SELECT itself, the pending-window SELECT) are not data corruption —
   they still abort the pass loudly.
+- **Per-tick work bound** (D103). D69's page cap bounds the reminders
+  pass, but the watcher derivations are caller-supplied generators
+  with no termination guarantee — a wedged derivation would hang the
+  sweep forever and the per-minute cron would pile up overlapping
+  sweeps. `sweep_once` takes an optional `time_budget_s`: one
+  `time.monotonic()` deadline shared across all three passes, checked
+  between candidates; on exhaustion the pass stops, records
+  `budget_exhausted`, and the unreached candidates stay due for the
+  next tick (the same discipline as the send loop's D96). An optional
+  `tick_interval_s` fires a `tick_overrun` note on the summary when
+  the sweep exceeds its schedule interval, so the operator sees the
+  pile-up risk before it becomes one. Both default to None (unbounded,
+  the previous behavior) and are validated fail-closed.
 
 D2 (restated, fail-closed): `owner_principal` is resolved from the
 plane's enrollment registry via the injected `resolve_owner(box_id)` —
@@ -85,6 +99,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 from collections import namedtuple
 from datetime import datetime, timezone
 
@@ -92,7 +107,11 @@ from hosted import push_enqueue
 from hosted import push_events
 
 # D8 — approvals with a shorter TTL never qualify for a reminder.
-REMINDER_MIN_TTL_SECONDS = 300
+# Single-sourced: the policy owns the constant
+# (hosted/push_events.py); the sweep's hint predicate must agree with
+# the policy's gate, so it reads the policy's value — a second local
+# definition would let a one-sided future change silently miss
+# reminders (#1507).
 
 # D69 — bounded work per sweep: the candidate query pages instead of
 # scanning the whole approvals table, and pages are capped. The cap is
@@ -105,17 +124,33 @@ DEFAULT_MAX_PAGES = 100
 SweepSummary = namedtuple(
     "SweepSummary",
     ["reminders", "digests", "stale_watchers", "token_warnings",
-     "candidates_seen", "pages_truncated", "reminders_enabled"])
+     "candidates_seen", "pages_truncated", "reminders_enabled", "notes",
+     "budget_truncated"],
+    defaults=[(), False])
 # Each of reminders/digests/stale_watchers/token_warnings is a dict
 # disposition -> count, or {"skipped": True} when the pass did not run.
+# "notes" is a tuple of (key, message) sweep-level annotations — e.g.
+# ("tick_overrun", ...) when the sweep exceeded its schedule interval
+# (D103). It defaults to () so existing field-name readers are
+# unaffected.
+# "budget_truncated" is True when any pass stopped early on the D103
+# time budget (the unreached candidates stay due for the next tick).
+# It is deliberately distinct from "pages_truncated" (the D69 page
+# cap): the two have different remediations — raise time_budget_s /
+# the cadence vs. raise max_pages — so the operator alert reads
+# `pages_truncated OR budget_truncated`, never one boolean for both.
 
 ReminderPassResult = namedtuple(
     "ReminderPassResult",
-    ["dispositions", "candidates_seen", "pages_truncated"])
+    ["dispositions", "candidates_seen", "pages_truncated",
+     "budget_truncated"],
+    defaults=[False])
 # The reminders pass keeps its meta out of the disposition map: the
-# per-pass map is disposition -> count only; candidates_seen and
-# pages_truncated ride alongside, and sweep_once copies them onto the
-# SweepSummary's dedicated fields.
+# per-pass map is disposition -> count only; candidates_seen,
+# pages_truncated, and budget_truncated ride alongside, and sweep_once
+# copies them onto the SweepSummary's dedicated fields. budget_truncated
+# (D103) is distinct from pages_truncated (D69): time-budget stop vs.
+# page-cap stop — different remediations.
 
 
 def _utcnow(now=None):
@@ -157,6 +192,36 @@ def _require_resolve_owner(resolve_owner):
         raise ValueError(
             "resolve_owner must be callable (D2: owner identity comes from"
             " the enrollment registry, never from a box assertion)")
+
+
+def _validate_budget_arg(name, value):
+    """Fail-closed validation for the D103 tick-bound args (the D96 discipline).
+
+    A bound is a finite non-negative number or None (unbounded, the
+    documented default) — nothing else. NaN and inf must not pass:
+    `elapsed >= nan` is always False, so a NaN budget would silently
+    disable the bound while appearing configured (the opposite of
+    fail-closed; a JSON config's NaN/Infinity literals are the realistic
+    vector). Mirrors the validation in hosted/push_send_loop.py so the
+    two tick bounds reject the same shapes.
+    """
+    if value is not None and (isinstance(value, bool)
+                              or not isinstance(value, (int, float))
+                              or not math.isfinite(value)
+                              or value < 0):
+        raise ValueError(
+            "%s must be a finite non-negative number or None" % name)
+
+
+def _deadline_reached(deadline):
+    """True once the sweep's wall-clock budget is spent (D103).
+
+    `deadline` is an absolute time.monotonic() reading computed once in
+    sweep_once, or None for the unbounded default. Checked between
+    candidates so a pass stops promptly without abandoning a candidate
+    mid-flight.
+    """
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def _resolve_owner(resolve_owner, box_id):
@@ -206,7 +271,28 @@ def _isolate_candidate(counts, pass_name, identity, fn):
               % (pass_name, identity, exc))
 
 
-def _drive_watcher(counts, label, derive, conn, moment, on_item):
+def _close_abandoned(items, label):
+    """Deliver GeneratorExit to a derivation abandoned on the D103 budget.
+
+    Deterministic cleanup instead of GC timing: a suspended generator
+    gets `close()` (GeneratorExit at its current yield) rather than
+    being left for refcount collection. Non-generator iterables
+    (e.g. the list derivations tests use) have no `close` — tolerated.
+    A raising `close()` is logged loudly, never fatal: the sweep is
+    already on the budget-exhaustion path and must not die in cleanup.
+    """
+    close = getattr(items, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001 — cleanup must not kill the sweep
+        _loud("%s: derivation close() raised during budget abandonment: "
+              "%r — continuing" % (label, exc))
+
+
+def _drive_watcher(counts, label, derive, conn, moment, on_item,
+                   deadline=None):
     """Drive one watcher derivation with per-candidate isolation (D78).
 
     Each yielded item is an isolated candidate (see
@@ -216,7 +302,36 @@ def _drive_watcher(counts, label, derive, conn, moment, on_item):
     watcher still runs. The derivation call itself is inside the same
     guard: caller-wired logic that fails at call time is one loud
     poisoned count, not a whole-sweep abort.
+
+    D103 — the derivation is caller-supplied and carries no termination
+    guarantee, so the deadline is checked at the top of every loop
+    iteration, *before* `next(items)`: a derivation that blocks before
+    its first yield would otherwise never reach a post-`next()` check,
+    and an already-exhausted budget must not spend one more derivation
+    call discovering it. On exhaustion the watcher stops, the
+    derivation generator is `close()`d (deterministic GeneratorExit
+    delivery — see `_close_abandoned`), the pass records
+    `budget_exhausted`, and the sweep continues with the next watcher.
+
+    Abandonment contract (pinned while the plane-side derivations are
+    still unwritten, #1069): derivations must tolerate abandonment at
+    any yield — no open transactions across yields; cursors and other
+    resources released via `try/finally` (GeneratorExit is delivered
+    deterministically on abandonment). The sweep guarantees GeneratorExit
+    delivery and nothing more about derivation-held resources.
+
+    Cooperative residual, stated honestly: the bound is checked
+    *between* candidates and cannot preempt a single `next()` — or a
+    single candidate's processing — that blocks indefinitely.
+    Derivations must not block unboundedly within one step; a wedged
+    step still hangs the sweep, and `tick_overrun` is the operator
+    signal for it.
     """
+    if _deadline_reached(deadline):
+        counts["budget_exhausted"] = True
+        _loud("%s: time budget already exhausted — watcher skipped; "
+              "items stay due for the next tick" % label)
+        return
     try:
         items = iter(derive(conn, moment))
     except Exception as exc:  # noqa: BLE001 — see _isolate_candidate
@@ -226,6 +341,13 @@ def _drive_watcher(counts, label, derive, conn, moment, on_item):
               % (label, exc))
         return
     while True:
+        if _deadline_reached(deadline):
+            counts["budget_exhausted"] = True
+            _close_abandoned(items, label)
+            _loud("%s: time budget exhausted — watcher stops; "
+                  "unreached items stay due for the next tick"
+                  % label)
+            return
         try:
             item = next(items)
         except StopIteration:
@@ -306,7 +428,10 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
     The predicate must never filter *harder* than the policy: it is a
     hint (D68), so `status='pending' AND decision_seq IS NULL` plus the
     D8 timing — the policy's gate-1 re-read (D59) is the timing
-    decision. Keyset pagination ordered by (box_id, aid) keeps each
+    decision. The D8 bound is the policy's constant
+    (`push_events.REMINDER_MIN_TTL_SECONDS`, single-sourced per #1507)
+    — the hint must agree with the gate it feeds. Keyset pagination
+    ordered by (box_id, aid) keeps each
     query bounded (D69); stops after max_pages and reports truncation
     so the remainder stays due for the next sweep.
 
@@ -331,7 +456,6 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
     last_box, last_aid = None, None
     pages = 0
     truncated = False
-    seen = 0
     while True:
         if pages >= max_pages:
             truncated = True
@@ -351,7 +475,8 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
             "    AND typeof(approvals.created_at) = 'integer'"
             "    AND typeof(approvals.expires_at) = 'integer'"
             ")")
-        params = [now_epoch, REMINDER_MIN_TTL_SECONDS, now_epoch]
+        params = [now_epoch, push_events.REMINDER_MIN_TTL_SECONDS,
+                  now_epoch]
         if last_box is not None:
             where += " AND (box_id > ? OR (box_id = ? AND aid > ?))"
             params += [last_box, last_box, last_aid]
@@ -362,19 +487,18 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
         pages += 1
         if not rows:
             break
-        seen += len(rows)
         last_box, last_aid = rows[-1]
         yield rows
         if len(rows) < page_size:
             break
-    yield {"__meta__": {"seen": seen, "truncated": truncated}}
+    yield {"__meta__": {"truncated": truncated}}
 
 
 def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
                     page_size=DEFAULT_PAGE_SIZE,
                     max_pages=DEFAULT_MAX_PAGES,
-                    reminders_enabled=True):
-    """Pass 1: due reminders (D67, D68, D69, D70, D75).
+                    reminders_enabled=True, deadline=None):
+    """Pass 1: due reminders (D67, D68, D69, D70, D75, D103).
 
     For every candidate the sweep calls the policy's
     `maybe_enqueue_reminder` with the D49 adapter (the D59 dict bridge)
@@ -383,6 +507,12 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
     (default: the built-in D49 adapter over the approvals table).
     Each candidate is isolated (D78): a raising candidate is counted
     `poisoned`, logged loudly, and skipped — the pass continues.
+    D103 — `deadline` is the sweep's absolute time.monotonic() budget
+    (None = unbounded, the default): when it is reached the pass stops,
+    records `budget_exhausted`, and reports `budget_truncated=True`
+    (not `pages_truncated` — the D69 page cap is a different stop with
+    a different remediation) — the unreached candidates stay due for
+    the next tick, exactly the truncation contract's self-healing half.
     Returns a ReminderPassResult: the disposition -> count map plus
     the pass meta (kept out of the map).
     """
@@ -400,14 +530,24 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
     adapter = record_adapter if record_adapter is not None else \
         make_record_adapter(conn, moment)
     counts = {}
+    if _deadline_reached(deadline):
+        counts["budget_exhausted"] = True
+        _loud("reminders: time budget already exhausted — pass skipped;"
+              " candidates stay due for the next tick")
+        return ReminderPassResult(counts, 0, False, True)
     seen, truncated = 0, False
     for page in _reminder_candidates(conn, now_epoch, page_size,
                                      max_pages):
         if isinstance(page, dict):
-            seen = page["__meta__"]["seen"]
             truncated = page["__meta__"]["truncated"]
             break
         for box_id, aid in page:
+            if _deadline_reached(deadline):
+                counts["budget_exhausted"] = True
+                _loud("reminders: time budget exhausted — pass stops;"
+                      " unreached candidates stay due for the next tick")
+                return ReminderPassResult(counts, seen, False, True)
+            seen += 1
             def _one(_box=box_id, _aid=aid):
                 owner_principal = _resolve_owner(resolve_owner, _box)
                 r = push_events.maybe_enqueue_reminder(
@@ -421,8 +561,8 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
     return ReminderPassResult(counts, seen, truncated)
 
 
-def sweep_digests(conn, *, now=None):
-    """Pass 2: the D54 digest trigger (D64, D67, D76).
+def sweep_digests(conn, *, now=None, deadline=None):
+    """Pass 2: the D54 digest trigger (D64, D67, D76, D103).
 
     Fires `maybe_enqueue_digest` for every *pending* digest window —
     `count > 0` with `enqueued_at IS NULL` — oldest first (D76). The
@@ -438,9 +578,16 @@ def sweep_digests(conn, *, now=None):
     digest this sweep must be carried by the digest in the same sweep.
     Each window is isolated (D78): a raising window is counted
     `poisoned`, logged loudly, and skipped — the pass continues.
-    Returns a dict disposition -> count.
+    D103 — `deadline` is the sweep's absolute time.monotonic() budget
+    (None = unbounded, the default): when it is reached the pass stops
+    and records `budget_exhausted`; unfired windows stay pending for
+    the next tick. Returns a dict disposition -> count.
     """
     moment = _utcnow(now)
+    if _deadline_reached(deadline):
+        _loud("digests: time budget already exhausted — pass skipped;"
+              " windows stay pending for the next tick")
+        return {"budget_exhausted": True}
     current = push_enqueue.hour_bucket(moment)
     pending = conn.execute(
         "SELECT owner_principal, window_start FROM push_digest_state"
@@ -450,6 +597,11 @@ def sweep_digests(conn, *, now=None):
         (current,)).fetchall()
     counts = {}
     for owner_principal, window_start in pending:
+        if _deadline_reached(deadline):
+            counts["budget_exhausted"] = True
+            _loud("digests: time budget exhausted — pass stops;"
+                  " unfired windows stay pending for the next tick")
+            break
         def _one(_owner=owner_principal, _window=window_start):
             r = push_events.maybe_enqueue_digest(
                 conn, owner_principal=_owner, now=moment,
@@ -462,8 +614,9 @@ def sweep_digests(conn, *, now=None):
 
 
 def sweep_watchers(conn, *, now=None, resolve_owner=None,
-                   derive_stale=None, derive_token_warnings=None):
-    """Pass 3: the cadence-driven watchers (D74/D63, scope extension).
+                   derive_stale=None, derive_token_warnings=None,
+                   deadline=None):
+    """Pass 3: the cadence-driven watchers (D74/D63, D103, scope extension).
 
     `derive_stale(conn, moment)` yields `(box_id, stale_epoch)` —
     missed-heartbeat counting per the #864 1/min cadence — and
@@ -475,7 +628,11 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
     A derivation that is None means the watcher is not wired — the
     pass reports "skipped", it is never guessed. Each yielded item is
     an isolated candidate (D78); a derivation that raises stops only
-    its own watcher. Returns {"stale": {...}, "token_warnings": {...}}
+    its own watcher. D103 — `deadline` is the sweep's absolute
+    time.monotonic() budget (None = unbounded, the default), checked
+    before every derived item: without it a wedged derivation hangs
+    the sweep and the per-minute cron piles up overlapping sweeps.
+    Returns {"stale": {...}, "token_warnings": {...}}
     disposition maps.
     """
     moment = _utcnow(now)
@@ -491,7 +648,8 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
             stale_counts[r.disposition] = \
                 stale_counts.get(r.disposition, 0) + 1
         _drive_watcher(stale_counts, "stale_watchers",
-                       derive_stale, conn, moment, _stale)
+                       derive_stale, conn, moment, _stale,
+                       deadline=deadline)
     else:
         stale_counts = {"skipped": True}
     warning_counts = {}
@@ -506,7 +664,8 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
             warning_counts[r.disposition] = \
                 warning_counts.get(r.disposition, 0) + 1
         _drive_watcher(warning_counts, "token_warnings",
-                       derive_token_warnings, conn, moment, _warn)
+                       derive_token_warnings, conn, moment, _warn,
+                       deadline=deadline)
     else:
         warning_counts = {"skipped": True}
     return {"stale": stale_counts, "token_warnings": warning_counts}
@@ -515,13 +674,24 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
 def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
                page_size=DEFAULT_PAGE_SIZE, max_pages=DEFAULT_MAX_PAGES,
                reminders_enabled=True, derive_stale=None,
-               derive_token_warnings=None):
+               derive_token_warnings=None,
+               time_budget_s=None, tick_interval_s=None):
     """Run one full D9 sweep: reminders, then digests, then watchers.
 
     `now` is taken once and threaded through every pass (D73).
     `resolve_owner(box_id)` is required (D2) whenever a pass needs an
     owner; `record_adapter` overrides the built-in D49 adapter (tests);
     the watchers fire only when their derivations are wired.
+
+    D103 — `time_budget_s` (the D96 discipline, applied to the sweep):
+    the sweep stops driving new candidates once its elapsed wall-clock
+    time reaches the budget; unreached candidates stay due for the next
+    tick. None (the default) keeps the unbounded behavior.
+    `tick_interval_s` (the schedule interval): when set and the
+    measured sweep duration exceeds it, a `tick_overrun` note lands on
+    the summary — the operator sees the overrun before the next tick
+    can overlap. Both are validated fail-closed (finite non-negative
+    number or None; NaN/inf/bool/str/negative are ValueError).
 
     Returns a SweepSummary. The D9 acceptance criterion reads off it:
     a due reminder produces exactly one `queued` disposition; a
@@ -532,16 +702,48 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
     disposition; the names split deliberately (see §12 of
     docs/D9_PUSH_SWEEP_OPERATOR_GUIDE.md).
     """
+    _validate_budget_arg("time_budget_s", time_budget_s)
+    _validate_budget_arg("tick_interval_s", tick_interval_s)
     moment = _utcnow(now)
+    # (D103) wall-clock, not the injected logical clock: the budget and
+    # the overrun alarm measure how long the sweep *ran*, which is
+    # time.monotonic() regardless of what `now` the caller injected
+    # (mixing them would compare real time against a fixture date).
+    tick_start = time.monotonic()
+    deadline = (tick_start + time_budget_s
+                if time_budget_s is not None else None)
     rem = sweep_reminders(
         conn, now=moment, resolve_owner=resolve_owner,
         record_adapter=record_adapter, page_size=page_size,
-        max_pages=max_pages, reminders_enabled=reminders_enabled)
-    digests = sweep_digests(conn, now=moment)
+        max_pages=max_pages, reminders_enabled=reminders_enabled,
+        deadline=deadline)
+    digests = sweep_digests(conn, now=moment, deadline=deadline)
     watchers = sweep_watchers(
         conn, now=moment, resolve_owner=resolve_owner,
         derive_stale=derive_stale,
-        derive_token_warnings=derive_token_warnings)
+        derive_token_warnings=derive_token_warnings,
+        deadline=deadline)
+    notes = []
+    duration_s = time.monotonic() - tick_start
+    if tick_interval_s is not None and duration_s > tick_interval_s:
+        # (D103) the sweep overran its schedule interval: the next tick
+        # may have overlapped, which the operator must see before it
+        # becomes a pile-up (this is the #1506 failure mode made
+        # visible).
+        msg = ("sweep ran %.1fs, exceeding the %.1fs schedule interval"
+               " — the next tick may have overlapped"
+               % (duration_s, tick_interval_s))
+        _loud("sweep_once: tick_overrun — " + msg)
+        notes.append(("tick_overrun", msg))
+    # D103/B2 — the operator alert reads `pages_truncated OR
+    # budget_truncated`: any pass stopping early on the time budget
+    # marks the sweep, so a tick that did partial work is visible even
+    # when the page cap was never hit.
+    budget_truncated = (
+        rem.budget_truncated
+        or "budget_exhausted" in digests
+        or "budget_exhausted" in watchers["stale"]
+        or "budget_exhausted" in watchers["token_warnings"])
     return SweepSummary(
         reminders=rem.dispositions,
         digests=digests,
@@ -549,4 +751,6 @@ def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
         token_warnings=watchers["token_warnings"],
         candidates_seen=rem.candidates_seen,
         pages_truncated=rem.pages_truncated,
-        reminders_enabled=reminders_enabled)
+        reminders_enabled=reminders_enabled,
+        notes=tuple(notes),
+        budget_truncated=budget_truncated)

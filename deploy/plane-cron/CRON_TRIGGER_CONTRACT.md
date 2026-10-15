@@ -60,8 +60,10 @@ Call, in this order, with the seams the modules' docstrings name:
    sweep alone enqueues, it never sends).
 
 Structured-log the `SweepSummary` where the ops console can see it
-(D75: `pages_truncated` is the operator alert for repeated truncation;
-the sweep surfaces it for exactly this).
+(D75: `pages_truncated` is the operator alert for repeated
+page-cap truncation; D103: `budget_truncated` is the separate alert
+for repeated time-budget truncation — different cause, different
+remediation; the sweep surfaces both for exactly this).
 
 **Retirement rule (D71):** when #958's per-approval Durable Object
 alarms land, the same change retires the cron sweep's *reminder* pass
