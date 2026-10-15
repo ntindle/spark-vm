@@ -137,6 +137,14 @@ The interview confirmed the managed agent's primary sense is the
   locator action can never be ambiguous. Duplicates today would
   indicate a daemon ref-assignment bug — validation is the backstop
   that catches it.
+- The AX tree is page-derived (attacker-controlled on a hostile site),
+  so its size is bounded: node `name` / `role` / `frame` strings are
+  capped at the same `MAX_PARAM_LEN` as every other page-controlled
+  string, tree depth at `MAX_AX_DEPTH`, and total node count at
+  `MAX_AX_NODES` (50,000 — generous for real pages, finite against a
+  wide-and-flat memory-DoS tree). Oversized trees are rejected, never
+  truncated: a truncated tree would give the agent a silently partial
+  view of the page.
 - A fresh AX capture is automatic after every action call (terminal
   observation), so the agent always decides from current state.
 - `snapshot` — observation-only call; never combined with actions.

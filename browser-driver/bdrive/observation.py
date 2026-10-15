@@ -30,8 +30,16 @@ from bdrive.protocol import (
 #: as ProtocolError, never as a raw RecursionError.
 MAX_AX_DEPTH = 1000
 
+#: Hard cap on the total AX node count within one observation. Depth is
+#: capped but breadth is not: a hostile page can serve a wide, flat tree
+#: (100,000 siblings observed accepted) and wedge the daemon's memory
+#: and CPU. The count is enforced in the same iterative walk, shared
+#: across every top-level node like ``seen_refs``. The bound is generous
+#: (real trees rarely pass ~10k nodes) but finite.
+MAX_AX_NODES = 50_000
 
-def _check_node(node, path, seen_refs):
+
+def _check_node(node, path, seen_refs, node_count):
     # Iterative: an explicit stack of (node, path, depth) instead of
     # recursion, so a hostile page cannot crash the daemon via
     # RecursionError (the daemon catches only ProtocolError).
@@ -40,7 +48,8 @@ def _check_node(node, path, seen_refs):
     # refs must be unique within one observation, so a locator can
     # never be ambiguous (a duplicate indicates a daemon
     # ref-assignment bug, and validation is the backstop that
-    # catches it).
+    # catches it). ``node_count`` is a one-element list holding the
+    # running tree-wide total, shared the same way for MAX_AX_NODES.
     stack = [(node, path, 0)]
     while stack:
         node, path, depth = stack.pop()
@@ -48,6 +57,13 @@ def _check_node(node, path, seen_refs):
             raise ProtocolError(
                 "bad_observation",
                 "%s: AX tree exceeds max depth %d" % (path, MAX_AX_DEPTH),
+            )
+        node_count[0] += 1
+        if node_count[0] > MAX_AX_NODES:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: AX tree exceeds max node count %d"
+                % (path, MAX_AX_NODES),
             )
         if not isinstance(node, dict):
             raise ProtocolError(
@@ -64,13 +80,31 @@ def _check_node(node, path, seen_refs):
                 "%s: duplicate node ref %r (refs must be unique within one observation)" % (path, ref),
             )
         seen_refs.add(ref)
-        if not is_nonempty_str(node.get("role")):
+        role = node.get("role")
+        if not is_nonempty_str(role):
             raise ProtocolError(
                 "bad_observation", "%s: node role must be non-empty" % path
             )
-        if not isinstance(node.get("name"), str):
+        # Node strings are page-derived (a hostile page controls
+        # accessible names): cap them like every other page-controlled
+        # string, and never echo the value into the error — only its
+        # length (log-injection hygiene).
+        if len(role) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: node role exceeds %d chars (len %d)"
+                % (path, MAX_PARAM_LEN, len(role)),
+            )
+        name = node.get("name")
+        if not isinstance(name, str):
             raise ProtocolError(
                 "bad_observation", "%s: node name must be a string" % path
+            )
+        if len(name) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: node name exceeds %d chars (len %d)"
+                % (path, MAX_PARAM_LEN, len(name)),
             )
         for flag in ("enabled", "visible"):
             if not isinstance(node.get(flag), bool):
@@ -90,6 +124,12 @@ def _check_node(node, path, seen_refs):
             raise ProtocolError(
                 "bad_observation",
                 "%s: frame must be a non-empty string" % path,
+            )
+        if isinstance(frame, str) and len(frame) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: node frame exceeds %d chars (len %d)"
+                % (path, MAX_PARAM_LEN, len(frame)),
             )
         unknown = set(node) - {
             "ref", "role", "name", "enabled", "visible", "children", "frame",
@@ -149,9 +189,11 @@ def validate_observation(obs):
         raise ProtocolError("bad_observation", "observation.ax must be an array")
     # One set across every top-level node: uniqueness is tree-wide,
     # covering duplicates in siblings and in nested children alike.
+    # The node counter is likewise tree-wide for MAX_AX_NODES.
     seen_refs = set()
+    node_count = [0]
     for i, node in enumerate(nodes):
-        _check_node(node, "ax[%d]" % i, seen_refs)
+        _check_node(node, "ax[%d]" % i, seen_refs, node_count)
     unknown = set(obs) - {"url", "title", "target", "ref_scope", "ax"}
     if unknown:
         raise ProtocolError(

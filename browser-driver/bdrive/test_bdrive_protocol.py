@@ -960,6 +960,65 @@ def test_observation_refs_not_shared_across_observations():
     O.validate_observation(obs2)
 
 
+def test_observation_rejects_oversized_node_strings():
+    # Node strings are page-derived (a hostile page controls accessible
+    # names): each of name/role/frame is capped at MAX_PARAM_LEN, and
+    # the rejection never echoes the giant value into the error.
+    big = "n" * (P.MAX_PARAM_LEN + 1)
+    for kw, field in ((dict(name=big), "node name"),
+                      (dict(role=big), "node role"),
+                      (dict(frame=big), "node frame")):
+        with pytest.raises(P.ProtocolError) as exc:
+            O.build_observation("https://x", "t", "tgt", "rs",
+                                [_node(**kw)])
+        assert exc.value.code == "bad_observation"
+        assert field in str(exc.value)
+        assert str(P.MAX_PARAM_LEN) in str(exc.value)
+        assert big not in str(exc.value)
+    # The nested-attribute path names the node, not just the top level.
+    with pytest.raises(P.ProtocolError) as exc:
+        O.build_observation(
+            "https://x", "t", "tgt", "rs",
+            [_node(ref="@e1", children=[_node(ref="@e2", name=big)])])
+    assert exc.value.code == "bad_observation"
+    assert "ax[0].children[0]" in str(exc.value)
+    # Exactly at the cap is fine.
+    O.build_observation(
+        "https://x", "t", "tgt", "rs",
+        [_node(name="n" * P.MAX_PARAM_LEN,
+               role="r" * P.MAX_PARAM_LEN,
+               frame="f" * P.MAX_PARAM_LEN)])
+
+
+def test_observation_rejects_oversized_node_count():
+    # Breadth is uncapped by MAX_AX_DEPTH: a wide-and-flat hostile tree
+    # wedges daemon memory. The count is tree-wide (nested nodes count
+    # too, one constant, one check in the shared walk).
+    wide = [_node(ref="@e%d" % i) for i in range(O.MAX_AX_NODES + 1)]
+    with pytest.raises(P.ProtocolError) as exc:
+        O.build_observation("https://x", "t", "tgt", "rs", wide)
+    assert exc.value.code == "bad_observation"
+    assert "max node count" in str(exc.value)
+    # Boundary behavior on a shrunk cap: cap nodes validate, cap + 1
+    # fails — proves the count is tree-wide and the boundary exact.
+    tiny = O.MAX_AX_NODES
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(O, "MAX_AX_NODES", 3)
+    try:
+        ok = [_node(ref="@e%d" % i) for i in range(3)]
+        O.build_observation("https://x", "t", "tgt", "rs", ok)
+        nested = [_node(ref="@e1", children=[_node(ref="@e2"),
+                                             _node(ref="@e3")]),
+                  _node(ref="@e4")]
+        with pytest.raises(P.ProtocolError) as exc:
+            O.build_observation("https://x", "t", "tgt", "rs", nested)
+        assert exc.value.code == "bad_observation"
+        assert "max node count" in str(exc.value)
+    finally:
+        monkey.undo()
+    assert tiny == O.MAX_AX_NODES
+
+
 def test_redact_for_history_drops_tree_keeps_envelope():
     obs = O.build_observation(
         "https://example.com", "Example", "target-1", "rs_1_abc",
