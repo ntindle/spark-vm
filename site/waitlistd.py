@@ -181,6 +181,12 @@ PURGE_TTL_SECONDS = 30 * 86400
 # eyeball recent unprocessable mail, and 48h bounds the PII a triaged
 # "forget me" reply can linger for.
 TRIAGE_RETENTION_SECONDS = 2 * 86400
+# #401: a triage/ write that loses the O_CREAT|O_EXCL race retries with
+# fresh entropy this many times before failing loud. With 128-bit names
+# the race is effectively unwinnable, so the retry bound is a belt over
+# the entropy's suspenders — but a *failed* retry still fails loud
+# rather than silently overwriting another invocation's triaged mail.
+TRIAGE_CREATE_RETRIES = 8
 # #897: funnel_events.jsonl retention — events older than this that are
 # not coverage-pinned rotate out of the hot file into dated archives
 # (WAITLIST_OPERATIONS.md §5). 90d is ~2x the dropped-row purge horizon
@@ -1891,7 +1897,10 @@ class WaitlistService:
         ever, so the parser can never become a backscatter reflector).
         The raw message plus the loop-generated reason land in the
         operator data dir's triage/ subdir for the operator to eyeball.
-        Returns the triage filename.
+        Returns the triage filename. Names are collision-proof across
+        concurrent lockless patha invocations (128-bit entropy +
+        exclusive create — no silent overwrite), written 0600, and swept
+        after TRIAGE_RETENTION_SECONDS.
 
         "No reply" is about replies to the sender (the clarification
         path). The signup confirm email and the §5 forget-confirmation
@@ -1907,8 +1916,6 @@ class WaitlistService:
         # every write — raw inbound mail (addresses included) used to
         # accumulate here with no retention policy at all.
         self._sweep_stale_triage()
-        name = (f"{int(self.clock().timestamp())}-"
-                f"{secrets.token_hex(4)}.eml")
         if isinstance(raw, bytes):
             text = raw.decode("utf-8", errors="replace")
         elif isinstance(raw, str):
@@ -1918,10 +1925,41 @@ class WaitlistService:
         # Never let a lone surrogate (PEP 383 from a str-stdin read, or
         # any other caller) crash the write: sanitize to U+FFFD first.
         text = text.encode("utf-8", errors="replace").decode("utf-8")
-        with open(os.path.join(triage_dir, name), "w",
-                  encoding="utf-8") as fh:
-            fh.write(f"X-Waitlist-Triage-Reason: {reason}\n\n")
-            fh.write(text)
+        payload = f"X-Waitlist-Triage-Reason: {reason}\n\n{text}"
+        # #401: the lockless patha CLI calls triage_inbound with no data
+        # lock held, so two racing invocations must never share a name:
+        # 128-bit entropy names + O_CREAT|O_EXCL exclusive create with a
+        # bounded retry — the loser of a name race retries with fresh
+        # entropy instead of truncating the winner's file. A persistent
+        # collision (and any other write failure) fails loud and leaves
+        # no partial file behind, so a lost write is never silent.
+        ts = int(self.clock().timestamp())
+        name = None
+        path = None
+        fd = None
+        for _ in range(TRIAGE_CREATE_RETRIES):
+            name = f"{ts}-{secrets.token_hex(16)}.eml"
+            path = os.path.join(triage_dir, name)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                             0o600)
+            except FileExistsError:
+                name = None
+                continue
+            break
+        if fd is None:
+            raise OSError(
+                f"triage/ name collision persists after "
+                f"{TRIAGE_CREATE_RETRIES} attempts; refusing to overwrite")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+        except BaseException:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
         return name
 
     def _sweep_stale_triage(self):
@@ -1936,8 +1974,9 @@ class WaitlistService:
         no new moving parts. Best-effort under concurrency: triage_inbound
         is also called from the lockless single-message patha CLI, so two
         racing sweeps may attempt the same unlink — the loser's
-        FileNotFoundError is swallowed, and filenames are unique per
-        write, so no write is ever lost to the sweep.
+        FileNotFoundError is swallowed, and filenames are collision-proof
+        per write (O_CREAT|O_EXCL + 128-bit entropy), so no write is
+        ever lost to the sweep.
         """
         triage_dir = os.path.join(self.data_dir, "triage")
         cutoff = self.clock().timestamp() - TRIAGE_RETENTION_SECONDS

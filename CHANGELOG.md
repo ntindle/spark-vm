@@ -94,6 +94,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The waitlist's raw-mail triage folder can no longer lose mail to a
+  filename collision: triage filenames now carry 128-bit entropy and are
+  created with exclusive create, so two simultaneous inbox-processing
+  runs retry with a fresh name instead of silently overwriting each
+  other's triaged mail; triage files are also written with owner-only
+  permissions. (#401)
+
 - Update journal operator reference: two precision corrections — the
   chain rule now says registrations in the same library batch count
   (the CLI journals one record per invocation, so the walk-through

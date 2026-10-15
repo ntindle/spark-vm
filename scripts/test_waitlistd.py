@@ -22,6 +22,8 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -1126,6 +1128,76 @@ def test_triage_inbound_sweeps_stale_files():
     assert old_name not in remaining, "stale triage file must be swept"
     assert hand_name in remaining, "non-conforming file must be left alone"
     assert new_name in remaining, "the just-written triage file survives"
+
+
+def test_triage_inbound_name_uses_128bit_entropy():
+    # #401: 32-bit names (token_hex(4)) were birthdays away from a
+    # silent overwrite; new names carry 128-bit entropy.
+    svc, tmp = make_service()
+    name = svc.triage_inbound("body", "entropy test")
+    assert re.fullmatch(r"\d+-[0-9a-f]{32}\.eml", name), \
+        f"unexpected triage name shape: {name!r}"
+    path = os.path.join(tmp, "triage", name)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, \
+        "triage files must be owner-only (raw inbound mail holds PII)"
+    with open(path, encoding="utf-8") as fh:
+        assert fh.read() == "X-Waitlist-Triage-Reason: entropy test\n\nbody", \
+            "header + body must be byte-identical through the fdopen write"
+
+
+def test_triage_inbound_exclusive_create_survives_name_collision(monkeypatch):
+    # #401: the lockless patha CLI can run two triage_inbound calls
+    # concurrently. Forcing the first name mint to collide with an
+    # existing file must retry with fresh entropy — never truncate.
+    real_token_hex = secrets.token_hex
+    collide = "ab" * 16  # 128-bit all-as hex, same shape as new names
+    calls = {"n": 0}
+
+    def stub(n):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return collide
+        return real_token_hex(n)
+
+    monkeypatch.setattr(wd.secrets, "token_hex", stub)
+    svc, tmp = make_service()
+    triage_dir = os.path.join(tmp, "triage")
+    os.makedirs(triage_dir, exist_ok=True)
+    victim_name = f"{int(NOW.timestamp())}-{collide}.eml"
+    victim = os.path.join(triage_dir, victim_name)
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("original triaged mail — must survive")
+    got = svc.triage_inbound("new body", "collision test")
+    assert calls["n"] == 2, \
+        "the stub must have forced exactly one collision plus one retry"
+    assert got != victim_name, \
+        "a name collision must be retried, not truncated"
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "original triaged mail — must survive", \
+            "the colliding file's content must be untouched"
+    assert got in set(os.listdir(triage_dir)), \
+        "the retried write must land under a fresh name"
+
+
+def test_triage_inbound_persistent_collision_fails_loud(monkeypatch):
+    # #401: an unwinnable name race must fail loud — never silently
+    # overwrite — and must leave no partial file behind.
+    collide = "cd" * 16  # 128-bit all-hex, same shape as new names
+    monkeypatch.setattr(wd.secrets, "token_hex", lambda n: collide)
+    svc, tmp = make_service()
+    triage_dir = os.path.join(tmp, "triage")
+    os.makedirs(triage_dir, exist_ok=True)
+    victim_name = f"{int(NOW.timestamp())}-{collide}.eml"
+    victim = os.path.join(triage_dir, victim_name)
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("original triaged mail — must survive")
+    with pytest.raises(OSError):
+        svc.triage_inbound("new body", "collision test")
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "original triaged mail — must survive", \
+            "the colliding file's content must be untouched"
+    assert os.listdir(triage_dir) == [victim_name], \
+        "a failed write must leave no partial file"
 
 
 def test_forget_scrub_survives_malformed_stores():
