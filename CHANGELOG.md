@@ -198,7 +198,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   verified `(tenant_id, ts, signature)` triple, and an exact replay of an
   observed triple gets 401 — the caller re-polls with a fresh timestamp.
   Only verified triples enter the ledger; entries older than the window
-  are evicted on the next verified request. (#TBD)
+  are evicted on the next verified request. (#1465, #1549)
 - Relay `--probe-now` no longer takes the connection bundle on the
   command line (#1536): the relay host, port, and pinned fingerprint
   now come from stdin as JSON, so the key material is never visible in
