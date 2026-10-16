@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Stuck-detector relay conjunct (2026-10-16): the detector's predicate
+  gains the relay-path check — a `down` relay reading routes a quiet
+  session to `connection-unreachable` (never `stuck`), and a suspect
+  `degraded` reading reads as insufficient observability, never
+  assumed-ok; the calibration soak gains a "suspension while measuring"
+  confusion class so rule-6 relay suspensions don't pollute detector
+  outcomes. (#1417) (#1582)
 - Competitor watch, 2026-10-16: two new entries in the
   sandbox-competitor corpus — Vercel Drives is now generally available for
   Vercel Sandbox (with drive forking for parallel workers), and Perplexity

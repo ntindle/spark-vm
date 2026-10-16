@@ -129,7 +129,7 @@ prober disagrees with itself across consecutive probes (flapping), or the
 passive journal is stale past the §2 idle threshold while the prober
 still reports `ok`. `degraded` does **not** fire transition rule 6 on
 its own (the rule fires only on `down`); it is recorded in `detail` and
-on the operator surface, and for the stuck detector's §6 conjunct a
+on the operator surface, and for the stuck detector's §4 conjunct a
 `degraded` reading is *suspect* — it evaluates as unobservable
 (`insufficient-observability`), never as assumed-`ok`.
 The tenant layer consumes it as the `connection-unreachable` producer:
@@ -167,14 +167,24 @@ The tenant layer consumes it as the `connection-unreachable` producer:
 
 ## 6. Closing the stuck-detector's gap (Q6 resolved)
 
-`docs/STUCK_DETECTOR_DESIGN.md` §4's predicate drops the relay conjunct
-today. With this instrument, the conjunct becomes observable:
+`docs/STUCK_DETECTOR_DESIGN.md` §4's predicate dropped the relay conjunct
+until this instrument existed. With this instrument, the conjunct is
+observable:
 
 ```
 AND relay_path_ok(S) == true       (this doc's relay_path_state(S) == ok;
                                     sub-codes route to
                                     connection-unreachable, never stuck)
 ```
+
+**R4 SHIPPED 2026-10-16 (#1417):** the conjunct is now in the detector's
+§4 predicate — `down` readings never become `stall_candidate`s (rule 6
+latches the
+arc; the endpoint serves `connection-unreachable` with the sub-code in
+`detail`) and `degraded` evaluates as unobservable for the conjunct
+(suspect, never assumed-`ok` — see §5). `STUCK_DETECTOR_DESIGN.md` §8
+Q6's "relay conjunct dropped outright" interim is retired; the S3
+gate's relay row is closed. The design below is unchanged.
 
 The closed-world rule survives: if the instrument itself is dark (prober
 down, journal stale past the §2 idle threshold + margin), the conjunct
