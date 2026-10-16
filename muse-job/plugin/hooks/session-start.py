@@ -11,7 +11,10 @@ import time
 
 # Whitelist the session id (used in the registry filename): the same-user
 # job agent could otherwise plant a registration symlink that redirects the
-# manager's session discovery (issue #3 review). See stop.py.
+# manager's session discovery (issue #3 review).
+# HOOK-COPY SYNC (issue #21): duplicated by design in session-end.py and
+# stop.py — hooks stay standalone for plugin deployment. Edit every copy
+# together; drift fails muse-job/tests/test_hook_copy_drift.py.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
