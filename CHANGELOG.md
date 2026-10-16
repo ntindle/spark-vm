@@ -137,7 +137,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   contract's D102 no longer claims the served `/sw.js` is
   byte-pinned: the pin had no enforcement mechanism and the plane
   bundle is redeployed to pick up dashboard changes; pin enforcement
-  belongs to the plane-side follow-up (#1392). (#TBD)
+  belongs to the plane-side follow-up (#1392). (#1546)
 
 - The status-page feed spec's alert-row section said "all four rules"
   while the page carries five: the audit-tail-discontinuity rule's rows
