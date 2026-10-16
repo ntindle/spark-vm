@@ -153,9 +153,9 @@ The tenant layer consumes it as the `connection-unreachable` producer:
   consumes the producer — transition rule 6 suspension on a `down`
   reading with the §3 sub-code (`relay` | `cert` | `box-leg`) carried in
   `detail` (sub-codes on `down` readings only — F-RL34-5), live-anchor
-  selection (first box whose arc reached live; non-anchor readings stay
-  operator-surface), the nested-suspension emit rule (`relay-down`
-  boolean flip only in latch-holding states, never `relay-failure`),
+  selection (earliest-created among live-reached candidates, the stable proxy;
+  non-anchor readings stay operator-surface), the nested-suspension emit rule (`relay-down`
+  boolean flip fires only on codes where rule-6 entry does not apply, never `relay-failure`),
   and the recovery protocol (`relay-reachable` before
   `relay-recovered`, single ordered emitter per box, stateless re-drive
   plus stale-`False` resync). The endpoint may now claim

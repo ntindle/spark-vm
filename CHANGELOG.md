@@ -169,7 +169,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   Suspect readings never trigger the move, and an outage found while
   the box is already paused for another reason only flips the
   reachability signal instead of stacking a second suspension.
-  (#1416) (#TBD)
+  (#1416) (#1562)
 
 ### Fixed
 

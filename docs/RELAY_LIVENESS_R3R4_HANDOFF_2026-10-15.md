@@ -7,13 +7,15 @@ R3 landed the morning after this pin: `hosted/relay_tenant_wiring.py`
 #1562 squash-merged `e3f8c6d1`; issue #1416 **closed**. The three build
 constraints this doc recorded (F-RL34-2–F-RL34-4) are consumed:
 
-- **Anchor selection (F-RL34-2):** `select_live_anchor` — first box whose
-  arc reached live; an active rule-6 suspension keeps the anchor until
+- **Anchor selection (F-RL34-2):** `select_live_anchor` — the earliest-created
+  among live-reached candidates (earliest `created_at` as the stable
+  proxy for first-to-live); an active rule-6 suspension keeps the anchor until
   its suspension exits (suspended-anchor stickiness; no orphaned
   recovery pairs).
 - **Nested-suspension emit rule (F-RL34-3):** `drive_box` is the per-box
-  single ordered emitter; the `relay-down` boolean flip fires only in
-  latch-holding states — never `relay-failure`. A nested `down` whose
+  single ordered emitter; the `relay-down` boolean flip fires only on codes
+  where rule-6 entry does not apply (not just latch-holding states) — never
+  `relay-failure`. A nested `down` whose
   sub-code differs from the headline `detail` is noted LOUD in
   `plan_events` (both legs named).
 - **Recovery protocol (F-RL34-4):** `relay-reachable` before
@@ -23,7 +25,10 @@ constraints this doc recorded (F-RL34-2–F-RL34-4) are consumed:
   loss is re-driven; `plan_events` is pure).
 - **F-RL34-5 / D-RL34-4** (sub-code in `detail`, `down`-only): held in the
   wiring — a `down` reading with a missing/foreign sub-code is treated
-  as a broken producer, never suspended blindly.
+  as a broken producer: rule 6 still fires on the `down` evidence, but
+  the wiring passes no classification (the entry falls back to the
+  tenant layer's unclassified default — no fabricated `detail`), and
+  the anomaly rides the notes loud.
 - **D-RL34-5** (cross-process lock gap, #1540 p3) is also done — fixed by PR
   #1546 (`f63eb8cb`, probe-history cross-process lock); issue closed.
   Not folded into R3, as decided.
