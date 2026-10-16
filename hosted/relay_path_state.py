@@ -61,6 +61,7 @@ unchanged on the control plane without extra dependencies.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -216,7 +217,19 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
     with mode 0o700 (the umask can only remove bits, never add them)
     and the file is opened with O_NOFOLLOW|O_CREAT|O_APPEND at 0o600,
     so a symlink at the history path fails loud (ELOOP) instead of
-    redirecting appends into an arbitrary file.
+    redirecting appends into an arbitrary file. Creation-only: files
+    and dirs that already existed with weaker permissions are NOT
+    re-chmodded (we do not silently rewrite operator-owned
+    permissions); the O_NOFOLLOW refusal applies at every open, not
+    just creation. O_NOFOLLOW covers the final path component only —
+    RELAY_PROBE_HISTORY must live under an operator-owned path
+    (intermediate-component symlinks are still followed).
+    Divergence note (PR #1538 review): relay_liveness's session
+    journal keeps plain O_CREAT|O_APPEND 0o600 without O_NOFOLLOW —
+    that path is daemon-fixed (/var/lib/sparkvm/) and daemon-owned,
+    while the history path is operator-configurable, so the symlink
+    risk profiles genuinely differ. Revisit if the journal path ever
+    becomes operator-configurable.
     """
     if now is None:
         now = time.time()
@@ -243,6 +256,16 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
 
 
 def _rotate_history_if_needed(path):
+    # Rotation deliberately uses os.stat (symlink-following), not
+    # os.lstat (PR #1538 review): if a symlink sits at the path and
+    # its target is under the rotation threshold, the write path
+    # ELOOP-fails loud anyway; if the target is over the threshold,
+    # the rename moves the link itself to path.1 and the write
+    # creates a fresh regular file at path — no append is ever
+    # redirected into the symlink's target (verified empirically).
+    # Failing rotation loud too would buy nothing over the write-side
+    # refusal, and would break the deliberate read-path symlink
+    # tolerance documented above.
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -271,7 +294,13 @@ def _iter_history(path, vm_id, limit):
     state; its absence degrades the reading (no flapping memory,
     "never probed"), never the reading itself. The write path
     (``_record_outcome``) stays fail-loud so a broken store is never
-    silent."""
+    silent. Reads follow symlinks deliberately (PR #1538 review): a
+    symlinked history path is a sane operator setup, and exploiting
+    it requires write access to the history parent — the same
+    capability as forging records directly — so there is no attacker
+    capability gain. Corrupt-line skipping bounds what a followed
+    symlink can inject. Do not "fix" this to O_NOFOLLOW without
+    revisiting the analysis."""
     try:
         fh = open(path, encoding="utf-8")
     except OSError:
@@ -531,8 +560,16 @@ def maybe_probe(
     try:
         _record_outcome(path, vm_id, result.outcome, result.detail, now=now)
     except OSError as exc:
-        why = "%s; WARNING: probe history unwritable (%s) — this probe " \
-            "will not inform flapping" % (why, exc)
+        # Security N2: ELOOP is an active-integrity signal (something
+        # planted a symlink at the history path), distinct from ENOSPC —
+        # say so so the operator can tell attack from disk-full.
+        hint = (
+            "; possible symlink planted at the history path (ELOOP)"
+            if getattr(exc, "errno", None) == errno.ELOOP
+            else ""
+        )
+        why = "%s; WARNING: probe history unwritable (%s)%s — this probe " \
+            "will not inform flapping" % (why, exc, hint)
     return {
         "probed": True,
         "reason": why,
@@ -565,7 +602,22 @@ def _read_bundle_stdin():
     Raises ``_BundleError`` with an operator-actionable message on
     empty stdin, invalid JSON, non-object JSON, or missing/empty
     required fields. The caller turns these into exit 2.
+
+    Validation is deliberately strict (B1/B2/B3, PR #1538 review):
+    ports are accepted only as ints or plain digit strings (no bool,
+    float, or underscore coercion — a validator must not silently
+    rewrite its input), and the string fields must actually be
+    strings, so a malformed operator-supplied bundle can never
+    escape into an uncaught traceback.
     """
+    if sys.stdin.isatty():
+        raise _BundleError(
+            "--probe-now reads the probe bundle from stdin as JSON "
+            "but stdin is a terminal — pipe the bundle, e.g. "
+            "echo '{\"relay_host\": ..., \"relay_port\": ..., "
+            "\"pinned_fingerprint\": ...}' | relay_path_state "
+            "--query VM --probe-now"
+        )
     raw = sys.stdin.read()
     if not raw.strip():
         raise _BundleError(
@@ -575,7 +627,7 @@ def _read_bundle_stdin():
         )
     try:
         bundle = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise _BundleError("--probe-now bundle on stdin is not valid JSON")
     if not isinstance(bundle, dict):
         raise _BundleError("--probe-now bundle must be a JSON object")
@@ -584,9 +636,25 @@ def _read_bundle_stdin():
         raise _BundleError(
             "--probe-now bundle missing required fields: %s" % ", ".join(missing)
         )
-    try:
-        port = int(bundle["relay_port"])
-    except (TypeError, ValueError):
+    for field in ("relay_host", "pinned_fingerprint"):
+        if not isinstance(bundle[field], str):
+            raise _BundleError(
+                "--probe-now bundle %s must be a string" % field
+            )
+    raw_port = bundle["relay_port"]
+    if isinstance(raw_port, bool):
+        raise _BundleError("--probe-now bundle relay_port must be an integer")
+    if isinstance(raw_port, int):
+        port = raw_port
+    elif isinstance(raw_port, str):
+        text = raw_port.strip()
+        sign, digits = (
+            (text[0], text[1:]) if text[:1] in ("+", "-") else ("", text)
+        )
+        if not digits or not (digits.isascii() and digits.isdigit()):
+            raise _BundleError("--probe-now bundle relay_port must be an integer")
+        port = int(sign + digits, 10)
+    else:
         raise _BundleError("--probe-now bundle relay_port must be an integer")
     if not 0 < port < 65536:
         raise _BundleError("--probe-now bundle relay_port out of range")

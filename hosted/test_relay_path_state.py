@@ -548,7 +548,9 @@ def _run_cli(argv, monkeypatch, capsys, stdin=""):
     import io
     import runpy
     monkeypatch.setattr("sys.argv", ["relay_path_state"] + argv)
-    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+    if isinstance(stdin, str):
+        stdin = io.StringIO(stdin)
+    monkeypatch.setattr("sys.stdin", stdin)
     try:
         runpy.run_module("hosted.relay_path_state", run_name="__main__")
     except SystemExit as exc:
@@ -608,6 +610,159 @@ def test_cli_probe_now_bad_port_exits_2(history, journal, monkeypatch, capsys):
     )
     assert code == 2
     assert "relay_port" in err.err
+
+
+@pytest.mark.parametrize("raw_port", [True, 8443.5, "8_443", "-1", 0, 65536])
+def test_cli_probe_now_coerced_port_rejected_exits_2(
+    history, journal, monkeypatch, capsys, raw_port
+):
+    # A validator must not silently rewrite its input (PR #1538 review
+    # B1): bool/float/underscore ports are rejected, not coerced.
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin=json.dumps(
+            {
+                "relay_host": "h",
+                "relay_port": raw_port,
+                "pinned_fingerprint": "SHA256:x",
+            }
+        ),
+    )
+    assert code == 2
+    assert "relay_port" in err.err
+
+
+@pytest.mark.parametrize("raw_port", ["8443", "+8443", " 8443 "])
+def test_cli_probe_now_plain_digit_port_strings_accepted(
+    history, journal, monkeypatch, capsys, raw_port
+):
+    import hosted.relay_dial_prober as real
+
+    seen = {}
+
+    def fake_probe(vm_id, *, relay_host, relay_port, pinned_fingerprint,
+                   provider_state_fn):
+        seen["relay_port"] = relay_port
+        return _FakeResult(prober.PATH_OK)
+
+    real_probe = real.probe
+    real.probe = fake_probe
+    try:
+        code, out = _run_cli(
+            ["--probe-now", "--query", VM],
+            monkeypatch,
+            capsys,
+            stdin=json.dumps(
+                {
+                    "relay_host": "h",
+                    "relay_port": raw_port,
+                    "pinned_fingerprint": "SHA256:x",
+                }
+            ),
+        )
+    finally:
+        real.probe = real_probe
+    assert code is None  # no SystemExit on success
+    assert seen["relay_port"] == 8443
+
+
+@pytest.mark.parametrize(
+    "bundle,expected",
+    [
+        (
+            {"relay_host": 123, "relay_port": 1, "pinned_fingerprint": "SHA256:x"},
+            "must be a string",
+        ),
+        (
+            {"relay_host": ["h"], "relay_port": 1, "pinned_fingerprint": "SHA256:x"},
+            "must be a string",
+        ),
+        (
+            {"relay_host": "h", "relay_port": 1, "pinned_fingerprint": 123},
+            "must be a string",
+        ),
+        # None is falsy → lands on the missing-fields path, still loud exit 2
+        (
+            {"relay_host": "h", "relay_port": 1, "pinned_fingerprint": None},
+            "missing required fields",
+        ),
+    ],
+)
+def test_cli_probe_now_nonstring_fields_exits_2(
+    history, journal, monkeypatch, capsys, bundle, expected
+):
+    # Non-string host/fingerprint must fail loud (exit 2), never
+    # escape into a traceback from the prober (PR #1538 review B2).
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin=json.dumps(bundle),
+    )
+    assert code == 2
+    assert expected in err.err
+
+
+def test_cli_probe_now_deeply_nested_stdin_exits_2(
+    history, journal, monkeypatch, capsys
+):
+    # json.loads raises RecursionError (not ValueError) on pathological
+    # nesting — it must still land on the loud exit-2 path (PR #1538 B3).
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin="[" * 200000,
+    )
+    assert code == 2
+    assert "not valid JSON" in err.err
+
+
+def test_cli_probe_now_tty_stdin_exits_2(history, journal, monkeypatch, capsys):
+    class _Tty:
+        def isatty(self):
+            return True
+
+        def read(self):
+            raise AssertionError("must not block on a TTY")
+
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM], monkeypatch, capsys, stdin=_Tty()
+    )
+    assert code == 2
+    assert "terminal" in err.err
+
+
+def test_maybe_probe_symlink_history_warns_eloop(history, journal, tmp_path):
+    target = tmp_path / "target.jsonl"
+    target.write_text("")
+    os.symlink(str(target), history)
+
+    def fake_probe(vm_id, *, relay_host, relay_port, pinned_fingerprint,
+                   provider_state_fn):
+        return _FakeResult(prober.PATH_OK)
+
+    import hosted.relay_dial_prober as real
+
+    real_probe = real.probe
+    real.probe = fake_probe
+    try:
+        out = rps.maybe_probe(
+            VM,
+            provider_state_fn=lambda: "running",
+            has_post_live_arc=True,
+            bundle={"relay_host": "h", "relay_port": 1,
+                    "pinned_fingerprint": "SHA256:eA"},
+            now=NOW,
+            history=history,
+        )
+    finally:
+        real.probe = real_probe
+    assert out["probed"] is True
+    assert "ELOOP" in out["reason"]
+    assert target.read_text() == ""  # the append never redirected
 
 
 def test_cli_probe_now_reads_bundle_from_stdin(
