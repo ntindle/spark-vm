@@ -509,16 +509,32 @@ step_deploy() {
 # a 0755 parent would let another local user *replace* the manifest via
 # rename(2) (directory write permission suffices), and a 0644 manifest would
 # let them read the stamped records. A pre-existing manifest gets its
-# group/other bits cleared on open. A symlink at the manifest path (opened
-# O_NOFOLLOW) or a symlinked parent dir fails loud instead of being
-# followed — the hardening must never re-permission an attacker's target.
+# group/other bits cleared on open. The parent dir is only tightened when
+# this run created it, or when it is the default state dir (the pre-#1548
+# upgrade path — older installers left it 0755); a FIRST stamp under a
+# pre-existing non-default parent refuses loud instead (#1551:
+# PROVENANCE_MANIFEST=/x.json must never chmod "/" to 0700). A re-stamp
+# to a non-default parent (the manifest file already exists AND is owned
+# by the invoking user — an attacker-planted file refuses loud) appends
+# without touching the parent — refusing there would break the installer's
+# own re-stamp/backfill flow; the default-dir parent is always tightened
+# (the pre-#1548 upgrade). The manifest file itself is still pinned 0600
+# on every stamp. A symlink at
+# the manifest path (opened O_NOFOLLOW) or a symlinked parent dir fails loud
+# instead of being followed — the hardening must never re-permission an
+# attacker's target.
 # Only the immediate parent is tightened,
 # never walked past (e.g. never ~/.local itself, which other apps own).
 # Fails loudly (not silently) if the commit, VERSION, or hash cannot be
 # read — a stamp the inventory cannot trust is worse than no stamp.
 stamp_provenance() {
     local installed="$1" source_rel="$2"
-    local manifest="${PROVENANCE_MANIFEST:-$HOME/.local/state/spark-vm/provenance-manifest.json}"
+    # Issue #1550: the manifest location honors the same lookup chain on
+    # both sides — PROVENANCE_MANIFEST_FILE first, then PROVENANCE_MANIFEST
+    # (the reader in self_update.py uses the identical chain), so an
+    # override set under either name retargets the writer and the reader
+    # together. ${VAR:-...} treats empty as unset, matching the reader.
+    local manifest="${PROVENANCE_MANIFEST_FILE:-${PROVENANCE_MANIFEST:-$HOME/.local/state/spark-vm/provenance-manifest.json}}"
     local commit version digest now
     commit="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
         die "cannot stamp provenance for $installed — git rev-parse failed in $AGENT_REPO"
@@ -546,6 +562,8 @@ record = {
     "stamped_at": int(now),
 }
 parent = os.path.dirname(os.path.abspath(manifest))
+default_dir = os.path.abspath(
+    os.path.join(os.path.expanduser("~"), ".local", "state", "spark-vm"))
 if not os.path.isabs(manifest):
     # Fail loud rather than chmod'ing the process CWD: abspath() would
     # silently resolve a relative override to the CWD and the chmod below
@@ -555,8 +573,49 @@ if os.path.islink(parent):
     # chmod follows symlinks: a planted dir-symlink here would get its
     # *target* re-permissioned. Refuse instead of mutating it.
     raise ValueError(f"refusing symlinked provenance manifest parent: {parent!r}")
-os.makedirs(parent, mode=0o700, exist_ok=True)
-os.chmod(parent, 0o700)  # tighten even when pre-existing (tighten-after-create)
+# Issue #1551: re-permissioning a pre-existing dir is only safe when this
+# run created it, or when it is the default state dir (the pre-#1548
+# upgrade path — older installers left it 0755). An exotic override like
+# PROVENANCE_MANIFEST=/x.json would chmod("/") to 0700, and /tmp/x.json
+# would chmod("/tmp"): a FIRST stamp under an existing non-default parent
+# refuses loud instead — the caller's || die keeps the fail-loud contract.
+# A re-stamp to a non-default parent (the manifest file already exists)
+# takes the append path: the parent question is settled history, so
+# nothing is tightened and nothing is refused — refusing here would break
+# the installer's own re-stamp/backfill flow. But "the file exists" alone
+# is manufacturable: an attacker who can write the parent (the #1548
+# threat model) pre-plants the file — even empty — to convert the
+# first-stamp refusal above into a silent append, keeping the parent loose
+# for a later rename(2)-replacement. So settled history requires the file
+# to be OURS: lstat (never stat through a planted symlink) and refuse loud
+# when the owner isn't the invoking user. A legacy manifest stamped by the
+# same user passes; root adopting another user's manifest must chown first
+# (fail-loud, diagnosable). The manifest itself is still opened O_NOFOLLOW
+# and fchmod'ed 0600 below, so the file pin holds on every stamp.
+# Residual (documented, not fixed here): a loose non-default parent with
+# our own manifest stays loose on re-stamp — the #1548 tighten guarantee
+# covers the default path; exotic overrides are the operator's tree.
+manifest_preexists = os.path.lexists(manifest)
+if manifest_preexists and parent != default_dir:
+    st = os.lstat(manifest)
+    if st.st_uid != os.geteuid():
+        raise ValueError(
+            "refusing to stamp a provenance manifest not owned by the "
+            f"invoking user: {manifest!r}")
+    # Re-stamp: leave the parent's permissions exactly as they are. A
+    # stderr note keeps the skip visible in install logs.
+    print(f"note: leaving pre-existing provenance manifest parent "
+          f"permissions unchanged: {parent!r}", file=sys.stderr)
+else:
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=False)
+    except FileExistsError:
+        if parent != default_dir:
+            raise ValueError(
+                "refusing to create a provenance manifest under an existing "
+                f"non-default parent dir: {parent!r}")
+    os.chmod(parent, 0o700)  # tighten-after-create: created-by-us no-op,
+    # or the default-dir upgrade for pre-#1548 installs
 # O_NOFOLLOW: a pre-planted symlink at the manifest path must fail loud
 # (ELOOP) rather than silently appending into — and re-permissioning —
 # the symlink's target (#1548; same precedent as the relay history file).

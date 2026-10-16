@@ -1767,6 +1767,91 @@ def test_provenance_symlinked_manifest_is_unknown_not_attacker_records(tmp_path)
     assert entries == []
 
 
+def test_provenance_reader_honors_writer_env_name(monkeypatch, tmp_path):
+    # #1550: the writer (install.sh stamp_provenance) honors
+    # PROVENANCE_MANIFEST while the reader honored only
+    # PROVENANCE_MANIFEST_FILE, so an override set for the installer was
+    # silently ignored by the status read. Setting the installer's name
+    # must now retarget the reader too. (Vacuity: without the fallback the
+    # no-arg read sees no manifest and returns {}.) The binding is at
+    # import time, so this reloads the module under the overridden env.
+    import importlib
+
+    import self_update
+
+    manifest = tmp_path / "provenance-manifest.json"
+    manifest.write_text('{"installed": "/x", "sha256": "y"}\n')
+    monkeypatch.setenv("PROVENANCE_MANIFEST", str(manifest))
+    monkeypatch.delenv("PROVENANCE_MANIFEST_FILE", raising=False)
+    try:
+        reloaded = importlib.reload(self_update)
+        assert reloaded._PROVENANCE_MANIFEST_FILE == str(manifest)
+        assert reloaded.provenance_records() == {
+            "/x": {"installed": "/x", "sha256": "y"}
+        }
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_provenance_manifest_empty_env_counts_as_unset(monkeypatch, tmp_path):
+    # #1550 (Engineering review): empty values are treated as unset,
+    # matching the installer's ${VAR:-default} — otherwise an empty
+    # override on one side silently desyncs the two sides again.
+    # (Vacuity: without the `or` chain the reader resolves to "" and
+    # reports unknown.) The binding is at import time, so this reloads
+    # the module under the overridden env.
+    import importlib
+    import os
+
+    import self_update
+
+    manifest = tmp_path / "provenance-manifest.json"
+    manifest.write_text('{"installed": "/x", "sha256": "y"}\n')
+    monkeypatch.setenv("PROVENANCE_MANIFEST_FILE", "")
+    monkeypatch.setenv("PROVENANCE_MANIFEST", str(manifest))
+    try:
+        reloaded = importlib.reload(self_update)
+        assert reloaded._PROVENANCE_MANIFEST_FILE == str(manifest)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+    # Empty on the only set name falls through to the default path.
+    monkeypatch.setenv("PROVENANCE_MANIFEST", "")
+    monkeypatch.delenv("PROVENANCE_MANIFEST_FILE", raising=False)
+    try:
+        reloaded = importlib.reload(self_update)
+        assert reloaded._PROVENANCE_MANIFEST_FILE.endswith(
+            os.path.join(".local", "state", "spark-vm",
+                         "provenance-manifest.json"))
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
+def test_provenance_reader_name_wins_when_both_env_names_set(monkeypatch, tmp_path):
+    # #1550 precedence pin: when both names are set to different values,
+    # the reader's own PROVENANCE_MANIFEST_FILE wins — explicit beats
+    # convergent.
+    import importlib
+
+    import self_update
+
+    reader_manifest = tmp_path / "reader.json"
+    reader_manifest.write_text('{"installed": "/r"}\n')
+    writer_manifest = tmp_path / "writer.json"
+    writer_manifest.write_text('{"installed": "/w"}\n')
+    monkeypatch.setenv("PROVENANCE_MANIFEST_FILE", str(reader_manifest))
+    monkeypatch.setenv("PROVENANCE_MANIFEST", str(writer_manifest))
+    try:
+        reloaded = importlib.reload(self_update)
+        assert reloaded._PROVENANCE_MANIFEST_FILE == str(reader_manifest)
+        assert reloaded.provenance_records() == {"/r": {"installed": "/r"}}
+    finally:
+        monkeypatch.undo()
+        importlib.reload(self_update)
+
+
 def test_provenance_malformed_manifest_is_unknown_not_a_crash(tmp_path):
     from self_update import provenance_state
 
