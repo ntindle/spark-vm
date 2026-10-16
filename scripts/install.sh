@@ -397,8 +397,13 @@ resolve_install_version() {
     tags="$(git ls-remote --tags "$REPO_URL" 2>/dev/null)" || \
         die "cannot list tags on $REPO_URL — check the network and re-run $SCRIPT_ABS"
     local latest
-    latest="$(printf '%s\n' "$tags" | awk '{print $2}' | grep -v '\^{}$' | sed 's|^refs/tags/||' | sort -V | tail -n 1)"
-    [ -n "$latest" ] || die "$REPO_URL has no tags — cannot pick a release to install"
+    # Grammar filter: only release tags compete for "latest" — sort -V over
+    # the raw tag namespace would let a non-release tag (e.g. `zzz`, which
+    # sorts above v0.10.0) win the default. The filter is the same grammar
+    # parse_args enforces for --version. Prereleases (v1.2.4-rc.1) compete
+    # as ordinary tags — sort -V decides, "latest tag" is literal.
+    latest="$(printf '%s\n' "$tags" | awk '{print $2}' | grep -v '\^{}$' | sed 's|^refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | sort -V | tail -n 1)"
+    [ -n "$latest" ] || die "$REPO_URL has no release tags — cannot pick a release to install"
     printf '%s\n' "$latest"
 }
 

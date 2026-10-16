@@ -611,7 +611,9 @@ def test_resolve_install_version_picks_latest_tag():
         """\
         git() {
           case "$*" in
-            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\naaa2\\trefs/tags/v0.8.0^{}\\nbbb\\trefs/tags/v0.10.0\\nbbb2\\trefs/tags/v0.10.0^{}\\nccc\\trefs/tags/v0.9.0\\nddd\\trefs/tags/notaversion\\n';;
+            # zzz sorts ABOVE v0.10.0 under sort -V and must not win;
+            # notaversion sorts below and was never the catch case.
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\naaa2\\trefs/tags/v0.8.0^{}\\nbbb\\trefs/tags/v0.10.0\\nbbb2\\trefs/tags/v0.10.0^{}\\nccc\\trefs/tags/v0.9.0\\nddd\\trefs/tags/notaversion\\neee\\trefs/tags/zzz\\nfff\\trefs/tags/ghost/20261002-2129\\n';;
           esac
         }
         INSTALL_VERSION=
