@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -130,13 +131,12 @@ def cadence_s():
         value = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_CADENCE_S
-    if not (value > 0):
+    if not math.isfinite(value) or not (value > 0):
         return DEFAULT_CADENCE_S
     return value
 
 
 def cadence_decision(
-    vm_id,
     *,
     provider_state,
     has_post_live_arc,
@@ -150,9 +150,12 @@ def cadence_decision(
     string read through the H4 interface by the caller ("read the
     interface, not the driver", F-RL2-4); ``has_post_live_arc`` is the
     tenant layer's answer to "does a post-``live`` arc exist on this
-    box" (the prober's job starts at ``live``). ``last_probe_at`` is a
-    monotonic-ish epoch timestamp of the previous probe; ``cadence``
-    overrides the default cadence in seconds.
+    box" (the prober's job starts at ``live``). ``last_probe_at`` is an
+    epoch timestamp of the previous probe; ``cadence`` overrides the
+    default cadence in seconds.
+
+    A future-dated ``last_probe_at`` (clock skew) is clamped to ``now``
+    — the fail-safe choice is to probe, not to delay silently.
     """
     if now is None:
         now = time.time()
@@ -168,6 +171,10 @@ def cadence_decision(
         )
     if last_probe_at is None:
         return True, "due: never probed"
+    if last_probe_at > now:
+        # Clock skew (or a bogus future timestamp): the fail-safe
+        # choice is to probe, not to delay silently.
+        return True, "due: last probe timestamp is in the future"
     wait = cadence - (now - last_probe_at)
     if wait <= 0:
         return True, "due: cadence elapsed"
@@ -182,6 +189,10 @@ def cadence_decision(
 # line; corrupt lines are skipped by readers, never fatal.
 _HISTORY_MAX_BYTES = 4 * 1024 * 1024  # 4 MiB, then rotate
 _HISTORY_MAX_ROTATED = 2
+# Unbounded liveness-outcome scan bound: the flapping check must see
+# past arbitrarily long stand-down runs (Engineering B1). The file is
+# 4 MiB-bounded, so this is O(file), not O(infinity).
+_HISTORY_SCAN_LIMIT = 1 << 62
 
 
 def history_path():
@@ -237,10 +248,16 @@ def _rotate_history_if_needed(path):
 def _iter_history(path, vm_id, limit):
     """Newest-first probe records for ``vm_id``. Corrupt lines are
     skipped (a wedged writer's garbage must not wedge the reader);
-    unknown outcomes are skipped, never mapped."""
+    unknown outcomes and records missing a numeric ``ts`` are skipped,
+    never mapped. An unreadable store (missing file, directory as
+    path, permissions) reads as no records — the history is advisory
+    state; its absence degrades the reading (no flapping memory,
+    "never probed"), never the reading itself. The write path
+    (``_record_outcome``) stays fail-loud so a broken store is never
+    silent."""
     try:
         fh = open(path, encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return
     with fh:
         lines = fh.readlines()
@@ -259,6 +276,8 @@ def _iter_history(path, vm_id, limit):
         outcome = record.get("outcome")
         if outcome not in relay_dial_prober.OUTCOMES:
             continue
+        if not isinstance(record.get("ts"), (int, float)):
+            continue
         count += 1
         yield record
 
@@ -266,11 +285,18 @@ def _iter_history(path, vm_id, limit):
 def recent_liveness_outcomes(vm_id, n=2, path=None):
     """The last ``n`` liveness-bearing probe outcomes for ``vm_id``,
     newest first. Stand-down reports are skipped — they carry no
-    liveness evidence and never count toward flapping."""
+    liveness evidence and never count toward flapping.
+
+    The scan is unbounded (whole file): a long stand-down run must
+    never push the older liveness outcome out of the flapping window
+    (Engineering B1 — a fixed window turned flapping into a rule-6
+    ``down``). The history file is byte-bounded and already fully
+    loaded, so this is O(file) with no new memory cost.
+    """
     if path is None:
         path = history_path()
     outcomes = []
-    for record in _iter_history(path, vm_id, limit=max(n * 4, 8)):
+    for record in _iter_history(path, vm_id, limit=_HISTORY_SCAN_LIMIT):
         outcome = record["outcome"]
         if outcome in _LIVENESS_OUTCOMES:
             outcomes.append(outcome)
@@ -439,8 +465,11 @@ def maybe_probe(
 
     Returns ``{"probed": bool, "reason": str, "reading": dict|None}``.
     A provider_state_fn that raises propagates as a caller bug (the
-    prober's contract); the outcome is recorded before the reading is
-    composed so a later query sees this probe.
+    prober's contract). A history-write failure after a successful
+    probe is caught, not raised — the cadence hot path must not raise
+    (the failure is recorded in ``reason`` so the operator sees it);
+    the outcome is recorded before the reading is composed so a later
+    query sees this probe.
     """
     if now is None:
         now = time.time()
@@ -452,7 +481,6 @@ def maybe_probe(
     last_probe_at = probe_record["ts"] if probe_record else None
     provider_state = provider_state_fn()
     should, why = cadence_decision(
-        vm_id,
         provider_state=provider_state,
         has_post_live_arc=has_post_live_arc,
         now=now,
@@ -483,7 +511,11 @@ def maybe_probe(
         pinned_fingerprint=bundle["pinned_fingerprint"],
         provider_state_fn=provider_state_fn,
     )
-    _record_outcome(path, vm_id, result.outcome, result.detail, now=now)
+    try:
+        _record_outcome(path, vm_id, result.outcome, result.detail, now=now)
+    except OSError as exc:
+        why = "%s; WARNING: probe history unwritable (%s) — this probe " \
+            "will not inform flapping" % (why, exc)
     return {
         "probed": True,
         "reason": why,

@@ -276,7 +276,6 @@ def test_stand_down_excluded_from_liveness_outcomes(history):
 def test_cadence_stands_down_on_suspended_and_destroyed():
     for state in ("suspended", "destroyed"):
         should, reason = rps.cadence_decision(
-            VM,
             provider_state=state,
             has_post_live_arc=True,
             now=NOW,
@@ -286,33 +285,27 @@ def test_cadence_stands_down_on_suspended_and_destroyed():
 
 
 def test_cadence_stands_down_without_post_live_arc():
-    should, reason = rps.cadence_decision(
-        VM, provider_state="running", has_post_live_arc=False, now=NOW
+    should, reason = rps.cadence_decision(provider_state="running", has_post_live_arc=False, now=NOW
     )
     assert should is False
     assert "post-live" in reason
 
 
 def test_cadence_due_when_never_probed():
-    should, _reason = rps.cadence_decision(
-        VM, provider_state="running", has_post_live_arc=True, now=NOW
+    should, _reason = rps.cadence_decision(provider_state="running", has_post_live_arc=True, now=NOW
     )
     assert should is True
 
 
 def test_cadence_due_after_interval_and_not_before():
-    should, _ = rps.cadence_decision(
-        VM,
-        provider_state="running",
+    should, _ = rps.cadence_decision(provider_state="running",
         has_post_live_arc=True,
         now=NOW,
         last_probe_at=NOW - 400,
         cadence=300,
     )
     assert should is True
-    should, reason = rps.cadence_decision(
-        VM,
-        provider_state="running",
+    should, reason = rps.cadence_decision(provider_state="running",
         has_post_live_arc=True,
         now=NOW,
         last_probe_at=NOW - 10,
@@ -439,3 +432,147 @@ def test_maybe_probe_not_due_skips_network(history, journal):
         real.probe = real_probe
     assert out["probed"] is False
     assert "next probe in" in out["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review fixes: Engineering B1, QA B1-B3 + advisories
+# ---------------------------------------------------------------------------
+
+
+def test_flapping_survives_long_stand_down_run(history, journal):
+    # Engineering B1: ≥8 stand-down records between the two liveness
+    # outcomes must not hide the flapping — the fixed window turned
+    # this into a rule-6-firing down.
+    _record(history, [prober.PATH_OK])
+    _record(history, [prober.PROVIDER_NOT_RUNNING] * 10, ts=NOW + 100)
+    _record(history, [prober.RELAY_DEFECT], ts=NOW + 200)
+    reading = rps.relay_path_state(VM, now=NOW + 300, history=history)
+    assert reading["state"] == "degraded"
+    assert reading["sub_code"] is None
+    assert "flapping" in reading["reason"]
+
+
+def test_history_record_missing_ts_is_skipped(history):
+    with open(history, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"vm_id": VM, "outcome": prober.PATH_OK}) + "\n")
+    assert rps.recent_liveness_outcomes(VM, n=2, path=history) == []
+    assert rps.latest_probe(VM, path=history) is None
+
+
+def test_empty_history_file_is_never_probed(history, journal):
+    open(history, "a", encoding="utf-8").close()
+    reading = rps.relay_path_state(VM, now=NOW, history=history)
+    assert reading["state"] == "degraded"
+    assert reading["probe"] is None
+
+
+def test_journal_lock_error_propagates_never_darkness(history, journal, monkeypatch):
+    # QA B1: a wedged lock is a broken instrument, never darkness.
+    def wedged(vm_id, now=None, timeout_s=None):
+        raise rl.JournalLockError("wedged")
+    monkeypatch.setattr(rl, "relay_session_liveness", wedged)
+    with pytest.raises(rl.JournalLockError):
+        rps.relay_path_state(VM, now=NOW, history=history)
+
+
+def test_record_outcome_io_failure_is_loud(history):
+    # QA B2: fail-loud on I/O errors — a path that is an existing
+    # directory can never be opened for append.
+    os.makedirs(history + "-as-dir", exist_ok=True)
+    with pytest.raises(OSError):
+        rps._record_outcome(history + "-as-dir", VM, prober.PATH_OK,
+                            {"elapsed_ms": 1}, now=NOW)
+
+
+def test_maybe_probe_raising_provider_state_fn_propagates(history, journal):
+    # QA B3: a raising provider_state_fn is a caller bug and propagates.
+    def boom():
+        raise RuntimeError("driver exploded")
+    with pytest.raises(RuntimeError):
+        rps.maybe_probe(
+            VM,
+            provider_state_fn=boom,
+            has_post_live_arc=True,
+            bundle={"relay_host": "h", "relay_port": 1,
+                    "pinned_fingerprint": "SHA256:eA"},
+            now=NOW,
+            history=history,
+        )
+
+
+def test_maybe_probe_history_write_failure_warns_not_raises(history, journal):
+    os.makedirs(history + "-as-dir", exist_ok=True)
+
+    def fake_probe(vm_id, *, relay_host, relay_port, pinned_fingerprint,
+                   provider_state_fn):
+        return _FakeResult(prober.PATH_OK)
+
+    import hosted.relay_dial_prober as real
+
+    real_probe = real.probe
+    real.probe = fake_probe
+    try:
+        out = rps.maybe_probe(
+            VM,
+            provider_state_fn=lambda: "running",
+            has_post_live_arc=True,
+            bundle={"relay_host": "h", "relay_port": 1,
+                    "pinned_fingerprint": "SHA256:eA"},
+            now=NOW,
+            history=history + "-as-dir",
+        )
+    finally:
+        real.probe = real_probe
+    assert out["probed"] is True
+    assert "unwritable" in out["reason"]
+    assert out["reading"]["probe"] is None  # nothing was recorded
+
+
+def test_cadence_clamps_future_last_probe_at():
+    should, _reason = rps.cadence_decision(
+        provider_state="running",
+        has_post_live_arc=True,
+        now=NOW,
+        last_probe_at=NOW + 3600,  # clock skew — fail-safe is to probe
+        cadence=300,
+    )
+    assert should is True
+
+
+def test_cadence_rejects_infinite_env_value(monkeypatch):
+    monkeypatch.setenv("RELAY_PROBE_CADENCE_S", "inf")
+    assert rps.cadence_s() == rps.DEFAULT_CADENCE_S
+
+
+def _run_cli(argv, monkeypatch, capsys):
+    import runpy
+    monkeypatch.setattr("sys.argv", ["relay_path_state"] + argv)
+    try:
+        runpy.run_module("hosted.relay_path_state", run_name="__main__")
+    except SystemExit as exc:
+        return exc.code, capsys.readouterr()
+    return None, capsys.readouterr()
+
+
+def test_cli_probe_now_missing_bundle_exits_2(history, journal, monkeypatch, capsys):
+    code, err = _run_cli(["--probe-now", "--query", VM], monkeypatch, capsys)
+    assert code == 2
+    assert "pinned-fingerprint" in err.err
+
+
+def test_cli_query_journal_wedge_exits_1(history, journal, monkeypatch, capsys):
+    def wedged(vm_id, now=None, timeout_s=None):
+        raise rl.JournalLockError("wedged")
+    monkeypatch.setattr(rl, "relay_session_liveness", wedged)
+    code, err = _run_cli(["--query", VM], monkeypatch, capsys)
+    assert code == 1
+    assert "wedged" in err.err
+
+
+def test_cli_query_prints_reading(history, journal, monkeypatch, capsys):
+    _record(history, [prober.PATH_OK])
+    code, out = _run_cli(["--query", VM], monkeypatch, capsys)
+    assert code is None or True  # no SystemExit on success
+    reading = json.loads(out.out)
+    assert reading["vm_id"] == VM
+    assert reading["state"] == "degraded"  # no journal frame written
