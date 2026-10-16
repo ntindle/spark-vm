@@ -544,7 +544,7 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
         arc.latched_detail = scrub_detail("box-unhealthy: provider-dead")
 
 
-def _suspend_on_relay_down(arc: BoxArc) -> None:
+def _suspend_on_relay_down(arc: BoxArc, detail: Optional[str]) -> None:
     """Apply a ``relay-down`` flip to the arc code (#1461, relay half).
 
     The relay/cert path is down — that is rule 6's suspension condition,
@@ -552,11 +552,19 @@ def _suspend_on_relay_down(arc: BoxArc) -> None:
     ``connection-unreachable`` with the sub-code in ``detail``. Already
     suspended, at ``provisioning`` (rule 1(a) hold), terminal/operator,
     or ``stuck`` / ``maintenance``: boolean flip only.
+
+    ``detail`` carries the producer's §3 sub-code (``relay`` | ``cert`` |
+    ``box-leg``) on the R3 wiring path (#1416, D-RL34-4); the sole
+    caller ``apply_event`` always passes it explicitly (falling back to
+    the generic ``"relay-down"`` when the event carries no detail
+    kwarg), so the parameter has no default. A ``relay-down`` arriving
+    while already suspended is a pure boolean flip — the detail is not
+    refreshed (#1463 pin).
     """
     if arc.code in _LIVENESS_DEMOTE_CODES:
         arc.latched = arc.code
         arc.latched_detail = arc.detail
-        _touch(arc, "connection-unreachable", detail="relay-down")
+        _touch(arc, "connection-unreachable", detail=detail)
 
 
 def _re_evaluate_latch_on_exit(arc: BoxArc) -> bool:
@@ -620,7 +628,10 @@ def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
         _demote_on_provider_death(arc)
     elif event == "relay-down":
         arc.relay_reachable = False
-        _suspend_on_relay_down(arc)
+        # R3 (#1416, D-RL34-4): the wiring passes the §3 sub-code as
+        # detail so the suspension entry carries it; direct callers keep
+        # the generic default.
+        _suspend_on_relay_down(arc, kw.get("detail", "relay-down"))
     else:
         _apply_arc_event(arc, event, **kw)
 
