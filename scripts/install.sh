@@ -9,7 +9,14 @@
 #
 # Usage:
 #   git clone https://github.com/ntindle/spark-vm.git
-#   sudo ./spark-vm/scripts/install.sh [--agent-user NAME] [--dry-run] [--force]
+#   sudo ./spark-vm/scripts/install.sh [--agent-user NAME] [--dry-run] [--force] [--version vX.Y.Z]
+#
+# The installer pins a tagged release: --version vX.Y.Z installs that tag
+# (default: the latest tag on the remote). The fresh clone uses
+# `git clone --branch <tag>`, then the checkout's VERSION file is verified
+# to equal the tag — a retagged or hand-edited tree fails loudly instead of
+# installing silently. An existing checkout must already be the pinned tag
+# (tag-to-tag updates are out of scope: F-PKG-6).
 #
 # Every step checks whether its end state already holds and skips when it
 # does, so re-running converges to the same state (the desktop start and the
@@ -24,20 +31,23 @@
 # user's home). The bootstrap re-execs the agent phase through a login
 # shell (sudo -iu) so systemctl --user has a user bus.
 #
-# Out of scope: choosing a published artifact format (#1529), version pinning
-# (#1527), provenance stamping (#1528).
+# Out of scope: choosing a published artifact format (#1529), provenance
+# stamping (#1528).
 
 set -euo pipefail
 
 # ${VAR:-default} (not plain assignment): the bootstrap phase re-execs the
 # agent phase with these as environment, and plain assignments would clobber
-# them (notably --agent-user and --force). CLI parsing below still overrides.
+# them (notably --agent-user, --force, and --version). CLI parsing below still
+# overrides.
 # AGENT_PHASE is deliberately NOT env-preserved (plain assignment): the
 # re-exec passes --agent-phase-internal explicitly, so a stray exported
 # AGENT_PHASE=1 can never silently skip bootstrap.
 AGENT_USER="${AGENT_USER:-ntindle}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
+# Empty = install the latest tagged release (resolved at install time).
+INSTALL_VERSION="${INSTALL_VERSION:-}"
 AGENT_PHASE=0
 
 SCRIPT_ABS="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -48,11 +58,14 @@ REPO_URL="https://github.com/ntindle/spark-vm.git"
 
 usage() {
     cat <<'EOF'
-Usage: install.sh [--agent-user NAME] [--dry-run] [--force] [--help]
+Usage: install.sh [--agent-user NAME] [--dry-run] [--force] [--version vX.Y.Z] [--help]
 
   --agent-user NAME  agent account the stack runs as (default: ntindle; not root)
   --dry-run          print what would change without changing anything
   --force            re-run steps that already hold (e.g. redeploy the stack)
+  --version vX.Y.Z   install a tagged release (default: the latest tag on the
+                     remote); the checkout's VERSION is verified to equal the
+                     tag, and an already-pinned checkout is left untouched
   --help             this text
 
 Run as root (or with sudo) for the bootstrap phase — creating the agent
@@ -86,6 +99,8 @@ parse_args() {
             --agent-user=*) AGENT_USER="${1#*=}"; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
             --force) FORCE=1; shift ;;
+            --version) INSTALL_VERSION="${2:?--version needs a tag, e.g. --version v1.2.3}"; shift 2 ;;
+            --version=*) INSTALL_VERSION="${1#*=}"; shift ;;
             # Internal re-exec flag (bootstrap -> agent phase). Safe to pass
             # directly once the bootstrap phase already holds.
             --agent-phase-internal) AGENT_PHASE=1; shift ;;
@@ -96,6 +111,13 @@ parse_args() {
 
     [[ "$AGENT_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --agent-user name: $AGENT_USER"
     [ "$AGENT_USER" != root ] || die "--agent-user root defeats the user-isolation design — pick a non-root agent account"
+    # Strict tag grammar: refuses branches ("main"), flag injection
+    # ("--upload-pack=..."), and command separators. Empty is allowed —
+    # it means "latest tag" (resolved at install time).
+    if [ -n "$INSTALL_VERSION" ]; then
+        [[ "$INSTALL_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || \
+            die "bad --version '$INSTALL_VERSION' — want a release tag like v1.2.3"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -357,30 +379,94 @@ step_linger() {
         sudo loginctl enable-linger "$AGENT_USER"
 }
 
+resolve_install_version() {
+    # Resolve the pinned release tag: an explicit --version, or the latest
+    # tag on the remote (sort -V over refs/tags, ignoring the peeled ^{}
+    # lines that annotated tags emit). An explicit tag is verified to
+    # exist, so a typo dies here — never at clone time. Dies loud when the
+    # remote is unreachable or has no tags.
+    if [ -n "$INSTALL_VERSION" ]; then
+        local probe
+        probe="$(git ls-remote --tags "$REPO_URL" "refs/tags/$INSTALL_VERSION" 2>/dev/null)" || \
+            die "cannot reach $REPO_URL to verify tag '$INSTALL_VERSION'"
+        [ -n "$probe" ] || die "no such tag '$INSTALL_VERSION' on $REPO_URL"
+        printf '%s\n' "$INSTALL_VERSION"
+        return 0
+    fi
+    local tags
+    tags="$(git ls-remote --tags "$REPO_URL" 2>/dev/null)" || \
+        die "cannot list tags on $REPO_URL — check the network and re-run $SCRIPT_ABS"
+    local latest
+    # Grammar filter: only release tags compete for "latest" — sort -V over
+    # the raw tag namespace would let a non-release tag (e.g. `zzz`, which
+    # sorts above v0.10.0) win the default. The filter is the same grammar
+    # parse_args enforces for --version. Prereleases (v1.2.4-rc.1) compete
+    # as ordinary tags — sort -V decides, "latest tag" is literal.
+    latest="$(printf '%s\n' "$tags" | awk '{print $2}' | grep -v '\^{}$' | sed 's|^refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | sort -V | tail -n 1)"
+    [ -n "$latest" ] || die "$REPO_URL has no release tags — cannot pick a release to install"
+    printf '%s\n' "$latest"
+}
+
+assert_version_matches() { # $1 = tag, $2 = checkout dir
+    # Fail loud when the checkout's VERSION disagrees with the tag it was
+    # installed from — a retagged or hand-edited tree must not install
+    # silently. Honest limit: this catches hand edits and tag-name
+    # confusion, not a server-side retag (there the git transport is the
+    # trust anchor — a moved tag serves the attacker's tree).
+    local want="${1#v}"
+    local have
+    have="$(tr -d '[:space:]' < "$2/VERSION" 2>/dev/null)" || \
+        die "checkout at $2 has no VERSION file — expected '$want' for tag $1"
+    [ "$have" = "$want" ] || \
+        die "checkout VERSION '$have' != tag $1 (expected '$want') — refusing a mismatched tree"
+}
+
 step_repo() {
+    local version
+    version="$(resolve_install_version)"   # dies loud on network/tag problems
+    note "installing release $version"
     if [ ! -d "$AGENT_REPO/.git" ]; then
         if [ -n "$(ls -A "$AGENT_REPO" 2>/dev/null)" ]; then
             die "$AGENT_REPO exists but is not a git checkout — move it aside, then re-run $SCRIPT_ABS"
         fi
-        exec_if_live "clone $REPO_URL to $AGENT_REPO" \
-            git clone "$REPO_URL" "$AGENT_REPO"
+        exec_if_live "clone $REPO_URL --branch $version to $AGENT_REPO" \
+            git clone --branch "$version" "$REPO_URL" "$AGENT_REPO"
+        [ "$DRY_RUN" = 1 ] && return 0
+        # Ref-shadow guard: `git clone --branch <tag>` prefers a same-named
+        # branch over the tag when both exist, so a branch shadowing the
+        # release tag would silently install non-tag code as the pinned
+        # release. `rev-parse <tag>^{commit}` resolves refs/tags before
+        # refs/heads, so equality with HEAD is airtight.
+        local landed want_commit
+        landed="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
+            die "cannot read HEAD of the fresh clone at $AGENT_REPO"
+        want_commit="$(git -C "$AGENT_REPO" rev-parse --verify --quiet "$version^{commit}")" || \
+            die "fresh clone at $AGENT_REPO does not know tag $version"
+        [ "$landed" = "$want_commit" ] || \
+            die "clone --branch $version landed on $landed, not the tag commit $want_commit — a branch is shadowing the release tag; refusing"
+        assert_version_matches "$version" "$AGENT_REPO"
         return 0
     fi
     if ! git -C "$AGENT_REPO" remote get-url origin >/dev/null 2>&1; then
         die "$AGENT_REPO has no origin remote — fix the checkout, then re-run $SCRIPT_ABS"
     fi
-    local branch
-    branch="$(git -C "$AGENT_REPO" symbolic-ref --short HEAD 2>/dev/null || echo detached)"
-    if [ "$branch" != main ]; then
-        # Never pull origin/main into another branch — the operator checked
-        # that branch out deliberately.
-        note "$AGENT_REPO is on '$branch', not main — skipping pull (re-run from a main checkout to update it)"
-        return 0
+    # A versioned install never pulls: the checkout must already be the
+    # pinned tag (a fresh `git clone --branch <tag>` lands detached at the
+    # tag's commit, so equality is the whole pin). Tag-to-tag updates are
+    # out of scope (F-PKG-6): die loud with the remedy instead of
+    # half-upgrading a live box.
+    local want_commit have_commit
+    want_commit="$(git -C "$AGENT_REPO" rev-parse --verify --quiet "$version^{commit}")" || \
+        die "$AGENT_REPO does not know tag $version — its origin may predate releases"
+    have_commit="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
+        die "cannot read HEAD of $AGENT_REPO"
+    if [ "$have_commit" != "$want_commit" ]; then
+        local installed
+        installed="$(tr -d '[:space:]' < "$AGENT_REPO/VERSION" 2>/dev/null || echo unknown)"
+        die "$AGENT_REPO is at VERSION '$installed' ($have_commit), not $version ($want_commit) — tag-to-tag updates are not supported: move the checkout aside and re-run to install $version (the running stack is untouched)"
     fi
-    note "repo at $AGENT_REPO is on main — fast-forwarding to origin/main"
-    exec_if_live "git pull --ff-only origin main in $AGENT_REPO" \
-        git -C "$AGENT_REPO" pull --ff-only origin main || \
-        die "$AGENT_REPO has diverged from origin/main — resolve it, then re-run $SCRIPT_ABS"
+    assert_version_matches "$version" "$AGENT_REPO"
+    note "skip: $AGENT_REPO already at release $version"
 }
 
 step_deploy() {
@@ -470,7 +556,7 @@ run_bootstrap() {
     if [ "$DRY_RUN" = 1 ]; then
         if id -u "$AGENT_USER" >/dev/null 2>&1 && staged_copy_current 2>/dev/null; then
             note "dry-run: re-executing the agent phase as $AGENT_USER so probes see the true plan"
-            sudo -iu "$AGENT_USER" env "DRY_RUN=1" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" \
+            sudo -iu "$AGENT_USER" env "DRY_RUN=1" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" "INSTALL_VERSION=$INSTALL_VERSION" \
                 "$AGENT_REPO/scripts/install.sh" --agent-phase-internal
         else
             note "dry-run: agent checkout not staged/current — simulating the agent phase in-process"
@@ -483,7 +569,7 @@ run_bootstrap() {
     # has a bus. The staged path is absolute, so the cwd change is safe.
     # shellcheck disable=SC2093
     exec sudo -iu "$AGENT_USER" env \
-        "DRY_RUN=$DRY_RUN" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" \
+        "DRY_RUN=$DRY_RUN" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" "INSTALL_VERSION=$INSTALL_VERSION" \
         "$AGENT_REPO/scripts/install.sh" --agent-phase-internal
 }
 
