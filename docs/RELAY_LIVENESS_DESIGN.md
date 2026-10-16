@@ -221,8 +221,9 @@ remains unreachable until all four ship.
   carrying the §2 identity-marker discriminator (prober handshakes
   excluded from the session journal), §3 cadence and outcome taxonomy,
   handshake-only, pinned-fingerprint verification. Ships with an
-  operator-visible `relay_path_state` surface — no tenant-status wiring
-  yet (§5 interim honesty).
+  operator-visible `relay_path_state` surface — the tenant-status
+  wiring arrived with R3 (the §5 interim-honesty clause, retired
+  2026-10-16 in PR #1562).
 - **R3 — tenant-status producer wiring:** the tenant layer consumes
   `relay_path_state` — transition rule 6 suspension + the live-entry
   AND-combine. Runtime wiring only (the §2 row's producer pointer was

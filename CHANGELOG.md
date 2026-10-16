@@ -208,12 +208,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Fixed
 
 - Relay-liveness docs brought current after the R4 ship (2026-10-16):
-  the R3/R4 handoff pin's in-place R4 row said "ship-gate satisfied"
-  even though the stuck-detector conjunct shipped in #1582, the design
-  doc's build-slice list still read as unshipped, and the October 13
-  remaining-builds analysis still listed R2/R3/R4 as unbuilt — all three
-  now read shipped, and the gap analysis is marked superseded for state
-  (its slice decomposition still stands). (#1591)
+  they still listed R2/R3/R4 as unbuilt and the R4 row read
+  "ship-gate satisfied" even though the stuck-detector conjunct shipped
+  in #1582 — readers could conclude the relay-liveness lane was
+  unbuilt when it is fully built. All three docs now read shipped, and
+  the October 13 gap analysis is marked superseded for state (its slice
+  decomposition still stands). (#1591)
 
 - Desktop-bridge probe + input hardening (2026-10-16): the input-path
   liveness probe's window pick now runs through the same
