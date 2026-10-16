@@ -72,8 +72,10 @@ Sections, in render order (each a projection of the feed rows):
 2. **Rollout rows** — the active rollout's envelope (`release_id`,
    `wave` from the event journal) or, honestly, "no active rollout";
    freeze flips from `kind: freeze-hold` events as "fleet frozen /
-   freeze cleared at `<received_at>`". No per-wave census rows until
-   G15 S2 lands (the page does not invent waves).
+   freeze cleared at `<received_at>`" (the G15 S3 producer has no
+   implementation yet — tracked on #1543, not the closed #777). No
+   per-wave census rows until G15 S2 lands (the page does not invent
+   waves).
 3. **History window** — resolved rows for the retention window (Q1),
    newest first, each citing the journal records that resolved it
    (later journaled evidence, independent of any ack).

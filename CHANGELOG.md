@@ -129,6 +129,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The status-page feed spec's alert-row section said "all four rules"
+  while the page carries five: the audit-tail-discontinuity rule's rows
+  live in the alert journal too, one page-class row per lost window.
+  The spec also pointed the missing freeze-flip event producer at an
+  issue that closed with only the gate channel shipped — the unowned
+  producer now has its own tracking issue — and now records the ack's
+  operator-provenance stamps that the journal has carried since the
+  provenance fix. (#TBD)
+
 - The waitlist site README's suite-size claim for the lifecycle-job tests
   said 21 and the suite holds 34 — already wrong the day it was written,
   because the claim was never registered with the test-count pin. The

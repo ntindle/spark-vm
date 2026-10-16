@@ -4,7 +4,8 @@ Doc-first; the honesty rule is G17 S1's (quoted in §1, from
 `docs/UPDATE_EVENT_REPORTING.md` §4), extended to the page itself by the
 G21–G26 analysis's no-fiction contract: everything below is
 **current state and work to do**, not promises. Statuses are pinned to the
-repo as of this commit. This doc is the S1 slice of G22 (tracked on issue
+repo as of this commit (re-verified 2026-10-15 against main `1b88bf9`:
+§3.1 rule count, §3.2 freeze-hold tracker, §4.3 ack provenance corrected). This doc is the S1 slice of G22 (tracked on issue
 #796): the feed contract for the P7 status page — which journal records
 become feed rows, the dedup/idempotency rule, the ack→resolve lifecycle,
 and what stays operator-only. It designs nothing else: S2 builds the page,
@@ -18,10 +19,12 @@ S3 answers the incident-comms question.
   clocks are never trusted (see the 20261001-1029 distribution turn's
   S2 cross-check).
 - **G17 S1** (`fleet/events.py` + `docs/UPDATE_EVENT_REPORTING.md` §4):
-  the fleet event journal (canonical shape: `event_id`, `box_id`,
+  the fleet event journal (canonical shape — S1-relevant fields:
+  `event_id`, `box_id`,
   `session_epoch`, `emitted_at`, `received_at`, `source`, `component`,
   `subcomponent`, `subcomponents`, `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
-  `attested`, `note`) and the alert journal (`alerts.jsonl`), with five
+  `attested`, `note`; the full additive schema lives in
+  `docs/UPDATE_EVENT_REPORTING.md`'s event-shape table) and the alert journal (`alerts.jsonl`), with five
   alert rules evaluated on every collect: (1) any `rollback-failed` →
   immediate alert; (2) correlated failure (≥2 boxes, same
   `(subcomponent, to)` or `(to)`-alone for audit lines without a
@@ -76,11 +79,11 @@ the single source of truth; the feed keeps no copy and no memory.
 
 ## 3. Which journal records become feed rows
 
-### 3.1 Alert rows (all four rules)
+### 3.1 Alert rows (all five rules)
 
 Every alert in `alerts.jsonl` becomes a row, with its journaled fields:
 `schema`, `alert_id`, `rule`, `fired_at`, `box_id`, `subcomponent`, `to`,
-`detail`, `acked`. The row's lifecycle state (§5) is rendered alongside; the
+`detail`, `acked` (plus `acked_at`/`acked_by` once acked — see §4.3). The row's lifecycle state (§5) is rendered alongside; the
 state is derived, the fields are journaled.
 
 - Rule 1 (rollback-failed): a box stuck on a known-bad build. Row is a
@@ -93,6 +96,12 @@ state is derived, the fields are journaled.
   fleet is wave-monitored before wave assignments exist.
 - Rule 4 (stuck precheck): per-box row. A perpetually precheck-failing
   box is #608's quieter pain and the page should name it as such.
+- Rule 5 (tail-discontinuity): one page-class row per distinct lost
+  window, fired from the collector's continuity check rather than
+  `evaluate_alerts` — but the row is a journal row like any other:
+  `alert_id` is the uuid5 of `tail-discontinuity|<box_id>|||<lost-window
+  head hash>`, deduped on the head hash so a genuinely new overflow
+  fires a new alert while re-collection never re-fires.
 
 ### 3.2 Rollout rows
 
@@ -101,7 +110,9 @@ Rollout rows come from two journaled sources only:
 - The `rollout` envelope on event records (`release_id`, `wave`): while
   the envelope is null on every event (today), the page shows "no
   active rollout" — honestly, not as a gap in the page.
-- `kind: freeze-hold` events (G15 S3 producer, tracked on #777): the
+- `kind: freeze-hold` events (G15 S3 producer, tracked on #1543 —
+  #777 closed 2026-10-05 with only S1a/S1b shipped; the controller's
+  freeze-hold emitter has no other owner): the
   freeze flip/clear records, rendered as "fleet frozen / freeze cleared
   at <received_at>". No freeze-hold rows until G15 S3 ships the
   controller producer — read-time derivation means nothing appears
@@ -135,7 +146,11 @@ ones:
    ingests on this pair. Feed rollup rows (e.g. "correlated failure
    involves N boxes") count distinct journaled keys, not rows.
 3. **Ack is a journal rewrite, not a feed action.** `fleet events ack`
-   sets `acked: True` by atomic rewrite (tmp + `os.replace`). The feed
+   sets `acked: True` by atomic rewrite (tmp + `os.replace`), and stamps
+   `acked_at` (collector clock) + `acked_by` (the operator identity,
+   #928 — null when unknown, which never fails the ack). Both stamps are
+   journaled, so the feed's cite-your-source discipline covers ack
+   attribution too. The feed
    reads the current journal; an ack takes effect on the next render.
    There is no feed-side ack cache.
 4. **No feed writes.** The S1 feed has no write path — acking stays in
