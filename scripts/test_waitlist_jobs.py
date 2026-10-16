@@ -22,6 +22,7 @@ stdlib only, no network except one loopback integration test for the 413
 """
 
 import importlib.util
+import fcntl
 import json
 import multiprocessing
 import os
@@ -738,6 +739,36 @@ def test_jobs_cli_dry_run_writes_nothing(monkeypatch, capsys):
     entry_id = [r for r in svc.rows.values()][0]["entry_id"]
     svc.reload()
     assert svc.rows[entry_id]["reminder_sent_at"] is None
+
+
+def test_jobs_cli_dry_run_releases_lock_before_scan():
+    # #396: the exclusive cross-process lock is held only for the
+    # reload — the dry-run scan itself must run lock-free, so a dry run
+    # never stalls the daemon's public traffic. The probe runs inside
+    # the scan (via a wrapped reminder_due): a non-blocking exclusive
+    # attempt must succeed there. Pre-fix the whole dry run held
+    # data_lock(), so the probe's attempt fails.
+    svc, tmp, clock = make_service()
+    submit(svc, "drylock@example.com")
+    probes = []
+    real_reminder_due = svc.reminder_due
+
+    def _probing_reminder_due(row):
+        path = os.path.join(tmp, "waitlist.lock")
+        with open(path, "a", encoding="utf-8") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                probes.append(False)
+            else:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                probes.append(True)
+        return real_reminder_due(row)
+
+    svc.reminder_due = _probing_reminder_due
+    assert wj._dry_run(tmp, svc, True, False, False) == 0
+    assert probes, "scan produced no probe"
+    assert all(probes), "dry-run scan held the exclusive data lock"
 
 
 def test_jobs_cli_requires_exactly_one_job(monkeypatch):

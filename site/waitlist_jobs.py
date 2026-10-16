@@ -125,6 +125,43 @@ def load_job_config(argv):
     return key, data_dir, host
 
 
+def _dry_run(data_dir, service, want_remind, want_drop, want_purge):
+    """Dry-run scan over a lock-held reload snapshot (#396).
+
+    The scan itself is pure in-memory work on the reloaded snapshot, so
+    the exclusive cross-process data lock is held only for reload() — a
+    dry run must never stall the daemon's public traffic.
+    """
+    with data_lock(data_dir):
+        service.reload()  # never scan from a pre-daemon view
+    due_remind = [r["entry_id"] for r in service.rows.values()
+                  if service.reminder_due(r)]
+    due_drop = [r["entry_id"] for r in service.rows.values()
+                if service.drop_due(r)]
+    due_purge = [r["entry_id"] for r in service.rows.values()
+                 if service.purge_due(r)]
+    if want_remind:
+        sys.stdout.write(
+            f"waitlist_jobs: dry-run — {len(due_remind)} reminder(s) "
+            f"due: {','.join(due_remind) or '(none)'}\n")
+    elif want_drop:
+        sys.stdout.write(
+            f"waitlist_jobs: dry-run — {len(due_drop)} drop(s) due: "
+            f"{','.join(due_drop) or '(none)'}\n")
+    elif want_purge:
+        sys.stdout.write(
+            f"waitlist_jobs: dry-run — {len(due_purge)} purge(s) "
+            f"due: {','.join(due_purge) or '(none)'}\n")
+    else:
+        result = service.rotate_funnel_events(dry_run=True)
+        sys.stdout.write(
+            f"waitlist_jobs: dry-run — {result['archived']} "
+            f"event(s) would rotate to "
+            f"{len(result['archives'])} archive(s), "
+            f"{result['kept']} kept\n")
+    return 0
+
+
 def main(argv):
     want_remind = "--remind" in argv
     want_drop = "--drop" in argv
@@ -138,36 +175,12 @@ def main(argv):
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_job_config(argv)
 
+    service = WaitlistService(data_dir, key, host)
+    if dry_run:
+        return _dry_run(data_dir, service, want_remind, want_drop,
+                        want_purge)
     with data_lock(data_dir):
-        service = WaitlistService(data_dir, key, host)
         service.reload()  # never scan from a pre-daemon view
-        if dry_run:
-            due_remind = [r["entry_id"] for r in service.rows.values()
-                          if service.reminder_due(r)]
-            due_drop = [r["entry_id"] for r in service.rows.values()
-                        if service.drop_due(r)]
-            due_purge = [r["entry_id"] for r in service.rows.values()
-                         if service.purge_due(r)]
-            if want_remind:
-                sys.stdout.write(
-                    f"waitlist_jobs: dry-run — {len(due_remind)} reminder(s) "
-                    f"due: {','.join(due_remind) or '(none)'}\n")
-            elif want_drop:
-                sys.stdout.write(
-                    f"waitlist_jobs: dry-run — {len(due_drop)} drop(s) due: "
-                    f"{','.join(due_drop) or '(none)'}\n")
-            elif want_purge:
-                sys.stdout.write(
-                    f"waitlist_jobs: dry-run — {len(due_purge)} purge(s) "
-                    f"due: {','.join(due_purge) or '(none)'}\n")
-            else:
-                result = service.rotate_funnel_events(dry_run=True)
-                sys.stdout.write(
-                    f"waitlist_jobs: dry-run — {result['archived']} "
-                    f"event(s) would rotate to "
-                    f"{len(result['archives'])} archive(s), "
-                    f"{result['kept']} kept\n")
-            return 0
         if want_remind:
             sent = service.send_reminders()
             sys.stdout.write(f"waitlist_jobs: sent {sent} reminder(s)\n")

@@ -2461,6 +2461,80 @@ def test_refresh_under_lock_sees_external_token_mutation():
     assert "forget.abc123" in svc.consumed
 
 
+# -- #386: read-only GETs must not take the exclusive data lock ------------
+
+
+def _hold_data_lock(tmp, holders):
+    # Acquire the exclusive cross-process lock in a helper thread and
+    # hold it — models an operator job (drop/purge rewrite, wave,
+    # reminder run) executing while public traffic arrives.
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with wd.data_lock(tmp):
+            acquired.set()
+            release.wait(30)
+
+    t = threading.Thread(target=_holder, daemon=True)
+    t.start()
+    assert acquired.wait(10), "lock-holder thread never acquired data_lock"
+    holders.append(release)
+
+
+@pytest.mark.parametrize("get_name",
+                         ["confirm_get", "forget_get", "claim_get"])
+def test_read_only_gets_do_not_block_on_data_lock(get_name):
+    # #386: the public renders are read-only — they must not serialize
+    # behind an operator job holding the exclusive cross-process lock.
+    # Pre-fix this test hangs: the GET waited on the same exclusive lock
+    # the "job" holds. Post-fix it returns promptly on the thread lock +
+    # the mtime-gated refresh.
+    svc, tmp = make_service()
+    holders = []
+    _hold_data_lock(tmp, holders)
+    try:
+        get = getattr(svc, get_name)
+        result = {}
+        done = threading.Event()
+
+        def _call():
+            result["rv"] = get("bogus-token")
+            done.set()
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        assert done.wait(10), f"{get_name} blocked on data_lock"
+        status, _ = result["rv"]
+        assert status == 200
+    finally:
+        for release in holders:
+            release.set()
+
+
+def test_confirm_get_sees_external_commit_without_data_lock():
+    # #386: the mtime-gated refresh still picks up a job's commit even
+    # though the GET no longer takes the exclusive lock — the render
+    # stays honest without serializing public traffic behind jobs.
+    svc, tmp = make_service()
+    status, _ = svc.submit_form(form_fields("ext@example.com"),
+                                "127.0.0.1")
+    assert status == 200
+    eid = svc.by_email["ext@example.com"]
+    token = svc.rows[eid]["active_token"]
+    # Simulate the lifecycle-job CLI committing from a separate process:
+    # append a confirmed version of the row straight to rows.jsonl.
+    confirmed = dict(svc.rows[eid])
+    confirmed["status"] = "confirmed"
+    confirmed["confirmed_at"] = "2026-09-20T12:00:01Z"
+    with open(os.path.join(tmp, "rows.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(confirmed, sort_keys=True) + "\n")
+    status, html = svc.confirm_get(token)
+    assert status == 200
+    assert "on the list" in html  # the already-confirmed page, not stale
+    assert svc.rows[eid]["status"] == "confirmed"
+
+
 # -- #395: skipped loader lines must never be silently destroyed ----------
 
 

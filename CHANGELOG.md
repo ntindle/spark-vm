@@ -207,6 +207,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Waitlist public pages no longer stall behind operator jobs (2026-10-16):
+  the confirm, forget, and claim pages rendered under the same exclusive
+  lock the lifecycle jobs hold, so a drop/purge rewrite, invite wave, or
+  reminder run stalled every page load for its whole duration. The pages
+  are read-only and now render on a thread-locked, freshness-checked view
+  instead — and a `--dry-run` of the lifecycle jobs holds the lock only
+  for its initial reload, never for the scan. (#386) (#1592)
+
 - Relay-liveness docs brought current after the R4 ship (2026-10-16):
   they still listed R2/R3/R4 as unbuilt and the R4 row read
   "ship-gate satisfied" even though the stuck-detector conjunct shipped
