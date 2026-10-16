@@ -186,7 +186,10 @@ def cadence_decision(
 # ---------------------------------------------------------------------------
 
 # Outcomes only — never fingerprints (D-RL2-3). One JSON object per
-# line; corrupt lines are skipped by readers, never fatal.
+# line; corrupt lines are skipped by readers, never fatal. The store is
+# created 0o600 in a 0o700 parent and opened with O_NOFOLLOW: a symlink at
+# the final path component fails loud instead of redirecting appends
+# (#1537).
 _HISTORY_MAX_BYTES = 4 * 1024 * 1024  # 4 MiB, then rotate
 _HISTORY_MAX_ROTATED = 2
 # Unbounded liveness-outcome scan bound: the flapping check must see
@@ -207,7 +210,14 @@ def history_path():
 def _record_outcome(path, vm_id, outcome, detail, now=None):
     """Append one probe outcome to the history store. Fail-loud on I/O
     errors (a history the operator cannot read is a broken instrument);
-    callers that must not raise (the cadence hot path) catch."""
+    callers that must not raise (the cadence hot path) catch.
+
+    #1537: the store is hardened at creation — the parent is created
+    with mode 0o700 (the umask can only remove bits, never add them)
+    and the file is opened with O_NOFOLLOW|O_CREAT|O_APPEND at 0o600,
+    so a symlink at the history path fails loud (ELOOP) instead of
+    redirecting appends into an arbitrary file.
+    """
     if now is None:
         now = time.time()
     record = {
@@ -219,9 +229,16 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
     # D-RL2-3: the fingerprint never crosses a session boundary. The
     # store keeps the outcome and timing only.
     line = json.dumps(record, separators=(",", ":"))
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
     _rotate_history_if_needed(path)
-    with open(path, "a", encoding="utf-8") as fh:
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
 
@@ -530,8 +547,54 @@ def maybe_probe(
 #
 # Mirrors relay_liveness's CLI discipline: JSON out, loud errors, no
 # tracebacks for operator-actionable failures. --probe-now takes the
-# connection bundle explicitly on the command line (D-RL2-3: the
-# bundle is never read from a config file here).
+# connection bundle from stdin as JSON (never from argv: #1536 — key
+# material on the command line is visible in the process listing and
+# persists in shell history — and never from a config file: D-RL2-3).
+
+_BUNDLE_FIELDS = ("relay_host", "relay_port", "pinned_fingerprint")
+
+
+class _BundleError(ValueError):
+    """The stdin-supplied probe bundle is missing or malformed."""
+
+
+def _read_bundle_stdin():
+    """Read the probe bundle for --probe-now from stdin as JSON.
+
+    Returns ``{"relay_host", "relay_port", "pinned_fingerprint"}``.
+    Raises ``_BundleError`` with an operator-actionable message on
+    empty stdin, invalid JSON, non-object JSON, or missing/empty
+    required fields. The caller turns these into exit 2.
+    """
+    raw = sys.stdin.read()
+    if not raw.strip():
+        raise _BundleError(
+            "--probe-now needs the probe bundle on stdin as JSON "
+            '({"relay_host", "relay_port", "pinned_fingerprint"}); '
+            "got empty stdin"
+        )
+    try:
+        bundle = json.loads(raw)
+    except ValueError:
+        raise _BundleError("--probe-now bundle on stdin is not valid JSON")
+    if not isinstance(bundle, dict):
+        raise _BundleError("--probe-now bundle must be a JSON object")
+    missing = [f for f in _BUNDLE_FIELDS if not bundle.get(f)]
+    if missing:
+        raise _BundleError(
+            "--probe-now bundle missing required fields: %s" % ", ".join(missing)
+        )
+    try:
+        port = int(bundle["relay_port"])
+    except (TypeError, ValueError):
+        raise _BundleError("--probe-now bundle relay_port must be an integer")
+    if not 0 < port < 65536:
+        raise _BundleError("--probe-now bundle relay_port out of range")
+    return {
+        "relay_host": bundle["relay_host"],
+        "relay_port": port,
+        "pinned_fingerprint": bundle["pinned_fingerprint"],
+    }
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
@@ -544,12 +607,10 @@ if __name__ == "__main__":
     ap.add_argument(
         "--probe-now",
         action="store_true",
-        help="run one probe now (needs --relay-host/--relay-port/"
-        "--pinned-fingerprint; provider state defaults to running)",
+        help="run one probe now (reads the probe bundle "
+        '{"relay_host", "relay_port", "pinned_fingerprint"} from stdin '
+        "as JSON; provider state defaults to running)",
     )
-    ap.add_argument("--relay-host", default=None)
-    ap.add_argument("--relay-port", type=int, default=None)
-    ap.add_argument("--pinned-fingerprint", default=None)
     ap.add_argument(
         "--provider-state",
         default="running",
@@ -561,23 +622,23 @@ if __name__ == "__main__":
     if args.journal:
         os.environ["RELAY_SESSION_JOURNAL"] = args.journal
     if args.probe_now:
-        if not (args.query and args.relay_host and args.relay_port
-                and args.pinned_fingerprint):
+        if not args.query:
             print(
-                "error: --probe-now needs --query VM_ID, --relay-host, "
-                "--relay-port and --pinned-fingerprint",
+                "error: --probe-now needs --query VM_ID and the probe "
+                "bundle on stdin as JSON",
                 file=sys.stderr,
             )
+            raise SystemExit(2)
+        try:
+            bundle = _read_bundle_stdin()
+        except _BundleError as exc:
+            print("error: %s" % exc, file=sys.stderr)
             raise SystemExit(2)
         out = maybe_probe(
             args.query,
             provider_state_fn=lambda: args.provider_state,
             has_post_live_arc=True,
-            bundle={
-                "relay_host": args.relay_host,
-                "relay_port": args.relay_port,
-                "pinned_fingerprint": args.pinned_fingerprint,
-            },
+            bundle=bundle,
         )
         print(json.dumps(out, indent=2))
     elif args.query:

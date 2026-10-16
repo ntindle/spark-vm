@@ -544,9 +544,11 @@ def test_cadence_rejects_infinite_env_value(monkeypatch):
     assert rps.cadence_s() == rps.DEFAULT_CADENCE_S
 
 
-def _run_cli(argv, monkeypatch, capsys):
+def _run_cli(argv, monkeypatch, capsys, stdin=""):
+    import io
     import runpy
     monkeypatch.setattr("sys.argv", ["relay_path_state"] + argv)
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
     try:
         runpy.run_module("hosted.relay_path_state", run_name="__main__")
     except SystemExit as exc:
@@ -554,10 +556,121 @@ def _run_cli(argv, monkeypatch, capsys):
     return None, capsys.readouterr()
 
 
-def test_cli_probe_now_missing_bundle_exits_2(history, journal, monkeypatch, capsys):
-    code, err = _run_cli(["--probe-now", "--query", VM], monkeypatch, capsys)
+def test_cli_probe_now_without_query_exits_2(monkeypatch, capsys):
+    code, err = _run_cli(["--probe-now"], monkeypatch, capsys)
     assert code == 2
-    assert "pinned-fingerprint" in err.err
+    assert "--query" in err.err
+
+
+def test_cli_probe_now_empty_stdin_exits_2(history, journal, monkeypatch, capsys):
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM], monkeypatch, capsys, stdin=""
+    )
+    assert code == 2
+    assert "stdin" in err.err
+
+
+def test_cli_probe_now_invalid_stdin_json_exits_2(
+    history, journal, monkeypatch, capsys
+):
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM], monkeypatch, capsys, stdin="{not json"
+    )
+    assert code == 2
+    assert "not valid JSON" in err.err
+
+
+def test_cli_probe_now_bundle_missing_field_exits_2(
+    history, journal, monkeypatch, capsys
+):
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin=json.dumps({"relay_host": "h", "relay_port": 1}),
+    )
+    assert code == 2
+    assert "pinned_fingerprint" in err.err
+
+
+def test_cli_probe_now_bad_port_exits_2(history, journal, monkeypatch, capsys):
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin=json.dumps(
+            {
+                "relay_host": "h",
+                "relay_port": "not-a-port",
+                "pinned_fingerprint": "SHA256:x",
+            }
+        ),
+    )
+    assert code == 2
+    assert "relay_port" in err.err
+
+
+def test_cli_probe_now_reads_bundle_from_stdin(
+    history, journal, monkeypatch, capsys
+):
+    import hosted.relay_dial_prober as real
+
+    seen = {}
+
+    def fake_probe(vm_id, *, relay_host, relay_port, pinned_fingerprint,
+                   provider_state_fn):
+        seen.update(
+            relay_host=relay_host,
+            relay_port=relay_port,
+            pinned_fingerprint=pinned_fingerprint,
+        )
+        return _FakeResult(prober.PATH_OK)
+
+    real_probe = real.probe
+    real.probe = fake_probe
+    try:
+        code, out = _run_cli(
+            ["--probe-now", "--query", VM],
+            monkeypatch,
+            capsys,
+            stdin=json.dumps(
+                {
+                    "relay_host": "relay.example",
+                    "relay_port": 8443,
+                    "pinned_fingerprint": "SHA256:abc",
+                }
+            ),
+        )
+    finally:
+        real.probe = real_probe
+    assert code is None  # no SystemExit on success
+    body = json.loads(out.out)
+    assert body["probed"] is True
+    assert seen == {
+        "relay_host": "relay.example",
+        "relay_port": 8443,
+        "pinned_fingerprint": "SHA256:abc",
+    }
+
+
+def test_history_store_created_with_pinned_permissions(tmp_path):
+    nested = str(tmp_path / "newdir" / "probe-history.jsonl")
+    rps._record_outcome(nested, VM, prober.PATH_OK, {"elapsed_ms": 1}, now=NOW)
+    # umask can only remove bits: the fix guarantees no group/other
+    # access on either the parent dir or the store itself
+    assert os.stat(str(tmp_path / "newdir")).st_mode & 0o077 == 0
+    assert os.stat(nested).st_mode & 0o077 == 0
+
+
+def test_history_store_symlink_refused_loud(tmp_path):
+    target = tmp_path / "target.jsonl"
+    target.write_text("")
+    link = str(tmp_path / "probe-history.jsonl")
+    os.symlink(str(target), link)
+    with pytest.raises(OSError):
+        rps._record_outcome(link, VM, prober.PATH_OK, {"elapsed_ms": 1}, now=NOW)
+    # the symlink target is untouched — the append never redirected
+    assert target.read_text() == ""
 
 
 def test_cli_query_journal_wedge_exits_1(history, journal, monkeypatch, capsys):
