@@ -132,6 +132,11 @@ def test_manifest_write_atomicity_is_one_d1_batch():
                    "write", "back").search(write)
     assert _needle("partial", "manifest", "is", "never", "observable").search(write)
     assert "#990" in write  # D1-batch-portable atomic statements precedent
+    # B2 (arch review): the deletes for absent names are inside the batch too.
+    assert _needle("deletes", "for", "names", "absent").search(write)
+    # B3 (arch review): the vend_audit manifest_write row commits in the batch.
+    assert _needle("`vend_audit`", "row", "for", "the", "manifest", "write").search(write)
+    assert _needle("never", "a", "phantom", "audit", "row").search(write)
 
 
 def test_tombstone_clear_needs_decrypt_compare():
@@ -146,6 +151,12 @@ def test_tombstone_clear_needs_decrypt_compare():
     assert _needle("identical", "plaintext", "leaves").search(write)
     assert "`revoked_at`" in write
     assert _needle("does", "not", "silently").search(write) and "un-revoke" in write
+    # B1 (arch review): revoke retains the vend_values row; a tombstone with
+    # no stored ciphertext is a 500, never "fresh".
+    assert _needle("MUST", "NOT", "delete", "the").search(write) and "`vend_values`" in write
+    assert _needle("never", "treat", "the", "missing", "value", "as").search(write)
+    # B4 (arch review): undecryptable stored value fails 500, never "different".
+    assert _needle("never", "treated", "as").search(write) and '"different"' in write
 
 
 def test_acceptance_covers_atomicity_pin():
@@ -160,10 +171,10 @@ def test_acceptance_covers_atomicity_pin():
     assert _needle("does", "not", "clear", "`revoked_at`").search(item13)
 
 
-def test_acceptance_covers_all_three_pins():
+def test_acceptance_covers_all_four_pins():
     """The §10 acceptance checklist names one item per pin, each citing its issue."""
     accept = _section(_doc(), "## 10. Acceptance (S6 — testable)")
-    for num, issue in (("10.", "#1401"), ("11.", "#1402"), ("12.", "#1403")):
+    for num, issue in (("10.", "#1401"), ("11.", "#1402"), ("12.", "#1403"), ("13.", "#1406")):
         assert issue in _acceptance_item(accept, num), (
             f"acceptance item {num} must cite {issue}"
         )
