@@ -1,5 +1,22 @@
 # Relay-liveness R3/R4 handoff convergence (2026-10-15, #486)
 
+## Addendum (2026-10-16): R4 shipped — the stuck detector gains the conjunct
+
+R4 landed the same morning as R3's wiring verification: the §4
+predicate of `docs/STUCK_DETECTOR_DESIGN.md` carries the relay conjunct
+(`relay_path_state(S) == ok`), the §8 Q6 "relay conjunct dropped
+outright" interim is retired, and the calibration soak's confusion
+classes gain the "suspension while measuring" row — PR #TBD, issue
+#1417 **closed**. The relay row of the detector's S3 gate is closed
+(instrument shipped R2b, wired R3, conjunct observable); H4 provider
+state, H13 suspend contract, and G1 terminal records remain the S3
+gate's unshipped dependencies. F-RL34-7 is consumed.
+
+The relay-liveness lane is now fully built: the instrument touches the
+tenant layer for `down` readings (R3) AND the stuck detector for the
+`ok`/`degraded` conjunct (R4). As of this addendum, nothing in the R1–R4
+decomposition remains open.
+
 ## Addendum (2026-10-16): R3 shipped — this doc's R3 rows are stale in-place below
 
 R3 landed the morning after this pin: `hosted/relay_tenant_wiring.py`
@@ -33,9 +50,10 @@ constraints this doc recorded (F-RL34-2–F-RL34-4) are consumed:
   #1546 (`f63eb8cb`, probe-history cross-process lock); issue closed.
   Not folded into R3, as decided.
 
-Remaining after this addendum: **R4** (#1417 — detector conjunct +
+Remaining after the R3 addendum was **R4** (#1417 — detector conjunct +
 retirement of the `STUCK_DETECTOR_DESIGN.md` §8 Q6 "R1–R4 unimplemented"
-clause per F-RL34-7). The relay-liveness lane is otherwise built.
+clause per F-RL34-7); see the R4 addendum above — it is now shipped and
+closed.
 
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `164d0f7` (2026-10-15; PR
@@ -43,8 +61,9 @@ verified against the repo tree at main `164d0f7` (2026-10-15; PR
 2026-10-15 (not code-verifiable from the tree). Honesty rules apply
 (`docs/POSITIONING.md`): this describes current state and work to do,
 not promises. As of the 2026-10-16 addendum the relay instrument is
-wired to the tenant layer for `down` readings (R3); it does not touch
-the stuck detector (R4's conjunct is still the §8 Q6 interim).
+wired to the tenant layer for `down` readings (R3); the R4 addendum above
+retires the "does not touch the stuck detector" clause — the conjunct is
+now in the detector's §4 predicate.
 
 **Non-overlap map (what this doc is not):**
 - `docs/RELAY_LIVENESS_DESIGN.md` — the lane's design (R1–R4, §5
@@ -243,7 +262,7 @@ a p3 (filed this turn — §4).
 | Slice | Issue | State | This turn |
 |---|---|---|---|
 | R3 — tenant-status wiring (rule 6, live-entry AND-combine, latch) + anchor selection + nested-suspension emit rule + recovery protocol | #1416 | **Shipped + closed** (PR #1562, `e3f8c6d1`; see the 2026-10-16 addendum) |
-| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | Open; ship-gate satisfied | Pointer comment; F-RL34-7 carried |
+| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | **Shipped + closed** (PR #TBD; see the 2026-10-16 addendum) | Pointer comment; F-RL34-7 carried |
 | Probe-history cross-process lock | #1540 | **Shipped + closed** — PR #1546 merged `f63eb8cb`; see the 2026-10-16 addendum |
 
 Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are

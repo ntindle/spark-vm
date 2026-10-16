@@ -44,7 +44,7 @@ Everything the detector can read today, from `docs/USAGE_METERING_DESIGN.md`
 | Pending approval | confirmd pending state → `approval_filed`/`approval_decided`/`approval_expired` (mapper S1); also `GET /tenant/status`'s G3 contract | an undecided filing exists | control-plane-readable (confirmd is the box-side authority; the detector reads the record, not the Muse's claim) | confirmd ships; S1 mapper design only |
 | Idle heartbeat | `meter_agent` `idle_heartbeat` every 60 s when idle | absence is not evidence of stall (the agent may be mid-heartbeat-window on a loaded box) — this signal is H13's, not the detector's; cross-check only | box-local privileged writer, narrow surface like the swap writers | design (ships with metering) |
 | Provider state | H4 driver `box_state_transition` (`active`/`suspended`/`waking`/`destroyed`) | box not `active` → detector stands down | control-plane-observed | **unshipped** — no H4 driver PR exists; today the wall clock cannot distinguish suspended from idle |
-| Relay session liveness | control-plane relay (SSH/session multiplexor) | session dead/never-established → `connection-unreachable` territory, not `stuck` | control-plane-observed | relay design only |
+| Relay session liveness | control-plane relay (SSH/session multiplexor) | session dead/never-established → `connection-unreachable` territory, not `stuck` | control-plane-observed | Ships — R2b instrument (`hosted/relay_path_state.py`: `relay_path_state(vm_id) → ok | degraded | down`, `degraded` on darkness, sub-code on `down` only); tenant wiring via R3 (`hosted/relay_tenant_wiring.py`: rule-6 suspension, live-anchor selection) |
 
 Two truths follow, and the design is built on both. First: **the
 30-minute quiet clock runs on trusted signals only.** `cooperative`
@@ -78,10 +78,13 @@ predicate, not a separate unenforced procedure):
    positive in the whole design. The detector emits nothing; §4's
    closed-world rule applies.
 1. **Provider/relay preconditions first — enforced by the §4 arc-scope
-   conjunct.** Box not provisioned-live → `provisioning`/
-   `provisioning-failed`. Relay session unreachable →
-   `connection-unreachable`. Box failed smoke → `box-unhealthy`. Only
-   sessions whose arc code is `live` are eligible at all; the detector
+   conjunct and the relay conjunct.** Box not provisioned-live →
+   `provisioning`/`provisioning-failed`. Relay session unreachable →
+   `connection-unreachable`: a `down` reading latches the arc under rule 6
+   (the session leaves the `live` arc scope) and the §4 relay conjunct
+   fires independently, with the sub-code (`relay` | `cert` | `box-leg`)
+   routing the blame — never `stuck`. Box failed smoke → `box-unhealthy`.
+   Only sessions whose arc code is `live` are eligible at all; the detector
    does not run against these arcs.
 2. **Pending approval?** If confirmd holds an undecided filing (or G1's
    terminal-record design, when it ships, shows a filing whose expiry has
@@ -160,20 +163,37 @@ AND task_engaged(S)            == true          (a confirmd first-filing
                                                 it has no producer)
 AND NOT suspended_or_scheduled(S)              (H13 suspend contract —
                                                 unobservable pre-H13)
+AND relay_path_ok(S)           == true        (R4 — the R2b instrument's
+                                                relay_path_state(S) == ok;
+                                                `down` never enters stall():
+                                                rule 6 latches the arc (R3
+                                                wiring) and the endpoint
+                                                serves connection-unreachable
+                                                with the §3 sub-code in
+                                                detail; `degraded` —
+                                                flapping, never-probed,
+                                                journal stale past the §2
+                                                idle threshold, provider
+                                                stand-down — is SUSPECT:
+                                                unobservable, never
+                                                assumed-ok, per the §5
+                                                producer-contract note;
+                                                closed-world rule applies)
 ```
 
 **Closed-world interim rule.** Every conjunct must be *evaluated*; any
 conjunct whose inputs are unobservable blocks emission. Today that is
-`provider_state` (no H4 driver), `suspended_or_scheduled` (no H13
-contract), and relay-dependent conditions (§8 Q6). The interim is
-closed-world, not assume-active: **unobservable ⇒ no `stall_candidate`,
-no `stuck`.** What the interim emits instead is
-`insufficient-observability` per missing input — the wiring gaps are
-visible on the operator surface as gaps, never as stalls. The relay
-conjunct is dropped outright (§8 Q6): `connection-unreachable` detection
-is owned by the relay-liveness design (`docs/RELAY_LIVENESS_DESIGN.md`;
-R1–R4 unimplemented), and the detector does
-not fake the signal.
+`provider_state` (no H4 driver) and `suspended_or_scheduled` (no H13
+contract); the relay conjunct is observable since R4 (2026-10-16,
+#1417) — the R2b instrument (`hosted/relay_path_state.py`) wired into
+the tenant layer by R3. Darkness maps to unobservable by the §5
+producer-contract rule (`degraded` is suspect, never assumed-`ok`;
+prober-down / journal-dark ⇒ `insufficient-observability`), and the
+closed-world rule applies to it verbatim. The interim is closed-world,
+not assume-active: **unobservable ⇒ no `stall_candidate`, no `stuck`.**
+What the interim emits instead is `insufficient-observability` per
+missing input — the wiring gaps are visible on the operator surface as
+gaps, never as stalls. The detector never fakes the signal.
 
 The `arc_code(S) == live` conjunct is what enforces the ladder's
 never-relabel promise: the promise is not a policy note but a predicate
@@ -263,12 +283,20 @@ a design violation:
   `policy-misfire` **as `stuck` — and zero systematic confusion of
   suspended boxes and `telemetry-gap` sessions** (the interim's own FP
   classes — S3 must not be reachable while the product's own idle state
-  is systematically mislabeled). S2 also owns the #377 dependency:
+  is systematically mislabeled). The soak's confusion classes gain a
+  **"suspension while measuring"** row (2026-10-16, #1417): a session
+  under a transition-rule-6 relay suspension latch during calibration is
+  out of the detector's scope (its arc is not `live`-coded while the
+  latch holds) and must not read as a detector outcome — counting it as
+  a stall candidate OR as a correct non-emission both corrupt the soak.
+  S2 also owns the #377 dependency:
   idle-heartbeat semantics ("what counts as idle") must be decided
   before S2's data is read, or the soak measures the wrong thing.
 - **S3 — automatic transition.** Only after S2's bar is met **and** the
   unobservable conjuncts become observable — H4's provider state shipped,
-  the relay-liveness design (§8 Q6) shipped, H13's suspend contract
+  the relay-liveness design (§8 Q6) shipped (relay row closed 2026-10-16,
+  #1417: design shipped, R2b instrument + R3 tenant wiring live, §4
+  conjunct observable — see below), H13's suspend contract
   shipped, G1's terminal records shipped: the detector may write the
   `stuck` code (licensed by transition rule 2, `live` → `stuck`; exits
   per the `stuck` row — operator/heuristic clears → re-evaluate;
@@ -354,6 +382,15 @@ as the `stuck` code.
   `relay_path_state` producer contract for the tenant-status layer, the
   predicate's relay conjunct, R1–R4 build slices). Implementation
   (R1–R4) remains as a tracked issue.
+- **RETIRED 2026-10-16 — R4 (#1417) SHIPPED:** the relay conjunct is now
+  in the §4 predicate (`relay_path_state(S) == ok`; `down` routes to
+  `connection-unreachable` via transition rule 6 with the sub-code in
+  `detail`, never `stuck`; `degraded` is suspect ⇒ unobservable per the
+  §5 producer-contract note, so instrument darkness yields
+  `insufficient-observability`, never assumed-`ok`). The interim
+  "relay conjunct dropped outright" is dead; the S3 gate's relay row is
+  closed. H4 provider state, H13 suspend contract, and G1 terminal
+  records remain the S3 gate's unshipped dependencies.
 
 ## Cross-references
 
