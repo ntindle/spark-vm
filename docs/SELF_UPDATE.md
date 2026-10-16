@@ -54,7 +54,9 @@ the cred-ui unit) into a provenance manifest recording the source commit,
 release version, and sha256. `status` reads that manifest and reports each
 placed copy as in-sync or drifted — drifted covers a missing copy, a copy
 modified in place, a copy re-placed without re-stamping, and a checkout
-whose source advanced past the stamped commit. The remedy is always
+whose source advanced past the stamped commit. The manifest is created
+owner-only (0600) with its directory pinned to 0700, so another user on a
+shared box cannot read or re-stamp it and fool the drift check. The remedy is always
 re-running the installer (re-stamping backfills installs that predate the
 manifest). Boxes with no manifest report `provenance: unknown` with a
 pointer to that backfill path. The manifest location can be overridden
