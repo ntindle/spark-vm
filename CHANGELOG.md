@@ -154,6 +154,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- muse-job blocked is claim-only (2026-10-16): `cmd_watch` no longer
+  transitions job state on the forgeable hook `blocked` event — a blocked
+  line is now only ever a claim the operator must confirm, triaged
+  oldest-first across the whole event file on a sanitized ts cursor (the
+  old tail-line reader could bury a genuine blocked page), with
+  `blocked-repeated` burst coalescing mirroring the done path. The MSP
+  lane is untouched: its `blocked` comes from the serve host's JobView
+  poll, not the event file. (#21)
 - Rollout-controller docs (2026-10-16): the rollout-controller and
   release-gate-channel design docs no longer point implementation tracking
   at the closed #777 — the shipped slices (S1a, the S1b hook loop) and the

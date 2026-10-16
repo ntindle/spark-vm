@@ -2514,6 +2514,84 @@ def triage_done_events(job, uuid, now, events):
         save_job(job, slug)
 
 
+def blocked_events(uuid, now):
+    """All `blocked`-state events in the file, oldest first by normalized ts.
+
+    Issue #21 item 2: mirrors done_events. The tail-line reader the old
+    blocked handling used is buryable (issue #23 B3 proved it for `done`):
+    a buried genuine blocked event produced a suppressed advisory page, so
+    every visible blocked event is triaged on every pass, oldest first by
+    the sanitized _claim_ts cursor.
+    """
+    evs = []
+    for e in _iter_events(uuid):
+        if e.get("state") == "blocked":
+            evs.append((e, _claim_ts(e, now)))
+    evs.sort(key=lambda t: t[1])
+    return evs
+
+
+def handle_blocked_claim(job, ev, slug, now=None, recent_count=0):
+    """Triage a hook `blocked` event into an operator page. ALWAYS returns a
+    signal dict -- never None.
+
+    Issue #21 item 2: NEVER transitions job state. Hook events are
+    cooperative telemetry, not ground truth: the job agent runs as the same
+    user with a full shell, so a `blocked` line is only ever a *claim* the
+    operator must confirm (inspect the pane / `muse-job log`, answer the
+    pending question, or close the job). The old code set
+    job["state"] = "blocked" on the forgeable tail-line event; a forged
+    line moved the job's recorded state and a buried genuine blocked page
+    was suppressed entirely. Bounded either way (it cannot fake completion
+    or blind the watchdog), but the trust model is cleaner with `blocked`
+    as claim-only behind a sanitized cursor, mirroring handle_done_claim.
+
+    Unlike `done`, a blocked claim has no protocol to verify against (no
+    session-uuid/worktree/SUMMARY.md equivalent): whether the agent is
+    genuinely stuck on an input question is a human judgment call the
+    manager cannot re-derive. So every visible blocked event pages as
+    `blocked`, every pass (fail loud), oldest first. Burst coalescing
+    mirrors done: when more than 3 blocked claims from the last 24h are
+    visible in the event file, claims are labeled `blocked-repeated`
+    (count derived from the event file via `recent_count`, never from
+    agent-writable job.json).
+
+    MSP jobs are untouched by this: their `blocked` comes from the serve
+    host's JobView poll (manager-side truth), not the forgeable event
+    file. See _MSP_STATE_TO_JOB / _watch_msp_job.
+    """
+    if now is None:
+        now = time.time()
+    ev = ev or {}
+    detail = _clean_text(ev.get("detail", ""))
+    text = f"agent claims blocked (operator must confirm): {detail}"
+    if recent_count > 3:
+        return {"signal": "blocked-repeated",
+                "detail": f"{recent_count} blocked claims in 24h; coalesced: {text}"}
+    return {"signal": "blocked", "detail": text}
+
+
+def triage_blocked_events(job, uuid, now, events):
+    """Triage every blocked event in the file, oldest-first, always paging.
+
+    Issue #21 item 2: mirrors triage_done_events -- no dedup cursor, no
+    suppression latch, no job-state transition (the transition was the
+    plantable/buryable half; a latch or cursor in agent-writable job.json
+    would be plantable per the issue #3 final review). The 24h burst count
+    comes from the event file, never from agent-writable job.json.
+    Appends signal dicts (with `job` filled) to `events`. Does not mutate
+    the job record, so no save.
+    """
+    slug = job["slug"]
+    evs = blocked_events(uuid, now)
+    recent_count = sum(1 for _, ts in evs if 0 <= now - ts <= 24 * 3600)
+    for ev, _ts in evs:
+        sig = handle_blocked_claim(job, ev, slug, now,
+                                   recent_count=recent_count)
+        sig["job"] = slug
+        events.append(sig)
+
+
 def check_events_liveness(job, st, now):
     """Watchdog liveness (issue #3): detect event-file blinding.
 
@@ -3588,14 +3666,13 @@ def cmd_watch(args):
 
         ev = st["last_hook_event"] or {}
         estate = ev.get("state")
-        if estate == "blocked" and job.get("state") != "blocked":
-            job["state"] = "blocked"
-            save_job(job, slug)
-            events.append({"job": slug, "signal": "blocked",
-                           "detail": _clean_text(ev.get("detail", ""))})
-        elif estate == "question":
+        if estate == "question":
             events.append({"job": slug, "signal": "question",
                            "detail": _clean_text(ev.get("detail", ""))})
+        # Issue #21 item 2: `blocked` is claim-only -- never transition job
+        # state on the forgeable hook event (see triage_blocked_events).
+        if uuid:
+            triage_blocked_events(job, uuid, now, events)
 
         # Issue #23 B1/B2/B3, final review: a hook `done` is only ever a
         # claim -- the same-user agent can forge every check -- so it never
