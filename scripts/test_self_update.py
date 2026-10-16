@@ -1701,3 +1701,211 @@ def test_status_json_carries_installed_pins_state(tmp_path, monkeypatch,
         argv_extra=("--json",))
     doc = json.loads(out)
     assert doc["installed_pins_state"] == "mismatch"
+
+
+def _write_manifest_line(manifest, installed, source, sha256, commit="c" * 40,
+                         version="0.9.1"):
+    import json
+
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "installed": str(installed),
+            "source": source,
+            "sha256": sha256,
+            "source_commit": commit,
+            "version": version,
+            "stamped_at": 1700000000,
+        }, sort_keys=True) + "\n")
+
+
+def _provenance_fixture(tmp_path, installed_bytes=b"#!/bin/sh\necho tool\n",
+                        source_bytes=None, manifest_sha=None):
+    """Fake installed copy + fake checkout source + manifest record."""
+    import hashlib
+
+    installed = tmp_path / "home" / "bin" / "muse-job"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(installed_bytes)
+    checkout = tmp_path / "checkout"
+    (checkout / "muse-job" / "bin").mkdir(parents=True)
+    source = checkout / "muse-job" / "bin" / "muse-job"
+    source.write_bytes(installed_bytes if source_bytes is None
+                       else source_bytes)
+    manifest = tmp_path / "provenance-manifest.json"
+    _write_manifest_line(
+        manifest, installed, "muse-job/bin/muse-job",
+        manifest_sha if manifest_sha is not None
+        else hashlib.sha256(installed_bytes).hexdigest())
+    return manifest, checkout, installed
+
+
+def test_provenance_unknown_without_manifest(tmp_path):
+    from self_update import provenance_state
+
+    aggregate, entries = provenance_state(
+        manifest_path=str(tmp_path / "no-such-manifest.json"))
+    assert aggregate == "unknown"
+    assert entries == []
+
+
+def test_provenance_malformed_manifest_is_unknown_not_a_crash(tmp_path):
+    from self_update import provenance_state
+
+    manifest = tmp_path / "provenance-manifest.json"
+    manifest.write_text("this is not json\n")
+    aggregate, entries = provenance_state(manifest_path=str(manifest))
+    assert aggregate == "unknown"
+    assert entries == []
+
+
+def test_provenance_ok_when_copy_matches_manifest_and_checkout(tmp_path):
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "ok"
+    assert len(entries) == 1
+    assert entries[0]["installed"] == str(installed)
+    assert entries[0]["state"] == "ok"
+    assert "in sync" in entries[0]["note"]
+
+
+def test_provenance_last_manifest_line_wins(tmp_path):
+    # Re-stamping appends; the reader must take the newest record.
+    from self_update import provenance_state
+    import hashlib
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    new_bytes = b"#!/bin/sh\necho tool v2\n"
+    installed.write_bytes(new_bytes)
+    (checkout / "muse-job" / "bin" / "muse-job").write_bytes(new_bytes)
+    _write_manifest_line(manifest, installed, "muse-job/bin/muse-job",
+                         hashlib.sha256(new_bytes).hexdigest())
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "ok", entries
+
+
+def test_provenance_drift_when_copy_modified_in_place(tmp_path):
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    installed.write_bytes(b"#!/bin/sh\necho TAMPERED\n")
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    assert entries[0]["state"] == "drift"
+    assert "differs from the manifest and the checkout source" in entries[0]["note"]
+
+
+def test_provenance_drift_when_replaced_from_checkout_without_restamp(tmp_path):
+    # The bytes match the checkout's current source but not the manifest:
+    # someone re-copied by hand — loud, because the manifest no longer
+    # describes the installed copy.
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    new_bytes = b"#!/bin/sh\necho tool v2\n"
+    installed.write_bytes(new_bytes)
+    (checkout / "muse-job" / "bin" / "muse-job").write_bytes(new_bytes)
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    assert "without re-stamping" in entries[0]["note"]
+
+
+def test_provenance_drift_when_checkout_advanced_past_stamp(tmp_path):
+    # Installed copy is exactly what the installer placed, but the repo
+    # checkout now carries a newer source — the copy is stale (#6's shape).
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    (checkout / "muse-job" / "bin" / "muse-job").write_bytes(
+        b"#!/bin/sh\necho tool v2\n")
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    assert "checkout advanced past the stamped commit" in entries[0]["note"]
+
+
+def test_provenance_drift_when_installed_file_missing(tmp_path):
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    installed.unlink()
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    assert "missing" in entries[0]["note"]
+
+
+def test_provenance_mixed_entries_aggregate_drift(tmp_path):
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    other = tmp_path / "home" / ".config" / "systemd" / "user" / "cred-ui.service"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"[Unit]\n")
+    _write_manifest_line(manifest, other, "cred-ui/cred-ui.service",
+                         "0" * 64)
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    by_path = {e["installed"]: e for e in entries}
+    assert by_path[str(installed)]["state"] == "ok"
+    assert by_path[str(other)]["state"] == "drift"
+
+
+def test_provenance_deeply_nested_line_never_raises(tmp_path):
+    # Regression (QA review): json.loads raises RecursionError — a
+    # RuntimeError, not a ValueError — on deeply nested input. The S1
+    # "never raises" contract must hold for hostile manifests.
+    from self_update import provenance_state
+
+    manifest = tmp_path / "provenance-manifest.json"
+    manifest.write_text("[" * 200000 + "\n")
+    aggregate, entries = provenance_state(manifest_path=str(manifest))
+    assert aggregate == "unknown"
+    assert entries == []
+
+
+def test_provenance_null_byte_paths_never_raise(tmp_path):
+    # Regression (QA review): open() raises ValueError on null-byte
+    # paths; _sha256_file must absorb it like OSError.
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write('{"installed": "/tmp/\\u0000x", "source": "muse-job/bin/muse-job",'
+                ' "sha256": "%s", "source_commit": "%s"}\n'
+                % ("0" * 64, "c" * 40))
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    by_path = {e["installed"]: e for e in entries}
+    assert by_path["/tmp/\x00x"]["state"] == "drift"
+    assert by_path[str(installed)]["state"] == "ok"
+
+
+def test_provenance_malformed_line_skipped_valid_lines_kept(tmp_path):
+    # One corrupt byte must not nuke the whole drift signal: the bad
+    # line is skipped, the valid record is still evaluated.
+    from self_update import provenance_state
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    with open(manifest, "a", encoding="utf-8") as f:
+        f.write("this line is not json\n")
+        f.write('["not", "a", "dict"]\n')
+        f.write('{"no-installed-key": true}\n')
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "ok"
+    assert len(entries) == 1
+    assert entries[0]["installed"] == str(installed)
+
+
+def test_provenance_record_without_source_relpath_is_drift(tmp_path):
+    from self_update import provenance_state
+    import hashlib
+
+    manifest, checkout, installed = _provenance_fixture(tmp_path)
+    other = tmp_path / "home" / "bin" / "other-tool"
+    other.write_bytes(b"x\n")
+    _write_manifest_line(manifest, other, "",
+                         hashlib.sha256(b"x\n").hexdigest())
+    aggregate, entries = provenance_state(str(manifest), str(checkout))
+    assert aggregate == "drift"
+    by_path = {e["installed"]: e for e in entries}
+    assert "no source relpath" in by_path[str(other)]["note"]

@@ -44,6 +44,7 @@ STEP_FNS = [
     "assert_version_matches",
     "step_deploy",
     "step_muse_job",
+    "stamp_provenance",
     "step_plugin",
     "step_cred_ui",
     "step_cua",
@@ -821,3 +822,212 @@ def test_step_repo_fresh_clone_shadowed_branch_refused(tmp_path):
     proc = run_bash(code)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert proc.stdout.strip().endswith("OK")
+
+
+def _provenance_harness(tmp_path):
+    """Fake agent repo + fake HOME for provenance tests.
+
+    Returns (code_prefix, agent_home, agent_repo, manifest) where
+    code_prefix exports the env and stubs git to a fixed commit SHA.
+    """
+    agent_home = tmp_path / "agent-home"
+    agent_repo = tmp_path / "agent-repo"
+    (agent_repo / "muse-job" / "bin").mkdir(parents=True)
+    (agent_repo / "cred-ui").mkdir(parents=True)
+    (agent_repo / "VERSION").write_text("0.9.1\n")
+    manifest = tmp_path / "provenance-manifest.json"
+    prefix = textwrap.dedent(
+        f"""\
+        export HOME="{agent_home}" AGENT_REPO="{agent_repo}" DRY_RUN=0
+        export PROVENANCE_MANIFEST="{manifest}"
+        git() {{ echo "0123456789abcdef0123456789abcdef01234567"; }}
+        """
+    )
+    return prefix, agent_home, agent_repo, manifest
+
+
+def test_stamp_provenance_writes_one_json_line(tmp_path):
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"#!/bin/sh\necho muse-job\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        stamp_provenance "{placed}" "muse-job/bin/muse-job"
+        [ -f "{manifest}" ] || {{ echo "no manifest"; exit 1; }}
+        echo "---MANIFEST---"; cat "{manifest}"
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    body = proc.stdout.split("---MANIFEST---")[1]
+    lines = [line for line in body.strip().splitlines() if line.startswith("{")]
+    assert len(lines) == 1, lines
+    import json, hashlib
+
+    record = json.loads(lines[0])
+    assert record["installed"] == str(placed)
+    assert record["source"] == "muse-job/bin/muse-job"
+    assert record["sha256"] == hashlib.sha256(placed.read_bytes()).hexdigest()
+    assert record["source_commit"] == "0123456789abcdef0123456789abcdef01234567"
+    assert record["version"] == "0.9.1"
+    assert isinstance(record["stamped_at"], int)
+
+
+def test_stamp_provenance_restamp_updates_record(tmp_path):
+    # The manifest is append-only JSONL; the reader takes the last line per
+    # path, so re-stamping must update rather than confuse.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null
+        printf 'v2\\n' > "{placed}"
+        stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null
+        wc -l < "{manifest}"
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("2"), proc.stdout
+    import json, hashlib
+
+    records = [
+        json.loads(line)
+        for line in manifest.read_text().splitlines()
+        if line.startswith("{")
+    ]
+    assert len(records) == 2
+    assert records[1]["sha256"] == hashlib.sha256(b"v2\n").hexdigest()
+    assert records[0]["sha256"] != records[1]["sha256"]
+
+
+def test_stamp_provenance_fails_loud_when_commit_unreadable(tmp_path):
+    # A stamp the inventory cannot trust is worse than no stamp: fail loud.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        git() {{ return 1; }}
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on unreadable commit"; exit 1
+        fi
+        [ ! -e "{manifest}" ] || {{ echo "manifest written despite failure"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_muse_job_stamps_provenance_on_skip_path(tmp_path):
+    # Idempotent re-run: the copy already matches (skip), but the manifest
+    # must still be stamped — this is how pre-#1528 installs get backfilled.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    src = agent_repo / "muse-job" / "bin" / "muse-job"
+    src.write_bytes(b"#!/bin/sh\necho muse-job\n")
+    (agent_home / "bin").mkdir(parents=True)
+    (agent_home / "bin" / "muse-job").write_bytes(src.read_bytes())
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        step_muse_job
+        [ -f "{manifest}" ] || {{ echo "no manifest on skip path"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "skip: ~/bin/muse-job already matches the repo copy" in proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    import json
+
+    record = json.loads(manifest.read_text().splitlines()[0])
+    assert record["installed"] == str(agent_home / "bin" / "muse-job")
+    assert record["source"] == "muse-job/bin/muse-job"
+
+
+def test_step_muse_job_stamps_provenance_after_copy(tmp_path):
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    src = agent_repo / "muse-job" / "bin" / "muse-job"
+    src.write_bytes(b"#!/bin/sh\necho muse-job\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        step_muse_job
+        cmp -s "{src}" "{agent_home}/bin/muse-job" || {{ echo "not copied"; exit 1; }}
+        [ -f "{manifest}" ] || {{ echo "no manifest after copy"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_muse_job_dry_run_stamps_nothing(tmp_path):
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    src = agent_repo / "muse-job" / "bin" / "muse-job"
+    src.write_bytes(b"#!/bin/sh\necho muse-job\n")
+    code = source_preamble() + prefix.replace("DRY_RUN=0", "DRY_RUN=1")
+    code += textwrap.dedent(
+        f"""\
+        step_muse_job
+        [ ! -e "{manifest}" ] || {{ echo "manifest written on dry run"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "would stamp provenance for" in proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_cred_ui_dry_run_stamps_nothing(tmp_path):
+    # Parity with the muse-job dry-run test: the cred-ui step must stamp
+    # through exec_if_live only, so --dry-run writes no manifest.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    (agent_repo / "cred-ui" / "cred-ui.service").write_text("[Unit]\n")
+    code = source_preamble() + prefix.replace("DRY_RUN=0", "DRY_RUN=1")
+    code += textwrap.dedent(
+        f"""\
+        systemctl() {{ echo "STUBBED systemctl $*"; return 0; }}
+        step_cred_ui
+        [ ! -e "{manifest}" ] || {{ echo "manifest written on dry run"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "would stamp provenance for the cred-ui unit" in proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_cred_ui_stamps_provenance_after_install(tmp_path):
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    (agent_repo / "cred-ui" / "cred-ui.service").write_text("[Unit]\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        systemctl() {{ return 0; }}
+        step_cred_ui
+        unit="{agent_home}/.config/systemd/user/cred-ui.service"
+        [ -f "$unit" ] || {{ echo "unit not installed"; exit 1; }}
+        [ -f "{manifest}" ] || {{ echo "no manifest after cred-ui install"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    import json
+
+    record = json.loads(manifest.read_text().splitlines()[0])
+    assert record["installed"] == str(
+        agent_home / ".config" / "systemd" / "user" / "cred-ui.service")
+    assert record["source"] == "cred-ui/cred-ui.service"

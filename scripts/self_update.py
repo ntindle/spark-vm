@@ -11,6 +11,12 @@ Scope is the spark-vm-provisioned defaults only (the #532 corrected scope —
 user-installed tools like Tailscale, KiCad/KiKit, Muse CLI, and Blender are
 explicitly out of scope).
 
+Issue #1528: the box installer stamps every file copy it places (source
+commit, VERSION, sha256) into a provenance manifest, and ``status`` reads
+it — a placed copy that no longer matches its manifest record or the
+checkout's source is reported as drift, so divergent installed copies are
+loud instead of silent (issue #6).
+
 Read-only by construction: probes only run ``--version``-style commands and
 read config files. Nothing is installed, changed, restarted, downloaded, or
 elevated — no network, no writes, no sudo. Later slices (roadmap in
@@ -82,6 +88,22 @@ _PINS_HASH_FILE = os.environ.get(
 _EXPECTED_PLAYWRIGHT_BROWSERS_FILE = os.environ.get(
     "EXPECTED_PLAYWRIGHT_BROWSERS_FILE",
     "/var/lib/sparkvm-toolset/expected_playwright_browsers")
+
+# Issue #1528 (D-PKG-3): scripts/install.sh stamps one JSON line per
+# installer-placed copy (installed path, source relpath, sha256,
+# source_commit, VERSION) to this agent-user-writable manifest — the
+# installer runs as the agent user, so the privileged
+# /var/lib/sparkvm-toolset carrier dir is not writable here. The status
+# plane reads the LAST line per installed path and compares each placed
+# copy against the manifest record and the checkout's source file: drift
+# between installed copies and the repo is loud instead of silent
+# (issue #6). No manifest, or no valid line in it, yields "unknown" —
+# text mode shows an informational line naming the backfill path
+# (pre-#1528 installs publish none); it is never an error.
+_PROVENANCE_MANIFEST_FILE = os.environ.get(
+    "PROVENANCE_MANIFEST_FILE",
+    os.path.join(os.path.expanduser("~"), ".local", "state", "spark-vm",
+                 "provenance-manifest.json"))
 
 # "installed pins differ from checkout — run `toolset-update.sh install`"
 # is the prescribed wording (issue #1313): the mismatch is actionable only
@@ -614,6 +636,133 @@ def playwright_browsers_expected_state(home=None, environ=None,
     return "mismatch" if (expected - set(browsers)) else "match"
 
 
+def _sha256_file(path):
+    """sha256 of a file, or None when it cannot be read. Never raises.
+
+    ValueError is caught alongside OSError: open() raises ValueError for
+    paths containing a null byte, and a manifest is untrusted input — the
+    "never raises" contract must hold for hostile records too.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def provenance_records(manifest_path=None):
+    """Read the installer provenance manifest (issue #1528).
+
+    Returns the LAST record per installed path (the manifest is
+    append-only JSONL; re-stamping a file updates its record), or {}
+    when the manifest is missing, unreadable, or yields no valid line —
+    the honest no-signal state (pre-#1528 installs publish none). A
+    single malformed line is skipped, not fatal: line granularity makes
+    the valid records recoverable, and one corrupt byte must not nuke
+    the whole drift signal. Never raises: json.loads can raise
+    RecursionError (a RuntimeError, not a ValueError) on deeply nested
+    input, so both are caught.
+    """
+    if manifest_path is None:
+        manifest_path = _PROVENANCE_MANIFEST_FILE
+    try:
+        with open(manifest_path, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return {}
+    latest = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        installed = record.get("installed")
+        if not isinstance(installed, str) or not installed:
+            continue
+        latest[installed] = record
+    return latest
+
+
+def provenance_state(manifest_path=None, checkout_dir=None):
+    """Compare installer-placed copies against their provenance (issue #1528).
+
+    Returns (aggregate, entries): aggregate is "ok" (every placed copy
+    matches its manifest record and the checkout source), "drift" (at
+    least one copy is missing, modified, re-placed without re-stamping,
+    or the checkout's source advanced past the stamped commit — the
+    remedy is always re-running the installer), or "unknown" (no usable
+    manifest). entries is a per-installed-path list of
+    {"installed", "state", "note"}. Never raises.
+    """
+    records = provenance_records(manifest_path)
+    if not records:
+        return "unknown", []
+    if checkout_dir is None:
+        checkout_dir = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))
+    entries = []
+    for installed in sorted(records):
+        record = records[installed]
+        entry = {"installed": installed, "state": "ok", "note": ""}
+        source_rel = record.get("source")
+        recorded_sha = record.get("sha256")
+        recorded_commit = record.get("source_commit")
+        source_path = (os.path.join(checkout_dir, source_rel)
+                       if isinstance(source_rel, str) and source_rel
+                       else None)
+        installed_sha = _sha256_file(installed)
+        if installed_sha is None:
+            entry["state"] = "drift"
+            entry["note"] = "missing — re-run scripts/install.sh"
+        elif not (isinstance(recorded_sha, str) and recorded_sha):
+            entry["state"] = "drift"
+            entry["note"] = ("manifest record has no sha256 — "
+                             "re-run scripts/install.sh")
+        elif installed_sha != recorded_sha:
+            source_sha = _sha256_file(source_path) if source_path else None
+            if source_sha is not None and source_sha == installed_sha:
+                entry["state"] = "drift"
+                entry["note"] = ("re-placed from the checkout without "
+                                 "re-stamping — re-run scripts/install.sh")
+            else:
+                entry["state"] = "drift"
+                entry["note"] = ("content differs from the manifest and "
+                                 "the checkout source — "
+                                 "re-run scripts/install.sh")
+        else:
+            source_sha = _sha256_file(source_path) if source_path else None
+            if source_path is None:
+                entry["state"] = "drift"
+                entry["note"] = ("manifest record has no source relpath — "
+                                 "re-run scripts/install.sh")
+            elif source_sha is None:
+                entry["state"] = "drift"
+                entry["note"] = ("source %s is gone from the checkout — "
+                                 "manual review needed; the installer cannot "
+                                 "restore it" % (source_rel,))
+            elif source_sha != recorded_sha:
+                entry["state"] = "drift"
+                entry["note"] = ("checkout advanced past the stamped commit "
+                                 "%s — re-run scripts/install.sh"
+                                 % (str(recorded_commit)[:12],))
+            else:
+                entry["note"] = ("in sync (commit %s, VERSION %s)"
+                                 % (str(recorded_commit)[:12],
+                                    record.get("version", "?")))
+        entries.append(entry)
+    aggregate = "drift" if any(e["state"] == "drift"
+                               for e in entries) else "ok"
+    return aggregate, entries
+
+
 def probe_snap(which=shutil.which, runner=default_runner):
     path = which("snap")
     if not path:
@@ -916,6 +1065,22 @@ def main(argv=None):
         mismatch_lines = ([_PINS_MISMATCH_WARNING]
                           if pins_state == "mismatch" else [])
         browsers_state = playwright_browsers_expected_state()
+        provenance, provenance_entries = provenance_state()
+        if provenance == "drift":
+            for entry in provenance_entries:
+                if entry["state"] == "drift":
+                    mismatch_lines.append(
+                        "provenance drift: %s — %s"
+                        % (entry["installed"], entry["note"]))
+        elif provenance == "unknown":
+            # Informational, not an error: pre-#1528 installs publish no
+            # manifest, and status may run as a different user than the
+            # agent user the installer ran as. The cohort that most needs
+            # drift tracking is exactly the cohort with no manifest, so
+            # the backfill path is named, not silent.
+            mismatch_lines.append(
+                "provenance: unknown — no manifest; re-run "
+                "`scripts/install.sh` to enable drift tracking")
         if args.json:
             print(json.dumps({
                 "generated_at": int(time.time()),
@@ -925,6 +1090,8 @@ def main(argv=None):
                 "duplicate_pins": duplicates,
                 "installed_pins_state": pins_state,
                 "playwright_browsers_expected_state": browsers_state,
+                "provenance_state": provenance,
+                "provenance_entries": provenance_entries,
             }, indent=2))
         else:
             table = format_table(records, pin_warnings=warnings,

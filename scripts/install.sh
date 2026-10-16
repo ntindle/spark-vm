@@ -31,8 +31,17 @@
 # user's home). The bootstrap re-execs the agent phase through a login
 # shell (sudo -iu) so systemctl --user has a user bus.
 #
-# Out of scope: choosing a published artifact format (#1529), provenance
-# stamping (#1528).
+# Out of scope: choosing a published artifact format (#1529).
+#
+# Provenance (issue #1528, D-PKG-3): every file copy this installer places
+# records its source commit + VERSION + sha256 in the provenance manifest
+# (~/.local/state/spark-vm/provenance-manifest.json, one JSON line per
+# placed file; the reader takes the last line per path, so re-stamping
+# updates). `scripts/self_update.py status` reads the manifest and reports
+# drift between the installed copies and the repo checkout loudly — the
+# exact failure #6 warns about (divergent copies silently missing fixes).
+# The muse-job plugin is muse-CLI-managed, not a file copy, so it is not
+# stamped: there is nothing the installer can byte-pin for it.
 
 set -euo pipefail
 
@@ -483,16 +492,65 @@ step_deploy() {
         env -C "$AGENT_REPO" ./proxy/deploy.sh
 }
 
+# stamp_provenance <installed-path> <source-relpath> — issue #1528 (D-PKG-3:
+# provenance is a file, not a memory). Appends one JSON line to the
+# provenance manifest recording where an installer-placed copy came from:
+# its installed path, source path relative to the repo root, sha256 of the
+# placed bytes, the source commit (full SHA), and VERSION. Only ever called
+# through exec_if_live, so --dry-run describes the stamp without writing.
+# The manifest is append-only JSONL: the reader (`self_update.py status`)
+# takes the last line per installed path, so re-stamping a file updates its
+# record instead of duplicating it, and a single O_APPEND write is atomic.
+# Fails loudly (not silently) if the commit, VERSION, or hash cannot be
+# read — a stamp the inventory cannot trust is worse than no stamp.
+stamp_provenance() {
+    local installed="$1" source_rel="$2"
+    local manifest="${PROVENANCE_MANIFEST:-$HOME/.local/state/spark-vm/provenance-manifest.json}"
+    local commit version digest now
+    commit="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
+        die "cannot stamp provenance for $installed — git rev-parse failed in $AGENT_REPO"
+    version="$(tr -d '[:space:]' < "$AGENT_REPO/VERSION")" || \
+        die "cannot stamp provenance for $installed — cannot read $AGENT_REPO/VERSION"
+    [ -n "$version" ] || die "cannot stamp provenance for $installed — empty VERSION"
+    digest="$(sha256sum < "$installed" | cut -d' ' -f1)" || \
+        die "cannot stamp provenance for $installed — cannot hash $installed"
+    now="$(date +%s)"
+    if [ "$DRY_RUN" = 0 ]; then
+        mkdir -p "$(dirname "$manifest")" || \
+            die "cannot stamp provenance for $installed — cannot create $(dirname "$manifest")"
+    fi
+    # JSON-string-escape via python3 (present on every supported box; jq is
+    # not a declared installer dependency).
+    python3 - "$installed" "$source_rel" "$digest" "$commit" "$version" "$now" "$manifest" <<'PYEOF' || \
+        die "cannot stamp provenance for $installed — manifest write failed"
+import json, sys
+installed, source_rel, digest, commit, version, now, manifest = sys.argv[1:8]
+record = {
+    "installed": installed,
+    "source": source_rel,
+    "sha256": digest,
+    "source_commit": commit,
+    "version": version,
+    "stamped_at": int(now),
+}
+with open(manifest, "a", encoding="utf-8") as f:
+    f.write(json.dumps(record, sort_keys=True) + "\n")
+PYEOF
+    note "stamped provenance for $installed (commit ${commit:0:12}, VERSION $version)"
+}
+
 step_muse_job() {
     if [ "$DRY_RUN" = 0 ]; then
         mkdir -p "$HOME/bin"
     fi
     if [ -f "$HOME/bin/muse-job" ] && cmp -s "$AGENT_REPO/muse-job/bin/muse-job" "$HOME/bin/muse-job"; then
         note "skip: ~/bin/muse-job already matches the repo copy"
-        return 0
+    else
+        exec_if_live "install ~/bin/muse-job from the repo" \
+            cp "$AGENT_REPO/muse-job/bin/muse-job" "$HOME/bin/muse-job"
     fi
-    exec_if_live "install ~/bin/muse-job from the repo" \
-        cp "$AGENT_REPO/muse-job/bin/muse-job" "$HOME/bin/muse-job"
+    exec_if_live "stamp provenance for ~/bin/muse-job" \
+        stamp_provenance "$HOME/bin/muse-job" "muse-job/bin/muse-job"
 }
 
 step_plugin() {
@@ -529,6 +587,8 @@ step_cred_ui() {
         exec_if_live "reload the user systemd daemon" \
             systemctl --user daemon-reload
     fi
+    exec_if_live "stamp provenance for the cred-ui unit" \
+        stamp_provenance "$unit" "cred-ui/cred-ui.service"
     if systemctl --user is-enabled --quiet cred-ui 2>/dev/null && \
        systemctl --user is-active --quiet cred-ui 2>/dev/null; then
         note "skip: cred-ui user service already enabled and active"
