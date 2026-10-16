@@ -2,14 +2,14 @@
 
 **Status: build slices 1–3c + slice 3 remainder of H15 PR 1.** Slice 1 shipped the static
 markup (PR #163); slice 2 shipped the backend half of the endpoint surface
-(`site/waitlistd.py` + `scripts/test_waitlistd.py`, 155 tests): `POST
+(`site/waitlistd.py` + `scripts/test_waitlistd.py`, 159 tests): `POST
 /waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
 confirms, token as form field), the HMAC token signer (single-use, 14-day
 expiry, operator key via `WAITLIST_HMAC_KEY` — never in the repo), and
 `funnel_events` logging per `docs/FUNNEL_MEASUREMENT.md` §3.4
 (verified parseable by `scripts/funnel_metrics.py`). Slice 3a ships the
 waitlist lifecycle jobs (`site/waitlist_jobs.py` + `scripts/test_waitlist_jobs.py`,
-34 tests): the +7d reminder job and the 14d drop job, run as operator cron
+35 tests): the +7d reminder job and the 14d drop job, run as operator cron
 against the operator data dir with a cross-process data lock so they never
 race the live daemon. The drop deadline is fixed at first submission and
 never refreshed by re-submits; a cap-deferred reminder retries on the next

@@ -893,16 +893,26 @@ class WaitlistService:
                 self._store_snapshot_key == self._store_snapshot_key_now())
 
     def _refresh_under_lock(self):
-        """Re-read persistent rows/tokens under data_lock()+self._lock.
+        """Re-read persistent rows/tokens.
+
+        Callers hold self._lock (serializing the daemon's own threads).
+        The exclusive cross-process data_lock() is additionally required
+        only for check-then-act / mutating sections — read-only renders
+        (the public GETs) deliberately skip it (#386): rewrites are
+        atomic (tmp + fsync + os.replace) and torn appends are skipped
+        loudly (#395), so a re-read without the cross-process lock is
+        safe; the worst case is a slightly stale or mixed view that
+        converges on the next request, and the state-changing POSTs
+        re-verify under the full lock before acting.
 
         The lifecycle-job CLI mutates rows.jsonl/consumed_tokens.txt in a
         separate process between daemon requests; without this, the
         check-then-act sections would run against a stale in-memory view
         (e.g. a job drops a row the daemon still thinks is pending, or a
-        reminder minted a token the daemon's view doesn't know). Callers
-        hold both locks already. _ip_hits is in-process abuse-rate state
-        that has no on-disk representation — refreshing it would reset
-        every request's rate window, so it is deliberately preserved.
+        reminder minted a token the daemon's view doesn't know). _ip_hits
+        is in-process abuse-rate state that has no on-disk
+        representation — refreshing it would reset every request's rate
+        window, so it is deliberately preserved.
 
         (#404) bounded snapshot cache: when the on-disk store is
         unchanged since the last parse, the in-memory view is already
@@ -2331,12 +2341,17 @@ class WaitlistService:
         never an error); a token invalidated by a re-submit renders the
         expired state — that link genuinely no longer works.
 
-        Read-only, but rendered under the data lock with a fresh view:
-        a job (or racing POST) may have consumed/re-minted the token or
-        dropped the row since the daemon's view was loaded, and this page
-        is what the user actually judges the link by.
+        Read-only, rendered under the thread lock with a fresh view (#386):
+        the exclusive cross-process data lock is deliberately NOT taken —
+        these pages perform no check-then-act, and the state-changing POSTs
+        re-verify the token/row under the full lock before acting, so the
+        worst case from a job committing between this render and the click
+        is one extra click — never a wrong state transition. A job (or
+        racing POST) may have consumed/re-minted the token or dropped the
+        row since the daemon's view was loaded, and this page is what the
+        user actually judges the link by.
         """
-        with data_lock(self.data_dir), self._lock:
+        with self._lock:
             self._refresh_under_lock()
             row, status = self._lookup_token_row(token or "")
         if status == "invalid":
@@ -2425,11 +2440,12 @@ class WaitlistService:
         the already-deleted page — the commit-before-consume order makes
         that state mean "the deletion committed but the consumes never
         ran", and "expired" would be a lie. An expired token, or a
-        malformed token, renders the expired page. Read-only, but rendered
-        under the data lock with a fresh view for the same reasons as
-        confirm_get.
+        malformed token, renders the expired page. Read-only, rendered
+        under the thread lock with a fresh view for the same reasons as
+        confirm_get (#386: no exclusive cross-process lock on renders;
+        the POST re-verifies before deleting).
         """
-        with data_lock(self.data_dir), self._lock:
+        with self._lock:
             self._refresh_under_lock()
             if token and token.startswith("forget.") and token in self.consumed:
                 return 200, page_already_deleted()
@@ -2850,11 +2866,13 @@ class WaitlistService:
         claim screen; an already-claimed row (consumed token, status
         signed_up) renders the claimed page idempotently — never an
         error; a dead link (expired, superseded, invalid, or a rolled-back
-        row) renders the inactive page. Read under the data lock with a
-        fresh view: a wave, the rollover cron, or a racing POST may have
-        retired this token since the daemon's view was loaded.
+        row) renders the inactive page. Read under the thread lock with a
+        fresh view (#386: no exclusive cross-process lock on renders; the
+        POST re-verifies before recording the claim): a wave, the rollover
+        cron, or a racing POST may have retired this token since the
+        daemon's view was loaded.
         """
-        with data_lock(self.data_dir), self._lock:
+        with self._lock:
             self._refresh_under_lock()
             row, status = self.lookup_invite_token(token or "")
             if status == "invalid" or status == "expired":
