@@ -2993,3 +2993,201 @@ class TestReadTailLines:
         p = tmp_path / "empty.log"
         p.write_bytes(b"")
         assert wd._read_tail_lines(str(p), 3) == []
+
+
+# ---------------------------------------------------------------------------
+# Token commit/consume ordering policy (#398)
+# ---------------------------------------------------------------------------
+# Pins the TOKEN ORDERING POLICY block in site/waitlistd.py: the durable
+# steps (_write_spool, _save_row/_rewrite_rows, _consume_token, _emit)
+# must fire in the documented order per flow. Through-calling recorders —
+# the flows run for real; only the call order is observed.
+
+
+def _ordering_recorder(svc):
+    """Install through-calling recorders on the durable steps.
+
+    Returns the events list; entries are (step, detail) with detail the
+    token for _consume_token, the event name for _emit, else None.
+    Note: the event records before the wrapped call runs, so on a
+    failure path (e.g. a spool OSError) a recorded step may not have
+    completed — the pins below are success-path only.
+    """
+    events = []
+
+    def wrap(name, detail):
+        fn = getattr(svc, name)
+
+        def rec(*a, **k):
+            events.append((name, detail(*a, **k)))
+            return fn(*a, **k)
+
+        setattr(svc, name, rec)
+
+    wrap("_write_spool", lambda *a, **k: None)
+    wrap("_save_row", lambda *a, **k: None)
+    wrap("_rewrite_rows", lambda *a, **k: None)
+    wrap("_consume_token", lambda token, *a, **k: token)
+    wrap("_emit", lambda event, ref, *a, **k: event)
+    return events
+
+
+def test_token_ordering_policy_confirm_post():
+    svc, tmp = make_service()
+    row = _submit(svc, "ord-confirm@example.com")
+    token, _ = extract_token_from_spool(tmp)
+    events = _ordering_recorder(svc)
+    status, _ = svc.confirm_post(token)
+    assert status == 200
+    # Commit-then-consume (Rule 2): the row commits before the token dies.
+    assert events == [
+        ("_save_row", None),
+        ("_consume_token", token),
+        ("_emit", "confirmed"),
+    ]
+
+
+def test_token_ordering_policy_claim_post():
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "ord-claim@example.com")
+    events = _ordering_recorder(svc)
+    status, _ = svc.claim_post(token)
+    assert status == 200
+    # Commit-then-consume (Rule 2).
+    assert events == [
+        ("_save_row", None),
+        ("_consume_token", token),
+        ("_emit", "claimed"),
+    ]
+
+
+def test_token_ordering_policy_reminder():
+    clock = MutableClock(NOW)
+    svc, tmp = make_service(clock=clock)
+    row = _submit(svc, "ord-remind@example.com")
+    old_token, _ = extract_token_from_spool(tmp)
+    clock.t = NOW + timedelta(seconds=wd.REMINDER_LEAD_SECONDS + 3600)
+    events = _ordering_recorder(svc)
+    assert svc.send_reminders() == 1
+    # Spool-then-commit (Rule 1), then commit-then-consume (Rule 2).
+    assert events == [
+        ("_write_spool", None),
+        ("_save_row", None),
+        ("_consume_token", old_token),
+        ("_emit", "reminder_sent"),
+    ]
+
+
+def test_token_ordering_policy_resubmit():
+    svc, tmp = make_service()
+    row = _submit(svc, "ord-resub@example.com")
+    old_token, _ = extract_token_from_spool(tmp)
+    events = _ordering_recorder(svc)
+    status, _ = svc.submit_form(
+        form_fields("ord-resub@example.com"), "127.0.0.1")
+    assert status == 200
+    # The re-submit refreshes submitted_at first; the confirm email then
+    # follows spool-then-commit (Rule 1: the token records only after the
+    # spool), and the old token dies last (Rule 2).
+    assert events == [
+        ("_save_row", None),
+        ("_write_spool", None),
+        ("_save_row", None),
+        ("_emit", "confirm_sent"),
+        ("_consume_token", old_token),
+    ]
+
+
+def test_token_ordering_policy_invite_rewave():
+    svc, tmp = make_service()
+    row, _ = _invite(svc, tmp, "ord-invite@example.com")
+    old = row["active_invite_token"]
+    assert old, "expected the first wave to record an invite token"
+    events = _ordering_recorder(svc)
+    position = svc.queue_position(row["entry_id"])
+    assert svc._queue_invite_email(
+        row, position, PRICING, TERMS, "w2", NOW)
+    # The invite exception: spool, then the idempotent old-token consume,
+    # then the single commit, then the event.
+    assert events == [
+        ("_write_spool", None),
+        ("_consume_token", old),
+        ("_save_row", None),
+        ("_emit", "invite_sent"),
+    ]
+
+
+def test_token_ordering_policy_forget_post():
+    svc, tmp = make_service()
+    row = _submit(svc, "ord-forget@example.com")
+    live_token, _ = extract_token_from_spool(tmp)
+    forget_token = svc.mint_forget_token(
+        row["entry_id"], row["owner_email"])
+    events = _ordering_recorder(svc)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    # Aux tokens (not the clicked link) die before the commit; the forget
+    # token itself dies after the rewrite (#394); the event follows the
+    # commit (Rule 3); the deletion notice spools last (single-use token,
+    # at most one).
+    assert events == [
+        ("_consume_token", live_token),
+        ("_rewrite_rows", None),
+        ("_consume_token", forget_token),
+        ("_emit", "forgot"),
+        ("_write_spool", None),
+    ]
+
+
+def test_token_ordering_policy_purge_dropped():
+    svc, tmp = make_service()
+    row = {
+        "entry_id": "ord-purge-1",
+        "owner_email": "ord-purge@example.com",
+        "status": "dropped",
+        "submitted_at": wd.iso_z(NOW - timedelta(days=40)),
+        "dropped_at": wd.iso_z(NOW - timedelta(days=31)),
+    }
+    svc._save_row(row)
+    events = _ordering_recorder(svc)
+    assert svc.purge_dropped() == ["ord-purge-1"]
+    # Deliberate at-least-once (Rule 3): the event precedes the rewrite.
+    assert events == [
+        ("_emit", "purged"),
+        ("_rewrite_rows", None),
+    ]
+
+
+def test_token_ordering_policy_drop_expired():
+    clock = MutableClock(NOW - timedelta(days=15))
+    svc, tmp = make_service(clock=clock)
+    row = _submit(svc, "ord-drop@example.com")
+    token, _ = extract_token_from_spool(tmp)
+    clock.t = NOW  # past the 14d drop deadline; the row is still pending
+    events = _ordering_recorder(svc)
+    assert svc.drop_expired() == [row["entry_id"]]
+    # Consume-then-commit: the status transition to dropped is what kills
+    # the link (the consume is belt-and-braces); the idempotent cron
+    # re-run re-drops after a crash in the consume->save window.
+    assert events == [
+        ("_consume_token", token),
+        ("_save_row", None),
+        ("_emit", "dropped"),
+    ]
+
+
+def test_token_ordering_policy_rollover_expired_invites():
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "ord-roll@example.com")
+    # Expire the invite: backdate invite_expires_at past now.
+    row = svc.rows[row["entry_id"]]
+    row["invite_expires_at"] = wd.iso_z(NOW - timedelta(days=1))
+    svc._save_row(row)
+    events = _ordering_recorder(svc)
+    assert svc.rollover_expired_invites() == [row["entry_id"]]
+    # Consume-then-commit; no funnel event (the §3.4 taxonomy has none);
+    # the idempotent cron re-run self-heals the consume->save window.
+    assert events == [
+        ("_consume_token", token),
+        ("_save_row", None),
+    ]

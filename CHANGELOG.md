@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Waitlist token ordering policy (2026-10-16): the crash-safety rules for
+  the signup email tokens — which durable step (email spool, row save,
+  token retirement, event) runs first in each confirm / reminder /
+  re-submit / invite / claim / forget / purge flow — are now stated in one
+  place and pinned by tests, so a future edit can't silently reorder a
+  crash window into losing a live token or double-counting an event.
+  (#398)
 - Credential-vend lane state (2026-10-16): the hosted credential-vending
   lane's vision-vs-state is re-pinned to current main — the S1+S2
   contract stands, the S3/S4 builds' open design inputs are mapped, and

@@ -981,6 +981,82 @@ class WaitlistService:
 
     # -- tokens -----------------------------------------------------------
 
+    # TOKEN COMMIT/CONSUME ORDERING POLICY (#398).
+    #
+    # Every token transition moves through durable steps — the email spool
+    # write, the row commit (_save_row append / _rewrite_rows atomic
+    # replace), the superseded-token consume (_consume_token idempotent
+    # append), and the funnel emit (_emit). The per-flow order is chosen
+    # so a crash in ANY window fails toward retryability: never two live
+    # tokens for one row (the active_token / active_invite_token check in
+    # _lookup_token_row / lookup_invite_token retires superseded links),
+    # and never a committed state with no live token and no retry path —
+    # except the invite re-wave window below, whose retry path is the
+    # operator repair tool, not an automatic re-run.
+    #
+    # Rule 1 — spool-then-commit (#406): no row/token mutation commits
+    # until its email spool write succeeds — except the re-submit's
+    # submitted_at refresh, which commits first; a spool failure there
+    # leaves the old token live, so the retry path still holds. A failed
+    # spool otherwise leaves the old token live and the row untouched;
+    # the next job run retries cleanly.
+    #
+    # Rule 2 — commit-then-consume (default): the row commit lands BEFORE
+    # the superseded (or single-use clicked) token is consumed. The crash
+    # window leaves the old token live-but-superseded — the active_token
+    # check renders it retired, never as a second live token — with the
+    # new token already recorded. confirm_post, claim_post,
+    # _queue_reminder_email, and forget_post's own token all follow this
+    # order.
+    #
+    # Exception — invite consume-then-commit: _queue_invite_email consumes
+    # the old invite token BEFORE the single commit. Two crash windows,
+    # named honestly because only one is benign: (A) spool→consume: a
+    # stray spooled email whose token was never recorded (it can never
+    # validate); the old token stays live and the row untouched, so the
+    # next wave re-mints cleanly. (B) consume→commit on a re-wave: the old
+    # token's consume landed on disk but the new token was never recorded
+    # — the row commits as invited with no live token. Not self-healing:
+    # send_invite_wave only scans confirmed rows, so recovery is the
+    # operator reinstate_confirmed repair (#235). Currently latent (every
+    # production path reaches the wave with no recorded invite token),
+    # but the reasoning must not depend on that.
+    #
+    # Rule 3 — emit/commit per path (deliberate, not an oversight):
+    # forget_post emits "forgot" AFTER the row commit, so the gone_but_live
+    # early-return can never double-emit it; a lost event under-reports,
+    # it never un-deletes (#394's fail-safe PII deletion). purge_dropped
+    # emits "purged" BEFORE the rewrite — deliberate at-least-once: a
+    # crashed purge is never silently unrecorded, and a duplicate on retry
+    # is inert (no §7 metric counts purges; only the rows_read hygiene
+    # counter moves).
+    #
+    # Flow table (durable-step order; aux = tokens that are not the link
+    # the user clicked — consumed before the commit so a crash leaves the
+    # clicked link live and the row still deletable. The path-A ledger
+    # append (_record_patha_event) fires pre-commit in the
+    # confirm/reminder/invite flows; it is an idempotent file append,
+    # benign on retry — not a token step, so not pinned here):
+    #   confirm_post:          save -> consume -> emit("confirmed")
+    #   claim_post:            save -> consume -> emit("claimed")
+    #   _queue_reminder_email: spool -> save -> consume(old) -> emit("reminder_sent")
+    #   _resubmit_core:        save -> spool -> save -> emit("confirm_sent")
+    #                          -> consume(old)   (first save refreshes
+    #                          submitted_at; the token records only after
+    #                          the spool, per Rule 1)
+    #   _queue_invite_email:   spool -> consume(old) -> save -> emit("invite_sent")
+    #   forget_post:           consume(aux) -> rewrite -> consume(self)
+    #                          -> emit("forgot") -> spool(deletion notice)
+    #   purge_dropped:         emit("purged") -> rewrite
+    #   drop_expired:          consume -> save -> emit("dropped")   (the
+    #                          status transition kills the link — the
+    #                          consume is belt-and-braces; the idempotent
+    #                          cron re-run re-drops after a crash)
+    #   rollover_expired_invites: consume -> save   (no event — the §3.4
+    #                          taxonomy has none; the idempotent cron
+    #                          re-run self-heals the crash window)
+    # Pinned by test_token_ordering_policy_* in scripts/test_waitlistd.py.
+
     def mint_token(self, entry_id, normalized_email, issued_at=None,
                    kind="confirm"):
         """Mint an HMAC token. `kind` is "confirm" or "forget".
