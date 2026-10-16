@@ -172,13 +172,14 @@ AND relay_path_ok(S)           == true        (R4 — the R2b instrument's
                                                 with the §3 sub-code in
                                                 detail; `degraded` —
                                                 flapping, never-probed,
-                                                journal stale past the §2
-                                                idle threshold, provider
-                                                stand-down — is SUSPECT:
-                                                unobservable, never
-                                                assumed-ok, per the §5
-                                                producer-contract note;
-                                                closed-world rule applies)
+                                                journal stale past the relay
+                                                design's §2 idle threshold,
+                                                provider stand-down — is
+                                                SUSPECT: unobservable, never
+                                                assumed-ok, per the relay
+                                                design's §5 producer-contract
+                                                note; closed-world rule
+                                                applies)
 ```
 
 **Closed-world interim rule.** Every conjunct must be *evaluated*; any
@@ -186,7 +187,7 @@ conjunct whose inputs are unobservable blocks emission. Today that is
 `provider_state` (no H4 driver) and `suspended_or_scheduled` (no H13
 contract); the relay conjunct is observable since R4 (2026-10-16,
 #1417) — the R2b instrument (`hosted/relay_path_state.py`) wired into
-the tenant layer by R3. Darkness maps to unobservable by the §5
+the tenant layer by R3. Darkness maps to unobservable by the relay design's §5
 producer-contract rule (`degraded` is suspect, never assumed-`ok`;
 prober-down / journal-dark ⇒ `insufficient-observability`), and the
 closed-world rule applies to it verbatim. The interim is closed-world,
@@ -386,7 +387,8 @@ as the `stuck` code.
   in the §4 predicate (`relay_path_state(S) == ok`; `down` routes to
   `connection-unreachable` via transition rule 6 with the sub-code in
   `detail`, never `stuck`; `degraded` is suspect ⇒ unobservable per the
-  §5 producer-contract note, so instrument darkness yields
+  §5 producer-contract note (in `docs/RELAY_LIVENESS_DESIGN.md`), so
+  instrument darkness yields
   `insufficient-observability`, never assumed-`ok`). The interim
   "relay conjunct dropped outright" is dead; the S3 gate's relay row is
   closed. H4 provider state, H13 suspend contract, and G1 terminal
