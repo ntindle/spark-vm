@@ -61,6 +61,7 @@ unchanged on the control plane without extra dependencies.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -186,7 +187,10 @@ def cadence_decision(
 # ---------------------------------------------------------------------------
 
 # Outcomes only — never fingerprints (D-RL2-3). One JSON object per
-# line; corrupt lines are skipped by readers, never fatal.
+# line; corrupt lines are skipped by readers, never fatal. The store is
+# created 0o600 in a 0o700 parent and opened with O_NOFOLLOW: a symlink at
+# the final path component fails loud instead of redirecting appends
+# (#1537).
 _HISTORY_MAX_BYTES = 4 * 1024 * 1024  # 4 MiB, then rotate
 _HISTORY_MAX_ROTATED = 2
 # Unbounded liveness-outcome scan bound: the flapping check must see
@@ -207,7 +211,26 @@ def history_path():
 def _record_outcome(path, vm_id, outcome, detail, now=None):
     """Append one probe outcome to the history store. Fail-loud on I/O
     errors (a history the operator cannot read is a broken instrument);
-    callers that must not raise (the cadence hot path) catch."""
+    callers that must not raise (the cadence hot path) catch.
+
+    #1537: the store is hardened at creation — the parent is created
+    with mode 0o700 (the umask can only remove bits, never add them)
+    and the file is opened with O_NOFOLLOW|O_CREAT|O_APPEND at 0o600,
+    so a symlink at the history path fails loud (ELOOP) instead of
+    redirecting appends into an arbitrary file. Creation-only: files
+    and dirs that already existed with weaker permissions are NOT
+    re-chmodded (we do not silently rewrite operator-owned
+    permissions); the O_NOFOLLOW refusal applies at every open, not
+    just creation. O_NOFOLLOW covers the final path component only —
+    RELAY_PROBE_HISTORY must live under an operator-owned path
+    (intermediate-component symlinks are still followed).
+    Divergence note (PR #1538 review): relay_liveness's session
+    journal keeps plain O_CREAT|O_APPEND 0o600 without O_NOFOLLOW —
+    that path is daemon-fixed (/var/lib/sparkvm/) and daemon-owned,
+    while the history path is operator-configurable, so the symlink
+    risk profiles genuinely differ. Revisit if the journal path ever
+    becomes operator-configurable.
+    """
     if now is None:
         now = time.time()
     record = {
@@ -219,13 +242,30 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
     # D-RL2-3: the fingerprint never crosses a session boundary. The
     # store keeps the outcome and timing only.
     line = json.dumps(record, separators=(",", ":"))
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
     _rotate_history_if_needed(path)
-    with open(path, "a", encoding="utf-8") as fh:
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
 
 def _rotate_history_if_needed(path):
+    # Rotation deliberately uses os.stat (symlink-following), not
+    # os.lstat (PR #1538 review): if a symlink sits at the path and
+    # its target is under the rotation threshold, the write path
+    # ELOOP-fails loud anyway; if the target is over the threshold,
+    # the rename moves the link itself to path.1 and the write
+    # creates a fresh regular file at path — no append is ever
+    # redirected into the symlink's target (verified empirically).
+    # Failing rotation loud too would buy nothing over the write-side
+    # refusal, and would break the deliberate read-path symlink
+    # tolerance documented above.
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -254,7 +294,13 @@ def _iter_history(path, vm_id, limit):
     state; its absence degrades the reading (no flapping memory,
     "never probed"), never the reading itself. The write path
     (``_record_outcome``) stays fail-loud so a broken store is never
-    silent."""
+    silent. Reads follow symlinks deliberately (PR #1538 review): a
+    symlinked history path is a sane operator setup, and exploiting
+    it requires write access to the history parent — the same
+    capability as forging records directly — so there is no attacker
+    capability gain. Corrupt-line skipping bounds what a followed
+    symlink can inject. Do not "fix" this to O_NOFOLLOW without
+    revisiting the analysis."""
     try:
         fh = open(path, encoding="utf-8")
     except OSError:
@@ -514,8 +560,16 @@ def maybe_probe(
     try:
         _record_outcome(path, vm_id, result.outcome, result.detail, now=now)
     except OSError as exc:
-        why = "%s; WARNING: probe history unwritable (%s) — this probe " \
-            "will not inform flapping" % (why, exc)
+        # Security N2: ELOOP is an active-integrity signal (something
+        # planted a symlink at the history path), distinct from ENOSPC —
+        # say so so the operator can tell attack from disk-full.
+        hint = (
+            "; possible symlink planted at the history path (ELOOP)"
+            if getattr(exc, "errno", None) == errno.ELOOP
+            else ""
+        )
+        why = "%s; WARNING: probe history unwritable (%s)%s — this probe " \
+            "will not inform flapping" % (why, exc, hint)
     return {
         "probed": True,
         "reason": why,
@@ -530,8 +584,91 @@ def maybe_probe(
 #
 # Mirrors relay_liveness's CLI discipline: JSON out, loud errors, no
 # tracebacks for operator-actionable failures. --probe-now takes the
-# connection bundle explicitly on the command line (D-RL2-3: the
-# bundle is never read from a config file here).
+# connection bundle from stdin as JSON (never from argv: #1536 — key
+# material on the command line is visible in the process listing and
+# persists in shell history — and never from a config file: D-RL2-3).
+
+_BUNDLE_FIELDS = ("relay_host", "relay_port", "pinned_fingerprint")
+
+
+class _BundleError(ValueError):
+    """The stdin-supplied probe bundle is missing or malformed."""
+
+
+def _read_bundle_stdin():
+    """Read the probe bundle for --probe-now from stdin as JSON.
+
+    Returns ``{"relay_host", "relay_port", "pinned_fingerprint"}``.
+    Raises ``_BundleError`` with an operator-actionable message on
+    empty stdin, invalid JSON, non-object JSON, or missing/empty
+    required fields. The caller turns these into exit 2.
+
+    Validation is deliberately strict (B1/B2/B3, PR #1538 review):
+    ports are accepted only as ints or plain digit strings (no bool,
+    float, or underscore coercion — a validator must not silently
+    rewrite its input), and the string fields must actually be
+    strings, so a malformed operator-supplied bundle can never
+    escape into an uncaught traceback.
+    """
+    if sys.stdin.isatty():
+        raise _BundleError(
+            "--probe-now reads the probe bundle from stdin as JSON "
+            "but stdin is a terminal — pipe the bundle, e.g. "
+            "echo '{\"relay_host\": ..., \"relay_port\": ..., "
+            "\"pinned_fingerprint\": ...}' | relay_path_state "
+            "--query VM --probe-now"
+        )
+    raw = sys.stdin.read()
+    if not raw.strip():
+        raise _BundleError(
+            "--probe-now needs the probe bundle on stdin as JSON "
+            '({"relay_host", "relay_port", "pinned_fingerprint"}); '
+            "got empty stdin"
+        )
+    try:
+        bundle = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise _BundleError("--probe-now bundle on stdin is not valid JSON")
+    if not isinstance(bundle, dict):
+        raise _BundleError("--probe-now bundle must be a JSON object")
+    missing = [f for f in _BUNDLE_FIELDS if not bundle.get(f)]
+    if missing:
+        raise _BundleError(
+            "--probe-now bundle missing required fields: %s" % ", ".join(missing)
+        )
+    for field in ("relay_host", "pinned_fingerprint"):
+        if not isinstance(bundle[field], str):
+            raise _BundleError(
+                "--probe-now bundle %s must be a string" % field
+            )
+    raw_port = bundle["relay_port"]
+    if isinstance(raw_port, bool):
+        raise _BundleError("--probe-now bundle relay_port must be an integer")
+    if isinstance(raw_port, int):
+        port = raw_port
+    elif isinstance(raw_port, str):
+        text = raw_port.strip()
+        sign, digits = (
+            (text[0], text[1:]) if text[:1] in ("+", "-") else ("", text)
+        )
+        if not digits or not (digits.isascii() and digits.isdigit()):
+            raise _BundleError("--probe-now bundle relay_port must be an integer")
+        try:
+            # Python 3.11+ int() refuses >4300-digit strings (ValueError):
+            # keep it inside the validator so pathological input still
+            # fails loud with exit 2 (PR #1538 review B4).
+            port = int(sign + digits, 10)
+        except ValueError:
+            raise _BundleError("--probe-now bundle relay_port must be an integer")
+    else:
+        raise _BundleError("--probe-now bundle relay_port must be an integer")
+    if not 0 < port < 65536:
+        raise _BundleError("--probe-now bundle relay_port out of range")
+    return {
+        "relay_host": bundle["relay_host"],
+        "relay_port": port,
+        "pinned_fingerprint": bundle["pinned_fingerprint"],
+    }
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
@@ -544,12 +681,10 @@ if __name__ == "__main__":
     ap.add_argument(
         "--probe-now",
         action="store_true",
-        help="run one probe now (needs --relay-host/--relay-port/"
-        "--pinned-fingerprint; provider state defaults to running)",
+        help="run one probe now (reads the probe bundle "
+        '{"relay_host", "relay_port", "pinned_fingerprint"} from stdin '
+        "as JSON; provider state defaults to running)",
     )
-    ap.add_argument("--relay-host", default=None)
-    ap.add_argument("--relay-port", type=int, default=None)
-    ap.add_argument("--pinned-fingerprint", default=None)
     ap.add_argument(
         "--provider-state",
         default="running",
@@ -561,23 +696,23 @@ if __name__ == "__main__":
     if args.journal:
         os.environ["RELAY_SESSION_JOURNAL"] = args.journal
     if args.probe_now:
-        if not (args.query and args.relay_host and args.relay_port
-                and args.pinned_fingerprint):
+        if not args.query:
             print(
-                "error: --probe-now needs --query VM_ID, --relay-host, "
-                "--relay-port and --pinned-fingerprint",
+                "error: --probe-now needs --query VM_ID and the probe "
+                "bundle on stdin as JSON",
                 file=sys.stderr,
             )
+            raise SystemExit(2)
+        try:
+            bundle = _read_bundle_stdin()
+        except _BundleError as exc:
+            print("error: %s" % exc, file=sys.stderr)
             raise SystemExit(2)
         out = maybe_probe(
             args.query,
             provider_state_fn=lambda: args.provider_state,
             has_post_live_arc=True,
-            bundle={
-                "relay_host": args.relay_host,
-                "relay_port": args.relay_port,
-                "pinned_fingerprint": args.pinned_fingerprint,
-            },
+            bundle=bundle,
         )
         print(json.dumps(out, indent=2))
     elif args.query:

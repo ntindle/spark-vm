@@ -147,6 +147,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Relay `--probe-now` no longer takes the connection bundle on the
+  command line (#1536): the relay host, port, and pinned fingerprint
+  now come from stdin as JSON, so the key material is never visible in
+  the process listing or persisted in shell history. Empty, invalid,
+  or incomplete stdin fails loud with exit 2. (#1538)
+- Relay probe-history store hardened at creation (#1537): the store
+  directory is created with no group/other access, the history file is
+  created 0600, and writes use `O_NOFOLLOW` — a symlink at the history
+  path now fails loud instead of redirecting appends into an arbitrary
+  file. (#1538)
+
 - Hourly digest sweep is now bounded per tick (#1383): the digest pass
   used to scan every pending digest window every minute, so sustained
   budget suppression piled up one pending row per owner per hour and
