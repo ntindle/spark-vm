@@ -424,12 +424,21 @@ STATE_FILE = os.environ["FAKE_BRIDGE_STATE_FILE"]
 # fetch carries ?probe=1 while the status surfacing stays a plain
 # /api/status read. Off by default: existing tests never read it.
 PATH_LOG = os.environ.get("FAKE_BRIDGE_PATH_LOG")
+# Optional request-header log (FAKE_BRIDGE_HEADER_LOG): when set, every
+# request's raw path plus its X-CUA header value is appended — so tests
+# can pin that the keepalive's mutating ?probe=1 fetch carries the CSRF
+# header the real bridge now requires (#1574). Off by default.
+HEADER_LOG = os.environ.get("FAKE_BRIDGE_HEADER_LOG")
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if PATH_LOG:
             with open(PATH_LOG, "a") as f:
                 f.write(self.path + "\n")
+        if HEADER_LOG:
+            with open(HEADER_LOG, "a") as f:
+                f.write(self.path + " | X-CUA: " +
+                        (self.headers.get("X-CUA") or "-") + "\n")
         # The real bridge 404s unknown paths; the fake must too, or a
         # production typo in the request path (e.g. /api/WRONGPATH)
         # would still get a 200 and the vocabulary tests would pass
@@ -483,13 +492,15 @@ def fake_bridge():
         with open(state_file, "w") as f:
             f.write("unknown")
         paths_file = os.path.join(t, "paths")
+        headers_file = os.path.join(t, "headers")
         server_py = os.path.join(t, "server.py")
         with open(server_py, "w") as f:
             f.write(_FAKE_BRIDGE_PY)
         proc = subprocess.Popen(
             ["python3", server_py], stdout=subprocess.PIPE, text=True,
             env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file,
-                 "FAKE_BRIDGE_PATH_LOG": paths_file})
+                 "FAKE_BRIDGE_PATH_LOG": paths_file,
+                 "FAKE_BRIDGE_HEADER_LOG": headers_file})
         try:
             port = proc.stdout.readline().strip()
             assert port.isdigit(), f"fake bridge did not print a port: {port!r}"
@@ -503,6 +514,9 @@ def fake_bridge():
             # yielded value) so the existing `url, set_state =`
             # unpacking in every other test keeps working unchanged.
             set_state.paths_file = paths_file
+            # Same treatment for the per-request X-CUA header log
+            # (the #1574 CSRF-header test below).
+            set_state.headers_file = headers_file
             yield (f"http://127.0.0.1:{port}", set_state)
         finally:
             proc.terminate()
@@ -747,6 +761,21 @@ class TestInputProbeCheck:
                 paths = [ln.strip() for ln in f if ln.strip()]
             assert paths, "fake bridge saw no requests"
             assert paths[-1] == "/api/status?probe=1", paths
+
+    def test_probe_fetch_carries_csrf_header(self, guard, fake_bridge):
+        # #1574: ?probe=1 is a state-changing GET — the bridge now
+        # requires the X-CUA header for it, so the keepalive must send
+        # the header or its probe fetch would 403 against the real
+        # bridge. Pinned behaviorally (the header the extracted guard
+        # actually sends), not as a source string.
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            self._run(guard, t, url)
+            with open(set_state.headers_file) as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+        probe = [ln for ln in lines if "probe=1" in ln]
+        assert probe, f"fake bridge saw no probe fetch: {lines}"
+        assert all(ln.endswith("| X-CUA: 1") for ln in probe), probe
 
     def test_restart_gate_off_by_default(self, guard, fake_bridge,
                                          fake_home):

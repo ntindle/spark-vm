@@ -26,6 +26,12 @@ taste against this contract. This file is the contract.
   (Browsers must preflight custom headers, and the bridge never answers
   with permissive CORS — that is the CSRF defense. `fetch()` can set
   `X-CUA`; it cannot override `Host`, which is why 18732 is allowlisted.)
+- The one state-changing `GET` — `/api/status?probe=1` (it spawns xev,
+  hops focus, and injects an XTEST key) — must carry `X-CUA: 1` too:
+  plain `GET` is a *simple request* that browsers never preflight, so
+  otherwise a hostile plain-HTTP page on the operator's own machine could
+  trigger it with `<img src="http://127.0.0.1:18731/api/status?probe=1">`.
+  Plain `/api/status` stays a headerless read-only `GET`.
 - Request bodies are capped at 1 MiB (413 beyond that).
 - The bridge never logs or returns secrets; it has no access to the
   credential store. Keep it that way.

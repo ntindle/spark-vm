@@ -8,6 +8,11 @@ shell: only the allowlisted desktop actions.
 
 Endpoints:
   GET  /api/status      -> stack + driver state
+  GET  /api/status?probe=1 -> runs a fresh input-path probe — mutating
+                                  (spawns xev, hops focus, injects an XTEST
+                                  key), so it requires the X-CUA CSRF
+                                  header like the POSTs (#1574); plain
+                                  /api/status is a read-only GET
   GET  /api/liveness    -> bridge-alive probe (no driver call; the restart
                            signal for keepalives — a slow driver can never
                            false-trip it)
@@ -50,7 +55,12 @@ PORT = 18731
 # a malicious web page would abuse. So (a) reject any request whose Host
 # header is not this bridge's own address, and (b) require a custom header
 # on all state-changing requests: browsers must preflight those, and we
-# never answer with permissive CORS.
+# never answer with permissive CORS. (#1574): GET /api/status?probe=1 is a
+# state-changing GET — it spawns xev, hops focus, and injects an XTEST
+# key — so the header is required for that query too, even though it is a
+# GET: GET is a *simple request* and is never preflighted, so a hostile
+# plain-HTTP page could fire <img src=".../api/status?probe=1"> with no
+# response reading needed.
 # 18732 is the local end of the operator SSH tunnel (127.0.0.1:18732 -> 127.0.0.1:18731); loopback-only too.
 ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731", "127.0.0.1:18732", "localhost:18732"}
 CSRF_HEADER = "X-CUA"
@@ -399,10 +409,71 @@ def call(tool, args):
     return json.loads(p.stdout.decode())
 
 
+def _malformed_window_fields(w, need_bounds):
+    """Names the driver-contract fields a window dict is missing (#1575).
+
+    Empty means the dict has the fields the bridge indexes: pid,
+    window_id (int()-coercible, for _assert_focused's EWMH comparison),
+    title, a present z_index that is numeric (it is order-compared), and
+    — when coordinates are used — a bounds dict with numeric
+    x/y/width/height. Bounds coordinates are compared with <=/<, so a
+    string in bounds is not "close enough" — it would raise TypeError
+    downstream.
+    """
+    missing = []
+    if not isinstance(w, dict):
+        return ["not-a-dict"]
+    for key in ("pid", "window_id", "title"):
+        if key not in w:
+            missing.append(key)
+    if "window_id" not in missing:
+        # _assert_focused int()-coerces window_id before comparing it
+        # against the EWMH active-window property — a present-but-
+        # non-numeric id (e.g. "0xdeadbeef") would ValueError/TypeError
+        # into a 500 on /api/type and /api/key (#1575). Coercibility, not
+        # type: a numeric string works fine downstream and must not be
+        # newly rejected.
+        try:
+            int(w["window_id"])
+        except (TypeError, ValueError):
+            missing.append("window_id")
+    # z_index is order-compared when picking the top window (sort/max) —
+    # a string, or mixed str/int across windows, would TypeError into a
+    # 500 (#1575). Missing is fine (callers default it to 0); present
+    # must be numeric.
+    if "z_index" in w and type(w["z_index"]) not in (int, float):
+        missing.append("z_index")
+    if need_bounds:
+        b = w.get("bounds")
+        if (not isinstance(b, dict)
+                or any(type(b.get(k)) not in (int, float)
+                       for k in ("x", "y", "width", "height"))):
+            missing.append("bounds")
+    return missing
+
+
+def _note_malformed_windows(wins, need_bounds):
+    """Log malformed driver windows, one line each (#1575).
+
+    Malformed windows are skipped at the filter stage — a missing key is
+    a driver-contract violation, not a 500 — but silently dropping them
+    would hide a broken driver, so each gets a loud stderr line naming
+    the missing fields (not the window content).
+    """
+    for w in wins:
+        fields = _malformed_window_fields(w, need_bounds)
+        if fields:
+            print(f"cua-bridge: WARNING: skipping malformed window from "
+                  f"driver: missing/mis-shaped fields: "
+                  f"{', '.join(fields)} (#1575)", file=sys.stderr)
+
+
 def top_window_at(x, y):
     wins = call("list_windows", {}).get("windows", [])
+    _note_malformed_windows(wins, need_bounds=True)
     hits = [w for w in wins
-            if w.get("is_on_screen") and w.get("pid")
+            if not _malformed_window_fields(w, need_bounds=True)
+            and w.get("is_on_screen") and w.get("pid")
             and w["bounds"]["x"] <= x < w["bounds"]["x"] + w["bounds"]["width"]
             and w["bounds"]["y"] <= y < w["bounds"]["y"] + w["bounds"]["height"]]
     hits.sort(key=lambda w: w.get("z_index", 0), reverse=True)
@@ -415,10 +486,16 @@ def top_window():
     # Never the desktop itself (Xfdesktop) nor the always-on-top docks
     # (Xfce4-panel) — with plain max(z_index) the panel would swallow input
     # meant for a real window (seen on the XFCE desktop).
+    # (#1575): /api/type, /api/key, and _assert_focused index w["pid"] and
+    # w["window_id"], and the click response reads w["title"] — so
+    # malformed windows are skipped at the filter stage, not 500'd.
     wins = call("list_windows", {}).get("windows", [])
-    app_wins = [w for w in wins if w.get("pid")
+    _note_malformed_windows(wins, need_bounds=False)
+    ok = [w for w in wins if not _malformed_window_fields(
+        w, need_bounds=False)]
+    app_wins = [w for w in ok if w.get("pid")
                 and w.get("app_name") not in ("Xfdesktop", "Xfce4-panel")]
-    cands = app_wins or [w for w in wins if w.get("pid")]
+    cands = app_wins or [w for w in ok if w.get("pid")]
     if not cands:
         return None
     return max(cands, key=lambda w: w.get("z_index", 0))
@@ -1008,6 +1085,20 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if self.command in ("POST", "PUT", "DELETE"):
             return self.headers.get(CSRF_HEADER) == CSRF_VALUE
+        if self.command == "GET":
+            # Issue #1574: /api/status?probe=1 is a state-changing GET
+            # (spawns xev, hops focus, injects an XTEST key) hiding behind
+            # the CSRF gate's GET blind spot — GET is a *simple request*,
+            # never preflighted, so a hostile plain-HTTP page on the
+            # operator's own machine could fire
+            # <img src="http://127.0.0.1:18731/api/status?probe=1"> with no
+            # response reading needed. Require the X-CUA header for the
+            # mutating query; plain /api/status stays a read-only GET.
+            # getattr: unit tests build the handler without .path.
+            parsed = urlparse(getattr(self, "path", "") or "")
+            if (parsed.path == "/api/status"
+                    and parse_qs(parsed.query).get("probe") == ["1"]):
+                return self.headers.get(CSRF_HEADER) == CSRF_VALUE
         return True
 
     def _check_csrf(self):

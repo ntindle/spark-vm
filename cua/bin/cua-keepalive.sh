@@ -88,8 +88,10 @@ fi
 # Input-path wedge supervision (#769): the bridge's /api/status "input"
 # field reports the XTEST keyboard-path probe verdict, but nothing ever
 # refreshed it — plain /api/status is a pure read, only ?probe=1 runs the
-# probe, and the liveness check above discards the body anyway. So the
-# keepalive schedules a fresh probe every CUA_KEEPALIVE_PROBE_INTERVAL_S
+# probe, and the liveness check above discards the body anyway. The probe
+# is a state-changing GET (spawns xev, hops focus, injects an XTEST key),
+# so it carries the bridge's CSRF header like the POSTs do (#1574).
+# The keepalive schedules a fresh probe every CUA_KEEPALIVE_PROBE_INTERVAL_S
 # (default 1800 — the probe focus-hops briefly, so not every 5-minute
 # tick), records each verdict in the probe history log, and tracks
 # consecutive wedges in a state file that cua-desktop.sh status surfaces.
@@ -140,7 +142,8 @@ input_probe_check() { # input_probe_check [state_dir] [bridge_url]
     return 0
   fi
   local body
-  if ! body=$(curl -s --max-time 15 "$bridge/api/status?probe=1" 2>/dev/null) \
+  if ! body=$(curl -s --max-time 15 -H "X-CUA: 1" \
+      "$bridge/api/status?probe=1" 2>/dev/null) \
       || [ -z "$body" ]; then
     # Bridge unreachable: the liveness block above owns that case —
     # don't double-act on a probe that never ran.
