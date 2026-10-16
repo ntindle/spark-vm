@@ -138,7 +138,13 @@ plane that has no tenant dimension.
   daemon has its own store and no auth — the plane port of this
   endpoint needs its credential model decided (which rides on
   T2 and T3). Keep the read-only contract (`Cache-Control:
-  no-store`, GET never changes state) through the port. → #1161
+  no-store`, GET never changes state) through the port. Keep the §1
+  single-use anti-replay property (#1465) through the port as well:
+  the plane auth must reject exact replays of verified
+  `(tenant_id, ts, signature)` triples inside the freshness window,
+  and must satisfy this in its own deployment shape — a
+  multi-process or multi-instance plane must share one ledger (or
+  equivalent); per-process ledgers reopen the window per worker. → #1161
 - **T6 — The 404-vs-403 discipline is moot until T3 lands**
   (advisory, no issue). In a single-owner namespace the
   enumeration discipline costs nothing and protects nothing;

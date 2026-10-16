@@ -56,7 +56,10 @@ of status inputs; this endpoint is the *reader*.
     verified request. Honest limitation: the ledger is in-memory per
     process, so a restart clears it — a triple captured just before a
     restart is replayable again for the remainder of its own window (a
-    ≤300 s status disclosure, GET-only, never a state change).
+    ≤300 s status disclosure, GET-only, never a state change). The
+    production plane-side auth (T1/T2/T5) must carry this single-use
+    property into its own deployment shape; see
+    `PLANE_TENANT_IDENTITY_GAP_ANALYSIS.md` T5.
 - **Read-only contract:** GET never changes state. A scanner fetching the
   URL (the mail-scanner threat already applied to the magic-link flow)
   learns nothing it is not authenticated to see and changes nothing.
