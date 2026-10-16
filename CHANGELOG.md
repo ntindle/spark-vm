@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   every file it places came from (source commit and release version), and
   the self-update status check warns when an installed copy has drifted
   from the repo — divergent copies silently missing fixes are loud
-  instead of silent. (#TBD)
+  instead of silent. (#1547)
 - Version-pinned install (2026-10-15): the box installer now installs a
   tagged release instead of the main tip — the latest release by default,
   or `install.sh --version vX.Y.Z` for a specific one. The checkout's
