@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   open-sourced its SPACE sandbox platform under Apache 2.0; plus Vercel
   Connect gaining Secure Compute support, a technical write-up and
   Linux-mainline fix for the Vercel KVM zero-day (CVE still pending), and
-  the Docker Sandboxes v0.48.0 release notes. (#TBD)
+  the Docker Sandboxes v0.48.0 release notes. (#1581)
 - Push-lane plane-port build path (2026-10-16): the gap analysis the
   hosted push lane's deployment was missing — the in-repo sweep, sender
   loop, and retention GC are synchronous Python the plane worker cannot
