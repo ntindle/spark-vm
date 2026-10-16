@@ -47,6 +47,7 @@ STEP_FNS = [
     "step_cua",
     "run_bootstrap",
     "run_agent",
+    "parse_args",
     "main",
 ]
 
@@ -412,6 +413,29 @@ def test_bootstrap_noop_only_reexecs(tmp_path):
     assert "--agent-phase-internal" in mutates[0]
     assert "skip: user ntindle exists" in proc.stdout
     assert "passwordless sudo for ntindle" in proc.stdout
+
+
+def test_agent_phase_ignores_unreadable_delivery_checkout(tmp_path):
+    # Option B: the invoker's checkout lives under /root (mode 700) — the
+    # agent phase works only in the agent-owned checkout, so main() must
+    # not gate the re-exec on the delivery checkout's readability.
+    harness, call_log, git_log, agent_home, agent_repo, sudoers_d = _agent_harness(
+        tmp_path, fresh=False
+    )
+    code = source_preamble() + harness
+    code += textwrap.dedent(
+        f"""\
+        export HOME="{agent_home}" SUDOERS_DIR="{sudoers_d}" AGENT_USER=ntindle DRY_RUN=0
+        export REPO_DIR="/nonexistent/invoker-checkout" AGENT_REPO="{agent_repo}"
+        main --agent-phase-internal
+        echo "---CALLS---"; cat "{call_log}"
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    calls = proc.stdout.split("---CALLS---")[1]
+    mutates = [line for line in calls.splitlines() if line.startswith("MUTATE")]
+    assert len(mutates) == 1 and "cua-desktop.sh start" in mutates[0], mutates
 
 
 def test_readme_try_it_calls_installer_not_inline():

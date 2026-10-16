@@ -74,22 +74,26 @@ exec_if_live() {
     "$@"
 }
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --agent-user) AGENT_USER="${2:?--agent-user needs a name}"; shift 2 ;;
-        --agent-user=*) AGENT_USER="${1#*=}"; shift ;;
-        --dry-run) DRY_RUN=1; shift ;;
-        --force) FORCE=1; shift ;;
-        # Internal re-exec flag (bootstrap -> agent phase). Safe to pass
-        # directly once the bootstrap phase already holds.
-        --agent-phase-internal) AGENT_PHASE=1; shift ;;
-        --help|-h) usage; exit 0 ;;
-        *) die "unknown argument: $1 (try --help)" ;;
-    esac
-done
+# Argument parsing lives in main(), not at top level, so sourcing this
+# file (as the test suite does) never shifts a sourcer's positional params.
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --agent-user) AGENT_USER="${2:?--agent-user needs a name}"; shift 2 ;;
+            --agent-user=*) AGENT_USER="${1#*=}"; shift ;;
+            --dry-run) DRY_RUN=1; shift ;;
+            --force) FORCE=1; shift ;;
+            # Internal re-exec flag (bootstrap -> agent phase). Safe to pass
+            # directly once the bootstrap phase already holds.
+            --agent-phase-internal) AGENT_PHASE=1; shift ;;
+            --help|-h) usage; exit 0 ;;
+            *) die "unknown argument: $1 (try --help)" ;;
+        esac
+    done
 
-[[ "$AGENT_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --agent-user name: $AGENT_USER"
-[ "$AGENT_USER" != root ] || die "--agent-user root defeats the user-isolation design — pick a non-root agent account"
+    [[ "$AGENT_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --agent-user name: $AGENT_USER"
+    [ "$AGENT_USER" != root ] || die "--agent-user root defeats the user-isolation design — pick a non-root agent account"
+}
 
 # ---------------------------------------------------------------------------
 # Bootstrap phase (root): agent user, sudoers drop, SSH key copy, prereqs.
@@ -450,7 +454,11 @@ run_agent() {
 }
 
 main() {
-    if [ ! -d "$REPO_DIR/.git" ]; then
+    parse_args "$@"
+    # The agent phase works only in the agent-owned checkout (AGENT_REPO),
+    # so the delivery checkout's readability is irrelevant to it — notably
+    # Option B, where the invoker's checkout lives under /root (mode 700).
+    if [ "$AGENT_PHASE" != 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
         die "cannot find the repo checkout at $REPO_DIR — clone it first, then run $SCRIPT_ABS from the checkout"
     fi
     if [ "$AGENT_PHASE" = 1 ]; then
