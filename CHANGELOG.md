@@ -183,7 +183,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   bridge no longer 500s when the desktop driver returns a window missing
   its identity or geometry fields — malformed entries are skipped with a
   loud log line instead, so a glitching driver degrades to "no window
-  here" instead of erroring. (#1575)
+  here" instead of erroring. (#1575) (#1578)
 
 - Relay-liveness docs truth repair (2026-10-16): the design doc's R3
   interim-honesty clause is retired and the R3/R4 handoff pin's status
@@ -269,7 +269,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   hops desktop focus, and injects a keystroke. The probe request now
   carries the same custom header the write endpoints require, which
   browsers never send unsolicited; the plain health read is unchanged.
-  (#1574)
+  (#1574) (#1578)
 
 - Installer provenance manifest trust gaps closed (2026-10-16): the
   installer and the status check now share one manifest-path lookup
