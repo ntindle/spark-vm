@@ -72,9 +72,10 @@ now in the detector's §4 predicate.
   (F-RL34-5).
 - `docs/RELAY_LIVENESS_REMAINING_BUILDS_GAP_ANALYSIS.md` (2026-10-13,
   pinned to `db71df38`) — the R2 decomposition (R2a/R2b) and the
-  D-RL2-1–D-RL2-7 decisions. This doc **supersedes it for R2's state**
-  (both halves shipped); the decomposition itself stands and is not
-  re-derived here.
+  D-RL2-1–D-RL2-7 decisions. This doc **supersedes it for state**
+  (R2a/R2b shipped at pin time; R3 and R4 shipped 2026-10-16 — see the
+  2026-10-16 addenda); the decomposition and decisions stand and are
+  not re-derived here.
 - `docs/TENANT_STATUS_ENDPOINT.md` §2/§4/§7 — the tenant-layer
   contract R3 wires into (rule 6, live-entry AND-combine, #1463
   nested-suspension pins). This doc carries three R3 build constraints
@@ -92,7 +93,7 @@ now in the detector's §4 predicate.
 | R2b — `relay_path_state` surface + cadence (#1415) | Unbuilt | **Shipped** — `hosted/relay_path_state.py` (726 lines) + `hosted/test_relay_path_state.py` (867); PR #1535 squash-merged `c2de261a`; issue #1415 closed |
 | R2b hardening (#1536, #1537) | — | **Shipped** — PR #1538 squash-merged `a0d1f07`: probe bundles via stdin (argv exposure gone), probe-history store 0o700/0o600 + O_NOFOLLOW creation (#1537); issues closed |
 | R3 — tenant-status wiring (#1416) | Unbuilt, ship-gated on R2b | **Shipped 2026-10-16** — `hosted/relay_tenant_wiring.py` + `hosted/test_relay_tenant_wiring.py`; PR #1562 squash-merged `e3f8c6d1`; issue #1416 closed (see the 2026-10-16 addendum) |
-| R4 — detector conjunct (#1417) | Unbuilt, ship-gated on R2b | **Ship-gate satisfied** — open, preconditions verified current |
+| R4 — detector conjunct (#1417) | Unbuilt, ship-gated on R2b | **Shipped 2026-10-16** — the §4 predicate carries the relay conjunct (`relay_path_state(S) == ok`); `down` readings route to `connection-unreachable` via transition rule 6 (never `stuck`); `degraded` reads as insufficient observability; §8 Q6's "relay conjunct dropped outright" interim retired; PR #1582 squash-merged `5d33e99f`; issue #1417 closed (see the 2026-10-16 R4 addendum) |
 
 ## 2. The R3/R4 consumer surface (shipped, verified at `164d0f7`)
 
@@ -203,6 +204,9 @@ a p3 (filed this turn — §4).
   acceptance already carries "Q6 interim text updated, not left
   stale", so no new issue. R4 fixes the clause when it retires the
   interim.
+  **Retired 2026-10-16** — R4 (PR #1582) retired the §8 Q6 interim; the
+  "R1–R4 unimplemented" clause is gone from the tree, so this finding
+  is consumed (see the 2026-10-16 R4 addendum).
 
 ## 4. What this turn changed
 

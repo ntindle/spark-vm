@@ -231,7 +231,8 @@ remains unreachable until all four ship.
   issue #1416 closed.
 - **R4 — stuck-detector conjunct:** §6's predicate change; closed-world
   on instrument darkness; S2-calibration note that the soak's confusion
-  classes gain a "suspension while measuring" row.
+  classes gain a "suspension while measuring" row. **Shipped 2026-10-16**
+  — PR #1582 squash-merged `5d33e99f`; issue #1417 closed.
 
 ## 9. Open questions (→ backlog)
 

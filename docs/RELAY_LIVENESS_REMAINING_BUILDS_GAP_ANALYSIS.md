@@ -1,5 +1,13 @@
 # Relay-liveness remaining-builds gap analysis (R2/R3/R4)
 
+**SUPERSEDED 2026-10-16 (docs truth repair):** the state claims below
+were verified at the 2026-10-13 pin (`db71df38`) and are now stale —
+R2a shipped (PR #1512, issue #1414 closed), R2b shipped (PR #1535,
+issue #1415 closed), R3 shipped (PR #1562, issue #1416 closed), and
+R4 shipped (PR #1582, issue #1417 closed). The R2 decomposition and
+decisions D-RL2-1–D-RL2-7 stand as written; current lane state lives
+in `docs/RELAY_LIVENESS_R3R4_HANDOFF_2026-10-15.md`.
+
 Vision-vs-state of the #486 relay-liveness lane, pinned to main `db71df38`
 (2026-10-13). The lane's design (`docs/RELAY_LIVENESS_DESIGN.md`, shipped as
 PR #485) named four build slices (R1–R4). R1 shipped in-repo; R2/R3/R4 have
