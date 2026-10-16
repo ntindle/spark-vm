@@ -136,7 +136,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   issue that closed with only the gate channel shipped — the unowned
   producer now has its own tracking issue — and now records the ack's
   operator-provenance stamps that the journal has carried since the
-  provenance fix. (#TBD)
+  provenance fix. (#1544)
 
 - The waitlist site README's suite-size claim for the lifecycle-job tests
   said 21 and the suite holds 34 — already wrong the day it was written,
