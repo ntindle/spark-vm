@@ -151,6 +151,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   now fails loudly if the copies ever diverge — a stale or tampered
   copy can no longer silently weaken the job monitor's forgery
   defenses. (#1556)
+- Relay-liveness tenant wiring (2026-10-16): the relay probe readings
+  are now wired into tenant status — when the relay/cert path to the
+  box carrying the tenant's `live` arc fails, the tenant moves to
+  `connection-unreachable` naming which leg failed (`relay` / `cert` /
+  `box-leg`), and returns automatically when the path recovers.
+  Suspect readings never trigger the move, and an outage found while
+  the box is already paused for another reason only flips the
+  reachability signal instead of stacking a second suspension.
+  (#1416) (#TBD)
 
 ### Fixed
 
