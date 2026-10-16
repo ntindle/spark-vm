@@ -592,6 +592,10 @@ def relay_path_state(vm_id, *, now=None, history=None, journal_timeout_s=None):
     path (tests); ``journal_timeout_s`` bounds the journal-lock wait
     (a wedged lock raises ``JournalLockError`` — a broken instrument,
     never darkness; plane-facing callers pass a request-scoped budget).
+    The probe-history read takes the shared history lock with the
+    module-default bounded wait (#1540): a wedged history holder
+    raises ``HistoryLockError`` here too — also a broken instrument,
+    never advisory absence.
 
     Flapping (the last two liveness-bearing outcomes disagree) reads
     ``degraded`` before the §5 mapping runs.
@@ -875,7 +879,7 @@ if __name__ == "__main__":
     elif args.query:
         try:
             reading = relay_path_state(args.query)
-        except relay_liveness.JournalLockError as exc:
+        except (relay_liveness.JournalLockError, HistoryLockError) as exc:
             print("error: %s" % exc, file=sys.stderr)
             raise SystemExit(1)
         print(json.dumps(reading, indent=2))

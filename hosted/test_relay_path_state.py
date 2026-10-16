@@ -1022,3 +1022,16 @@ def test_history_write_waits_for_exclusive_holder(history):
         assert elapsed >= 1.0, "write did not wait for the lock holder"
     finally:
         holder.join(15)
+
+
+def test_cli_query_history_wedge_exits_1(history, journal, monkeypatch, capsys):
+    # _run_cli re-executes the module via runpy, so wedge at the
+    # shared fcntl layer (the first flock in a --query is the history
+    # shared lock, taken by latest_probe before the journal read).
+    import fcntl
+    def boom(fd, op):
+        raise OSError("wedged")
+    monkeypatch.setattr(fcntl, "flock", boom)
+    code, err = _run_cli(["--query", VM], monkeypatch, capsys)
+    assert code == 1
+    assert "probe history" in err.err
