@@ -47,6 +47,19 @@ python3 scripts/self_update.py status --pins /path/to/pins.conf
 No install, no timer, no writes — safe to run on any box, including one that
 was never provisioned by spark-vm (missing tools just report `no`).
 
+### Provenance drift tracking (installer-placed copies)
+
+The box installer stamps every file copy it places (the muse-job CLI and
+the cred-ui unit) into a provenance manifest recording the source commit,
+release version, and sha256. `status` reads that manifest and reports each
+placed copy as in-sync or drifted — drifted covers a missing copy, a copy
+modified in place, a copy re-placed without re-stamping, and a checkout
+whose source advanced past the stamped commit. The remedy is always
+re-running the installer (re-stamping backfills installs that predate the
+manifest). Boxes with no manifest report `provenance: unknown` with a
+pointer to that backfill path. The manifest location can be overridden
+with the `PROVENANCE_MANIFEST_FILE` environment variable.
+
 ## Behavior requirements
 
 (These describe the finished system. Items marked S2/S3 arrive in later
