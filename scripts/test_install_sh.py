@@ -835,7 +835,11 @@ def _provenance_harness(tmp_path):
     (agent_repo / "muse-job" / "bin").mkdir(parents=True)
     (agent_repo / "cred-ui").mkdir(parents=True)
     (agent_repo / "VERSION").write_text("0.9.1\n")
-    manifest = tmp_path / "provenance-manifest.json"
+    # The manifest nests under a not-yet-existing dir: since #1551 the
+    # writer only tightens a parent it created (or the default state dir),
+    # so a pre-existing override parent is a refuse-loud case — the
+    # harness must mirror a supported layout.
+    manifest = tmp_path / "state" / "provenance-manifest.json"
     prefix = textwrap.dedent(
         f"""\
         export HOME="{agent_home}" AGENT_REPO="{agent_repo}" DRY_RUN=0
@@ -979,30 +983,147 @@ def test_stamp_provenance_pins_parent_dir_0700(tmp_path):
     assert mode == 0o700, f"manifest parent mode {oct(mode)}, want 0o700"
 
 
-def test_stamp_provenance_tightens_preexisting_manifest(tmp_path):
-    # #1548: a manifest created pre-fix (0644 under a default umask) gets its
-    # group/other bits cleared on the next stamp — and the new line is
-    # appended, not lost.
+def test_stamp_provenance_tightens_preexisting_default_dir(tmp_path):
+    # #1551: a pre-existing *default* state dir (0755, left by a pre-#1548
+    # installer) still gets tightened on the next stamp — and the new line
+    # is appended, not lost. Pre-existing non-default parents are refused
+    # (see test_stamp_provenance_refuses_preexisting_nondefault_parent).
     prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"installed": "legacy", "stamped_at": 0}\n')
-    os.chmod(manifest, 0o644)
-    os.chmod(manifest.parent, 0o755)
+    default_manifest = (
+        agent_home / ".local" / "state" / "spark-vm" / "provenance-manifest.json"
+    )
+    default_manifest.parent.mkdir(parents=True)
+    default_manifest.write_text('{"installed": "legacy", "stamped_at": 0}\n')
+    os.chmod(default_manifest, 0o644)
+    os.chmod(default_manifest.parent, 0o755)
     placed = tmp_path / "placed-bin"
     placed.write_bytes(b"v1\n")
     code = source_preamble() + prefix
-    code += f'stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK'
+    code += textwrap.dedent(
+        f"""\
+        export PROVENANCE_MANIFEST="{default_manifest}"
+        stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK
+        """
+    )
     proc = run_bash(code)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert proc.stdout.strip().endswith("OK")
-    mode = stat.S_IMODE(manifest.stat().st_mode)
+    mode = stat.S_IMODE(default_manifest.stat().st_mode)
     assert mode == 0o600, f"pre-existing manifest mode {oct(mode)}, want 0o600"
+    dmode = stat.S_IMODE(default_manifest.parent.stat().st_mode)
+    assert dmode == 0o700, f"default parent mode {oct(dmode)}, want 0o700"
     import json
 
-    lines = [line for line in manifest.read_text().splitlines() if line.startswith("{")]
+    lines = [
+        line for line in default_manifest.read_text().splitlines()
+        if line.startswith("{")
+    ]
     assert len(lines) == 2, lines
     assert json.loads(lines[0])["installed"] == "legacy"
     assert json.loads(lines[1])["installed"] == str(placed)
+
+
+def test_stamp_provenance_refuses_preexisting_nondefault_parent(tmp_path):
+    # #1551: PROVENANCE_MANIFEST pointing under a pre-existing non-default
+    # dir (the /tmp/x.json case) must die loud instead of chmod'ing that
+    # dir — the dir stays untouched and nothing is written.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    predir = tmp_path / "preexisting"
+    predir.mkdir()
+    os.chmod(predir, 0o755)
+    exotic = predir / "provenance-manifest.json"
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        export PROVENANCE_MANIFEST="{exotic}"
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on pre-existing non-default parent"; exit 1
+        fi
+        [ ! -e "{exotic}" ] || {{ echo "manifest written despite refusal"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    assert stat.S_IMODE(predir.stat().st_mode) == 0o755
+
+
+def test_stamp_provenance_honors_manifest_file_env_name(tmp_path):
+    # #1550: the writer shares the reader's lookup chain
+    # (PROVENANCE_MANIFEST_FILE > PROVENANCE_MANIFEST) — setting the
+    # historic reader-side name must retarget the writer too.
+    prefix, agent_home, agent_repo, _manifest = _provenance_harness(tmp_path)
+    file_manifest = tmp_path / "file-env" / "provenance-manifest.json"
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        export PROVENANCE_MANIFEST_FILE="{file_manifest}"
+        stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    assert file_manifest.is_file(), "writer did not honor PROVENANCE_MANIFEST_FILE"
+
+
+def test_stamp_provenance_manifest_file_wins_when_both_set(tmp_path):
+    # #1550: both names set to different values converge to
+    # PROVENANCE_MANIFEST_FILE on the writer, mirroring the reader —
+    # the PROVENANCE_MANIFEST path must stay untouched.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness(tmp_path)
+    file_manifest = tmp_path / "file-env" / "provenance-manifest.json"
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        export PROVENANCE_MANIFEST_FILE="{file_manifest}"
+        stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    assert file_manifest.is_file()
+    assert not manifest.exists(), "writer stamped the PROVENANCE_MANIFEST path too"
+
+
+def test_stamp_provenance_refuses_manifest_owned_by_another_user(tmp_path):
+    # #1551 (Arch review B2): a manifest file planted by another local
+    # user must refuse loud — silently appending would convert the
+    # first-stamp refusal into a quiet downgrade of the parent pin.
+    # (Vacuity: without the ownership check the stamp appends into the
+    # planted file.) Needs root to chown the plant.
+    if os.geteuid() != 0:
+        pytest.skip("needs root to chown the planted manifest")
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"installed": "planted", "stamped_at": 0}\n')
+    os.chmod(manifest, 0o644)
+    os.chown(manifest, 65534, 65534)  # nobody
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on other-owned manifest"; exit 1
+        fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    # The planted file is untouched: no append, no re-permission.
+    assert manifest.read_text() == '{"installed": "planted", "stamped_at": 0}\n'
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o644
 
 
 def test_stamp_provenance_refuses_relative_manifest_path(tmp_path):

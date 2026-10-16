@@ -100,10 +100,21 @@ _EXPECTED_PLAYWRIGHT_BROWSERS_FILE = os.environ.get(
 # (issue #6). No manifest, or no valid line in it, yields "unknown" —
 # text mode shows an informational line naming the backfill path
 # (pre-#1528 installs publish none); it is never an error.
-_PROVENANCE_MANIFEST_FILE = os.environ.get(
-    "PROVENANCE_MANIFEST_FILE",
-    os.path.join(os.path.expanduser("~"), ".local", "state", "spark-vm",
-                 "provenance-manifest.json"))
+# Issue #1550: the writer honors PROVENANCE_MANIFEST while this reader
+# honored only PROVENANCE_MANIFEST_FILE, so an override set for one side
+# was silently ignored by the other. The two names are now one contract:
+# the identical lookup chain on both sides — PROVENANCE_MANIFEST_FILE
+# first, then PROVENANCE_MANIFEST (the installer's stamp_provenance uses
+# the same chain) — so an override set under either name retargets the
+# writer and the reader together, and both-set converges to the FILE name.
+# Empty values are treated as unset, matching the installer's
+# ${VAR:-default} expansion — otherwise an empty override on one side
+# would silently desync the two sides again.
+_PROVENANCE_MANIFEST_FILE = (
+    os.environ.get("PROVENANCE_MANIFEST_FILE")
+    or os.environ.get("PROVENANCE_MANIFEST")
+    or os.path.join(os.path.expanduser("~"), ".local", "state", "spark-vm",
+                     "provenance-manifest.json"))
 
 # "installed pins differ from checkout — run `toolset-update.sh install`"
 # is the prescribed wording (issue #1313): the mismatch is actionable only

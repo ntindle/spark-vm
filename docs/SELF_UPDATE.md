@@ -60,7 +60,22 @@ shared box cannot read or re-stamp it and fool the drift check. The remedy is al
 re-running the installer (re-stamping backfills installs that predate the
 manifest). Boxes with no manifest report `provenance: unknown` with a
 pointer to that backfill path. The manifest location can be overridden
-with the `PROVENANCE_MANIFEST_FILE` environment variable.
+with the `PROVENANCE_MANIFEST_FILE` or `PROVENANCE_MANIFEST` environment
+variables — the installer (`stamp_provenance`) and this status check use
+the identical lookup chain (`PROVENANCE_MANIFEST_FILE` first, then
+`PROVENANCE_MANIFEST`, then the default), so an override set under
+either name retargets both sides together and both-set converges to the
+`_FILE` name; an empty value counts as unset. For safety the installer's
+parent-directory pin only tightens a directory this run created, or the
+default state directory (a pre-existing install's 0755 directory is
+upgraded on the next stamp) — a first stamp to an override under a
+pre-existing directory elsewhere fails loudly instead of
+re-permissioning someone else's tree. Re-stamping an existing manifest
+under a non-default location appends without touching the parent, but
+only when that manifest is owned by the invoking user — a file planted
+by another local user fails loudly instead of being silently appended
+to. The manifest file itself stays pinned 0600 on every stamp, and the
+reader's never-raises contract is unchanged.
 
 ## Behavior requirements
 

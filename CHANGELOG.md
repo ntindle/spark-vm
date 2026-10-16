@@ -235,6 +235,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Installer provenance manifest trust gaps closed (2026-10-16): the
+  installer and the status check now share one manifest-path lookup
+  (`PROVENANCE_MANIFEST_FILE`, then `PROVENANCE_MANIFEST`) — previously
+  they honored different variable names, so an override set for one side
+  was silently ignored by the other — and the installer tightens the
+  manifest's parent directory only when this run created it or when it
+  is the default state directory: a first stamp to an override under a
+  pre-existing directory elsewhere fails loudly instead of
+  re-permissioning someone else's tree, and re-stamping refuses a
+  manifest file owned by another local user. (#1564)
 - Installer provenance manifest hardened (2026-10-16): the manifest the
   box installer stamps is now created owner-only (0600) with its
   directory pinned to 0700, and a symlink at the manifest path fails
