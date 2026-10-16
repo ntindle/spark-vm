@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `degraded` reading reads as insufficient observability, never
   assumed-ok; the calibration soak gains a "suspension while measuring"
   confusion class so rule-6 relay suspensions don't pollute detector
-  outcomes. (#1417) (#TBD)
+  outcomes. (#1417) (#1582)
 - Competitor watch, 2026-10-16: two new entries in the
   sandbox-competitor corpus — Vercel Drives is now generally available for
   Vercel Sandbox (with drive forking for parallel workers), and Perplexity

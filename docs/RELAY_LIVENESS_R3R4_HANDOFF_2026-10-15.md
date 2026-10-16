@@ -6,7 +6,7 @@ R4 landed the same morning as R3's wiring verification: the §4
 predicate of `docs/STUCK_DETECTOR_DESIGN.md` carries the relay conjunct
 (`relay_path_state(S) == ok`), the §8 Q6 "relay conjunct dropped
 outright" interim is retired, and the calibration soak's confusion
-classes gain the "suspension while measuring" row — PR #TBD, issue
+classes gain the "suspension while measuring" row — PR #1582, issue
 #1417 **closed**. The relay row of the detector's S3 gate is closed
 (instrument shipped R2b, wired R3, conjunct observable); H4 provider
 state, H13 suspend contract, and G1 terminal records remain the S3
@@ -262,7 +262,7 @@ a p3 (filed this turn — §4).
 | Slice | Issue | State | This turn |
 |---|---|---|---|
 | R3 — tenant-status wiring (rule 6, live-entry AND-combine, latch) + anchor selection + nested-suspension emit rule + recovery protocol | #1416 | **Shipped + closed** (PR #1562, `e3f8c6d1`; see the 2026-10-16 addendum) |
-| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | **Shipped + closed** (PR #TBD; see the 2026-10-16 addendum) | Conjunct added to the §4 predicate; Q6 interim retired; S2 "suspension while measuring" row added — docs-only slice |
+| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | **Shipped + closed** (PR #1582; see the 2026-10-16 addendum) | Conjunct added to the §4 predicate; Q6 interim retired; S2 "suspension while measuring" row added — docs-only slice |
 | Probe-history cross-process lock | #1540 | **Shipped + closed** — PR #1546 merged `f63eb8cb`; see the 2026-10-16 addendum |
 
 Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are
