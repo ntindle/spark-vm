@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Relay path-state producer (2026-10-15): the relay-liveness lane's
+  `relay_path_state` contract is now pinned in code, not just the design
+  doc — each box's probe outcomes map to `ok` / `degraded` / `down` with
+  `relay` / `cert` / `box-leg` sub-codes, flapping probes read
+  `degraded` instead of firing a suspension, and a 5-minute default
+  cadence driver probes post-`live` boxes while standing down on
+  suspended or destroyed provider states. Includes an operator query
+  surface and 30 tests. (#TBD)
 - Packaging gap analysis (2026-10-15): pinned the gap between spark-vm's
   release machinery and an actual install story — releases are cut and tagged,
   but there is no published artifact, no installer script, and no
