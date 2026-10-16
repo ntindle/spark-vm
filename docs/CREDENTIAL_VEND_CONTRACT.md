@@ -112,6 +112,48 @@ Write/replace is per-box and **atomic**: the posted array becomes the
 box's entire manifest — names absent from the array have their values
 deleted. Validation failures are `400`:
 
+**Atomicity unit (issue #1406):** "atomic" means one D1 batch. The whole
+PUT — every name in the posted array and the deletes for names absent
+from the posted array, across both `vend_manifest` (metadata) and
+`vend_values` (ciphertext) — executes as a single D1 batch; any
+statement failure rolls the whole write back (D1 batches are
+all-or-nothing), and the response is `400` (validation) or `500`
+(infra) — a partial manifest is never observable. The plane MUST NOT
+apply the write statement-by-statement: without the batch, a mid-write
+failure would leave the states the contract forbids — metadata for a
+name with no value (mint `500`s, or refuses a name the manifest claims)
+or a value with no metadata (ciphertext the manifest cannot see —
+invisible to the owner, unrevocable through the API). Precedent: the
+design-ahead's D1-batch-portable atomic statements (#990). The
+`vend_audit` row for the manifest write (§2.5) is a statement in the
+same batch: the audit trail for a manifest write commits exactly when
+the write commits — never a phantom audit row for a rolled-back write,
+never a committed write with no audit row.
+
+**Tombstone-clear freshness (issue #1406):** `revoked_at` is "cleared
+only by re-PUT with a fresh value" (§2.4) — "fresh" means the new
+plaintext differs from the stored value. The plane holds only ciphertext
+in `vend_values`, so the comparison is a decrypt-compare: the plane
+decrypts `vend_values.ciphertext` with the data key and compares the
+resulting plaintext to the new plaintext in constant time, in worker
+memory, before the batch is constructed (the compare's result determines
+whether the batch's `vend_manifest` statement clears `revoked_at`). An
+identical plaintext leaves `revoked_at` set — the revocation stands; the
+re-PUT is otherwise processed normally. Re-posting the revoked value
+does not silently un-revoke it.
+
+**Retention invariant:** DELETE (revoke) MUST NOT delete the
+`vend_values` row — the ciphertext survives revocation precisely so a
+later re-PUT can decrypt-compare against it. A tombstoned name with no
+stored ciphertext is an invariant violation: the PUT MUST fail `500`,
+never treat the missing value as "fresh". (A name with neither manifest
+row nor value row is a new secret — no compare, no tombstone.)
+
+If the stored ciphertext cannot be decrypted (corrupt row, unknown
+`alg`, data key unavailable), the PUT MUST fail `500` — an
+undecryptable stored value is never treated as "different". (During the
+key-rotation window both keys decrypt per §3.)
+
 - `name`: 1–64 chars, `[A-Za-z0-9._-]` (the `aid` charset precedent in
   `CONTROL_PLANE_API_REFERENCE.md`); names appear in URL paths and D1
   keys, so anything else is rejected.
@@ -395,7 +437,9 @@ this answer the design is a trust relocation, not a trust improvement:
   excluded from HTTP access logging; error paths (4xx/5xx bodies,
   exception traces, edge logs) must never echo a secret value or a full
   mint response. The only place a plaintext value may exist on the plane
-  is worker memory during response assembly.
+  is worker memory — during mint/refresh response assembly, or during the
+  §2.1a tombstone-clear decrypt-compare (which decrypts the *stored*
+  value).
 - **Key-rotation bound.** The old data key is destroyed ≤ 24 h after a
   rotation completes; during the window both keys decrypt (dual-key
   read). Fresh random nonce per encryption operation, including
@@ -579,6 +623,14 @@ is already explicit in the H11 audit (§3).
     encryption primitive is the vendored AES-128-GCM from
     `hosted/push_crypto.py`, not an AES-256 the stdlib-only worker
     cannot implement (§2.4, §3). Issue #1403.
+13. A manifest write never leaves a partial manifest: the write is one
+    D1 batch over `vend_manifest` and `vend_values`, and any statement
+    failure rolls the whole write back — no metadata-without-value and
+    no value-without-metadata state is ever observable (§2.1a). A re-PUT
+    carrying a plaintext-identical value does not clear `revoked_at` —
+    only a fresh (plaintext-different) value, established by
+    decrypt-compare with the data key, lifts the tombstone. Issue
+    #1406.
 
 ## 11. What's next
 

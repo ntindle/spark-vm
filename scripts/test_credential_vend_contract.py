@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Pin: docs/CREDENTIAL_VEND_CONTRACT.md keeps its three security pins.
+"""Pin: docs/CREDENTIAL_VEND_CONTRACT.md keeps its four security pins.
 
 The vend contract is the design the #890 plane vend endpoint and the #891
-box-side fetch path implement, and three of its security decisions arrived
+box-side fetch path implement, and four of its security decisions arrived
 as filed findings from the 2026-10-13 arch deep-read:
 
 (a) #1401 — the mint endpoint's auth surface must be the plane's
@@ -10,13 +10,16 @@ as filed findings from the 2026-10-13 arch deep-read:
 (b) #1402 — secret issuance requires a `current` box token; a `grace`
     (post-rotation) token mints nothing (grace is for continuity traffic);
 (c) #1403 — `vend_values.alg` is exactly `aes-128-gcm`, the algorithm the
-    stdlib-only worker can actually implement — never AES-256.
+    stdlib-only worker can actually implement — never AES-256;
+(d) #1406 — a manifest write is one D1 batch over `vend_manifest` and
+    `vend_values` (never statement-by-statement), and the tombstone-clear
+    rule's "fresh value" is a decrypt-compare with the data key.
 
 A contract edit that quietly reintroduces a 403, lets a grace token mint,
-or re-pins AES-256 would hand the #890 builder an unaudited security
-downgrade — so these tests pin the doc text. Needle-based on the doc;
-multi-word needles use \\s+ so doc line-wraps don't false-fail.
-Stdlib-only. Run from the repo root:
+re-pins AES-256, or drops the atomicity unit would hand the #890 builder
+an unaudited security downgrade — so these tests pin the doc text.
+Needle-based on the doc; multi-word needles use \\s+ so doc line-wraps
+don't false-fail. Stdlib-only. Run from the repo root:
 `python3 -m pytest scripts/test_credential_vend_contract.py`.
 """
 
@@ -116,10 +119,62 @@ def _acceptance_item(accept: str, num: str) -> str:
     return body[: nxt.start()] if nxt else body
 
 
-def test_acceptance_covers_all_three_pins():
+def test_manifest_write_atomicity_is_one_d1_batch():
+    """#1406: §2.1a pins the atomicity unit — one D1 batch over both tables,
+    never statement-by-statement."""
+    text = _doc()
+    assert "(issue #1406)" in text
+    write = _section(text, "### 2.1a Manifest write schema and validation")
+    assert _needle("one", "D1", "batch").search(write)
+    assert _needle("vend_manifest").search(write) and _needle("vend_values").search(write)
+    assert _needle("MUST", "NOT").search(write) and "statement-by-statement" in write
+    assert _needle("any", "statement", "failure", "rolls", "the", "whole",
+                   "write", "back").search(write)
+    assert _needle("partial", "manifest", "is", "never", "observable").search(write)
+    assert "#990" in write  # D1-batch-portable atomic statements precedent
+    # B2 (arch review): the deletes for absent names are inside the batch too.
+    assert _needle("deletes", "for", "names", "absent").search(write)
+    # B3 (arch review): the vend_audit manifest_write row commits in the batch.
+    assert _needle("`vend_audit`", "row", "for", "the", "manifest", "write").search(write)
+    assert _needle("never", "a", "phantom", "audit", "row").search(write)
+
+
+def test_tombstone_clear_needs_decrypt_compare():
+    """#1406: the tombstone-clear "fresh value" rule names the decrypt-compare
+    mechanism — decrypt vend_values.ciphertext with the data key, constant-time
+    compare, identical plaintext leaves revoked_at set."""
+    text = _doc()
+    write = _section(text, "### 2.1a Manifest write schema and validation")
+    assert _needle("decrypts", "`vend_values.ciphertext`", "with", "the", "data",
+                   "key").search(write)
+    assert "constant time" in write
+    assert _needle("identical", "plaintext", "leaves").search(write)
+    assert "`revoked_at`" in write
+    assert _needle("does", "not", "silently").search(write) and "un-revoke" in write
+    # B1 (arch review): revoke retains the vend_values row; a tombstone with
+    # no stored ciphertext is a 500, never "fresh".
+    assert _needle("MUST", "NOT", "delete", "the").search(write) and "`vend_values`" in write
+    assert _needle("never", "treat", "the", "missing", "value", "as").search(write)
+    # B4 (arch review): undecryptable stored value fails 500, never "different".
+    assert _needle("never", "treated", "as").search(write) and '"different"' in write
+
+
+def test_acceptance_covers_atomicity_pin():
+    """§10 acceptance item 13 names the atomicity pin and cites #1406."""
+    accept = _section(_doc(), "## 10. Acceptance (S6 — testable)")
+    item13 = _acceptance_item(accept, "13.")
+    assert "#1406" in item13
+    assert _needle("one", "D1", "batch").search(item13)
+    assert _needle("rolls", "the", "whole", "write", "back").search(item13)
+    # Denial-worded like items 10-12: states what is refused, not just the allowlist.
+    assert _needle("never", "leaves", "a", "partial", "manifest").search(item13)
+    assert _needle("does", "not", "clear", "`revoked_at`").search(item13)
+
+
+def test_acceptance_covers_all_four_pins():
     """The §10 acceptance checklist names one item per pin, each citing its issue."""
     accept = _section(_doc(), "## 10. Acceptance (S6 — testable)")
-    for num, issue in (("10.", "#1401"), ("11.", "#1402"), ("12.", "#1403")):
+    for num, issue in (("10.", "#1401"), ("11.", "#1402"), ("12.", "#1403"), ("13.", "#1406")):
         assert issue in _acceptance_item(accept, num), (
             f"acceptance item {num} must cite {issue}"
         )
