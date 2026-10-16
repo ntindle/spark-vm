@@ -247,6 +247,22 @@ stage_repo_copy() {
     chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_REPO"
 }
 
+staged_copy_current() {
+    # Freshness predicate for the staged agent checkout: the staged tree
+    # must be at-or-ahead of the invoker checkout (its own ff-pulls may
+    # advance it) with the invoker tree clean — otherwise a re-run would
+    # silently deploy stale content.
+    [ -d "$AGENT_REPO/.git" ] || return 1
+    [ -f "$AGENT_REPO/scripts/install.sh" ] || return 1
+    [ "$(stat -c %U "$AGENT_REPO")" = "$AGENT_USER" ] || return 1
+    local invoker_head staged_head
+    invoker_head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" || return 1
+    staged_head="$(git -C "$AGENT_REPO" rev-parse HEAD 2>/dev/null)" || return 1
+    git -C "$AGENT_REPO" merge-base --is-ancestor "$invoker_head" "$staged_head" 2>/dev/null || return 1
+    [ -z "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null)" ] || return 1
+    return 0
+}
+
 step_stage_repo() {
     # The re-exec opens this script as the agent user, and the agent phase
     # reads the whole repo as the agent user — but the invoker's checkout
@@ -257,10 +273,7 @@ step_stage_repo() {
         note "skip: installer already runs from the agent-owned checkout"
         return 0
     fi
-    if [ -d "$AGENT_REPO/.git" ] && \
-       [ -f "$AGENT_REPO/scripts/install.sh" ] && \
-       cmp -s "$REPO_DIR/scripts/install.sh" "$AGENT_REPO/scripts/install.sh" && \
-       [ "$(stat -c %U "$AGENT_REPO")" = "$AGENT_USER" ]; then
+    if [ "$FORCE" = 0 ] && staged_copy_current; then
         note "skip: agent-readable repo copy already staged at $AGENT_REPO"
         return 0
     fi
@@ -455,12 +468,12 @@ run_bootstrap() {
     step_stage_repo
     note "bootstrap complete — handing the agent phase to $AGENT_USER (login shell, so the user bus exists)"
     if [ "$DRY_RUN" = 1 ]; then
-        if id -u "$AGENT_USER" >/dev/null 2>&1 && [ -x "$AGENT_REPO/scripts/install.sh" ]; then
+        if id -u "$AGENT_USER" >/dev/null 2>&1 && staged_copy_current 2>/dev/null; then
             note "dry-run: re-executing the agent phase as $AGENT_USER so probes see the true plan"
             sudo -iu "$AGENT_USER" env "DRY_RUN=1" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" \
                 "$AGENT_REPO/scripts/install.sh" --agent-phase-internal
         else
-            note "dry-run: agent checkout not staged yet — simulating the agent phase in-process"
+            note "dry-run: agent checkout not staged/current — simulating the agent phase in-process"
             AGENT_PHASE=1
             run_agent
         fi

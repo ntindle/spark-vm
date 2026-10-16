@@ -47,6 +47,7 @@ STEP_FNS = [
     "step_cua",
     "step_stage_repo",
     "stage_repo_copy",
+    "staged_copy_current",
     "derive_agent_repo",
     "run_bootstrap",
     "run_agent",
@@ -471,6 +472,58 @@ def test_agent_phase_ignores_unreadable_delivery_checkout(tmp_path):
     calls = proc.stdout.split("---CALLS---")[1]
     mutates = [line for line in calls.splitlines() if line.startswith("MUTATE")]
     assert len(mutates) == 1 and "cua-desktop.sh start" in mutates[0], mutates
+
+
+def test_stage_repo_freshness_skip_and_restage(tmp_path):
+    # The staged copy must track the WHOLE invoker tree, not just
+    # install.sh: a re-run after any invoker edit must re-stage, or the
+    # agent phase would silently deploy stale content.
+    invoker = tmp_path / "invoker-repo"
+    (invoker / "scripts").mkdir(parents=True)
+    for cmd in (
+        ["git", "init", "-q", str(invoker)],
+        ["git", "-C", str(invoker), "config", "user.email", "t@t"],
+        ["git", "-C", str(invoker), "config", "user.name", "t"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True)
+    (invoker / "scripts" / "install.sh").write_text("#!/bin/bash\necho hi\n")
+    (invoker / "other.txt").write_text("v1\n")
+    subprocess.run(["git", "-C", str(invoker), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(invoker), "commit", "-qm", "init"], check=True, capture_output=True)
+    staged = tmp_path / "staged-repo"
+    me = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    code = source_preamble()
+    code += textwrap.dedent(
+        f"""\
+        export AGENT_USER="{me}" REPO_DIR="{invoker}" AGENT_REPO="{staged}" DRY_RUN=0 FORCE=0
+        step_stage_repo
+        [ -f "{staged}/scripts/install.sh" ] || {{ echo "not staged"; exit 1; }}
+        [ "$(stat -c %U "{staged}")" = "{me}" ] || {{ echo "bad owner"; exit 1; }}
+        out=$(step_stage_repo 2>&1)
+        echo "$out" | grep -q "already staged" || {{ echo "no skip when current: $out"; exit 1; }}
+        # invoker edits an unrelated file and commits -> must re-stage
+        # (live staging is quiet; assert the skip note is absent and the
+        # staged tree converges)
+        echo "v2" > "{invoker}/other.txt"
+        git -C "{invoker}" commit -qam v2
+        out=$(step_stage_repo 2>&1)
+        echo "$out" | grep -q "already staged" && {{ echo "wrongly skipped on move"; exit 1; }}
+        [ "$(cat "{staged}/other.txt")" = "v2" ] || {{ echo "stale staged copy"; exit 1; }}
+        # dirty invoker tree -> must re-stage
+        echo "dirty" >> "{invoker}/other.txt"
+        out=$(step_stage_repo 2>&1)
+        echo "$out" | grep -q "already staged" && {{ echo "wrongly skipped on dirty"; exit 1; }}
+        grep -q "dirty" "{staged}/other.txt" || {{ echo "dirty edit not staged"; exit 1; }}
+        # FORCE re-stages even when current
+        git -C "{invoker}" checkout -q -- "{invoker}/other.txt"
+        out=$(FORCE=1 step_stage_repo 2>&1)
+        echo "$out" | grep -q "already staged" && {{ echo "force did not restage"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
 
 
 def test_readme_try_it_calls_installer_not_inline():
