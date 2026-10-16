@@ -1,12 +1,50 @@
 # Relay-liveness R3/R4 handoff convergence (2026-10-15, #486)
 
+## Addendum (2026-10-16): R3 shipped — this doc's R3 rows are stale in-place below
+
+R3 landed the morning after this pin: `hosted/relay_tenant_wiring.py`
+(572 lines) + `hosted/test_relay_tenant_wiring.py` (728 lines), PR
+#1562 squash-merged `e3f8c6d1`; issue #1416 **closed**. The three build
+constraints this doc recorded (F-RL34-2–F-RL34-4) are consumed:
+
+- **Anchor selection (F-RL34-2):** `select_live_anchor` — the earliest-created
+  among live-reached candidates (earliest `created_at` as the stable
+  proxy for first-to-live); an active rule-6 suspension keeps the anchor until
+  its suspension exits (suspended-anchor stickiness; no orphaned
+  recovery pairs).
+- **Nested-suspension emit rule (F-RL34-3):** `drive_box` is the per-box
+  single ordered emitter; the `relay-down` boolean flip fires only on codes
+  where rule-6 entry does not apply (not just latch-holding states) — never
+  `relay-failure`. A nested `down` whose
+  sub-code differs from the headline `detail` is noted LOUD in
+  `plan_events` (both legs named).
+- **Recovery protocol (F-RL34-4):** `relay-reachable` before
+  `relay-recovered` from the single ordered emitter, with stateless
+  re-drive (next `ok` reading re-drives the pair) and stale-`False`
+  resync. Crash-between-events interleaving is safe (pre-tick whole-tick
+  loss is re-driven; `plan_events` is pure).
+- **F-RL34-5 / D-RL34-4** (sub-code in `detail`, `down`-only): held in the
+  wiring — a `down` reading with a missing/foreign sub-code is treated
+  as a broken producer: rule 6 still fires on the `down` evidence, but
+  the wiring passes no classification (the entry falls back to the
+  tenant layer's unclassified default — no fabricated `detail`), and
+  the anomaly rides the notes loud.
+- **D-RL34-5** (cross-process lock gap, #1540 p3) is also done — fixed by PR
+  #1546 (`f63eb8cb`, probe-history cross-process lock); issue closed.
+  Not folded into R3, as decided.
+
+Remaining after this addendum: **R4** (#1417 — detector conjunct +
+retirement of the `STUCK_DETECTOR_DESIGN.md` §8 Q6 "R1–R4 unimplemented"
+clause per F-RL34-7). The relay-liveness lane is otherwise built.
+
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `164d0f7` (2026-10-15; PR
 #1539's merge). Issue/PR numbers are GitHub references as of
 2026-10-15 (not code-verifiable from the tree). Honesty rules apply
 (`docs/POSITIONING.md`): this describes current state and work to do,
-not promises. The relay instrument is not wired to the tenant layer;
-no box has been suspended by it.
+not promises. As of the 2026-10-16 addendum the relay instrument is
+wired to the tenant layer for `down` readings (R3); it does not touch
+the stuck detector (R4's conjunct is still the §8 Q6 interim).
 
 **Non-overlap map (what this doc is not):**
 - `docs/RELAY_LIVENESS_DESIGN.md` — the lane's design (R1–R4, §5
@@ -34,7 +72,7 @@ no box has been suspended by it.
 | R2a — dial prober core (#1414) | Unbuilt | **Shipped** — `hosted/relay_dial_prober.py` + `hosted/test_relay_dial_prober.py`; PR #1512 merged `e7d63294`; issue #1414 closed |
 | R2b — `relay_path_state` surface + cadence (#1415) | Unbuilt | **Shipped** — `hosted/relay_path_state.py` (726 lines) + `hosted/test_relay_path_state.py` (867); PR #1535 squash-merged `c2de261a`; issue #1415 closed |
 | R2b hardening (#1536, #1537) | — | **Shipped** — PR #1538 squash-merged `a0d1f07`: probe bundles via stdin (argv exposure gone), probe-history store 0o700/0o600 + O_NOFOLLOW creation (#1537); issues closed |
-| R3 — tenant-status wiring (#1416) | Unbuilt, ship-gated on R2b | **Ship-gate satisfied** — open, three build constraints recorded since 10-13 (F-RL34-2–F-RL34-4) |
+| R3 — tenant-status wiring (#1416) | Unbuilt, ship-gated on R2b | **Shipped 2026-10-16** — `hosted/relay_tenant_wiring.py` + `hosted/test_relay_tenant_wiring.py`; PR #1562 squash-merged `e3f8c6d1`; issue #1416 closed (see the 2026-10-16 addendum) |
 | R4 — detector conjunct (#1417) | Unbuilt, ship-gated on R2b | **Ship-gate satisfied** — open, preconditions verified current |
 
 ## 2. The R3/R4 consumer surface (shipped, verified at `164d0f7`)
@@ -75,6 +113,8 @@ bounded; creation-hardened 0o700 parent / 0o600 O_NOFOLLOW file
 (`relay_liveness.py`) takes an exclusive `flock` on a sidecar lock
 (#1082); the probe-history store takes none. Two concurrent cadence
 drivers for one box double-probe and interleave flapping memory.
+(Stale as of 2026-10-16 — the cross-process lock shipped in PR #1546;
+see the addendum.)
 No data corruption (O_APPEND + corrupt-line skip), so the residual is
 a p3 (filed this turn — §4).
 
@@ -202,9 +242,9 @@ a p3 (filed this turn — §4).
 
 | Slice | Issue | State | This turn |
 |---|---|---|---|
-| R3 — tenant-status wiring (rule 6, live-entry AND-combine, latch) + anchor selection + nested-suspension emit rule + recovery protocol | #1416 | Open; ship-gate satisfied | Acceptance amended (§4.3) |
+| R3 — tenant-status wiring (rule 6, live-entry AND-combine, latch) + anchor selection + nested-suspension emit rule + recovery protocol | #1416 | **Shipped + closed** (PR #1562, `e3f8c6d1`; see the 2026-10-16 addendum) |
 | R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | Open; ship-gate satisfied | Pointer comment; F-RL34-7 carried |
-| Probe-history cross-process lock | new p3 | Filed | §4.4 |
+| Probe-history cross-process lock | #1540 | **Shipped + closed** — PR #1546 merged `f63eb8cb`; see the 2026-10-16 addendum |
 
 Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are
 separate lanes; the Q1 5-min-cadence product call stays open

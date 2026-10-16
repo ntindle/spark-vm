@@ -147,12 +147,23 @@ The tenant layer consumes it as the `connection-unreachable` producer:
   `connection-unreachable` with the sub-code in `detail`, record
   arc-advancing events against the latch, re-evaluate on recovery —
   never a blind stack-pop.
-- **Interim honesty:** until the R3 wiring ships, the instrument exposes
-  `relay_path_state` on the operator surface only. The endpoint must not
-  claim `connection-unreachable` from a producer that isn't wired — the
-  same "don't fake the signal" discipline the stuck detector's
-  closed-world rule enforces. A design that silently claims more than it
-  measures is a funnel-poisoning instrument.
+- **Interim honesty (retired 2026-10-16, PR #1562):** until the R3 wiring
+  shipped, the instrument exposed `relay_path_state` on the operator
+  surface only. That interim is now over: `hosted/relay_tenant_wiring.py`
+  consumes the producer — transition rule 6 suspension on a `down`
+  reading with the §3 sub-code (`relay` | `cert` | `box-leg`) carried in
+  `detail` (sub-codes on `down` readings only — F-RL34-5), live-anchor
+  selection (earliest-created among live-reached candidates, the stable proxy;
+  non-anchor readings stay operator-surface), the nested-suspension emit rule (`relay-down`
+  boolean flip fires only on codes where rule-6 entry does not apply, never `relay-failure`),
+  and the recovery protocol (`relay-reachable` before
+  `relay-recovered`, single ordered emitter per box, stateless re-drive
+  plus stale-`False` resync). The endpoint may now claim
+  `connection-unreachable` from the producer — because the producer is
+  wired, and the "don't fake the signal" discipline is satisfied by the
+  wiring, not by the absence of a claim. A design that silently claims
+  more than it measures is a funnel-poisoning instrument; that posture
+  is unchanged — the interim label is what retired.
 
 ## 6. Closing the stuck-detector's gap (Q6 resolved)
 
@@ -205,7 +216,9 @@ remains unreachable until all four ship.
 - **R3 — tenant-status producer wiring:** the tenant layer consumes
   `relay_path_state` — transition rule 6 suspension + the live-entry
   AND-combine. Runtime wiring only (the §2 row's producer pointer was
-  set by this design turn).
+  set by this design turn). **Shipped 2026-10-16** — `hosted/relay_tenant_wiring.py`
+  + `hosted/test_relay_tenant_wiring.py`; PR #1562 merged `e3f8c6d1`;
+  issue #1416 closed.
 - **R4 — stuck-detector conjunct:** §6's predicate change; closed-world
   on instrument darkness; S2-calibration note that the soak's confusion
   classes gain a "suspension while measuring" row.
