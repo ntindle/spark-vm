@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   lookalikes (including the `hsurr:github` placeholder) are proven not to
   false-positive, and the real script's `--dry-run` is shown to refuse a
   staged secret before any network attempt without ever echoing the secret
-  in its report; `pull.sh`'s CLI contract is pinned alongside. (#TBD)
+  in its report; `pull.sh`'s CLI contract is pinned alongside. (#1590)
 - cua-bridge observability gap analysis (2026-10-16): what the bridge's
   own records must eventually cover — mutation audit, server-side error
   traces, rejected-attempt visibility, and the audit sink's rotation and
