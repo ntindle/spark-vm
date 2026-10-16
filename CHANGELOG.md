@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   own records must eventually cover — mutation audit, server-side error
   traces, rejected-attempt visibility, and the audit sink's rotation and
   permissions — filed as #1586/#1587/#1588 alongside the existing #1576
-  (see the gap analysis doc linked from the docs index). (#TBD)
+  (see the gap analysis doc linked from the docs index). (#1589)
 - Stuck-detector relay conjunct (2026-10-16): the detector's predicate
   gains the relay-path check — a `down` relay reading routes a quiet
   session to `connection-unreachable` (never `stuck`), and a suspect
