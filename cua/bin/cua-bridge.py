@@ -432,10 +432,12 @@ def _malformed_window_fields(w, need_bounds):
         # non-numeric id (e.g. "0xdeadbeef") would ValueError/TypeError
         # into a 500 on /api/type and /api/key (#1575). Coercibility, not
         # type: a numeric string works fine downstream and must not be
-        # newly rejected.
+        # newly rejected. OverflowError is a third failure mode:
+        # int(float("inf")) overflows — a driver reporting an infinite
+        # window_id must not 500 the bridge (#1579).
         try:
             int(w["window_id"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             missing.append("window_id")
     # z_index is order-compared when picking the top window (sort/max) —
     # a string, or mixed str/int across windows, would TypeError into a
@@ -844,12 +846,22 @@ def _input_probe(timeout=INPUT_PROBE_TIMEOUT, cancel=None):
                     return ("unknown",
                             "input probe cancelled — inconclusive")
                 wins = call("list_windows", {}).get("windows", [])
+                # #1580: the probe indexes w["window_id"] (focus_window) and
+                # order-compares z_index (max below) — route its windows
+                # through the same #1575 shape filter the other handlers
+                # use, so a malformed driver dict cannot 500 the probe or
+                # skew its window pick. Malformed xev candidates are
+                # dropped like any malformed window: no PID match is
+                # inconclusive, never a wedge.
+                _note_malformed_windows(wins, need_bounds=False)
+                ok = [w for w in wins
+                      if not _malformed_window_fields(w, need_bounds=False)]
                 # Match on the exact child PID: window titles and app names
                 # are free-form and settable by any X client, so a spoofed
                 # "Event Tester" window could otherwise steal the focus and
                 # the key and false-report a wedge. No PID match is
                 # inconclusive, never a wedge.
-                hits = [w for w in wins
+                hits = [w for w in ok
                         if w.get("is_on_screen") and w.get("pid") == proc.pid]
                 if hits:
                     win = max(hits, key=lambda w: w.get("z_index", 0))
@@ -1205,10 +1217,13 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/click":
                 try:
                     x, y = int(data["x"]), int(data["y"])
-                except (KeyError, TypeError, ValueError):
+                except (KeyError, TypeError, ValueError, OverflowError):
                     # missing or non-numeric coordinates are a client bug,
                     # not a server failure (used to 500 with the exception
-                    # text echoed).
+                    # text echoed). OverflowError is the third numeric
+                    # failure mode: int(float("inf")) overflows — a JSON
+                    # body can carry Infinity (json.loads accepts it), so
+                    # non-finite coordinates answer 400 here, not 500.
                     return self._json({"error": "bad coordinates"}, 400)
                 button = data.get("button", "left")
                 if button not in ("left", "right", "middle"):

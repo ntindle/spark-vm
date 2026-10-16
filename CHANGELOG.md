@@ -187,6 +187,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Desktop-bridge probe + input hardening (2026-10-16): the input-path
+  liveness probe's window pick now runs through the same
+  malformed-driver-window filter as the other bridge handlers — a
+  misshapen xev candidate is dropped before the PID match, never
+  focused, and an infinite driver window_id is filtered as malformed
+  instead of erroring; non-finite click coordinates are answered 400
+  instead of 500. (#1579) (#1580) (#TBD)
 - Desktop-bridge request routing (2026-10-16): the localhost control-panel
   bridge now routes every endpoint on the parsed URL path, so a query
   string no longer turns valid endpoints (`/api/windows`,

@@ -34,6 +34,12 @@ Covers:
 - #1575: malformed driver window dicts (missing pid/window_id/title, or a
   bounds dict with non-numeric x/y/width/height) are skipped at the filter
   stage with a stderr line instead of KeyError/TypeError-ing into a 500
+- #1579: int(float("inf")) overflows instead of ValueError-ing — an
+  infinite driver window_id is filtered as malformed (and non-finite
+  /api/click coordinates answer 400 "bad coordinates", not 500)
+- #1580: the #492 probe's window pick runs through the same #1575 shape
+  filter — a malformed xev candidate is dropped before the PID match and
+  the z-order max, so it can never be focused or crash the probe
 """
 import importlib.util
 import io
@@ -320,6 +326,26 @@ class TestTopWindow:
         # present-but-non-numeric id would ValueError into a 500.
         bad = dict(WINDOWS[1])
         bad["window_id"] = "0xdeadbeef"
+        monkeypatch.setattr(bridge, "call", FakeDriver([bad]))
+        assert bridge.top_window() is None
+        assert "window_id" in capsys.readouterr().err
+
+    def test_top_window_skips_infinite_window_id(self, bridge, monkeypatch,
+                                               capsys):
+        # #1579: int(float("inf")) raises OverflowError (not
+        # ValueError/TypeError) — an infinite driver window_id must be
+        # filtered as malformed, not 500 the bridge.
+        bad = dict(WINDOWS[1])
+        bad["window_id"] = float("inf")
+        monkeypatch.setattr(bridge, "call", FakeDriver([bad]))
+        assert bridge.top_window() is None
+        assert "window_id" in capsys.readouterr().err
+
+    def test_top_window_skips_negative_inf_window_id(self, bridge,
+                                                      monkeypatch, capsys):
+        # #1579: -inf overflows the same way as +inf.
+        bad = dict(WINDOWS[1])
+        bad["window_id"] = float("-inf")
         monkeypatch.setattr(bridge, "call", FakeDriver([bad]))
         assert bridge.top_window() is None
         assert "window_id" in capsys.readouterr().err
@@ -625,10 +651,15 @@ class TestEndpoints:
 
     def test_click_bad_coords_400(self, live):
         # F-cua-5: missing or non-numeric coordinates are a client bug —
-        # 400, not a 500 with the exception text echoed
+        # 400, not a 500 with the exception text echoed. Non-finite
+        # coordinates ride the same contract: JSON can carry Infinity
+        # (json.loads accepts it) and int(float("inf")) would OverflowError
+        # into a 500 without the guard (#1579's sibling case).
         _, _, port = live
         for bad in ({"x": "abc", "y": 1}, {"x": 1}, {"y": 2},
-                    {"x": None, "y": 1}, {"x": "3.5", "y": 1}):
+                    {"x": None, "y": 1}, {"x": "3.5", "y": 1},
+                    {"x": float("inf"), "y": 1},
+                    {"x": 1, "y": float("-inf")}):
             status, body = req(port, "POST", "/api/click", bad)
             assert status == 400, bad
             assert body["error"] == "bad coordinates", bad
@@ -1772,6 +1803,48 @@ class TestInputLiveness:
         assert state == "unknown"
         assert "4242" in detail  # names the pid it looked for
         assert spawned[0].killed
+
+    def test_probe_skips_malformed_xev_window(self, bridge, monkeypatch,
+                                              capsys):
+        # #1580: the probe's window pick must go through the same #1575
+        # shape filter the other handlers use. Here the only pid-4242
+        # window is malformed (string z_index) — the probe cannot trust
+        # the order-comparison, so the window reads as no-PID-match:
+        # "unknown" (inconclusive), never a wedge. The malformed window
+        # is logged like every other filtered window.
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned,
+                          out_chunks=(b"KeyPress event, serial 34\n",))
+        bad_xev = dict(XEV_WINDOW)
+        bad_xev["z_index"] = "high"
+        monkeypatch.setattr(bridge, "call", FakeDriver([bad_xev]))
+        state, detail = bridge._input_probe(timeout=0.5)
+        assert state == "unknown"
+        assert "never appeared" in detail
+        assert "malformed window" in capsys.readouterr().err
+
+    def test_probe_malformed_decoy_does_not_win_window_pick(self, bridge,
+                                                            monkeypatch):
+        # #1580: a malformed pid-4242 decoy outranking the real xev on
+        # z-order must be filtered before the pick — the probe focuses
+        # the well-formed xev window, not the decoy. Pre-fix the decoy
+        # won max() and focus_window's w["window_id"] KeyError'd,
+        # surfacing as a probe error instead of "ok".
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned,
+                          out_chunks=(b"KeyPress event, serial 34\n",))
+        decoy = dict(XEV_WINDOW)
+        decoy["z_index"] = 9
+        del decoy["window_id"]  # malformed: probe indexes w["window_id"]
+        driver = FakeDriver([decoy, XEV_WINDOW])
+        monkeypatch.setattr(bridge, "call", driver)
+        state, _ = bridge._input_probe(timeout=2.0)
+        assert state == "ok"
+        brings = [c[1] for c in driver.calls
+                  if c[0] == "bring_to_front"]
+        assert brings[0] == {"pid": 4242, "window_id": 505}
 
     def test_probe_wedged_on_echo_deadline(self, bridge, monkeypatch):
         self._patch_binaries(bridge, monkeypatch)
