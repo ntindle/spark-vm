@@ -677,6 +677,11 @@ def maybe_probe(
     (the failure is recorded in ``reason`` so the operator sees it);
     the outcome is recorded before the reading is composed so a later
     query sees this probe.
+    #1540: the same no-raise contract covers history-READ wedges. A
+    wedged history holder is fail-loud on the operator query path
+    (``--query`` exits 1), but the periodic tick degrades to
+    no-probe-data (``reading`` None) and reports the wedge in
+    ``reason`` instead of crashing the tick.
     """
     if now is None:
         now = time.time()
@@ -684,7 +689,34 @@ def maybe_probe(
         cadence = cadence_s()
     path = history if history is not None else history_path()
 
-    probe_record = latest_probe(vm_id, path=path)
+    # #1540: a wedged history lock must not crash the tick — the
+    # read degrades to no-probe-data and the wedge is folded into
+    # `reason` at each return below.
+    wedge_notes = []
+
+    try:
+        probe_record = latest_probe(vm_id, path=path)
+    except HistoryLockError as exc:
+        probe_record = None
+        wedge_notes.append(
+            "probe history unreadable (wedged lock): %s" % exc)
+
+    def _compose_reading():
+        try:
+            return relay_path_state(
+                vm_id, now=now, history=path,
+                journal_timeout_s=journal_timeout_s,
+            )
+        except HistoryLockError as exc:
+            wedge_notes.append(
+                "probe history unreadable (wedged lock): %s" % exc)
+            return None
+
+    def _reason(base):
+        if wedge_notes:
+            return "%s; WARNING: %s" % (base, "; ".join(wedge_notes))
+        return base
+
     last_probe_at = probe_record["ts"] if probe_record else None
     provider_state = provider_state_fn()
     should, why = cadence_decision(
@@ -695,21 +727,20 @@ def maybe_probe(
         cadence=cadence,
     )
     if not should:
+        reading = _compose_reading()
         return {
             "probed": False,
-            "reason": why,
-            "reading": relay_path_state(
-                vm_id, now=now, history=path, journal_timeout_s=journal_timeout_s
-            ),
+            "reason": _reason(why),
+            "reading": reading,
         }
     if bundle is None:
+        reading = _compose_reading()
         return {
             "probed": False,
-            "reason": "due but no connection bundle supplied — "
-            "R2b never fetches bundles (interim honesty)",
-            "reading": relay_path_state(
-                vm_id, now=now, history=path, journal_timeout_s=journal_timeout_s
-            ),
+            "reason": _reason(
+                "due but no connection bundle supplied — "
+                "R2b never fetches bundles (interim honesty)"),
+            "reading": reading,
         }
     result = relay_dial_prober.probe(
         vm_id,
@@ -731,12 +762,11 @@ def maybe_probe(
         )
         why = "%s; WARNING: probe history unwritable (%s)%s — this probe " \
             "will not inform flapping" % (why, exc, hint)
+    reading = _compose_reading()
     return {
         "probed": True,
-        "reason": why,
-        "reading": relay_path_state(
-            vm_id, now=now, history=path, journal_timeout_s=journal_timeout_s
-        ),
+        "reason": _reason(why),
+        "reading": reading,
     }
 
 

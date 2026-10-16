@@ -1035,3 +1035,30 @@ def test_cli_query_history_wedge_exits_1(history, journal, monkeypatch, capsys):
     code, err = _run_cli(["--query", VM], monkeypatch, capsys)
     assert code == 1
     assert "probe history" in err.err
+
+
+def test_tick_under_history_wedge_does_not_raise(history, monkeypatch):
+    # #1540/QA-B1: a wedged history lock must not crash the cadence
+    # tick — the tick degrades to no-probe-data and reports the wedge
+    # in `reason` (the operator query path stays fail-loud, exit 1).
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_exclusive_holder_body, args=(history, 5.0, ready)
+    )
+    holder.start()
+    try:
+        assert ready.wait(30), "holder child never took the lock"
+        monkeypatch.setattr(rps, "_HISTORY_LOCK_WAIT_TIMEOUT_S", 0.5)
+        out = rps.maybe_probe(
+            VM,
+            provider_state_fn=lambda: "running",
+            has_post_live_arc=True,
+            bundle=None,
+            history=history,
+        )
+        assert out["probed"] is False
+        assert "wedged lock" in out["reason"]
+        assert out["reading"] is None
+    finally:
+        holder.terminate()
+        holder.join(10)
