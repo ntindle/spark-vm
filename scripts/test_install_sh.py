@@ -791,3 +791,33 @@ def test_dry_run_names_version_pin(tmp_path):
     proc = run_bash(code)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_repo_fresh_clone_shadowed_branch_refused(tmp_path):
+    # A same-named branch shadows the tag at clone time: git clone
+    # --branch <tag> checks out the branch, not the tag. The VERSION check
+    # alone would pass if the branch tree carries the same VERSION string,
+    # so the post-clone commit pin must refuse. (Engineering round-1 B2.)
+    repo = tmp_path / "agent-repo"
+    code = source_preamble()
+    code += textwrap.dedent(
+        f"""\
+        git() {{
+          case "$*" in
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\n';;
+            *"remote get-url"*) return 0;;
+            *"rev-parse"*HEAD*) echo deadbeef-branch;;   # clone landed on the shadowing branch tip
+            *"rev-parse"*) echo deadbeef-tag;;             # the tag's own commit
+            *"clone"*) mkdir -p "$AGENT_REPO"; printf '0.8.0\\n' > "$AGENT_REPO/VERSION";;
+          esac
+          return 0
+        }}
+        AGENT_REPO="{repo}"; REPO_URL="https://example.invalid/spark-vm.git"
+        DRY_RUN=0; INSTALL_VERSION=v0.8.0
+        if ( step_repo ) 2>/dev/null; then echo "shadowed ref accepted"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")

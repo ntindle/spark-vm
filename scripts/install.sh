@@ -432,6 +432,18 @@ step_repo() {
         exec_if_live "clone $REPO_URL --branch $version to $AGENT_REPO" \
             git clone --branch "$version" "$REPO_URL" "$AGENT_REPO"
         [ "$DRY_RUN" = 1 ] && return 0
+        # Ref-shadow guard: `git clone --branch <tag>` prefers a same-named
+        # branch over the tag when both exist, so a branch shadowing the
+        # release tag would silently install non-tag code as the pinned
+        # release. `rev-parse <tag>^{commit}` resolves refs/tags before
+        # refs/heads, so equality with HEAD is airtight.
+        local landed want_commit
+        landed="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
+            die "cannot read HEAD of the fresh clone at $AGENT_REPO"
+        want_commit="$(git -C "$AGENT_REPO" rev-parse --verify --quiet "$version^{commit}")" || \
+            die "fresh clone at $AGENT_REPO does not know tag $version"
+        [ "$landed" = "$want_commit" ] || \
+            die "clone --branch $version landed on $landed, not the tag commit $want_commit — a branch is shadowing the release tag; refusing"
         assert_version_matches "$version" "$AGENT_REPO"
         return 0
     fi
