@@ -61,7 +61,9 @@ unchanged on the control plane without extra dependencies.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
+import fcntl
 import json
 import math
 import os
@@ -199,6 +201,119 @@ _HISTORY_MAX_ROTATED = 2
 _HISTORY_SCAN_LIMIT = 1 << 62
 
 
+# ---------------------------------------------------------------------------
+# Probe-history cross-process lock (#1540)
+# ---------------------------------------------------------------------------
+
+# Same bounded-wait discipline as relay_liveness._journal_locked (#1082):
+# LOCK_NB in a retry loop up to a deadline, then a loud HistoryLockError
+# naming the lock file and pointing the operator at the stopped/wedged
+# holder. Kept in this module (not imported from relay_liveness) on
+# purpose: the helper's contract text names the instrument it guards,
+# and a HistoryLockError caught around a relay-journal call (or vice
+# versa) must never silently pass as the other instrument's failure —
+# the discipline is shared by documentation and review, not by import.
+#
+# Deliberate divergences from relay_liveness._journal_locked (same list
+# style as that helper's own divergence notes against
+# fleet/events.py::journal_lock):
+#   1. HistoryLockError is module-local here and NOT interchangeable
+#      with relay_liveness.JournalLockError — each names its own
+#      instrument in its failure text; catching one around the other's
+#      call misses the wedge.
+#   2. The default wait is 60 s (the journal's is 300 s): a
+#      probe-history critical section is a sub-millisecond append and
+#      the cadence is periodic, so a genuinely wedged holder should
+#      fail loud well before the journal's daemon-scale deadline.
+#   3. FileNotFoundError on the sidecar is NOT wrapped here either —
+#      but the reader maps it to "no records" (see _iter_history),
+#      where the journal reader maps it to darkness (None). An absent
+#      history is advisory-state absence in both cases; a wedge is a
+#      broken instrument in both cases. They must not share an error
+#      shape.
+_HISTORY_LOCK_WAIT_TIMEOUT_S = 60.0
+_HISTORY_LOCK_POLL_INTERVAL_S = 0.1
+
+
+class HistoryLockError(OSError):
+    """The probe-history lock could not be acquired within the deadline.
+
+    Subclasses OSError so the write path's "fail loud on OSError"
+    contract is preserved while the failure class stays nameable —
+    tests, the operator CLI, and the query path's deliberate raise (a
+    wedged instrument is an error, not advisory absence) all key on
+    the name.
+    """
+
+
+@contextlib.contextmanager
+def _history_locked(path, exclusive=True, timeout_s=None):
+    """Cross-process lock for probe-history writes/reads, with a bounded
+    wait.
+
+    The cadence driver (writer) and the operator query / the
+    flapping-memory scan (readers) can be different processes.
+    Writers take LOCK_EX; readers take LOCK_SH so a read can never
+    interleave with a rotation. The lock lives in a sidecar so the
+    history path itself is never opened read-write by the reader.
+
+    Bounded wait (#1540, same discipline as #1082): the lock is
+    attempted with LOCK_NB in a retry loop for up to timeout_s
+    seconds (default _HISTORY_LOCK_WAIT_TIMEOUT_S), then raises
+    HistoryLockError naming the lock file and the likely cause,
+    instead of blocking forever behind a stopped (SIGSTOP) or wedged
+    holder. Waiting callers still serialize — only the pathological
+    wait becomes a loud failure.
+
+    A missing lock sidecar (FileNotFoundError) is NOT wrapped: the
+    reader maps it to no-records and the writer already creates the
+    parent directory before locking. Absence is an absent instrument;
+    a wedge is a broken one — they must not share an error shape.
+    """
+    if timeout_s is None:
+        timeout_s = _HISTORY_LOCK_WAIT_TIMEOUT_S
+    if not (timeout_s >= 0):
+        raise HistoryLockError(
+            "history lock timeout must be a non-negative number of "
+            "seconds, got %r" % (timeout_s,))
+    lock_path = path + ".lock"
+    try:
+        lf = open(lock_path, "a+b")
+    except FileNotFoundError:
+        raise
+    with lf:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(lf.fileno(),
+                            (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                            | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # Held by another process; retry until the deadline.
+                pass
+            except OSError as exc:
+                raise HistoryLockError(
+                    "cannot lock probe history %s: %s" % (lock_path, exc))
+            if time.monotonic() >= deadline:
+                raise HistoryLockError(
+                    "probe history lock %s is still held after %.0f "
+                    "seconds; the holder may be stopped (SIGSTOP) or "
+                    "wedged on a stuck filesystem — find it (fuser/lsof "
+                    "%s) and revive or kill it; do not delete %s "
+                    "(deleting the path does not release the holder's "
+                    "flock)" % (lock_path, timeout_s, lock_path,
+                                lock_path))
+            time.sleep(_HISTORY_LOCK_POLL_INTERVAL_S)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
 def history_path():
     """Probe-history path: ``$RELAY_PROBE_HISTORY`` (tests/operator), else
     the control-plane default next to the session journal."""
@@ -224,6 +339,15 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
     just creation. O_NOFOLLOW covers the final path component only —
     RELAY_PROBE_HISTORY must live under an operator-owned path
     (intermediate-component symlinks are still followed).
+    #1540: writes serialize on the cross-process history lock, and
+    rotation happens inside the same exclusive hold — two concurrent
+    writers can no longer interleave records across a rotation
+    boundary (the flapping-memory scan never mixes two drivers'
+    histories) or race ``os.rename`` (the loser's FileNotFoundError
+    is gone, because only one writer is ever inside the critical
+    section). A wedged holder fails loud as HistoryLockError (an
+    OSError) after _HISTORY_LOCK_WAIT_TIMEOUT_S — the cadence hot
+    path already catches OSError.
     Divergence note (PR #1538 review): relay_liveness's session
     journal keeps plain O_CREAT|O_APPEND 0o600 without O_NOFOLLOW —
     that path is daemon-fixed (/var/lib/sparkvm/) and daemon-owned,
@@ -245,17 +369,23 @@ def _record_outcome(path, vm_id, outcome, detail, now=None):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, mode=0o700, exist_ok=True)
-    _rotate_history_if_needed(path)
-    fd = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
-        0o600,
-    )
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
+    with _history_locked(path, exclusive=True):
+        _rotate_history_if_needed(path)
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
 
 def _rotate_history_if_needed(path):
+    # Must be called with the exclusive history lock held (#1540): two
+    # concurrent rotators would race os.rename (the loser's
+    # FileNotFoundError is unhandled) and interleave records across a
+    # rotation boundary, mixing two drivers' histories in the
+    # flapping-memory scan.
     # Rotation deliberately uses os.stat (symlink-following), not
     # os.lstat (PR #1538 review): if a symlink sits at the path and
     # its target is under the rotation threshold, the write path
@@ -285,7 +415,7 @@ def _rotate_history_if_needed(path):
     os.rename(path, "%s.1" % path)
 
 
-def _iter_history(path, vm_id, limit):
+def _iter_history(path, vm_id, limit, timeout_s=None):
     """Newest-first probe records for ``vm_id``. Corrupt lines are
     skipped (a wedged writer's garbage must not wedge the reader);
     unknown outcomes and records missing a numeric ``ts`` are skipped,
@@ -294,19 +424,34 @@ def _iter_history(path, vm_id, limit):
     state; its absence degrades the reading (no flapping memory,
     "never probed"), never the reading itself. The write path
     (``_record_outcome``) stays fail-loud so a broken store is never
-    silent. Reads follow symlinks deliberately (PR #1538 review): a
+    silent.
+
+    #1540: reads take the shared history lock so a read can never
+    interleave with a rotation (which renames under the exclusive
+    hold). A missing lock sidecar (never-written history) is NOT an
+    error — it maps to no records, like a missing store. A wedged
+    holder raises HistoryLockError instead: a broken instrument is
+    loud, never advisory absence. ``timeout_s`` bounds the lock wait
+    (default _HISTORY_LOCK_WAIT_TIMEOUT_S); public readers use the
+    default.
+
+    Reads follow symlinks deliberately (PR #1538 review): a
     symlinked history path is a sane operator setup, and exploiting
     it requires write access to the history parent — the same
     capability as forging records directly — so there is no attacker
     capability gain. Corrupt-line skipping bounds what a followed
     symlink can inject. Do not "fix" this to O_NOFOLLOW without
-    revisiting the analysis."""
+    revisiting the analysis.
+    """
     try:
-        fh = open(path, encoding="utf-8")
+        with _history_locked(path, exclusive=False, timeout_s=timeout_s):
+            fh = open(path, encoding="utf-8")
+            with fh:
+                lines = fh.readlines()
+    except HistoryLockError:
+        raise
     except OSError:
         return
-    with fh:
-        lines = fh.readlines()
     count = 0
     for line in reversed(lines):
         if count >= limit:

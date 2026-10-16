@@ -865,3 +865,161 @@ def test_cli_query_prints_reading(history, journal, monkeypatch, capsys):
     reading = json.loads(out.out)
     assert reading["vm_id"] == VM
     assert reading["state"] == "degraded"  # no journal frame written
+
+
+# ---------------------------------------------------------------------------
+# Probe-history cross-process lock (#1540)
+# ---------------------------------------------------------------------------
+
+import multiprocessing
+
+
+def _exclusive_holder_body(path, hold_s, ready):
+    """Child body: hold the exclusive history lock for hold_s seconds."""
+    with rps._history_locked(path, exclusive=True):
+        ready.set()
+        time.sleep(hold_s)
+
+
+def _concurrent_writer_body(path, base_ts, count, queue):
+    """Child body: append `count` outcomes, fail-loud on any error."""
+    try:
+        for i in range(count):
+            rps._record_outcome(
+                path, VM, prober.PATH_OK, {"elapsed_ms": 12},
+                now=base_ts + i,
+            )
+    except BaseException as exc:  # noqa: BLE001 — report, then re-raise
+        queue.put(repr(exc))
+        raise
+    queue.put(None)
+
+
+def _all_history_records(path):
+    """Parse every record across the live history and its rotations."""
+    records = []
+    for gen in ("", ".1", ".2"):
+        p = path + gen
+        if not os.path.exists(p):
+            continue
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                records.append(json.loads(line))
+    return records
+
+
+def test_history_writes_serialize_across_processes(history, monkeypatch):
+    # Rotation pressure: tiny byte bound forces renames mid-burst, the
+    # race the lock exists to close (concurrent os.rename of path ->
+    # path.1 would fail loud on the loser without the lock).
+    monkeypatch.setattr(rps, "_HISTORY_MAX_BYTES", 400)
+    n = 30
+    queues = [multiprocessing.Queue() for _ in range(2)]
+    procs = [
+        multiprocessing.Process(
+            target=_concurrent_writer_body,
+            args=(history, NOW + i * 1000, n, queues[i]),
+        )
+        for i in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+        assert p.exitcode == 0, "writer child crashed"
+    for q in queues:
+        assert q.get(timeout=10) is None
+    records = _all_history_records(history)
+    # rotation evicts the oldest records by design (bounded store), so
+    # the assertions are the race invariants, not the full record set:
+    # every surviving line parses (no torn writes), every record is
+    # one the children actually wrote (no phantoms), and none is
+    # duplicated (no double-append from a raced rotation)
+    assert records, "the store must not be empty after 60 writes"
+    allowed = {NOW + i for i in range(n)} | {NOW + 1000 + i for i in range(n)}
+    ts = [r["ts"] for r in records if r["vm_id"] == VM]
+    assert set(ts) <= allowed
+    assert len(set(ts)) == len(ts)
+
+
+def test_history_wedge_fails_loud_names_lock(history, monkeypatch):
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_exclusive_holder_body, args=(history, 5.0, ready)
+    )
+    holder.start()
+    try:
+        assert ready.wait(30), "holder child never took the lock"
+        monkeypatch.setattr(rps, "_HISTORY_LOCK_WAIT_TIMEOUT_S", 0.5)
+        with pytest.raises(rps.HistoryLockError) as excinfo:
+            rps._record_outcome(
+                history, VM, prober.PATH_OK, {"elapsed_ms": 1}, now=NOW
+            )
+        assert history + ".lock" in str(excinfo.value)
+        # the fail-loud contract is an OSError contract — the cadence
+        # hot path's `except OSError` still catches the wedge
+        assert isinstance(excinfo.value, OSError)
+    finally:
+        holder.terminate()
+        holder.join(10)
+
+
+def test_history_reader_waits_for_writer(history):
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_exclusive_holder_body, args=(history, 1.0, ready)
+    )
+    holder.start()
+    try:
+        assert ready.wait(30), "holder child never took the lock"
+        # the shared read serializes behind the exclusive writer
+        # (5 s budget, not the 60 s default) and then succeeds
+        _record(history, [prober.PATH_OK])
+        recs = list(rps._iter_history(history, VM, 10, timeout_s=5.0))
+        assert len(recs) == 1
+        assert recs[0]["outcome"] == prober.PATH_OK
+    finally:
+        holder.join(10)
+
+
+def test_history_never_written_reads_empty(tmp_path):
+    # a never-written history (no store, no lock sidecar — the
+    # FileNotFoundError on the sidecar is NOT wrapped) reads as no
+    # records, never an error
+    path = str(tmp_path / "no-such-dir" / "probe-history.jsonl")
+    assert list(rps._iter_history(path, VM, 10)) == []
+    assert rps.latest_probe(VM, path=path) is None
+    assert rps.recent_liveness_outcomes(VM, path=path) == []
+
+
+def test_history_lock_error_is_oserror():
+    assert issubclass(rps.HistoryLockError, OSError)
+
+
+def test_history_bad_timeout_rejected(history):
+    with pytest.raises(rps.HistoryLockError):
+        with rps._history_locked(history, timeout_s=-1):
+            pass
+
+
+def test_history_write_waits_for_exclusive_holder(history):
+    # the writer BLOCKS on a held lock (serializes) instead of racing
+    # past it: the lock wait must span (most of) the holder's 1.5 s
+    # critical section. On lockless code the write returns in
+    # microseconds and this assertion fails — the test is the
+    # deterministic non-vacuity companion to the stress test above.
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_exclusive_holder_body, args=(history, 1.5, ready)
+    )
+    holder.start()
+    try:
+        assert ready.wait(30), "holder child never took the lock"
+        t0 = time.monotonic()
+        rps._record_outcome(
+            history, VM, prober.PATH_OK, {"elapsed_ms": 1}, now=NOW
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed >= 1.0, "write did not wait for the lock holder"
+    finally:
+        holder.join(15)
