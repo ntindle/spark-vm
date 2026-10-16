@@ -244,7 +244,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   is the default state directory: a first stamp to an override under a
   pre-existing directory elsewhere fails loudly instead of
   re-permissioning someone else's tree, and re-stamping refuses a
-  manifest file owned by another local user. (#TBD)
+  manifest file owned by another local user. (#1564)
 - Installer provenance manifest hardened (2026-10-16): the manifest the
   box installer stamps is now created owner-only (0600) with its
   directory pinned to 0700, and a symlink at the manifest path fails
