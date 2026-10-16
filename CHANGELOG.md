@@ -129,6 +129,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Relay probe history (2026-10-15): probe-outcome writes and reads now
+  serialize on a cross-process lock, so two concurrent cadence drivers
+  can no longer interleave outcomes across a rotation boundary or race
+  the history rotation — and a wedged holder fails loudly within a
+  minute instead of hanging the tick. The push subscription wire
+  contract's D102 no longer claims the served `/sw.js` is
+  byte-pinned: the pin had no enforcement mechanism and the plane
+  bundle is redeployed to pick up dashboard changes; pin enforcement
+  belongs to the plane-side follow-up (#1392). (#1546)
+
 - The status-page feed spec's alert-row section said "all four rules"
   while the page carries five: the audit-tail-discontinuity rule's rows
   live in the alert journal too, one page-class row per lost window.

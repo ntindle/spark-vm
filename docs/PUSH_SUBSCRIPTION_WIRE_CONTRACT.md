@@ -46,12 +46,20 @@ discriminator — the UI does not need it and does not receive it.
 **D102. The plane serves the reference service worker at `/sw.js`.**
 `PushManager.subscribe()` requires a service-worker registration; the
 plane serves `hosted/dashboard/sw.js` (this repo) at `/sw.js`, same
-origin, scope `/`, byte-pinned to the reviewed file. The worker is a
+origin, scope `/`, from the plane bundle — redeploy the plane to pick
+up dashboard changes. The worker is a
 pure renderer — it shows the signed "go look" payload's summary
 (`{aid, ttl_s, summary}`, D4) with `requireInteraction: true` and
 opens `/` on tap; it holds no keys and sees no credentials. Any
 future payload shape keeps the render-then-fallback rule (malformed
 payload → generic page, never a crash).
+
+(The D102 text previously claimed the served file was "byte-pinned
+to the reviewed file" — downgraded #1476: the byte-pin had no
+enforcement mechanism (same drift class as #1299), and the loop
+cannot verify what the private plane serves. Pin enforcement, if
+wanted, belongs to #1392's plane-side scope — a deploy-time hash of
+the served file against the repo file, or serve-from-repo-at-deploy.)
 
 ### 1.2 `GET /v1/push/subscriptions?box_id=<id>` → 200 `{ok, subscriptions: [...]}`
 

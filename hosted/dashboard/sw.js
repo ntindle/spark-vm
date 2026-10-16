@@ -3,7 +3,9 @@
 The plane serves this file at /sw.js (same origin, scope "/") so the
 dashboard's register flow (PushManager.subscribe, see dashboard.html)
 has a service worker to bind the push subscription to. It is shipped
-here so the plane's serving is byte-pinned to a reviewed file; the
+here so the plane serves the reviewed file from the plane bundle
+(#1476: "byte-pinned" downgraded — the pin had no enforcement
+mechanism; redeploy the plane to pick up changes); the
 worker never sees credentials and holds no keys — it only renders
 the "go look" payloads the plane already signed and sent.
 
