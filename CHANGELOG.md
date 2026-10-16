@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-lane plane-port build path (2026-10-16): the gap analysis the
+  hosted push lane's deployment was missing — the in-repo sweep, sender
+  loop, and retention GC are synchronous Python the plane worker cannot
+  run as-is (its D1 is async-only, its outbound HTTPS is pyodide
+  `pyfetch`), so the port is an async rewrite with the #844
+  byte-identical-inline precedent for the pure-compute modules, one
+  `scheduled` handler multiplexed on the cron, and the #1094 Durable
+  Object singleton for the sender drain; build slices filed — #1565
+  (D1 migration), #1566 (D9 sweep port), #1567 (sender-loop epic:
+  #1569–#1571), #1568 (GC port). (#1572)
 - Waitlist token ordering policy (2026-10-16): the crash-safety rules for
   the signup email tokens — which durable step (email spool, row save,
   token retirement, event) runs first in each confirm / reminder /
