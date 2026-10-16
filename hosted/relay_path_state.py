@@ -445,12 +445,24 @@ def _iter_history(path, vm_id, limit, timeout_s=None):
     """
     try:
         with _history_locked(path, exclusive=False, timeout_s=timeout_s):
-            fh = open(path, encoding="utf-8")
+            try:
+                fh = open(path, encoding="utf-8")
+            except OSError:
+                # A missing store (or an unreadable one at open time)
+                # reads as no records — advisory absence, not a wedge.
+                return
             with fh:
+                # Mid-read I/O errors stay LOUD (pre-#1540 behavior):
+                # a file that dies during the read is a broken
+                # instrument, not an absent one. Only the open itself
+                # is mapped to no-records.
                 lines = fh.readlines()
     except HistoryLockError:
         raise
-    except OSError:
+    except FileNotFoundError:
+        # Never-written history (no store, no lock sidecar): an
+        # absent instrument reads as no records — same as a missing
+        # store at open time.
         return
     count = 0
     for line in reversed(lines):

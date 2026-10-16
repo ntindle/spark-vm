@@ -5,6 +5,7 @@ Run: ``python3 -m pytest hosted/`` from the repo root.
 """
 
 import json
+import multiprocessing
 import os
 import time
 
@@ -870,8 +871,6 @@ def test_cli_query_prints_reading(history, journal, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # Probe-history cross-process lock (#1540)
 # ---------------------------------------------------------------------------
-
-import multiprocessing
 
 
 def _exclusive_holder_body(path, hold_s, ready):
