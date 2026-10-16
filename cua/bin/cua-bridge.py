@@ -1028,7 +1028,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self._check_csrf():
                 return
             parsed = urlparse(self.path)
-            if parsed.path == "/api/liveness":
+            route = parsed.path  # route on the path alone: /api/windows,
+            # /api/screenshot and every POST endpoint used to compare the
+            # raw self.path (query included), so any query string 404'd —
+            # while /api/status and /api/liveness already parsed. One
+            # normalized route for all endpoints.
+            if route == "/api/liveness":
                 # #784: liveness is decoupled from driver health. The
                 # keepalive's restart decision must answer "is the BRIDGE
                 # alive?" — not "is the DRIVER fast?". /api/status shells
@@ -1042,7 +1047,7 @@ class Handler(BaseHTTPRequestHandler):
                 # /api/status keeps the full driver detail for panels
                 # and operators.
                 self._json({"alive": True})
-            elif parsed.path == "/api/status":
+            elif route == "/api/status":
                 st = subprocess.run([DRIVER, "status"], capture_output=True,
                                     timeout=10, env=BASE_ENV, text=True)
                 if st.returncode == 0:
@@ -1073,9 +1078,9 @@ class Handler(BaseHTTPRequestHandler):
                                       "detail": pdetail,
                                       "checked_at": pchecked,
                                       "driver": PROBE_DRIVER_VERSION}})
-            elif self.path == "/api/windows":
+            elif route == "/api/windows":
                 self._json(call("list_windows", {}))
-            elif self.path == "/api/screenshot":
+            elif route == "/api/screenshot":
                 # Private 0600 temp file, unlinked right after the read: the
                 # old fixed path (/tmp/cua-bridge-shot.png) was a predictable
                 # world-readable name in a shared dir — a symlink/snoop
@@ -1104,8 +1109,16 @@ class Handler(BaseHTTPRequestHandler):
             data = self._body()
             if data is None:
                 return self._json({"error": "body too large"}, 413)
-            if self.path == "/api/click":
-                x, y = int(data["x"]), int(data["y"])
+            route = urlparse(self.path).path  # same query-string
+            # normalization as do_GET
+            if route == "/api/click":
+                try:
+                    x, y = int(data["x"]), int(data["y"])
+                except (KeyError, TypeError, ValueError):
+                    # missing or non-numeric coordinates are a client bug,
+                    # not a server failure (used to 500 with the exception
+                    # text echoed).
+                    return self._json({"error": "bad coordinates"}, 400)
                 button = data.get("button", "left")
                 if button not in ("left", "right", "middle"):
                     return self._json({"error": "bad button"}, 400)
@@ -1125,7 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "x": x - b["x"], "y": y - b["y"],
                                          "button": button})
                 self._json({"ok": True, "window": w["title"], "result": res})
-            elif self.path == "/api/type":
+            elif route == "/api/type":
                 text = str(data.get("text", ""))[:2000]
                 if not text:
                     return self._json({"error": "empty text"}, 400)
@@ -1140,7 +1153,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "text": text,
                                          "delivery_mode": "foreground"})
                 self._json({"ok": True, "result": res})
-            elif self.path == "/api/key":
+            elif route == "/api/key":
                 key = str(data.get("key", ""))[:40]
                 mods = [m for m in data.get("modifiers", []) if m in
                         ("ctrl", "shift", "alt", "super")][:4]
@@ -1157,7 +1170,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "key": key, "modifiers": mods,
                                          "delivery_mode": "foreground"})
                 self._json({"ok": True, "result": res})
-            elif self.path == "/api/launch":
+            elif route == "/api/launch":
                 app = str(data.get("app", ""))[:80]
                 if not app:
                     return self._json({"error": "empty app"}, 400)

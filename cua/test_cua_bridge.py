@@ -374,6 +374,48 @@ class TestEndpoints:
         status, body = req(port, "GET", "/nope")
         assert status == 404
 
+    def test_unknown_path_with_query_string_404(self, live):
+        # the query-string normalization must not rescue unknown routes
+        _, _, port = live
+        status, body = req(port, "GET", "/nope?x=1")
+        assert status == 404
+
+    def test_get_windows_ignores_query_string(self, live):
+        # F-cua-1: routing is on the parsed path — a query string on a
+        # valid endpoint must not 404 (as /api/windows did before the fix)
+        _, _, port = live
+        status, body = req(port, "GET", "/api/windows?cache=0")
+        assert status == 200
+        assert len(body["windows"]) == 4
+
+    def test_screenshot_ignores_query_string(self, live, monkeypatch):
+        # same F-cua-1 class, via a raw (non-JSON) request
+        bridge, driver, port = live
+
+        def fake_call(tool, args):
+            assert tool == "get_desktop_state"
+            with open(args["screenshot_out_file"], "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\n")
+            return {"ok": True}
+
+        monkeypatch.setattr(bridge, "call", fake_call)
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/api/screenshot?x=1", headers={"X-CUA": "1"})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        assert resp.status == 200
+        assert data[:4] == b"\x89PNG"
+
+    def test_post_with_query_string_routed(self, live):
+        # F-cua-1: POST endpoints get the same normalization — before the
+        # fix, any query string on a POST path 404'd
+        bridge, driver, port = live
+        status, body = req(port, "POST", "/api/click?x=1",
+                           {"x": 50, "y": 50, "button": "left"})
+        assert status == 200
+        assert body["window"] == "web"
+
 
     def test_post_without_csrf_header_403(self, live):
         _, _, port = live
@@ -403,6 +445,16 @@ class TestEndpoints:
         status, body = req(port, "POST", "/api/click",
                            {"x": 50, "y": 50, "button": "wheel"})
         assert status == 400
+
+    def test_click_bad_coords_400(self, live):
+        # F-cua-5: missing or non-numeric coordinates are a client bug —
+        # 400, not a 500 with the exception text echoed
+        _, _, port = live
+        for bad in ({"x": "abc", "y": 1}, {"x": 1}, {"y": 2},
+                    {"x": None, "y": 1}, {"x": "3.5", "y": 1}):
+            status, body = req(port, "POST", "/api/click", bad)
+            assert status == 400, bad
+            assert body["error"] == "bad coordinates", bad
 
     def test_click_no_window_at_point_404(self, live):
         _, _, port = live
