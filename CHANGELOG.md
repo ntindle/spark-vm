@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Contributor secret-scan pin tests (2026-10-16): the `push.sh` pre-push
+  secret scan — the last automated check before a secret can reach the
+  public remote — gets its first test coverage: every secret family the
+  scan claims to catch is verified against synthetic fixtures, benign
+  lookalikes (including the `hsurr:github` placeholder) are proven not to
+  false-positive, and the real script's `--dry-run` is shown to refuse a
+  staged secret before any network attempt without ever echoing the secret
+  in its report; `pull.sh`'s CLI contract is pinned alongside. (#TBD)
 - cua-bridge observability gap analysis (2026-10-16): what the bridge's
   own records must eventually cover — mutation audit, server-side error
   traces, rejected-attempt visibility, and the audit sink's rotation and
