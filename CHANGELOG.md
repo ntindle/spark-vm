@@ -177,7 +177,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   interim-honesty clause is retired and the R3/R4 handoff pin's status
   tables now reflect the shipped tenant-status wiring (#1562) and the
   probe-history lock fix (#1546) — the docs no longer call R3 unbuilt.
-  (#TBD)
+  (#1573)
 
 - muse-job blocked is claim-only (2026-10-16): `cmd_watch` no longer
   transitions job state on the forgeable hook `blocked` event — a blocked
