@@ -327,7 +327,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   re-submitting a genuinely different value (re-posting the revoked
   value leaves the revocation standing). A machine-checked pin test
   guards the wording, and the acceptance checklist gains a matching
-  denial-worded item. (#1406, #TBD)
+  denial-worded item. (#1406, #1545)
 
 ### Added
 
