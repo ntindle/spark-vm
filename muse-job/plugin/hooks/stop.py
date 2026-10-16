@@ -16,6 +16,9 @@ import time
 # also strip CR (\x0d) and bare ESC sequences (\x1bc reset, \x1b7/\x1b8,
 # \x1bM, \x1b(X) -- "\r" + padding overwrites the rendered status line and
 # displays a fake verified-done label. Bare-\x1b is ordered AFTER CSI/OSC.
+# HOOK-COPY SYNC (issue #21): duplicated by design in session-end.py — hooks
+# stay standalone for plugin deployment. Edit every copy together; drift
+# fails muse-job/tests/test_hook_copy_drift.py.
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI sequences
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL | ST
@@ -28,6 +31,9 @@ _ANSI_RE = re.compile(
 # job's job.json, so every hook append corrupts that job and the manager
 # silently stops monitoring it (issue #3 review). Whitelist the id and never
 # write through a symlink.
+# HOOK-COPY SYNC (issue #21): duplicated by design in session-start.py and
+# session-end.py — hooks stay standalone for plugin deployment. Edit every
+# copy together; drift fails muse-job/tests/test_hook_copy_drift.py.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 # Issue #8: quoted markers. Fenced code blocks are never the agent's own
@@ -44,7 +50,12 @@ def _clean(s):
 
 
 def _append_event(evdir, sid, evt):
-    """Append one event line, refusing untrusted paths. Never raises."""
+    """Append one event line, refusing untrusted paths. Never raises.
+
+    HOOK-COPY SYNC (issue #21): duplicated by design in session-end.py —
+    hooks stay standalone for plugin deployment. Edit every copy together;
+    drift fails muse-job/tests/test_hook_copy_drift.py.
+    """
     if not _SID_RE.match(sid or ""):
         return
     try:

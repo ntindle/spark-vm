@@ -12,6 +12,9 @@ import time
 # output, so strip them at the source. Issue #23 B6: also strip CR (\x0d)
 # and bare ESC sequences -- "\r" + padding in `muse-job status` overwrites
 # the rendered line and displays a fake verified-done label.
+# HOOK-COPY SYNC (issue #21): duplicated by design in stop.py — hooks stay
+# standalone for plugin deployment. Edit every copy together; drift fails
+# muse-job/tests/test_hook_copy_drift.py.
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
@@ -21,6 +24,9 @@ _ANSI_RE = re.compile(
 
 # Whitelist the session id (used in the event filename) and never write
 # through a symlink -- see stop.py for the cross-job tampering scenario.
+# HOOK-COPY SYNC (issue #21): duplicated by design in session-start.py and
+# stop.py — hooks stay standalone for plugin deployment. Edit every copy
+# together; drift fails muse-job/tests/test_hook_copy_drift.py.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -29,7 +35,12 @@ def _clean(s):
 
 
 def _append_event(evdir, sid, evt):
-    """Append one event line, refusing untrusted paths. Never raises."""
+    """Append one event line, refusing untrusted paths. Never raises.
+
+    HOOK-COPY SYNC (issue #21): duplicated by design in stop.py — hooks
+    stay standalone for plugin deployment. Edit every copy together; drift
+    fails muse-job/tests/test_hook_copy_drift.py.
+    """
     if not _SID_RE.match(sid or ""):
         return
     try:

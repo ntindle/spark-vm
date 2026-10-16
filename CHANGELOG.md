@@ -138,6 +138,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the signed box-to-plane channel) had no owning issue, so this turn
   filed #1516 for it, carrying the "unattested events may be logged,
   never gate-consumed" rule as an acceptance item. (#1517)
+- Job-plugin trust checks, drift-proofed: the session-id whitelist,
+  terminal-escape sanitizer, and event-file safety checks are duplicated
+  across the plugin's standalone hooks by design, and a new sync test
+  now fails loudly if the copies ever diverge — a stale or tampered
+  copy can no longer silently weaken the job monitor's forgery
+  defenses. (#1556)
 
 ### Fixed
 
