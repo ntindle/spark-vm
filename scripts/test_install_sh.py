@@ -45,6 +45,9 @@ STEP_FNS = [
     "step_plugin",
     "step_cred_ui",
     "step_cua",
+    "step_stage_repo",
+    "stage_repo_copy",
+    "derive_agent_repo",
     "run_bootstrap",
     "run_agent",
     "parse_args",
@@ -363,7 +366,10 @@ def test_dry_run_mutates_nothing_and_exits_zero(tmp_path):
     assert "muse CLI not present yet" in proc.stdout
 
 
-def test_bootstrap_noop_only_reexecs(tmp_path):
+def test_bootstrap_stages_repo_and_reexecs_staged_copy(tmp_path):
+    # QA round-2 B1: the re-exec must target the agent-readable staged
+    # copy, never the invoker's checkout (which the agent user frequently
+    # cannot read — /root is mode 700, human homes are 750).
     harness, call_log, git_log, agent_home, agent_repo, sudoers_d = _agent_harness(
         tmp_path, fresh=False
     )
@@ -386,6 +392,7 @@ def test_bootstrap_noop_only_reexecs(tmp_path):
         f"""\
         export PATH="{fakebin}:$PATH"
         export SUDOERS_DIR="{sudoers_d}" AGENT_USER=ntindle DRY_RUN=0 SUDO_USER=testinvoker
+        export REPO_DIR="/nonexistent/invoker-checkout"
         id() {{ case "$1" in -u) echo 0;; -un) echo root;; -nG) echo "root sudo";; *) return 0;; esac; }}
         getent() {{
           case "$1 $2" in
@@ -397,22 +404,50 @@ def test_bootstrap_noop_only_reexecs(tmp_path):
         }}
         adduser() {{ log_mut "adduser $*"; }}; usermod() {{ log_mut "usermod $*"; }}
         install() {{ log_mut "install $*"; return 0; }}
+        mkdir() {{ log_mut "mkdir $*"; }}; chown() {{ log_mut "chown $*"; }}
         visudo() {{ return 0; }}
         run_bootstrap
-        # NOTE: run_bootstrap ends in `exec sudo -iu ...`; the stubbed sudo
-        # returns 0, so the shell exits here — assertions read the log file.
+        # NOTE: run_bootstrap ends in `exec sudo -iu ...`; the fake sudo
+        # exits 0, so the shell exits here — assertions read the log file.
         """
     )
     proc = run_bash(code)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     mutates = [l for l in call_log.read_text().splitlines() if l.startswith("MUTATE")]
-    # Everything holds; the only action is the login-shell re-exec into the
-    # agent phase (sudo itself is stubbed, so it cannot actually exec).
-    assert len(mutates) == 1, f"unexpected bootstrap mutations: {mutates}"
-    assert mutates[0].startswith("MUTATE sudo -iu ntindle env "), mutates
-    assert "--agent-phase-internal" in mutates[0]
+    assert len(mutates) == 4, f"unexpected bootstrap mutations: {mutates}"
+    assert mutates[0].startswith("MUTATE mkdir "), mutates
+    assert mutates[1].startswith("MUTATE cp -a "), mutates
+    assert mutates[2].startswith("MUTATE chown -R "), mutates
+    assert mutates[3].startswith("MUTATE sudo -iu ntindle env "), mutates
+    staged = f"{agent_home}/spark-vm/scripts/install.sh"
+    assert staged in mutates[3], f"re-exec must target the staged copy: {mutates[3]}"
+    assert "/nonexistent" not in mutates[3], f"re-exec leaked invoker checkout: {mutates[3]}"
     assert "skip: user ntindle exists" in proc.stdout
-    assert "passwordless sudo for ntindle" in proc.stdout
+
+
+def test_repo_divergence_dies_loud(tmp_path):
+    harness, call_log, git_log, agent_home, agent_repo, sudoers_d = _agent_harness(
+        tmp_path, fresh=False
+    )
+    code = source_preamble() + harness
+    code += textwrap.dedent(
+        f"""\
+        export AGENT_USER=ntindle DRY_RUN=0 AGENT_REPO="{agent_repo}"
+        git() {{
+          case "$*" in
+            *"symbolic-ref"*) echo main;;
+            *"remote get-url"*) return 0;;
+            *"pull"*) return 1;;
+          esac
+          return 0
+        }}
+        if ( step_repo ) 2>/dev/null; then echo "did not die on divergence"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
 
 
 def test_agent_phase_ignores_unreadable_delivery_checkout(tmp_path):

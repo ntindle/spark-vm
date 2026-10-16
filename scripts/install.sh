@@ -32,10 +32,13 @@ set -euo pipefail
 # ${VAR:-default} (not plain assignment): the bootstrap phase re-execs the
 # agent phase with these as environment, and plain assignments would clobber
 # them (notably --agent-user and --force). CLI parsing below still overrides.
+# AGENT_PHASE is deliberately NOT env-preserved (plain assignment): the
+# re-exec passes --agent-phase-internal explicitly, so a stray exported
+# AGENT_PHASE=1 can never silently skip bootstrap.
 AGENT_USER="${AGENT_USER:-ntindle}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
-AGENT_PHASE="${AGENT_PHASE:-0}"
+AGENT_PHASE=0
 
 SCRIPT_ABS="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -218,8 +221,52 @@ step_ssh_key() {
 }
 
 # ---------------------------------------------------------------------------
-# Agent phase ($AGENT_USER): tailnet, repo, stack. Always in the agent user's
-# own checkout ($AGENT_REPO) — never the invoker's.
+# The agent phase always works in the AGENT user's own checkout
+# (~$AGENT_USER/spark-vm) — never the invoker's. Bootstrap stages an
+# agent-owned copy of the repo first (the invoker's checkout is frequently
+# unreadable to the agent user: /root is mode 700, human homes are 750),
+# then re-execs the staged copy through a login shell (sudo -iu) so
+# systemctl --user has a user bus.
+derive_agent_repo() {
+    local agent_home
+    agent_home="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+    if [ -z "$agent_home" ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            agent_home="/home/$AGENT_USER"
+            note "dry-run: no passwd entry for $AGENT_USER yet — planning against $agent_home"
+        else
+            die "no passwd entry for $AGENT_USER — run the bootstrap phase first (with sudo)"
+        fi
+    fi
+    AGENT_REPO="$agent_home/spark-vm"
+}
+
+stage_repo_copy() {
+    mkdir -p "$AGENT_REPO"
+    cp -a "$REPO_DIR/." "$AGENT_REPO/"
+    chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_REPO"
+}
+
+step_stage_repo() {
+    # The re-exec opens this script as the agent user, and the agent phase
+    # reads the whole repo as the agent user — but the invoker's checkout
+    # is frequently unreadable to them (/root is mode 700, human homes are
+    # 750). Stage an agent-owned copy first; the re-exec then targets the
+    # staged copy, never the invoker's checkout.
+    if [ "$AGENT_REPO" = "$REPO_DIR" ]; then
+        note "skip: installer already runs from the agent-owned checkout"
+        return 0
+    fi
+    if [ -d "$AGENT_REPO/.git" ] && \
+       [ -f "$AGENT_REPO/scripts/install.sh" ] && \
+       cmp -s "$REPO_DIR/scripts/install.sh" "$AGENT_REPO/scripts/install.sh" && \
+       [ "$(stat -c %U "$AGENT_REPO")" = "$AGENT_USER" ]; then
+        note "skip: agent-readable repo copy already staged at $AGENT_REPO"
+        return 0
+    fi
+    exec_if_live "stage an agent-readable repo copy at $AGENT_REPO" \
+        stage_repo_copy
+}
 # ---------------------------------------------------------------------------
 
 tailscale_apt_install() {
@@ -299,6 +346,9 @@ step_linger() {
 
 step_repo() {
     if [ ! -d "$AGENT_REPO/.git" ]; then
+        if [ -n "$(ls -A "$AGENT_REPO" 2>/dev/null)" ]; then
+            die "$AGENT_REPO exists but is not a git checkout — move it aside, then re-run $SCRIPT_ABS"
+        fi
         exec_if_live "clone $REPO_URL to $AGENT_REPO" \
             git clone "$REPO_URL" "$AGENT_REPO"
         return 0
@@ -399,27 +449,29 @@ run_bootstrap() {
     [ "$(id -u)" = 0 ] || die "bootstrap phase needs root — run with sudo"
     step_prereqs
     step_agent_user
+    derive_agent_repo
     step_sudoers
     step_ssh_key
+    step_stage_repo
     note "bootstrap complete — handing the agent phase to $AGENT_USER (login shell, so the user bus exists)"
     if [ "$DRY_RUN" = 1 ]; then
-        if id -u "$AGENT_USER" >/dev/null 2>&1; then
+        if id -u "$AGENT_USER" >/dev/null 2>&1 && [ -x "$AGENT_REPO/scripts/install.sh" ]; then
             note "dry-run: re-executing the agent phase as $AGENT_USER so probes see the true plan"
             sudo -iu "$AGENT_USER" env "DRY_RUN=1" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" \
-                "$SCRIPT_ABS" --agent-phase-internal
+                "$AGENT_REPO/scripts/install.sh" --agent-phase-internal
         else
-            note "dry-run: $AGENT_USER does not exist yet — simulating the agent phase in-process"
+            note "dry-run: agent checkout not staged yet — simulating the agent phase in-process"
             AGENT_PHASE=1
             run_agent
         fi
         return 0
     fi
     # Login shell (-i): pam_systemd sets XDG_RUNTIME_DIR so systemctl --user
-    # has a bus. SCRIPT_ABS is absolute, so the cwd change is safe.
+    # has a bus. The staged path is absolute, so the cwd change is safe.
     # shellcheck disable=SC2093
     exec sudo -iu "$AGENT_USER" env \
         "DRY_RUN=$DRY_RUN" "FORCE=$FORCE" "AGENT_USER=$AGENT_USER" \
-        "$SCRIPT_ABS" --agent-phase-internal
+        "$AGENT_REPO/scripts/install.sh" --agent-phase-internal
 }
 
 run_agent() {
@@ -430,17 +482,7 @@ run_agent() {
         [ -f "$SUDOERS_DIR/$AGENT_USER" ] || \
             die "no sudoers drop for $AGENT_USER — run the bootstrap phase first (with sudo)"
     fi
-    local agent_home
-    agent_home="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
-    if [ -z "$agent_home" ]; then
-        if [ "$DRY_RUN" = 1 ]; then
-            agent_home="/home/$AGENT_USER"
-            note "dry-run: no passwd entry for $AGENT_USER yet — planning against $agent_home"
-        else
-            die "no passwd entry for $AGENT_USER — run the bootstrap phase first (with sudo)"
-        fi
-    fi
-    AGENT_REPO="$agent_home/spark-vm"
+    derive_agent_repo
     step_tailscale_install
     step_tailscale_up
     step_linger
