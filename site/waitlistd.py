@@ -3666,13 +3666,13 @@ class WaitlistService:
         write and the replace leaves funnel_events.jsonl.rotate-tmp
         behind; the next run truncates it harmlessly.)
 
-        Contract: the caller holds data_lock() across reload() +
-        rotate — the same convention as the reconcile passes and
-        _rewrite_rows. The data lock serializes rotation against the
-        cron jobs and the lock-taking daemon paths; it does NOT cover
-        the cta_click hot GET (#403), which is why the compare-and-swap
-        loop above exists. dry_run reports the partition without
-        writing anything.
+        Contract: the caller holds data_lock() across reload() + rotate
+        on the writing path — the same convention as the reconcile
+        passes and _rewrite_rows. dry_run=True takes no lock (#396): it
+        reports the partition without writing anything. The data lock
+        serializes rotation against the cron jobs and the lock-taking
+        daemon paths; it does NOT cover the cta_click hot GET (#403),
+        which is why the compare-and-swap loop above exists.
 
         Returns {"kept": n, "archived": n, "archives": {basename: n},
         "unparseable_kept": n, "dry_run": bool}.
