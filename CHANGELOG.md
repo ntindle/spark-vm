@@ -179,6 +179,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `/api/screenshot`, and all `POST` endpoints) into 404s; malformed click
   coordinates are answered 400 instead of 500ing with the exception text
   echoed. (#1577)
+- Desktop-bridge driver-contract hardening (2026-10-16): the control-panel
+  bridge no longer 500s when the desktop driver returns a window missing
+  its identity or geometry fields — malformed entries are skipped with a
+  loud log line instead, so a glitching driver degrades to "no window
+  here" instead of erroring. (#1575)
 
 - Relay-liveness docs truth repair (2026-10-16): the design doc's R3
   interim-honesty clause is retired and the R3/R4 handoff pin's status
@@ -257,6 +262,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   registration CLI is updated now that it shipped. (#1505, #1520)
 
 ### Security
+
+- Desktop-bridge probe CSRF gap closed (2026-10-16): refreshing the
+  keyboard-path health probe used to be a `GET` any web page on the
+  operator's machine could trigger — and the probe spawns a window,
+  hops desktop focus, and injects a keystroke. The probe request now
+  carries the same custom header the write endpoints require, which
+  browsers never send unsolicited; the plain health read is unchanged.
+  (#1574)
 
 - Installer provenance manifest trust gaps closed (2026-10-16): the
   installer and the status check now share one manifest-path lookup

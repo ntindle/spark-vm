@@ -28,6 +28,12 @@ Covers:
   bring_to_front (one re-focus retry); a persistent mismatch fails closed
   (409, no keystrokes sent) while an unreadable focus property fails open
   loudly; the #492 probe reports stolen focus as "unknown", never a wedge
+- #1574: GET /api/status?probe=1 is a state-changing GET — it requires the
+  X-CUA CSRF header like the POSTs (GET is a simple request browsers never
+  preflight); plain /api/status stays a headerless read-only GET
+- #1575: malformed driver window dicts (missing pid/window_id/title, or a
+  bounds dict with non-numeric x/y/width/height) are skipped at the filter
+  stage with a stderr line instead of KeyError/TypeError-ing into a 500
 """
 import importlib.util
 import io
@@ -101,9 +107,10 @@ class FakeDriver:
         return {"ok": True}
 
 
-def fake_handler(bridge, command="GET", headers=None):
+def fake_handler(bridge, command="GET", headers=None, path="/"):
     h = bridge.Handler.__new__(bridge.Handler)
     h.command = command
+    h.path = path
     m = Message()
     for k, v in (headers or {}).items():
         m[k] = v
@@ -208,6 +215,56 @@ class TestTopWindowAt:
         w = bridge.top_window_at(50, 50)
         assert w["app_name"] == "xterm"
 
+    # #1575: malformed driver window dicts must not KeyError/TypeError into
+    # a 500 — they are skipped at the filter stage with a stderr line.
+    def test_window_missing_bounds_is_skipped(self, bridge, monkeypatch):
+        bad = dict(WINDOWS[1])
+        del bad["bounds"]
+        self._call(bridge, monkeypatch, [bad])
+        assert bridge.top_window_at(50, 50) is None
+
+    def test_window_missing_window_id_is_skipped(self, bridge, monkeypatch):
+        bad = dict(WINDOWS[1])
+        del bad["window_id"]
+        self._call(bridge, monkeypatch, [bad])
+        assert bridge.top_window_at(50, 50) is None
+
+    def test_window_missing_title_is_skipped(self, bridge, monkeypatch):
+        bad = dict(WINDOWS[1])
+        del bad["title"]
+        self._call(bridge, monkeypatch, [bad])
+        assert bridge.top_window_at(50, 50) is None
+
+    def test_window_with_string_bounds_is_skipped(self, bridge, monkeypatch):
+        # bounds coordinates are compared with <= — a string would
+        # TypeError downstream, so it must be skipped at the filter.
+        bad = dict(WINDOWS[1])
+        bad["bounds"] = dict(bad["bounds"])
+        bad["bounds"]["x"] = "40"
+        self._call(bridge, monkeypatch, [bad])
+        assert bridge.top_window_at(50, 50) is None
+
+    def test_malformed_does_not_shadow_well_formed(self, bridge, monkeypatch):
+        bad = dict(WINDOWS[2])
+        del bad["bounds"]
+        self._call(bridge, monkeypatch, [bad, WINDOWS[1]])
+        w = bridge.top_window_at(50, 50)
+        assert w["app_name"] == "xterm"
+
+    def test_non_dict_window_is_skipped(self, bridge, monkeypatch):
+        self._call(bridge, monkeypatch, ["not-a-window", WINDOWS[1]])
+        w = bridge.top_window_at(50, 50)
+        assert w["app_name"] == "xterm"
+
+    def test_malformed_window_logs_stderr(self, bridge, monkeypatch, capsys):
+        bad = dict(WINDOWS[1])
+        del bad["bounds"]
+        self._call(bridge, monkeypatch, [bad])
+        bridge.top_window_at(50, 50)
+        err = capsys.readouterr().err
+        assert "malformed window" in err
+        assert "bounds" in err
+
 
 class TestTopWindow:
     def test_skips_desktop_and_panel(self, bridge, monkeypatch):
@@ -226,6 +283,23 @@ class TestTopWindow:
     def test_top_window_pid_none_when_empty(self, bridge, monkeypatch):
         monkeypatch.setattr(bridge, "call", FakeDriver([]))
         assert bridge.top_window_pid() is None
+
+    def test_top_window_skips_malformed(self, bridge, monkeypatch):
+        # #1575: /api/type and /api/key index w["pid"] and w["window_id"],
+        # and focus asserts int(w["window_id"]) — all must be present.
+        no_id = dict(WINDOWS[1])
+        del no_id["window_id"]
+        no_title = dict(WINDOWS[1])
+        del no_title["title"]
+        monkeypatch.setattr(bridge, "call", FakeDriver([no_id, no_title]))
+        assert bridge.top_window() is None
+
+    def test_top_window_needs_no_bounds(self, bridge, monkeypatch):
+        # focus/type/key never touch bounds — bounds stay optional here.
+        no_bounds = dict(WINDOWS[1])
+        del no_bounds["bounds"]
+        monkeypatch.setattr(bridge, "call", FakeDriver([no_bounds]))
+        assert bridge.top_window()["app_name"] == "xterm"
 
 
 # ---------------------------------------------------------------- CSRF / host gate
@@ -269,6 +343,38 @@ class TestCsrfGate:
     def test_wrong_port_rejected(self, bridge):
         h = fake_handler(bridge, "GET", {"Host": "127.0.0.1:18733"})
         assert not h._csrf_ok()
+
+    # #1574: /api/status?probe=1 is a state-changing GET behind the CSRF
+    # gate's blind spot — it spawns xev, hops focus, and injects an XTEST
+    # key, but GET is a *simple request* that browsers never preflight.
+    def test_probe_get_without_csrf_header_rejected(self, bridge):
+        h = fake_handler(bridge, "GET", {"Host": self.HOST},
+                         path="/api/status?probe=1")
+        assert not h._csrf_ok()
+
+    def test_probe_get_with_csrf_header_ok(self, bridge):
+        h = fake_handler(bridge, "GET",
+                         {"Host": self.HOST, "X-CUA": "1"},
+                         path="/api/status?probe=1")
+        assert h._csrf_ok()
+
+    def test_probe_get_wrong_csrf_value_rejected(self, bridge):
+        h = fake_handler(bridge, "GET",
+                         {"Host": self.HOST, "X-CUA": "0"},
+                         path="/api/status?probe=1")
+        assert not h._csrf_ok()
+
+    def test_plain_status_get_needs_no_header(self, bridge):
+        # the read-only probe cache read stays headerless.
+        h = fake_handler(bridge, "GET", {"Host": self.HOST},
+                         path="/api/status")
+        assert h._csrf_ok()
+
+    def test_status_probe_wrong_value_needs_no_header(self, bridge):
+        # probe=0 is not the mutating query — only the exact "1".
+        h = fake_handler(bridge, "GET", {"Host": self.HOST},
+                         path="/api/status?probe=0")
+        assert h._csrf_ok()
 
 
 # ---------------------------------------------------------------- request body
@@ -361,6 +467,31 @@ class TestEndpoints:
         assert body["launched"] == {}
         # #492: the input-path liveness probe rides along too
         assert body["input"]["state"] == "unknown"
+        assert body["input"]["detail"] == "stubbed"
+
+    def test_get_status_probe_without_csrf_header_403(self, live, monkeypatch):
+        # #1574: the mutating probe query cannot ride a simple request.
+        bridge, driver, port = live
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        status, body = req(port, "GET", "/api/status?probe=1",
+                           headers={"X-CUA": REMOVE})
+        assert status == 403
+
+    def test_get_status_probe_with_csrf_header_200(self, live, monkeypatch):
+        # the keepalive sends X-CUA: 1 — the probe runs (stubbed here).
+        bridge, driver, port = live
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        monkeypatch.setattr(bridge, "get_input_liveness",
+                            lambda run_probe=False: ("unknown", "stubbed",
+                                                     None))
+        status, body = req(port, "GET", "/api/status?probe=1")
+        assert status == 200
         assert body["input"]["detail"] == "stubbed"
 
     def test_get_windows(self, live):
