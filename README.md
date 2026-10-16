@@ -149,9 +149,12 @@ idempotent machine form of this runbook (it creates the `ntindle` agent
 user, drops the passwordless-sudo rule, copies your SSH key, joins the
 tailnet, clones the repo, deploys the proxy + confirmd stack, installs the
 muse-job CLI and plugin, enables the cred-ui user service, and starts the
-CUA desktop). Re-run it any time: every step skips what is already done
-and fails loudly with a diagnostic otherwise. This section calls the
-script instead of inlining the steps, so the two cannot drift.
+CUA desktop). Tailscale installs from its signed apt repository, never a
+piped shell script. Re-run it any time: completed steps are skipped — the
+desktop start and repo sync always run but are no-ops when current — and
+anything the script cannot complete fails loudly with a diagnostic
+(`~/bin` lands on `PATH` via `~/.profile` on next login). This section
+calls the script instead of inlining the steps, so the two cannot drift.
 
 ### Option A: you have Unraid
 
