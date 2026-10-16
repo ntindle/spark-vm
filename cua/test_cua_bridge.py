@@ -265,6 +265,26 @@ class TestTopWindowAt:
         assert "malformed window" in err
         assert "bounds" in err
 
+    def test_window_with_string_z_index_is_skipped(self, bridge, monkeypatch,
+                                                   capsys):
+        # #1575: z_index is order-compared by the sort — a string would
+        # TypeError into a 500, so it must be skipped at the filter.
+        bad = dict(WINDOWS[1])
+        bad["z_index"] = "high"
+        self._call(bridge, monkeypatch, [bad])
+        assert bridge.top_window_at(50, 50) is None
+        assert "z_index" in capsys.readouterr().err
+
+    def test_mixed_z_index_types_do_not_500(self, bridge, monkeypatch):
+        # mixed str/int z_index across windows used to TypeError the
+        # sort; now the malformed one is skipped and the well-formed
+        # window is still picked.
+        bad = dict(WINDOWS[2])
+        bad["z_index"] = "high"
+        self._call(bridge, monkeypatch, [bad, WINDOWS[1]])
+        w = bridge.top_window_at(50, 50)
+        assert w["app_name"] == "xterm"
+
 
 class TestTopWindow:
     def test_skips_desktop_and_panel(self, bridge, monkeypatch):
@@ -292,6 +312,32 @@ class TestTopWindow:
         no_title = dict(WINDOWS[1])
         del no_title["title"]
         monkeypatch.setattr(bridge, "call", FakeDriver([no_id, no_title]))
+        assert bridge.top_window() is None
+
+    def test_top_window_skips_non_numeric_window_id(self, bridge, monkeypatch,
+                                                    capsys):
+        # #1575: _assert_focused does int(w["window_id"]) — a
+        # present-but-non-numeric id would ValueError into a 500.
+        bad = dict(WINDOWS[1])
+        bad["window_id"] = "0xdeadbeef"
+        monkeypatch.setattr(bridge, "call", FakeDriver([bad]))
+        assert bridge.top_window() is None
+        assert "window_id" in capsys.readouterr().err
+
+    def test_top_window_accepts_numeric_string_window_id(self, bridge,
+                                                          monkeypatch):
+        # int("123") works fine downstream — coercibility, not type, so
+        # this must NOT be flagged (no behavior regression).
+        ok = dict(WINDOWS[1])
+        ok["window_id"] = "123"
+        monkeypatch.setattr(bridge, "call", FakeDriver([ok]))
+        assert bridge.top_window()["window_id"] == "123"
+
+    def test_top_window_skips_string_z_index(self, bridge, monkeypatch):
+        # max() order-compares z_index — mixed str/int would TypeError.
+        bad = dict(WINDOWS[1])
+        bad["z_index"] = "high"
+        monkeypatch.setattr(bridge, "call", FakeDriver([bad]))
         assert bridge.top_window() is None
 
     def test_top_window_needs_no_bounds(self, bridge, monkeypatch):

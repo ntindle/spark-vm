@@ -413,10 +413,12 @@ def _malformed_window_fields(w, need_bounds):
     """Names the driver-contract fields a window dict is missing (#1575).
 
     Empty means the dict has the fields the bridge indexes: pid,
-    window_id, title, and — when coordinates are used — a bounds dict
-    with numeric x/y/width/height. Bounds coordinates are compared with
-    <=/<, so a string in bounds is not "close enough" — it would raise
-    TypeError downstream.
+    window_id (int()-coercible, for _assert_focused's EWMH comparison),
+    title, a present z_index that is numeric (it is order-compared), and
+    — when coordinates are used — a bounds dict with numeric
+    x/y/width/height. Bounds coordinates are compared with <=/<, so a
+    string in bounds is not "close enough" — it would raise TypeError
+    downstream.
     """
     missing = []
     if not isinstance(w, dict):
@@ -424,6 +426,23 @@ def _malformed_window_fields(w, need_bounds):
     for key in ("pid", "window_id", "title"):
         if key not in w:
             missing.append(key)
+    if "window_id" not in missing:
+        # _assert_focused int()-coerces window_id before comparing it
+        # against the EWMH active-window property — a present-but-
+        # non-numeric id (e.g. "0xdeadbeef") would ValueError/TypeError
+        # into a 500 on /api/type and /api/key (#1575). Coercibility, not
+        # type: a numeric string works fine downstream and must not be
+        # newly rejected.
+        try:
+            int(w["window_id"])
+        except (TypeError, ValueError):
+            missing.append("window_id")
+    # z_index is order-compared when picking the top window (sort/max) —
+    # a string, or mixed str/int across windows, would TypeError into a
+    # 500 (#1575). Missing is fine (callers default it to 0); present
+    # must be numeric.
+    if "z_index" in w and type(w["z_index"]) not in (int, float):
+        missing.append("z_index")
     if need_bounds:
         b = w.get("bounds")
         if (not isinstance(b, dict)
