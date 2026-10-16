@@ -1931,3 +1931,61 @@ def test_touch_leaves_arc_untouched_on_hostile_detail():
         apply_event(arc, "relay-failure", detail=["not", "a", "str"])
     assert arc.code == "live"
     assert arc.detail == "live-detail"
+
+
+# ---------------------------------------------------------------------------
+# #1465 — signed-request replay: an observed (tenant_id, ts, signature)
+# triple must be single-use inside SIGNATURE_WINDOW_S; a replay gets 401
+# and the caller re-polls with a fresh timestamp.
+
+
+def test_1465_replay_of_identical_triple_rejected(store):
+    _seeded(store)
+    svc = _service(store)
+    headers = _signed_headers("tnt_test1")
+    status, _ = svc.handle_get("/tenant/status", headers)
+    assert status == 200
+    # The exact observed triple, replayed within the window: 401.
+    status, body = svc.handle_get("/tenant/status", headers)
+    assert status == 401 and body["error"] == "unauthorized"
+
+
+def test_1465_fresh_timestamp_resigns_and_accepts(store):
+    # The ledger keys the exact triple, not the tenant: a fresh ts means a
+    # fresh signature, and the poller keeps working.
+    _seeded(store)
+    svc = _service(store)
+    ts0 = int(time.time())
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0))[0] == 200
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0 + 1))[0] == 200
+
+
+def test_1465_invalid_signature_never_poisoned(store):
+    # Only VERIFIED requests enter the ledger: a garbage triple for
+    # (tenant_id, ts) must not block the real caller's later request.
+    _seeded(store)
+    svc = _service(store)
+    ts0 = int(time.time())
+    bad = _signed_headers("tnt_test1", ts=ts0)
+    bad["x-signature"] = "aGVsbG8="  # valid base64, wrong signature
+    assert svc.handle_get("/tenant/status", bad)[0] == 401
+    assert svc._seen == {}  # the ledger holds no unverified entries
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0))[0] == 200
+
+
+def test_1465_expired_entry_evicted_not_sticky(store):
+    # Ledger entries live at most the freshness window: an entry older
+    # than SIGNATURE_WINDOW_S is evicted on the next verified request, so
+    # nothing haunts the tenant after its own window lapses.
+    _seeded(store)
+    svc = _service(store)
+    ts0 = int(time.time()) - 200  # inside the 300s window
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0))[0] == 200
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0))[0] == 401
+    for fp in list(svc._seen):
+        svc._seen[fp] = time.time() - 301  # age the ledger entry past the window
+    assert len(svc._seen) == 1
+    assert svc.handle_get("/tenant/status", _signed_headers("tnt_test1", ts=ts0 + 1))[0] == 200
+    assert svc._seen and all(
+        seen_at > time.time() - 301 for seen_at in svc._seen.values()
+    )

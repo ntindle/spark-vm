@@ -62,6 +62,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1356,6 +1357,42 @@ class TenantStatusService:
     def __init__(self, store: TenantStore, verify: VerifyFn):
         self.store = store
         self.verify = verify
+        # #1465 — the verified-request replay ledger. Every (tenant_id, ts,
+        # signature) triple that passes signature verification is
+        # single-use inside SIGNATURE_WINDOW_S: an exact replay of an
+        # observed triple gets 401 and the caller re-polls with a fresh
+        # timestamp. Only *verified* triples enter the ledger (a garbage
+        # triple can neither poison a tenant's slot nor grow the set);
+        # entries older than the window are evicted on the next verified
+        # request, so the ledger's size is bounded by legitimate traffic.
+        # Honest limitation: the ledger is in-memory per process, so a
+        # restart clears it and a triple captured just before the restart
+        # becomes replayable again for the remainder of its own window —
+        # the residual impact is a <=300s status disclosure, GET-only,
+        # never a state change. A caller-authenticated side (the session
+        # cookie) is unaffected.
+        self._seen: Dict[bytes, float] = {}
+        self._seen_lock = threading.Lock()
+
+    def _is_replay(self, tenant_id: str, ts: str, signature: bytes) -> bool:
+        """Check-and-mark the verified-request ledger.
+
+        Returns True when this exact (tenant_id, ts, signature) triple was
+        already seen inside SIGNATURE_WINDOW_S — the caller is replaying.
+        Otherwise records the triple and returns False. Lock-serialized so
+        two racing identical requests admit exactly one.
+        """
+        fp = hashlib.sha256(canonical_poll_message(tenant_id, ts) + signature).digest()
+        now = time.time()
+        cutoff = now - SIGNATURE_WINDOW_S
+        with self._seen_lock:
+            for old_fp, seen_at in list(self._seen.items()):
+                if seen_at <= cutoff:
+                    del self._seen[old_fp]
+            if fp in self._seen:
+                return True
+            self._seen[fp] = now
+            return False
 
     def _authenticate(self, headers: Dict[str, str]) -> Optional[TenantRecord]:
         """Resolve the caller's tenant record from its credential.
@@ -1399,13 +1436,17 @@ class TenantStatusService:
             if (rec is not None and rec.muse_public_key)
             else _DUMMY_VERIFY_KEY
         )
+        message = canonical_poll_message(tenant_id, ts)
         try:
-            ok = self.verify(
-                canonical_poll_message(tenant_id, ts), signature, key
-            )
+            ok = self.verify(message, signature, key)
         except Exception:
             return None
         if not ok or rec is None or rec.muse_public_key is None:
+            return None
+        # #1465: the signed-request side is single-use inside the
+        # freshness window — a valid signature does not make an observed
+        # triple reusable. The caller re-polls with a fresh timestamp.
+        if self._is_replay(tenant_id, ts, signature):
             return None
         return rec
 
