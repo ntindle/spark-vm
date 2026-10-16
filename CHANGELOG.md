@@ -319,6 +319,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   header makes that a machine-enforced guarantee instead of a
   convention — a future edit cannot silently add script execution.
   (Framing posture unchanged per the deliberate #1237 pin.) (#1484)
+- The credential-vend contract now pins the manifest write's atomicity
+  before the endpoint is built: the whole write — every credential's
+  metadata and its ciphertext — commits as one database batch, so a
+  failed write never leaves metadata without its secret or a secret
+  without its metadata; and a revoked credential is only un-revoked by
+  re-submitting a genuinely different value (re-posting the revoked
+  value leaves the revocation standing). A machine-checked pin test
+  guards the wording, and the acceptance checklist gains a matching
+  denial-worded item. (#1406, #TBD)
 
 ### Added
 
