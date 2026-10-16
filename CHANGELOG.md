@@ -151,7 +151,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   release-gate-channel design docs no longer point implementation tracking
   at the closed #777 — the shipped slices (S1a, the S1b hook loop) and the
   remaining ones are now named honestly, with the remainders owned by a new
-  tracker (#1557) and the freeze-hold emitter by #1543. (#TBD)
+  tracker (#1557) and the freeze-hold emitter by #1543. (#1558)
 - Relay probe history (2026-10-15): probe-outcome writes and reads now
   serialize on a cross-process lock, so two concurrent cadence drivers
   can no longer interleave outcomes across a rotation boundary or race
