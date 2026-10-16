@@ -56,7 +56,10 @@ hosted/relay_path_state.py::relay_path_state(vm_id, *, now=None,
   instrument never assumes `ok` from darkness, and provider state is
   never a liveness question.
 - `probe` is the latest raw outcome; `journal` is the R1 passive
-  reading (`active | idle | closed`, or None on darkness).
+  reading (`active | idle | closed`, or None on darkness). A wedged
+  journal lock raises `JournalLockError` through `relay_path_state`
+  (a broken instrument, never darkness) — plane-facing callers pass a
+  request-scoped `journal_timeout_s`.
 - Cadence: `maybe_probe` / `cadence_decision` — 5-min default,
   tunable (param / `RELAY_PROBE_CADENCE_S`), stands down on
   `suspended`/`destroyed` and on no post-`live` arc
@@ -148,10 +151,13 @@ a p3 (filed this turn — §4).
 2. `docs/RELAY_LIVENESS_DESIGN.md` §5 — the sub-code reconciliation
    (F-RL34-5): sub-codes on `down` readings only.
 3. #1416's acceptance amended (issue body PATCH, provenance: the
-   user's pointer comments 6192069640 / 6204845321): adds the anchor
-   selection item (F-RL34-2), the nested-suspension emit rule
-   (F-RL34-3), and the producer-disagreement protocol item
-   (F-RL34-4). A pointer comment on #1416 records the amendment.
+   user's pointer comments 6192069640 / 6204845321, extended by the
+   gap turn's Architecture review): adds the anchor selection item
+   (F-RL34-2), the nested-suspension emit rule (F-RL34-3), and the
+   recovery-event protocol item with its open delivery-semantics
+   acceptance sub-items (F-RL34-4, D-RL34-3: single-ordered-emitter,
+   idempotency contract, lost-event reconciliation). A pointer comment
+   on #1416 records the amendment.
 4. New p3 issue filed for the probe-history cross-process lock
    (F-RL34-6).
 5. Pointer comment on #1417 (this doc; F-RL34-7 carried — no new
@@ -167,12 +173,23 @@ a p3 (filed this turn — §4).
   slice too big for one slot, they split with a pointer comment —
   the mechanism must not fall between the slices, whatever the split.
 - **D-RL34-3** — The producer-disagreement question (F-RL34-4) is
-  resolved by the R3 wiring's event protocol, not by the tenant layer:
-  the prober's recovery reading emits `relay-reachable` (boolean
-  restore) *before* `relay-recovered` (suspension exit), in that
-  order; the tenant handler's stale-boolean case then has its answer
-  in the protocol. Alternative protocols are fine — what is not fine
-  is leaving the case unhandled.
+  answered by the R3 wiring's event protocol, not by the tenant layer:
+  ordering is pinned — the prober's recovery reading emits
+  `relay-reachable` (boolean restore) *before* `relay-recovered`
+  (suspension exit), in that order. Ordering alone is not the
+  resolution: delivery semantics remain open and ride with #1416 as
+  acceptance items — (a) a single-ordered-emitter requirement per box,
+  or the protocol proved interleaving-safe (coupled to the F-RL34-6 p3
+  — either serialize the wiring or make recovery pair atomically);
+  (b) a per-event idempotency contract — the wiring never blind-retries
+  `relay-recovered` (re-emit after a successful recovery raises
+  `TransitionError`) or the handler tolerates the duplicate; (c) a
+  lost-event reconciliation rule — a re-drive for a lost
+  `relay-recovered` (a lost recovery wedges `connection-unreachable`
+  indefinitely) and a resync rule for `relay_reachable` (a stale
+  `False` poisons `_re_evaluate_latch_on_exit`'s exit-time backstop).
+  Alternative protocols stay fine — what is not fine is leaving the
+  case unhandled.
 - **D-RL34-4** — R3's "sub-code in `detail`" means the detail carries
   the `down` reading's sub-code; `degraded` readings never produce
   suspensions, so there is no sub-code to carry (follows F-RL34-5).

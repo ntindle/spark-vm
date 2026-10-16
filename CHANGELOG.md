@@ -73,7 +73,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   selection (which box's reading drives the tenant), the #1463
   nested-suspension emit rule, and the recovery-event protocol, and the
   design's sub-code language is reconciled to the shipped contract
-  (sub-codes on `down` readings only). (#TBD)
+  (sub-codes on `down` readings only). (#486)
 - Packaging gap analysis (2026-10-15): pinned the gap between spark-vm's
   release machinery and an actual install story — releases are cut and tagged,
   but there is no published artifact, no installer script, and no
