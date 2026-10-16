@@ -67,6 +67,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (tunable) decides when post-`live` boxes are probed, standing down on
   suspended or destroyed provider states. Exposed on the operator query
   surface only — not yet wired to tenant status. (#1535)
+- Relay-liveness R3/R4 handoff pin (2026-10-15): vision-vs-state of the
+  two remaining relay-liveness builds now that the probe surface has
+  shipped — the tenant-status wiring issue now explicitly owns anchor
+  selection (which box's reading drives the tenant), the #1463
+  nested-suspension emit rule, and the recovery-event protocol, and the
+  design's sub-code language is reconciled to the shipped contract
+  (sub-codes on `down` readings only). (#TBD)
 - Packaging gap analysis (2026-10-15): pinned the gap between spark-vm's
   release machinery and an actual install story — releases are cut and tagged,
   but there is no published artifact, no installer script, and no

@@ -119,7 +119,10 @@ Why both channels observe the path without any inbound path to the VM:
 
 The instrument's shipped output is `relay_path_state(vm_id) → ok |
 degraded | down`, with the §3 sub-code (`relay` | `cert` | `box-leg`)
-on non-`ok` readings. Value mapping from the §3 taxonomy: `path_ok` →
+on `down` readings only. `degraded` readings (flapping, never-probed,
+provider stand-down) carry no sub-code — the §3 sub-code is a property
+of defect evidence, and a suspect reading is not evidence of a specific
+defect. Value mapping from the §3 taxonomy: `path_ok` →
 `ok`; `relay_defect`/`cert_defect`/`box_leg_defect` → `down` with the
 corresponding sub-code. `degraded` is the operator-warning state — the
 prober disagrees with itself across consecutive probes (flapping), or the
