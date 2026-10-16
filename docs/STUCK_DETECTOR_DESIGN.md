@@ -178,8 +178,18 @@ AND relay_path_ok(S)           == true        (R4 — the R2b instrument's
                                                 SUSPECT: unobservable, never
                                                 assumed-ok, per the relay
                                                 design's §5 producer-contract
-                                                note; closed-world rule
-                                                applies)
+                                                note; a broken instrument
+                                                (e.g. a wedged journal lock
+                                                raising JournalLockError —
+                                                never darkness) means the
+                                                conjunct does not evaluate
+                                                at all, and the closed-world
+                                                rule blocks emission: a
+                                                future implementation must
+                                                map instrument exceptions to
+                                                insufficient-observability,
+                                                never to a conjunct skip;
+                                                closed-world rule applies)
 ```
 
 **Closed-world interim rule.** Every conjunct must be *evaluated*; any
