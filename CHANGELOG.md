@@ -178,7 +178,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   string no longer turns valid endpoints (`/api/windows`,
   `/api/screenshot`, and all `POST` endpoints) into 404s; malformed click
   coordinates are answered 400 instead of 500ing with the exception text
-  echoed. (#TBD)
+  echoed. (#1577)
 
 - Relay-liveness docs truth repair (2026-10-16): the design doc's R3
   interim-honesty clause is retired and the R3/R4 handoff pin's status
