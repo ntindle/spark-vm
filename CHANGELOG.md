@@ -213,7 +213,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   doc's build-slice list still read as unshipped, and the October 13
   remaining-builds analysis still listed R2/R3/R4 as unbuilt — all three
   now read shipped, and the gap analysis is marked superseded for state
-  (its slice decomposition still stands). (#TBD)
+  (its slice decomposition still stands). (#1591)
 
 - Desktop-bridge probe + input hardening (2026-10-16): the input-path
   liveness probe's window pick now runs through the same
