@@ -705,6 +705,27 @@ def test_cli_probe_now_nonstring_fields_exits_2(
     assert expected in err.err
 
 
+def test_cli_probe_now_huge_digit_port_exits_2(
+    history, journal, monkeypatch, capsys
+):
+    # Python 3.11+ int() refuses >4300-digit strings (ValueError) — the
+    # validator must still fail loud with exit 2 (PR #1538 review B4).
+    code, err = _run_cli(
+        ["--probe-now", "--query", VM],
+        monkeypatch,
+        capsys,
+        stdin=json.dumps(
+            {
+                "relay_host": "h",
+                "relay_port": "9" * 5000,
+                "pinned_fingerprint": "SHA256:x",
+            }
+        ),
+    )
+    assert code == 2
+    assert "must be an integer" in err.err
+
+
 def test_cli_probe_now_deeply_nested_stdin_exits_2(
     history, journal, monkeypatch, capsys
 ):

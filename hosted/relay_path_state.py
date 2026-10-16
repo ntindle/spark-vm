@@ -653,7 +653,13 @@ def _read_bundle_stdin():
         )
         if not digits or not (digits.isascii() and digits.isdigit()):
             raise _BundleError("--probe-now bundle relay_port must be an integer")
-        port = int(sign + digits, 10)
+        try:
+            # Python 3.11+ int() refuses >4300-digit strings (ValueError):
+            # keep it inside the validator so pathological input still
+            # fails loud with exit 2 (PR #1538 review B4).
+            port = int(sign + digits, 10)
+        except ValueError:
+            raise _BundleError("--probe-now bundle relay_port must be an integer")
     else:
         raise _BundleError("--probe-now bundle relay_port must be an integer")
     if not 0 < port < 65536:
