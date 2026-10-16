@@ -1748,6 +1748,25 @@ def test_provenance_unknown_without_manifest(tmp_path):
     assert entries == []
 
 
+def test_provenance_symlinked_manifest_is_unknown_not_attacker_records(tmp_path):
+    # #1548 (Security round-1 blocker): the writer refuses symlinks
+    # (O_NOFOLLOW), so a symlink here means the box was squatted — the
+    # reader must report no signal ("unknown"), never the attacker's
+    # records (which would fake an "in sync" verdict).
+    import os
+
+    from self_update import provenance_records, provenance_state
+
+    target = tmp_path / "attacker.json"
+    target.write_text('{"installed": "/x", "sha256": "y"}\n')
+    manifest = tmp_path / "provenance-manifest.json"
+    os.symlink(target, manifest)
+    assert provenance_records(str(manifest)) == {}
+    aggregate, entries = provenance_state(manifest_path=str(manifest))
+    assert aggregate == "unknown"
+    assert entries == []
+
+
 def test_provenance_malformed_manifest_is_unknown_not_a_crash(tmp_path):
     from self_update import provenance_state
 

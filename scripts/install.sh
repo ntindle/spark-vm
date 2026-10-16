@@ -40,6 +40,9 @@
 # updates). `scripts/self_update.py status` reads the manifest and reports
 # drift between the installed copies and the repo checkout loudly — the
 # exact failure #6 warns about (divergent copies silently missing fixes).
+# Permission pin (issue #1548): the manifest is created owner-only (0600)
+# and its parent dir pinned 0700, so drift detection cannot be fooled by a
+# re-stamped manifest on a shared box.
 # The muse-job plugin is muse-CLI-managed, not a file copy, so it is not
 # stamped: there is nothing the installer can byte-pin for it.
 
@@ -501,6 +504,16 @@ step_deploy() {
 # The manifest is append-only JSONL: the reader (`self_update.py status`)
 # takes the last line per installed path, so re-stamping a file updates its
 # record instead of duplicating it, and a single O_APPEND write is atomic.
+# Permission pin (#1548): the manifest is the S1 integrity inventory, so it
+# is created owner-only (0600) and its immediate parent dir is pinned 0700 —
+# a 0755 parent would let another local user *replace* the manifest via
+# rename(2) (directory write permission suffices), and a 0644 manifest would
+# let them read the stamped records. A pre-existing manifest gets its
+# group/other bits cleared on open. A symlink at the manifest path (opened
+# O_NOFOLLOW) or a symlinked parent dir fails loud instead of being
+# followed — the hardening must never re-permission an attacker's target.
+# Only the immediate parent is tightened,
+# never walked past (e.g. never ~/.local itself, which other apps own).
 # Fails loudly (not silently) if the commit, VERSION, or hash cannot be
 # read — a stamp the inventory cannot trust is worse than no stamp.
 stamp_provenance() {
@@ -515,15 +528,14 @@ stamp_provenance() {
     digest="$(sha256sum < "$installed" | cut -d' ' -f1)" || \
         die "cannot stamp provenance for $installed — cannot hash $installed"
     now="$(date +%s)"
-    if [ "$DRY_RUN" = 0 ]; then
-        mkdir -p "$(dirname "$manifest")" || \
-            die "cannot stamp provenance for $installed — cannot create $(dirname "$manifest")"
-    fi
     # JSON-string-escape via python3 (present on every supported box; jq is
-    # not a declared installer dependency).
+    # not a declared installer dependency). Directory + file permission
+    # pinning lives here too (issue #1548) — os.open's mode is exact-or-
+    # stricter under any umask (umask can only remove bits), and fchmod is
+    # umask-immune, so the manifest ends up exactly 0600 regardless.
     python3 - "$installed" "$source_rel" "$digest" "$commit" "$version" "$now" "$manifest" <<'PYEOF' || \
         die "cannot stamp provenance for $installed — manifest write failed"
-import json, sys
+import json, os, sys
 installed, source_rel, digest, commit, version, now, manifest = sys.argv[1:8]
 record = {
     "installed": installed,
@@ -533,8 +545,32 @@ record = {
     "version": version,
     "stamped_at": int(now),
 }
-with open(manifest, "a", encoding="utf-8") as f:
-    f.write(json.dumps(record, sort_keys=True) + "\n")
+parent = os.path.dirname(os.path.abspath(manifest))
+if not os.path.isabs(manifest):
+    # Fail loud rather than chmod'ing the process CWD: abspath() would
+    # silently resolve a relative override to the CWD and the chmod below
+    # would tighten the wrong directory.
+    raise ValueError(f"refusing relative provenance manifest path: {manifest!r}")
+if os.path.islink(parent):
+    # chmod follows symlinks: a planted dir-symlink here would get its
+    # *target* re-permissioned. Refuse instead of mutating it.
+    raise ValueError(f"refusing symlinked provenance manifest parent: {parent!r}")
+os.makedirs(parent, mode=0o700, exist_ok=True)
+os.chmod(parent, 0o700)  # tighten even when pre-existing (tighten-after-create)
+# O_NOFOLLOW: a pre-planted symlink at the manifest path must fail loud
+# (ELOOP) rather than silently appending into — and re-permissioning —
+# the symlink's target (#1548; same precedent as the relay history file).
+fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+try:
+    # The creation mode only constrains new files; clear group/other bits
+    # on open for pre-existing manifests too.
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        fd = None  # fdopen owns the fd from here; avoid double-close
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+finally:
+    if fd is not None:
+        os.close(fd)
 PYEOF
     note "stamped provenance for $installed (commit ${commit:0:12}, VERSION $version)"
 }

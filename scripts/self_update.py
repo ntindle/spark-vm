@@ -658,7 +658,8 @@ def provenance_records(manifest_path=None):
 
     Returns the LAST record per installed path (the manifest is
     append-only JSONL; re-stamping a file updates its record), or {}
-    when the manifest is missing, unreadable, or yields no valid line —
+    when the manifest is missing, unreadable, a symlink (refused —
+    issue #1548), or yields no valid line —
     the honest no-signal state (pre-#1528 installs publish none). A
     single malformed line is skipped, not fatal: line granularity makes
     the valid records recoverable, and one corrupt byte must not nuke
@@ -668,6 +669,14 @@ def provenance_records(manifest_path=None):
     """
     if manifest_path is None:
         manifest_path = _PROVENANCE_MANIFEST_FILE
+    if os.path.islink(manifest_path):
+        # #1548: the writer refuses symlinks (O_NOFOLLOW), so a symlink
+        # here means the box was squatted before the fix — or by someone
+        # who can write the manifest's parent. Never read through it:
+        # report no signal (honest "unknown") instead of attacker-authored
+        # records that would fake an "in sync" verdict. islink never raises,
+        # so the never-raises contract holds.
+        return {}
     try:
         with open(manifest_path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()

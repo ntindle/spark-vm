@@ -925,6 +925,162 @@ def test_stamp_provenance_fails_loud_when_commit_unreadable(tmp_path):
     assert proc.stdout.strip().endswith("OK")
 
 
+def _provenance_harness_nested(tmp_path):
+    """Like _provenance_harness, but the manifest lives under a nested,
+    not-yet-existing parent (mirroring the real ~/.local/state/spark-vm
+    layout) and the shell umask is pinned to 022 so creation-mode
+    assertions are deterministic and the pre-fix code fails them.
+    """
+    agent_home = tmp_path / "agent-home"
+    agent_repo = tmp_path / "agent-repo"
+    (agent_repo / "muse-job" / "bin").mkdir(parents=True)
+    (agent_repo / "cred-ui").mkdir(parents=True)
+    (agent_repo / "VERSION").write_text("0.9.1\n")
+    manifest = tmp_path / "state" / "spark-vm" / "provenance-manifest.json"
+    prefix = textwrap.dedent(
+        f"""\
+        export HOME="{agent_home}" AGENT_REPO="{agent_repo}" DRY_RUN=0
+        export PROVENANCE_MANIFEST="{manifest}"
+        umask 022
+        git() {{ echo "0123456789abcdef0123456789abcdef01234567"; }}
+        """
+    )
+    return prefix, agent_home, agent_repo, manifest
+
+
+def test_stamp_provenance_creates_manifest_0600(tmp_path):
+    # #1548: the manifest is the S1 integrity inventory; it must be created
+    # owner-only so another local user cannot read the stamped records.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"#!/bin/sh\necho muse-job\n")
+    code = source_preamble() + prefix
+    code += f'stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK'
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    mode = stat.S_IMODE(manifest.stat().st_mode)
+    assert mode == 0o600, f"manifest mode {oct(mode)}, want 0o600"
+
+
+def test_stamp_provenance_pins_parent_dir_0700(tmp_path):
+    # #1548: the parent dir must not be group/other-writable either — a 0755
+    # parent lets another local user *replace* the manifest via rename(2)
+    # (directory write permission suffices) and re-stamp a tampered copy.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += f'stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK'
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    mode = stat.S_IMODE(manifest.parent.stat().st_mode)
+    assert mode == 0o700, f"manifest parent mode {oct(mode)}, want 0o700"
+
+
+def test_stamp_provenance_tightens_preexisting_manifest(tmp_path):
+    # #1548: a manifest created pre-fix (0644 under a default umask) gets its
+    # group/other bits cleared on the next stamp — and the new line is
+    # appended, not lost.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"installed": "legacy", "stamped_at": 0}\n')
+    os.chmod(manifest, 0o644)
+    os.chmod(manifest.parent, 0o755)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += f'stamp_provenance "{placed}" "muse-job/bin/muse-job" >/dev/null && echo OK'
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    mode = stat.S_IMODE(manifest.stat().st_mode)
+    assert mode == 0o600, f"pre-existing manifest mode {oct(mode)}, want 0o600"
+    import json
+
+    lines = [line for line in manifest.read_text().splitlines() if line.startswith("{")]
+    assert len(lines) == 2, lines
+    assert json.loads(lines[0])["installed"] == "legacy"
+    assert json.loads(lines[1])["installed"] == str(placed)
+
+
+def test_stamp_provenance_refuses_relative_manifest_path(tmp_path):
+    # A relative PROVENANCE_MANIFEST override would resolve to the process
+    # CWD; the fix must die loud instead of chmod'ing the CWD to 0700.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        export PROVENANCE_MANIFEST="relative-manifest.json"
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on relative manifest path"; exit 1
+        fi
+        [ ! -e "relative-manifest.json" ] || {{ echo "manifest created in CWD"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_stamp_provenance_refuses_symlinked_manifest(tmp_path):
+    # #1548 (Security round-1 blocker): a pre-planted symlink at the
+    # manifest path must fail loud (ELOOP) — never append into the
+    # symlink's target, and never re-permission the target.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    target = tmp_path / "victim.txt"
+    target.write_text("attacker records\n")
+    os.chmod(target, 0o644)
+    manifest.parent.mkdir(parents=True)
+    os.symlink(target, manifest)
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on symlinked manifest"; exit 1
+        fi
+        [ -L "{manifest}" ] || {{ echo "symlink removed"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+    assert target.read_text() == "attacker records\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_stamp_provenance_dies_loud_when_parent_blocked(tmp_path):
+    # The python stage must fail loud too (not just the pre-python
+    # commit/VERSION/hash checks): a regular file blocking the manifest's
+    # parent dir must exit non-zero with no manifest written.
+    prefix, agent_home, agent_repo, manifest = _provenance_harness_nested(tmp_path)
+    blocker = manifest.parent.parent / "spark-vm"
+    blocker.parent.mkdir(parents=True)
+    blocker.write_text("not a dir\n")
+    placed = tmp_path / "placed-bin"
+    placed.write_bytes(b"v1\n")
+    code = source_preamble() + prefix
+    code += textwrap.dedent(
+        f"""\
+        if ( stamp_provenance "{placed}" "muse-job/bin/muse-job" ) 2>/dev/null; then
+          echo "did not die on blocked parent dir"; exit 1
+        fi
+        [ ! -e "{manifest}" ] || {{ echo "manifest written despite failure"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
 def test_step_muse_job_stamps_provenance_on_skip_path(tmp_path):
     # Idempotent re-run: the copy already matches (skip), but the manifest
     # must still be stamped — this is how pre-#1528 installs get backfilled.

@@ -193,6 +193,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Installer provenance manifest hardened (2026-10-16): the manifest the
+  box installer stamps is now created owner-only (0600) with its
+  directory pinned to 0700, and a symlink at the manifest path fails
+  loud instead of being followed — so a second user on a shared box can
+  neither read the stamped records nor replace-and-re-stamp them into a
+  fake "in sync". That is a file-ownership guarantee against other local
+  users, not tamper-evidence against root or the installer's own account.
+  A manifest created before this change gets its permissions tightened on
+  the next install run. (#TBD)
 - Tenant-status signed requests are now single-use inside the 300 s
   freshness window (#1465): a per-process replay ledger records every
   verified `(tenant_id, ts, signature)` triple, and an exact replay of an
