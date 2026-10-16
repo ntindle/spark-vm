@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Relay path-state readings (2026-10-15): each box's relay probe
+  outcomes are now mapped to `ok` / `degraded` / `down` with `relay` /
+  `cert` / `box-leg` sub-codes; flapping probes read `degraded`
+  instead of triggering a suspension, and a 5-minute default cadence
+  (tunable) decides when post-`live` boxes are probed, standing down on
+  suspended or destroyed provider states. Exposed on the operator query
+  surface only — not yet wired to tenant status. (#1535)
 - Packaging gap analysis (2026-10-15): pinned the gap between spark-vm's
   release machinery and an actual install story — releases are cut and tagged,
   but there is no published artifact, no installer script, and no
