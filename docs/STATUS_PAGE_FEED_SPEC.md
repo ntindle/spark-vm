@@ -20,10 +20,10 @@ S3 answers the incident-comms question.
   S2 cross-check).
 - **G17 S1** (`fleet/events.py` + `docs/UPDATE_EVENT_REPORTING.md` §4):
   the fleet event journal (canonical shape — S1-relevant fields:
-  `event_id`, `box_id`,
-  `session_epoch`, `emitted_at`, `received_at`, `source`, `component`,
-  `subcomponent`, `subcomponents`, `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
-  `attested`, `note`; the full additive schema lives in
+  `event_id`, `box_id`, `session_epoch`, `emitted_at`, `received_at`,
+  `source`, `component`, `subcomponent`, `subcomponents`, `kind`,
+  `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`, `attested`,
+  `note`; the full additive schema lives in
   `docs/UPDATE_EVENT_REPORTING.md`'s event-shape table) and the alert journal (`alerts.jsonl`), with five
   alert rules evaluated on every collect: (1) any `rollback-failed` →
   immediate alert; (2) correlated failure (≥2 boxes, same
