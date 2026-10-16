@@ -113,6 +113,8 @@ bounded; creation-hardened 0o700 parent / 0o600 O_NOFOLLOW file
 (`relay_liveness.py`) takes an exclusive `flock` on a sidecar lock
 (#1082); the probe-history store takes none. Two concurrent cadence
 drivers for one box double-probe and interleave flapping memory.
+(Stale as of 2026-10-16 — the cross-process lock shipped in PR #1546;
+see the addendum.)
 No data corruption (O_APPEND + corrupt-line skip), so the residual is
 a p3 (filed this turn — §4).
 
