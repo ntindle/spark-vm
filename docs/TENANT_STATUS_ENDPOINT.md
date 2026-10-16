@@ -45,6 +45,18 @@ of status inputs; this endpoint is the *reader*.
     is no tenant selector on this endpoint — identity is
     credential-derived — so the 404 case fires only for the caller's own
     tenant being unservable.
+  - **Anti-replay (#1465):** the signed-request side is single-use inside the
+    300 s freshness window. Every `(tenant_id, ts, signature)` triple that
+    passes verification is recorded in a per-process replay ledger; an
+    exact replay of an observed triple gets `401` — the caller re-polls
+    with a fresh timestamp (a fresh `ts` signs a fresh message, so normal
+    5 s polling is unaffected). Only verified triples enter the ledger
+    (an unverified triple can neither poison a tenant's slot nor grow the
+    set), and entries older than the window are evicted on the next
+    verified request. Honest limitation: the ledger is in-memory per
+    process, so a restart clears it — a triple captured just before a
+    restart is replayable again for the remainder of its own window (a
+    ≤300 s status disclosure, GET-only, never a state change).
 - **Read-only contract:** GET never changes state. A scanner fetching the
   URL (the mail-scanner threat already applied to the magic-link flow)
   learns nothing it is not authenticated to see and changes nothing.

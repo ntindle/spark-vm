@@ -193,6 +193,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Tenant-status signed requests are now single-use inside the 300 s
+  freshness window (#1465): a per-process replay ledger records every
+  verified `(tenant_id, ts, signature)` triple, and an exact replay of an
+  observed triple gets 401 — the caller re-polls with a fresh timestamp.
+  Only verified triples enter the ledger; entries older than the window
+  are evicted on the next verified request. (#TBD)
 - Relay `--probe-now` no longer takes the connection bundle on the
   command line (#1536): the relay host, port, and pinned fingerprint
   now come from stdin as JSON, so the key material is never visible in
