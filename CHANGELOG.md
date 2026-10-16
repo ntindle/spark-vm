@@ -76,6 +76,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   Object singleton for the sender drain; build slices filed — #1565
   (D1 migration), #1566 (D9 sweep port), #1567 (sender-loop epic:
   #1569–#1571), #1568 (GC port). (#1572)
+- Hosted push lane database tables are live (2026-10-16): the four
+  tables the push lane's plane port needs (subscriptions, per-box and
+  per-owner page-budget counters, send results with the page-once
+  guarantee, hourly digest state) were created on the live plane
+  database via the forward one-shot migration; re-running the
+  migration is a no-op, and no existing table was touched. (#1565)
+  (#TBD)
 - Waitlist token ordering policy (2026-10-16): the crash-safety rules for
   the signup email tokens — which durable step (email spool, row save,
   token retirement, event) runs first in each confirm / reminder /

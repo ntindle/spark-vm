@@ -460,6 +460,12 @@ decisions here, not follow-ups.
   deploying before its migration writes to missing tables. The
   migration file lives in the control-plane workspace next to
   `migrate_958_s4b.sql`; this doc is its contract.
+- **Status (2026-10-16): applied.** The migration ran against the live
+  plane D1 statement-by-statement; the four tables and all four
+  indexes verified present, the re-run verified a silent no-op, and
+  no other database object changed. S2/S3/S4 builds can assume the
+  tables exist. Corrections are forward-only; this migration contains
+  no DROP statements by design.
 - 90-day retention + GC is shipped in-repo as `hosted/push_gc.py`
   (#1058; the #999 precedent filed #1013 for `phone_home_events`,
   whose plane-workspace cron + manual-trigger pattern the deploy half
