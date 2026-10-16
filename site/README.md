@@ -2,7 +2,7 @@
 
 **Status: build slices 1–3c + slice 3 remainder of H15 PR 1.** Slice 1 shipped the static
 markup (PR #163); slice 2 shipped the backend half of the endpoint surface
-(`site/waitlistd.py` + `scripts/test_waitlistd.py`, 159 tests): `POST
+(`site/waitlistd.py` + `scripts/test_waitlistd.py`, 157 tests): `POST
 /waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
 confirms, token as form field), the HMAC token signer (single-use, 14-day
 expiry, operator key via `WAITLIST_HMAC_KEY` — never in the repo), and
