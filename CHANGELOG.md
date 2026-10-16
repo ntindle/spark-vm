@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `scheduled` handler multiplexed on the cron, and the #1094 Durable
   Object singleton for the sender drain; build slices filed — #1565
   (D1 migration), #1566 (D9 sweep port), #1567 (sender-loop epic:
-  #1569–#1571), #1568 (GC port). (#TBD)
+  #1569–#1571), #1568 (GC port). (#1572)
 - Waitlist token ordering policy (2026-10-16): the crash-safety rules for
   the signup email tokens — which durable step (email spool, row save,
   token retirement, event) runs first in each confirm / reminder /
