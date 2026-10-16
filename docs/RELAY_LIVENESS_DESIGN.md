@@ -129,7 +129,7 @@ prober disagrees with itself across consecutive probes (flapping), or the
 passive journal is stale past the §2 idle threshold while the prober
 still reports `ok`. `degraded` does **not** fire transition rule 6 on
 its own (the rule fires only on `down`); it is recorded in `detail` and
-on the operator surface, and for the stuck detector's §6 conjunct a
+on the operator surface, and for the stuck detector's §4 conjunct a
 `degraded` reading is *suspect* — it evaluates as unobservable
 (`insufficient-observability`), never as assumed-`ok`.
 The tenant layer consumes it as the `connection-unreachable` producer:
@@ -178,7 +178,8 @@ AND relay_path_ok(S) == true       (this doc's relay_path_state(S) == ok;
 ```
 
 **R4 SHIPPED 2026-10-16 (#1417):** the conjunct is now in the detector's
-§4 predicate — `down` readings never enter `stall()` (rule 6 latches the
+§4 predicate — `down` readings never become `stall_candidate`s (rule 6
+latches the
 arc; the endpoint serves `connection-unreachable` with the sub-code in
 `detail`) and `degraded` evaluates as unobservable for the conjunct
 (suspect, never assumed-`ok` — see §5). `STUCK_DETECTOR_DESIGN.md` §8

@@ -262,7 +262,7 @@ a p3 (filed this turn — §4).
 | Slice | Issue | State | This turn |
 |---|---|---|---|
 | R3 — tenant-status wiring (rule 6, live-entry AND-combine, latch) + anchor selection + nested-suspension emit rule + recovery protocol | #1416 | **Shipped + closed** (PR #1562, `e3f8c6d1`; see the 2026-10-16 addendum) |
-| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | **Shipped + closed** (PR #TBD; see the 2026-10-16 addendum) | Pointer comment; F-RL34-7 carried |
+| R4 — detector conjunct becomes observable + Q6 interim retirement + S2 calibration row | #1417 | **Shipped + closed** (PR #TBD; see the 2026-10-16 addendum) | Conjunct added to the §4 predicate; Q6 interim retired; S2 "suspension while measuring" row added — docs-only slice |
 | Probe-history cross-process lock | #1540 | **Shipped + closed** — PR #1546 merged `f63eb8cb`; see the 2026-10-16 addendum |
 
 Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are

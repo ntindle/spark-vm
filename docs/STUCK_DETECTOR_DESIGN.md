@@ -164,8 +164,11 @@ AND task_engaged(S)            == true          (a confirmd first-filing
 AND NOT suspended_or_scheduled(S)              (H13 suspend contract —
                                                 unobservable pre-H13)
 AND relay_path_ok(S)           == true        (R4 — the R2b instrument's
-                                                relay_path_state(S) == ok;
-                                                `down` never enters stall():
+                                                relay_path_state(S) == ok
+                                                (S keyed to its box's vm_id;
+                                                per-box session-arc candidates
+                                                per §8 Q2); `down` never
+                                                becomes a stall_candidate:
                                                 rule 6 latches the arc (R3
                                                 wiring) and the endpoint
                                                 serves connection-unreachable
@@ -188,8 +191,7 @@ AND relay_path_ok(S)           == true        (R4 — the R2b instrument's
                                                 future implementation must
                                                 map instrument exceptions to
                                                 insufficient-observability,
-                                                never to a conjunct skip;
-                                                closed-world rule applies)
+                                                never to a conjunct skip)
 ```
 
 **Closed-world interim rule.** Every conjunct must be *evaluated*; any
@@ -392,17 +394,17 @@ as the `stuck` code.
   handshake-only synthetic dial prober, no-inbound observation discipline,
   `relay_path_state` producer contract for the tenant-status layer, the
   predicate's relay conjunct, R1–R4 build slices). Implementation
-  (R1–R4) remains as a tracked issue.
-- **RETIRED 2026-10-16 — R4 (#1417) SHIPPED:** the relay conjunct is now
+  (R1–R4) was a tracked issue — closed by R4 below.
+  **RETIRED 2026-10-16 — R4 (#1417) SHIPPED:** the relay conjunct is now
   in the §4 predicate (`relay_path_state(S) == ok`; `down` routes to
   `connection-unreachable` via transition rule 6 with the sub-code in
   `detail`, never `stuck`; `degraded` is suspect ⇒ unobservable per the
   §5 producer-contract note (in `docs/RELAY_LIVENESS_DESIGN.md`), so
-  instrument darkness yields
-  `insufficient-observability`, never assumed-`ok`). The interim
-  "relay conjunct dropped outright" is dead; the S3 gate's relay row is
-  closed. H4 provider state, H13 suspend contract, and G1 terminal
-  records remain the S3 gate's unshipped dependencies.
+  instrument darkness yields `insufficient-observability`, never
+  assumed-`ok`). The interim "relay conjunct dropped outright" is dead;
+  the S3 gate's relay row is closed. H4 provider state, H13 suspend
+  contract, and G1 terminal records remain the S3 gate's unshipped
+  dependencies.
 
 ## Cross-references
 
