@@ -143,7 +143,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   across the plugin's standalone hooks by design, and a new sync test
   now fails loudly if the copies ever diverge — a stale or tampered
   copy can no longer silently weaken the job monitor's forgery
-  defenses. (#TBD)
+  defenses. (#1556)
 
 ### Fixed
 
