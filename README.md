@@ -150,8 +150,12 @@ user, drops the passwordless-sudo rule, copies your SSH key, joins the
 tailnet, clones the repo, deploys the proxy + confirmd stack, installs the
 muse-job CLI and plugin, enables the cred-ui user service, and starts the
 CUA desktop). Tailscale installs from its signed apt repository, never a
-piped shell script. Re-run it any time: completed steps are skipped — the
-desktop start and repo sync always run but are no-ops when current — and
+piped shell script. **Version pinning:** the installer installs the latest
+tagged release by default — `sudo ./spark-vm/scripts/install.sh --version vX.Y.Z`
+installs a specific release instead (the checkout's `VERSION` is verified
+against the tag, and a mismatched tree fails loudly). Re-run it any time:
+completed steps are skipped — the desktop start always runs but is a no-op
+when current, and an already-pinned checkout is left untouched — and
 anything the script cannot complete fails loudly with a diagnostic
 (`~/bin` lands on `PATH` via `~/.profile` on next login). This section
 calls the script instead of inlining the steps, so the two cannot drift.

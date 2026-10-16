@@ -40,6 +40,8 @@ STEP_FNS = [
     "step_tailscale_up",
     "step_linger",
     "step_repo",
+    "resolve_install_version",
+    "assert_version_matches",
     "step_deploy",
     "step_muse_job",
     "step_plugin",
@@ -98,13 +100,15 @@ def test_source_defines_steps_without_side_effects(tmp_path):
 
 def test_env_flags_survive_sourcing():
     # The bootstrap -> agent re-exec passes flags via environment (env(1));
-    # plain assignments would clobber them (notably --agent-user and --force).
+    # plain assignments would clobber them (notably --agent-user, --force,
+    # and --version).
     code = (
-        "export AGENT_USER=alice DRY_RUN=1 FORCE=1; "
+        "export AGENT_USER=alice DRY_RUN=1 FORCE=1 INSTALL_VERSION=v1.2.3; "
         f"source {SCRIPT} >/dev/null 2>&1; "
         '[ "$AGENT_USER" = alice ] || { echo "AGENT_USER clobbered: $AGENT_USER"; exit 1; }; '
         '[ "$DRY_RUN" = 1 ] || { echo "DRY_RUN clobbered: $DRY_RUN"; exit 1; }; '
         '[ "$FORCE" = 1 ] || { echo "FORCE clobbered: $FORCE"; exit 1; }; '
+        '[ "$INSTALL_VERSION" = v1.2.3 ] || { echo "INSTALL_VERSION clobbered: $INSTALL_VERSION"; exit 1; }; '
         "echo OK"
     )
     proc = run_bash(code)
@@ -249,6 +253,10 @@ def _agent_harness(tmp_path, fresh):
             (REPO / "muse-job" / "bin" / "muse-job").read_bytes()
         )
         (agent_repo / ".git").mkdir()
+        # Pinned-release fake: ls-remote above advertises v9.9.9 at deadbeef
+        # and rev-parse answers deadbeef for both HEAD and the tag commit,
+        # so the existing-checkout path sees the pin as holding.
+        agent_repo.joinpath("VERSION").write_text("9.9.9\n")
         repo_unit = agent_repo / "cred-ui"
         repo_unit.mkdir()
         repo_unit.joinpath("cred-ui.service").write_bytes(
@@ -285,7 +293,7 @@ def _agent_harness(tmp_path, fresh):
         getent() {{ case "$1 $2" in "passwd ntindle") echo "ntindle:x:1001:1001:Agent User:$AGENT_HOME:/bin/bash";; "group sudo") echo "sudo:x:27:";; *) return 1;; esac; }}
         tailscale() {{ case "$1" in status) {ts_status};; up) echo "tailscale up"; return 0;; esac; }}
         loginctl() {{ case "$1" in show-user) {linger};; *) log_mut "loginctl $*";; esac; return 0; }}
-        git() {{ echo "git $*" >> "$GIT_LOG"; case "$*" in *"symbolic-ref"*) echo main;; *"pull"*) return 0;; esac; return 0; }}
+        git() {{ echo "git $*" >> "$GIT_LOG"; case "$*" in *"symbolic-ref"*) echo main;; *"ls-remote --tags"*) printf 'deadbeef\\trefs/tags/v9.9.9\\ndeadbeef2\\trefs/tags/v9.9.9^{{}}\\n';; *"rev-parse"*) echo deadbeef;; *) return 0;; esac; return 0; }}
         systemctl() {{
           [ "$1" = "--user" ] && shift
           case "${1:-} ${2:-}" in
@@ -556,3 +564,228 @@ def test_shellcheck_error_clean():
         timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# #1527 — version-pinned install
+# ---------------------------------------------------------------------------
+
+
+def test_version_flag_parsing_and_grammar():
+    code = source_preamble()
+    code += textwrap.dedent(
+        """\
+        parse_args --version v1.2.3
+        [ "$INSTALL_VERSION" = v1.2.3 ] || { echo "space form failed: $INSTALL_VERSION"; exit 1; }
+        parse_args --version=v2.0.0-rc.1
+        [ "$INSTALL_VERSION" = v2.0.0-rc.1 ] || { echo "equals form failed: $INSTALL_VERSION"; exit 1; }
+        for bad in main v1.2 v1 v1.2.3.4.5 --upload-pack=x 'v1.2.3;rm -rf /' 'v 1.2.3' 'v1.2.3
+        x'; do
+          if ( parse_args --version "$bad" ) 2>/dev/null; then echo "accepted bad ref: $bad"; exit 1; fi
+        done
+        # env-provided value is validated too (the re-exec passes --version by env)
+        INSTALL_VERSION=main
+        if ( parse_args ) 2>/dev/null; then echo "env bad ref accepted"; exit 1; fi
+        # empty is the default (latest tag), not an error
+        INSTALL_VERSION=
+        parse_args || { echo "empty default rejected"; exit 1; }
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_version_flag_missing_arg_dies():
+    code = source_preamble()
+    code += '( parse_args --version ) 2>/dev/null && { echo "missing arg accepted"; exit 1; }; echo OK\n'
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_resolve_install_version_picks_latest_tag():
+    code = source_preamble()
+    code += textwrap.dedent(
+        """\
+        git() {
+          case "$*" in
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\naaa2\\trefs/tags/v0.8.0^{}\\nbbb\\trefs/tags/v0.10.0\\nbbb2\\trefs/tags/v0.10.0^{}\\nccc\\trefs/tags/v0.9.0\\nddd\\trefs/tags/notaversion\\n';;
+          esac
+        }
+        INSTALL_VERSION=
+        v=$(resolve_install_version)
+        [ "$v" = v0.10.0 ] || { echo "wrong latest: $v"; exit 1; }
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_resolve_install_version_explicit_tag_checked_and_missing_dies():
+    code = source_preamble()
+    code += textwrap.dedent(
+        """\
+        git() {
+          case "$*" in
+            *"ls-remote --tags"*"refs/tags/v1.2.3") printf 'aaa\\trefs/tags/v1.2.3\\n';;
+          esac
+        }
+        INSTALL_VERSION=v1.2.3
+        v=$(resolve_install_version)
+        [ "$v" = v1.2.3 ] || { echo "explicit tag not echoed: $v"; exit 1; }
+        if ( INSTALL_VERSION=v9.9.9 resolve_install_version ) 2>/dev/null; then echo "missing tag accepted"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def _repo_harness_git(clone_args_file, clone_version_plant):
+    # git stub for step_repo tests: ls-remote advertises v0.8.0; clone
+    # fakes the checkout by planting the given VERSION content and logs its
+    # argv to a file (the step runs in a command-substitution subshell, so
+    # plain variable assignments would be lost).
+    return textwrap.dedent(
+        f"""\
+        git() {{
+          case "$*" in
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\n';;
+            *"remote get-url"*) return 0;;
+            *"rev-parse"*) echo deadbeef;;
+            *"clone"*) echo "$*" >> "{clone_args_file}"; mkdir -p "$AGENT_REPO"; printf '%s\\n' "{clone_version_plant}" > "$AGENT_REPO/VERSION";;
+          esac
+          return 0
+        }}
+        """
+    )
+
+
+def test_step_repo_fresh_clone_pins_branch_and_verifies_version(tmp_path):
+    repo = tmp_path / "agent-repo"
+    clone_args = tmp_path / "clone-args"
+    clone_args.write_text("")
+    code = source_preamble()
+    code += _repo_harness_git(str(clone_args), "0.8.0")
+    code += textwrap.dedent(
+        f"""\
+        AGENT_REPO="{repo}"; REPO_URL="https://example.invalid/spark-vm.git"
+        DRY_RUN=0; INSTALL_VERSION=v0.8.0
+        out=$(step_repo 2>&1); rc=$?
+        [ $rc = 0 ] || {{ echo "failed on matching VERSION: $out"; exit 1; }}
+        args=$(cat "{clone_args}")
+        case "$args" in *"--branch v0.8.0"*) ;; *) echo "no --branch in: $args"; exit 1;; esac
+        case "$args" in *"$REPO_URL $AGENT_REPO"*) ;; *) echo "bad clone dest: $args"; exit 1;; esac
+        echo "$out" | grep -q "installing release v0.8.0" || {{ echo "no pin note: $out"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_repo_fresh_clone_version_mismatch_dies(tmp_path):
+    repo = tmp_path / "agent-repo"
+    clone_args = tmp_path / "clone-args"
+    clone_args.write_text("")
+    code = source_preamble()
+    code += _repo_harness_git(str(clone_args), "0.7.0")  # hand-edited tree
+    code += textwrap.dedent(
+        f"""\
+        AGENT_REPO="{repo}"; REPO_URL="https://example.invalid/spark-vm.git"
+        DRY_RUN=0; INSTALL_VERSION=v0.8.0
+        if ( step_repo ) 2>/dev/null; then echo "mismatched tree accepted"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_repo_existing_pin_holds_skips_without_pull(tmp_path):
+    repo = tmp_path / "agent-repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "VERSION").write_text("0.8.0\n")
+    git_seen = tmp_path / "git-seen"
+    git_seen.write_text("")
+    code = source_preamble()
+    code += textwrap.dedent(
+        f"""\
+        git() {{
+          echo "$*" >> "{git_seen}"
+          case "$*" in
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\n';;
+            *"remote get-url"*) return 0;;
+            *"rev-parse"*) echo deadbeef;;
+          esac
+          return 0
+        }}
+        AGENT_REPO="{repo}"; REPO_URL="https://example.invalid/spark-vm.git"
+        DRY_RUN=0; INSTALL_VERSION=v0.8.0
+        out=$(step_repo 2>&1); rc=$?
+        [ $rc = 0 ] || {{ echo "failed on held pin: $out"; exit 1; }}
+        echo "$out" | grep -q "already at release v0.8.0" || {{ echo "no skip note: $out"; exit 1; }}
+        seen=$(cat "{git_seen}")
+        case "$seen" in *"pull"*|*"clone"*) echo "mutating git op on pinned run: $seen"; exit 1;; esac
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_step_repo_existing_pin_mismatch_dies_loud(tmp_path):
+    # The checkout is at a different commit than the pinned tag: tag-to-tag
+    # updates are out of scope (F-PKG-6) — die loud, don't half-upgrade.
+    repo = tmp_path / "agent-repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "VERSION").write_text("0.7.0\n")
+    code = source_preamble()
+    code += textwrap.dedent(
+        f"""\
+        git() {{
+          case "$*" in
+            *"ls-remote --tags"*) printf 'aaa\\trefs/tags/v0.8.0\\n';;
+            *"remote get-url"*) return 0;;
+            *"rev-parse"*) case "$*" in *"HEAD"*) echo deadbeef-old;; *) echo deadbeef-new;; esac;;
+          esac
+          return 0
+        }}
+        AGENT_REPO="{repo}"; REPO_URL="https://example.invalid/spark-vm.git"
+        DRY_RUN=0; INSTALL_VERSION=v0.8.0
+        if ( step_repo ) 2>/dev/null; then echo "diverged checkout accepted"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_dry_run_names_version_pin(tmp_path):
+    harness, call_log, git_log, agent_home, agent_repo, sudoers_d = _agent_harness(
+        tmp_path, fresh=True
+    )
+    code = source_preamble() + harness
+    code += textwrap.dedent(
+        f"""\
+        export HOME="{agent_home}" SUDOERS_DIR="{sudoers_d}" AGENT_USER=ntindle DRY_RUN=1
+        export REPO_DIR="/nonexistent/invoker-checkout" AGENT_REPO="{agent_home}/spark-vm"
+        out=$(run_agent 2>&1); rc=$?
+        [ $rc = 0 ] || {{ echo "dry-run failed: $out"; exit 1; }}
+        echo "$out" | grep -q "installing release v9.9.9" || {{ echo "no pin note: $out"; exit 1; }}
+        echo "$out" | grep -q "would clone .*--branch v9.9.9" || {{ echo "no branch in plan: $out"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")

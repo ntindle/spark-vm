@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Version-pinned install (2026-10-15): the box installer now installs a
+  tagged release instead of the main tip — the latest release by default,
+  or `install.sh --version vX.Y.Z` for a specific one. The checkout's
+  `VERSION` is verified against the tag, so a retagged or hand-edited tree
+  fails loudly instead of installing silently; an already-pinned checkout
+  is left untouched on re-run (tag-to-tag updates are not supported yet —
+  move the checkout aside and re-run). (#TBD)
 - Idempotent box installer (2026-10-15): the README "Try it" runbook is
   now a reviewed, re-runnable script — it creates the agent user, drops
   the passwordless-sudo rule, copies your SSH key, joins the tailnet
