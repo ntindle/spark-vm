@@ -144,107 +144,53 @@ then the same pid re-verified alive with its job sessions intact.</sub>
 Pick the path that matches your hardware. Both end at the same place: an
 Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 
+The installer is [`scripts/install.sh`](scripts/install.sh) — the
+idempotent machine form of this runbook (it creates the `ntindle` agent
+user, drops the passwordless-sudo rule, copies your SSH key, joins the
+tailnet, clones the repo, deploys the proxy + confirmd stack, installs the
+muse-job CLI and plugin, enables the cred-ui user service, and starts the
+CUA desktop). Tailscale installs from its signed apt repository, never a
+piped shell script. Re-run it any time: completed steps are skipped — the
+desktop start and repo sync always run but are no-ops when current — and
+anything the script cannot complete fails loudly with a diagnostic
+(`~/bin` lands on `PATH` via `~/.profile` on next login). This section
+calls the script instead of inlining the steps, so the two cannot drift.
+
 ### Option A: you have Unraid
 
 In the Unraid web UI, create an Ubuntu 24.04 VM — 8 vCPU, 15 GB RAM,
 250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. On the
-VM, run this one line first and type your install user's password when
-asked — it caches sudo so the paste below runs clean:
+VM, as your install user:
 
 ```bash
-sudo -v
+sudo -v                                # cache sudo; type your password when asked
+git clone https://github.com/ntindle/spark-vm.git
+sudo ./spark-vm/scripts/install.sh     # bootstrap, then the stack as ntindle
 ```
-
-Then paste this — it creates the `ntindle` agent user if your install
-didn't, then switches to it:
-
-```bash
-# passwordless sudo for the agent user
-sudo tee /etc/sudoers.d/ntindle <<< 'ntindle ALL=(ALL) NOPASSWD: ALL'
-sudo chmod 440 /etc/sudoers.d/ntindle
-
-# agent user — the stack runs as ntindle; skip if your install already made it
-id -u ntindle >/dev/null 2>&1 || sudo adduser ntindle --disabled-password --gecos ''
-
-# let the agent (and you) SSH in as ntindle over Tailscale — skip silently
-# if you logged in with a password instead of a key
-if [ -f ~/.ssh/authorized_keys ]; then
-  sudo install -d -o ntindle -g ntindle -m 700 ~ntindle/.ssh
-  sudo install -o ntindle -g ntindle -m 600 ~/.ssh/authorized_keys ~ntindle/.ssh/authorized_keys
-fi
-
-sudo -i -u ntindle
-
-# tailnet — the only network the box needs
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up        # approve the device in your Tailscale admin console
-sudo loginctl enable-linger ntindle
-
-# the stack
-git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
-cd ~/spark-vm
-./proxy/deploy.sh                                    # swap proxy + confirmd
-mkdir -p ~/bin                                        # fresh users have no ~/bin (~/.profile picks it up next login)
-cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
-muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
-mkdir -p ~/.config/systemd/user
-cp cred-ui/cred-ui.service ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now cred-ui
-./cua/bin/cua-desktop.sh start                       # the desktop it can drive
-```
-
-Then run `muse plugins approve` and approve the muse-job plugin when
-prompted. (If you logged in with a password instead of a key, the block
-couldn't copy an SSH key over — add your public key to
-`~ntindle/.ssh/authorized_keys` before expecting agent SSH access over
-Tailscale.)
 
 ### Option B: Hetzner (or any cloud VPS)
 
 Spin up an Ubuntu 24.04 VPS — 4 vCPU / 8 GB RAM minimum, 8 / 16 GB if
 you'll drive the desktop much. **Open zero firewall ports**: every
 service binds `127.0.0.1`; you reach the box over Tailscale + SSH.
-SSH in as root and paste this:
+SSH in as root:
 
 ```bash
-# agent user with passwordless sudo
-adduser ntindle --disabled-password --gecos ''
-usermod -aG sudo ntindle
-echo 'ntindle ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ntindle
-chmod 440 /etc/sudoers.d/ntindle
-
-# let the agent (and you) SSH in as ntindle over Tailscale — skip silently
-# if you logged in with a password instead of a key
-if [ -f ~/.ssh/authorized_keys ]; then
-  install -d -o ntindle -g ntindle -m 700 ~ntindle/.ssh
-  install -o ntindle -g ntindle -m 600 ~/.ssh/authorized_keys ~ntindle/.ssh/authorized_keys
-fi
+git clone https://github.com/ntindle/spark-vm.git
+./spark-vm/scripts/install.sh          # bootstrap, then the stack as ntindle
 ```
 
-Then `ssh ntindle@<vps-ip>` and paste the same tailnet + stack block as
-Option A:
+### Then: the two human gates, in order
 
-```bash
-# tailnet — the only network the box needs
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up        # approve the device in your Tailscale admin console
-sudo loginctl enable-linger ntindle
+1. **Tailscale.** The installer runs `tailscale up` for you; approve the
+   device in your Tailscale admin console, then re-run the installer —
+   it picks up where it stopped.
+2. **muse plugin.** Run `muse plugins approve` and approve the muse-job
+   plugin when prompted.
 
-# the stack
-git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
-cd ~/spark-vm
-./proxy/deploy.sh                                    # swap proxy + confirmd
-mkdir -p ~/bin                                        # fresh users have no ~/bin (~/.profile picks it up next login)
-cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
-muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
-mkdir -p ~/.config/systemd/user
-cp cred-ui/cred-ui.service ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now cred-ui
-./cua/bin/cua-desktop.sh start                       # the desktop it can drive
-```
-
-Then run `muse plugins approve` and approve the muse-job plugin when
-prompted.
+(If you logged in with a password instead of a key, the installer had no
+SSH key to copy — add your public key to `~ntindle/.ssh/authorized_keys`
+before expecting agent SSH access over Tailscale.)
 
 ### Then: give it secrets (the human part)
 
