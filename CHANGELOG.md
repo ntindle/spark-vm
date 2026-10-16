@@ -82,7 +82,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   guarantee, hourly digest state) were created on the live plane
   database via the forward one-shot migration; re-running the
   migration is a no-op, and no existing table was touched. (#1565)
-  (#TBD)
+  (#1585)
 - Waitlist token ordering policy (2026-10-16): the crash-safety rules for
   the signup email tokens — which durable step (email spool, row save,
   token retirement, event) runs first in each confirm / reminder /
