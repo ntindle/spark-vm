@@ -359,6 +359,10 @@ evaluated on wake against the *current* permitted version.
   the collector's gate answer-age field (not the event stream); it is
   folded into UPDATE_EVENT_REPORTING's S1 alert set when the S1b slice
   lands (pointer comment on #777 — the G15/G18 implementation issue — at ship; #608 closed on the design).
+  (2026-10-16: the fold never landed — UPDATE_EVENT_REPORTING §4 holds
+  rules 1–4 + rule-5 tail-discontinuity (#1006), no gate-stale rule — and
+  #777 closed 2026-10-05 with only S1a/S1b shipped; the rule and the owed
+  pointer comment are tracked on #1557.)
 - **G11–G14**: the `image.max_permitted_image_version` field is the wave
   gate's reimage approval (G15 §5); the `maintenance` code's enter/exit
   stays scheduler-owned (UPDATE_CHANNEL_POLICY.md producer rule); the
@@ -439,7 +443,11 @@ evaluated on wake against the *current* permitted version.
 (`FLEET_UPDATE_ROLLOUT_GAP_ANALYSIS.md`). It delivers the transport half
 of the G15/G18 split: G15's rollout-controller design
 (`ROLLOUT_CONTROLLER_DESIGN.md` §5) states the box-side interface; this
-doc specifies how the answer travels. Implementation (S1a–S1b/S2/S3)
-remains — tracked on #777 (the G15/G18 implementation issue; #609 closed on the design). Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
+doc specifies how the answer travels. Implementation: S1a and the S1b
+hook loop shipped (#830, #1034); #777 closed 2026-10-05. Remainders tracked
+on #1557 (the S1b residuals — toolset-update gate cap, G17 S2 mapping rows,
+the correlated gate-stale alert rule, the `fleet status` gate-stale line;
+S2 operator tooling; S3 hosted). (#609 closed on the design).
+Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
 G17 (#608), G11/G12 (`UPDATE_CHANNEL_POLICY.md`), G13 (#555), G14
 (#556), H11.*
