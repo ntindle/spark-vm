@@ -193,7 +193,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   misshapen xev candidate is dropped before the PID match, never
   focused, and an infinite driver window_id is filtered as malformed
   instead of erroring; non-finite click coordinates are answered 400
-  instead of 500. (#1579) (#1580) (#TBD)
+  instead of 500. (#1579) (#1580) (#1584)
 - Desktop-bridge request routing (2026-10-16): the localhost control-panel
   bridge now routes every endpoint on the parsed URL path, so a query
   string no longer turns valid endpoints (`/api/windows`,
