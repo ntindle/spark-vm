@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the three remaining unowned pieces are now tracked: the S6 acceptance
   checklist (#1553), the per-tenant-plane data-key provisioning step
   (#1554), and the retention build-gate recorded on the S3
-  issue. (#TBD)
+  issue. (#1555)
 - Installer provenance (2026-10-16): the box installer now records where
   every file it places came from (source commit and release version), and
   the self-update status check warns when an installed copy has drifted
