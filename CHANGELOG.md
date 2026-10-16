@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Idempotent box installer (2026-10-15): the README "Try it" runbook is
+  now a reviewed, re-runnable script — it creates the agent user, drops
+  the passwordless-sudo rule, copies your SSH key, joins the tailnet,
+  clones the repo, deploys the proxy and confirmd stack, installs the
+  muse-job CLI and plugin, enables the cred-ui service, and starts the
+  desktop. Every step skips what is already done, so a second run is a
+  no-op; the README calls the script instead of inlining the steps, so
+  the two cannot drift. (#TBD)
 - Relay path-state readings (2026-10-15): each box's relay probe
   outcomes are now mapped to `ok` / `degraded` / `down` with `relay` /
   `cert` / `box-leg` sub-codes; flapping probes read `degraded`
