@@ -385,9 +385,23 @@ def _stamp_landed_pins_locked(store_dir, plane_ids, template):
     Returns the plane_ids actually stamped.
     """
     pin = _build_pin(store_dir, template)
+    # #1637: read the planes map ONCE, outside the per-plane loop. The
+    # caller holds events.journal_lock for the whole critical section, so
+    # no concurrent writer can move the map under us; the loop's own
+    # record writes never invalidate another plane's idempotency check
+    # (each plane_id is handled once, and re-stamping an identical pin is
+    # idempotent anyway), so the stamper's explicit full-store re-read
+    # drops from N per run to one. (The per-plane record writes still
+    # replay the snapshot through the lock; this change removes only the
+    # redundant explicit reads.)
+    planes = plane_inventory.read_planes(store_dir)
     stamped = []
-    for plane_id in sorted(plane_ids):
-        current = plane_inventory.read_planes(store_dir).get(plane_id)
+    # dedupe: a duplicate plane_id would re-stamp identically against the
+    # stale snapshot (the loop's own earlier write isn't visible in it);
+    # the sole caller builds plane_ids from dict keys, so this only
+    # hardens pathological inputs back to the old skip behavior.
+    for plane_id in sorted(set(plane_ids)):
+        current = planes.get(plane_id)
         if current is None:
             _fail(f"plane {plane_id!r} is not registered (register first)")
         prev_pin = current.get("last_known_good") or {}

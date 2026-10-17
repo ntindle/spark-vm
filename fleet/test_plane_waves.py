@@ -570,6 +570,36 @@ def test_pin_write_idempotent(store):
     assert len(_journal_lines()) == before + 1
 
 
+def test_pin_stamper_reads_planes_store_once(store, monkeypatch):
+    # #1637: the stamper used to re-read the whole planes store once per
+    # landed plane, inside the bounded-wait journal lock. The lock already
+    # serializes writers, so one read before the loop is exact.
+    # Neuters that must flip this test: revert the hoisted read_planes
+    # (per-loop call) -> calls == [store] * 3.
+    for pid in ("plane-1", "plane-2", "plane-3"):
+        _register(store, pid, tenant_id="t1")
+    _release(store)
+    for pid in ("plane-1", "plane-2", "plane-3"):
+        _deploy(store, pid, "w@v1", status="healthy")
+    calls = []
+    real_read = plane_inventory.read_planes
+
+    def counting(store_dir):
+        calls.append(store_dir)
+        return real_read(store_dir)
+
+    monkeypatch.setattr(plane_inventory, "read_planes", counting)
+    with events.journal_lock(store):
+        stamped = plane_waves._stamp_landed_pins_locked(
+            store, ["plane-3", "plane-1", "plane-2"], "w@v1")
+    assert stamped == ["plane-1", "plane-2", "plane-3"]
+    assert calls == [store]
+    # pins still land for every plane (no behavioral regression)
+    planes = plane_inventory.read_planes(store)
+    for pid in ("plane-1", "plane-2", "plane-3"):
+        assert planes[pid]["last_known_good"]["template_version"] == "w@v1"
+
+
 def test_pin_shape_validation_unit():
     # Advisory #1285/6107294719 (QA): malformed pins fail at write time.
     good = {

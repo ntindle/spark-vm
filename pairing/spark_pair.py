@@ -908,7 +908,10 @@ def _heartbeat_result(d, box_id, token, sent_at, status, resp):
         return 1
     if status == 200 and resp.get("ok"):
         # The plane's own ok — nothing else counts as a delivered heartbeat.
-        _write_private(os.path.join(d, "last_heartbeat.json"), json.dumps(
+        # #1621: atomic temp+rename, not O_TRUNC in place — a mid-write
+        # crash must leave the previous file (the operator's freshness
+        # signal) intact, never torn JSON.
+        _write_private_atomic(os.path.join(d, "last_heartbeat.json"), json.dumps(
             {"box_id": box_id, "last_ok_at": sent_at,
              "plane_ok": True}, indent=2).encode())
         return 0

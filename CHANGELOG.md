@@ -1604,6 +1604,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   only the failure channel, so a sustained control-plane outage could grow
   the reconnect log unboundedly past it. (#1622)
 
+- Fleet rollout pins: stamping the last-known-good pin for a landed wave
+  no longer re-reads the whole plane store once per plane inside the
+  journal lock — one read before the loop, so large estates don't stretch
+  the bounded-wait critical section. (#1642)
+
+- Heartbeat freshness file: the box's last-heartbeat record is now written
+  atomically, so a crash mid-write can no longer tear the file the
+  operator's health signal reads. (#1642)
+
 ## [0.8.0] - 2026-10-10
 
 ### Added
