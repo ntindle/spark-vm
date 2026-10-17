@@ -264,13 +264,23 @@ noted here for consistency only.
   as the per-tenant implementation — it is the decision record, not the
   build.
 
-## 6. Open verifications (unchanged from the research doc; filed §7)
+## 6. Open verifications (two verified 2026-10-17 — #340 closed; see research doc)
 
-- Nested-KVM availability on the hosted product's target hosts (decides
-  whether Firecracker/Kata are even options; gVisor works regardless).
-- Tailscale control-plane-outage semantics for lockout (fail-closed
-  enrollment is architectural; existing-session revocation behavior
-  needs verification).
+- Nested-KVM availability on the hosted product's target hosts —
+  **VERIFIED: not available on the decided provider (Fly Sprites).**
+  Fly runs every workload as a Firecracker microVM; Firecracker guests
+  get no `/dev/kvm` and no nested virtualization. Firecracker/Kata are
+  therefore not options for a stronger-than-nspawn boundary *inside*
+  the tenant box; gVisor (no KVM required) is the only one of the three
+  that works there.
+- Tailscale control-plane-outage semantics for lockout — **VERIFIED:**
+  existing sessions keep working through an outage (data plane
+  independent of the control plane); revocation cannot propagate
+  (design for *stale authorization* — fail-open for revocation);
+  enrollment fails closed; key expiry is still enforced locally by
+  peers (never bypassed identity checks). Lockout semantics may now
+  rely on this behavior. Runbook note: a `tailscaled` restart during
+  an outage drops the node unless netmap caching is enabled.
 - Vendor root semantics remain publicly undocumented — assert nothing.
 
 ## 7. Issues filed this turn

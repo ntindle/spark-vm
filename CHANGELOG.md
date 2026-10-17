@@ -317,6 +317,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Hosted multi-tenancy audit: the two open verifications behind issue
+  #340 are now verified and recorded — a Tailscale control-plane outage
+  leaves existing tailnet sessions working but unable to propagate
+  revocations (design for stale authorization, never assume bypassed
+  identity), and nested KVM is unavailable on the decided box provider
+  (Fly Sprites), so gVisor is the only viable stronger-than-nspawn
+  boundary inside the tenant box. (#TBD)
+
 - The credential-swapping proxy now evaluates each request's credential
   grant verdict once and reuses it for every placeholder in that request
   (2026-10-17): previously a request body studded with placeholders
