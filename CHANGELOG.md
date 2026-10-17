@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   traces, rejected CSRF attempts) re-confirmed at current code with exact
   references, and one genuinely-new gap filed: nothing on the box reads
   the audit lines yet, so a small log-reader tool is now on the tracker.
-  (#1597) (#TBD)
+  (#1597) (#1598)
 
 - Push-sweep async plane port, sweep half (2026-10-16): the per-minute
   push sweep now has its plane-side async implementation — the same
