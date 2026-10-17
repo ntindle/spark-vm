@@ -225,61 +225,56 @@ def _env_int(name, default):
 # /tmp would pass the "audit write is part of authorization" writability
 # check while the trail vanishes on restart. A mispointed override now
 # refuses to start instead of running mis-jailed.
+#
+# Single source of truth for every SWAP_* runtime path default (issue
+# #1609 fix round): the module constants below AND the startup jail
+# gate both derive from this table, so a future path added here is
+# jailed by construction — a default changed in only one place can no
+# longer desync the gate from the served paths.
+_SWAP_PATH_DEFAULTS = {
+    "SWAP_SECRETS_DIR": "/home/swapd/secrets",
+    "SWAP_HOSTS_FILE": "/home/swapd/hosts.allow",
+    "SWAP_SMOKE_HOSTS_FILE": "/home/swapd/smoke-hosts",
+    "SWAP_STREAM_HOSTS_FILE": "/home/swapd/stream-hosts",
+    "SWAP_REGISTRY_FILE": "/home/swapd/credentials.json",
+    "SWAP_LOG_FILE": "/home/swapd/swap.log",
+    "SWAP_APPROVALS_DIR": "/home/swapd/approvals",
+    "SWAP_GRANTS_FILE": "/home/swapd/grants.json",
+    "SWAP_SSRF_FILE": "/home/swapd/ssrf.allow",
+    "SWAP_SSRF_DENY_FILE": "/home/swapd/ssrf.deny",
+}
 SWAP_BASE_DIR = _env_path("SWAP_BASE_DIR", "/home/swapd")
 
 # (env var, default) for every runtime path the addon reads or writes.
 # _validate_path_jail() checks the env-provided configuration — the
 # deployment surface the #709 contract governs — not the module
 # constants (tests legitimately re-point those after import).
-_PATH_JAIL_VARS = (
-    ("SWAP_SECRETS_DIR", "/home/swapd/secrets"),
-    ("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow"),
-    ("SWAP_SMOKE_HOSTS_FILE", "/home/swapd/smoke-hosts"),
-    ("SWAP_STREAM_HOSTS_FILE", "/home/swapd/stream-hosts"),
-    ("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json"),
-    ("SWAP_LOG_FILE", "/home/swapd/swap.log"),
-    ("SWAP_APPROVALS_DIR", "/home/swapd/approvals"),
-    ("SWAP_GRANTS_FILE", "/home/swapd/grants.json"),
-    ("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow"),
-    ("SWAP_SSRF_DENY_FILE", "/home/swapd/ssrf.deny"),
-)
+_PATH_JAIL_VARS = tuple(_SWAP_PATH_DEFAULTS.items())
 
 
-def _validate_path_jail():
-    """Fail closed at startup when a SWAP_* runtime path escapes the base.
+def _validate_paths_within_base(paths):
+    """Fail closed unless every (var, path) resolves within the base.
 
-    Every SWAP_* path override must realpath-resolve within-or-equal
-    SWAP_BASE_DIR (default /home/swapd). realpath defeats symlink
-    escapes (a link under the base pointing at /etc resolves outside);
-    empty-string env falls back to the default exactly like _env_path;
-    relative paths resolve against the process CWD and fail closed
-    unless they land under the base. On violation raises RuntimeError:
-    mitmproxy aborts the script load, so no proxy ever runs with
-    mis-jailed paths — the silent misread/miswrite becomes a loud
-    refusal to start.
-
-    Honest limit, stated not solved: SWAP_BASE_DIR is itself the trust
-    anchor — an environment writer who sets SWAP_BASE_DIR=/ can pin the
-    whole jail anywhere. The environment is operator-owned (systemd
-    Environment= lines); someone who can write it already owns the
-    process. This gate catches the documented residual — operator
-    misconfiguration, the case the unit files warned "nothing at
-    deploy checks" about — not a privilege boundary.
+    Shared by the proxy startup gate and the --summons-sweep CLI: one
+    invariant — no component runs mis-jailed — with no carve-outs.
+    os.path.commonpath gives the separator-boundary comparison
+    (/home/swapd-evil is refused) and treats base=/ as the no-op jail
+    every absolute path satisfies. A non-absolute SWAP_BASE_DIR would
+    silently re-anchor the jail to the process CWD via realpath, so it
+    is refused outright. realpath defeats symlink escapes; empty-string
+    env falls back to defaults exactly like _env_path.
     """
-    base = os.path.realpath(os.environ.get("SWAP_BASE_DIR")
-                            or str(SWAP_BASE_DIR))
+    raw_base = os.environ.get("SWAP_BASE_DIR") or str(SWAP_BASE_DIR)
+    if not os.path.isabs(raw_base):
+        raise RuntimeError(
+            "swap_addon: refusing to start: SWAP_BASE_DIR=%r is not an "
+            "absolute path" % (raw_base,))
+    base = os.path.realpath(raw_base)
     bad = []
-    for var, default in _PATH_JAIL_VARS:
-        v = os.environ.get(var)
-        p = v if v else default
+    for var, p in paths:
         rp = os.path.realpath(p)
-        if rp != base and not rp.startswith(base + os.sep):
+        if os.path.commonpath([rp, base]) != base:
             bad.append((var, p))
-    outbox = os.environ.get("SWAP_SUMMONS_OUTBOX")
-    if outbox:
-        rp = os.path.realpath(outbox)
-        if rp != base and not rp.startswith(base + os.sep):
-            bad.append(("SWAP_SUMMONS_OUTBOX", outbox))
     if bad:
         raise RuntimeError(
             "swap_addon: refusing to start: %s outside the SWAP_BASE_DIR "
@@ -287,8 +282,44 @@ def _validate_path_jail():
                 ", ".join("%s=%r" % (var, p) for var, p in bad), base))
 
 
-SECRETS_DIR = _env_path("SWAP_SECRETS_DIR", "/home/swapd/secrets")
-HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
+def _validate_path_jail():
+    """Fail closed at startup when a SWAP_* runtime path escapes the base.
+
+    Every SWAP_* path override must realpath-resolve within-or-equal
+    SWAP_BASE_DIR (default /home/swapd).
+
+    Delivery, stated honestly (Security review, issue #1609): the
+    in-addon gate runs at module import (`addons = [SwapAddon()]`), but
+    mitmproxy's script loader catches addon exceptions and keeps
+    serving addon-less — so this gate alone cannot refuse startup. The
+    real startup refusal is the systemd units' ExecStartPre, which
+    imports this module (tripping this gate) before the service starts:
+    a violation fails the pre-check and the service never serves. This
+    in-addon gate is defense-in-depth for direct `mitmdump -s`
+    invocations outside systemd.
+
+    Honest limit, stated not solved: SWAP_BASE_DIR is itself the trust
+    anchor — an environment writer who relocates it to a real directory
+    (with all paths under it) passes by design. The environment is
+    operator-owned (systemd Environment= lines); someone who can write
+    it already owns the process. This gate catches the documented
+    residual — operator misconfiguration, the case the unit files
+    warned "nothing at deploy checks" about — not a privilege boundary.
+    Post-validation symlink swaps (TOCTOU) need write access to
+    swapd-owned dirs, the same trust boundary as the env itself.
+    """
+    paths = []
+    for var, default in _PATH_JAIL_VARS:
+        v = os.environ.get(var)
+        paths.append((var, v if v else default))
+    outbox = os.environ.get("SWAP_SUMMONS_OUTBOX")
+    if outbox:
+        paths.append(("SWAP_SUMMONS_OUTBOX", outbox))
+    _validate_paths_within_base(paths)
+
+
+SECRETS_DIR = _env_path("SWAP_SECRETS_DIR", _SWAP_PATH_DEFAULTS["SWAP_SECRETS_DIR"])
+HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", _SWAP_PATH_DEFAULTS["SWAP_HOSTS_FILE"])
 # §3a smoke echo hosts (G6): requests to these hosts may swap ONLY the
 # public smoke-test credential. The smoke echo endpoint returns the
 # post-substitution request body, so without this scoping any proxy
@@ -296,8 +327,7 @@ HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 # secret back -- a chosen-plaintext oracle over the whole main store.
 # One hostname per line, same format as hosts.allow; the provision-time
 # injector owns the file (see harness/inject-provision-state.sh step 8).
-SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE",
-                             "/home/swapd/smoke-hosts")
+SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE", _SWAP_PATH_DEFAULTS["SWAP_SMOKE_HOSTS_FILE"])
 # Issue #629 piece 3: per-host opt-in for the finding-40e stream refusal
 # (issue #92). Hosts listed here are exempted from the stream kill in
 # `responseheaders` and re-enable the `websocket_message` insertion
@@ -313,10 +343,9 @@ SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE",
 # provision-time writes would clobber operator intent. A host-scoping
 # file keeps the operator's escape hatch under operator ownership,
 # alongside hosts.allow / smoke-hosts / ssrf.allow.
-STREAM_HOSTS_FILE = _env_path("SWAP_STREAM_HOSTS_FILE",
-                              "/home/swapd/stream-hosts")
-REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
-LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
+STREAM_HOSTS_FILE = _env_path("SWAP_STREAM_HOSTS_FILE", _SWAP_PATH_DEFAULTS["SWAP_STREAM_HOSTS_FILE"])
+REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", _SWAP_PATH_DEFAULTS["SWAP_REGISTRY_FILE"])
+LOG_FILE = _env_path("SWAP_LOG_FILE", _SWAP_PATH_DEFAULTS["SWAP_LOG_FILE"])
 # Finding 49/50: swapd files structured approvals here when it
 # refuses a swap for lack of a grant.
 # Finding 75: the pending dir is setgid so that confirm-request filings
@@ -326,10 +355,10 @@ LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 # user identity, so a proxy-filed approval's "requester" is the
 # (credential, host, method, path) tuple in the item, never the file
 # owner. Do not read requester identity out of these files' ownership.
-APPROVALS_DIR = _env_path("SWAP_APPROVALS_DIR", "/home/swapd/approvals")
+APPROVALS_DIR = _env_path("SWAP_APPROVALS_DIR", _SWAP_PATH_DEFAULTS["SWAP_APPROVALS_DIR"])
 # Finding 60: grants live in their own file. The single writer is
 # proxy/grant-writer; proxies only read.
-GRANTS_FILE = _env_path("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
+GRANTS_FILE = _env_path("SWAP_GRANTS_FILE", _SWAP_PATH_DEFAULTS["SWAP_GRANTS_FILE"])
 # Finding 60: the inference proxy gets no approvals directory at all.
 # It reads grants but never files or consumes approvals.
 APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
@@ -733,12 +762,12 @@ def _summons_sweep(outbox=None, pending_d=None):
     return recovered
 
 
-SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
+SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", _SWAP_PATH_DEFAULTS["SWAP_SSRF_FILE"])
 # Finding 47: hard-deny list. Entries here refuse egress even if
 # ssrf.allow names the host — it covers the host's own tailnet
 # addresses and the confirmation page's name, so the jail can never
 # reach the page through the proxy and be seen as the owner.
-SSRF_DENY_FILE = _env_path("SWAP_SSRF_DENY_FILE", "/home/swapd/ssrf.deny")
+SSRF_DENY_FILE = _env_path("SWAP_SSRF_DENY_FILE", _SWAP_PATH_DEFAULTS["SWAP_SSRF_DENY_FILE"])
 # Inference mode (finding 31): swap headers only, never bodies, query,
 # paths, or websocket messages — page content in obox's prompts must
 # never traverse credential insertion.
@@ -1113,9 +1142,17 @@ def _is_private_ip(ip):
 class SwapAddon:
     def __init__(self):
         # Issue #1609: the SWAP_* path jail is enforced here, first —
-        # before any file is read or any swap served. A mispointed
-        # override raises RuntimeError, mitmproxy aborts the script
-        # load, and no proxy ever runs with mis-jailed paths.
+        # before any file is read or any swap served. On a RuntimeError
+        # the service never serves: the systemd units' ExecStartPre
+        # imports this module (tripping this gate) before the service
+        # starts, because mitmproxy's script loader would otherwise
+        # swallow the exception and keep serving addon-less. This
+        # in-addon gate is the defense-in-depth layer for direct
+        # `mitmdump -s` invocations outside systemd.
+        # NOTE (import-time gate): this runs at module import
+        # (`addons = [SwapAddon()]` below), so a stray SWAP_* var in a
+        # dev/CI environment pointing outside /home/swapd fails the
+        # import — loud and immediate, by design.
         _validate_path_jail()
         self.inference_mode = INFERENCE_MODE
         self.secrets = {}
@@ -4211,8 +4248,10 @@ class SwapAddon:
 # which runs here for mitmproxy (the module is imported, not run, so
 # __name__ != "__main__"). The --summons-sweep maintenance entry point
 # below takes explicit paths and never serves swaps, so it must not
-# construct a serving addon — and must not trip the jail gate meant
-# for the proxy's env-provided configuration.
+# construct a serving addon — but it is NOT un-jailed: the __main__
+# branch validates the sweep's two real paths against the base before
+# running, via the same shared helper. One invariant — no component
+# runs mis-jailed — with no carve-outs.
 if __name__ != "__main__":
     addons = [SwapAddon()]
 else:
@@ -4231,6 +4270,16 @@ if __name__ == "__main__":
                          "and re-append rows the inline append missed")
     args = ap.parse_args()
     if args.summons_sweep:
+        # Issue #1609: the sweep reads SWAP_SUMMONS_OUTBOX and
+        # APPROVALS_DIR from env in production (called with no args),
+        # so its paths are jailed here — a mispointed sweep-unit env
+        # refuses instead of re-appending "recovered" rows to a journal
+        # the S2 observer never reads.
+        _validate_paths_within_base([
+            ("SWAP_SUMMONS_OUTBOX", summons_outbox_path()),
+            ("SWAP_APPROVALS_DIR/pending",
+             os.path.join(str(APPROVALS_DIR), "pending")),
+        ])
         n = _summons_sweep()
         print("summons-sweep: recovered %d row(s)" % n)
     else:

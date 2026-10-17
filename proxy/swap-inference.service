@@ -26,6 +26,13 @@ Environment=SWAP_INFERENCE_MODE=1
 # grants.json but never files approvals or consumes answers.
 Environment=SWAP_ENABLE_APPROVALS=0
 ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18081 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn --set "dumper_filter=~d nomatch.invalid"
+# Issue #1609: the path-jail pre-check. Importing the addon runs the
+# module-level SwapAddon() construction, tripping _validate_path_jail()
+# as its first statement; a violation raises RuntimeError, the import
+# exits nonzero, and the service never starts (fail closed — mitmproxy's
+# script loader would otherwise swallow the exception and serve
+# addon-less, with no swaps, no SSRF guard, and no audit at all).
+ExecStartPre=/home/swapd/.venvs/mitm/bin/python3 -c "import sys; sys.path.insert(0, '/home/swapd'); import swap_addon"
 Restart=always
 RestartSec=5
 # Issue #95: systemd hardening (mirrors cred-ui's #115 shape, extended).
@@ -35,17 +42,20 @@ RestartSec=5
 # plus the stdlib. Deploy order note: /home/swapd must exist before the
 # unit starts (a missing ReadWritePaths dir fails service startup; it is
 # not auto-created). Contract (issue #709): keep every SWAP_*_DIR/_FILE
-# override under /home/swapd. The
+# override under SWAP_BASE_DIR (default /home/swapd). The
 # unit sandboxes with ProtectSystem=strict + ReadWritePaths=/home/swapd
 # + PrivateTmp=yes, so: writes outside /home/swapd fail at the first
 # write (EROFS) — except in the service-private /tmp and /var/tmp,
 # which are writable but ephemeral; reads outside /home/swapd still
 # succeed (strict is read-only, not inaccessible), so a mispointed
 # hosts/registry/SSRF path would silently read from outside the jail.
-# The addon now enforces the contract itself at startup (issue #1609):
-# _validate_path_jail() refuses to start when any SWAP_* path resolves
-# outside SWAP_BASE_DIR (default /home/swapd), so the silent
-# misread/miswrite became a loud refusal.
+# Two-layer enforcement (issue #1609): ExecStartPre below imports the
+# addon — tripping its startup path jail — before the service starts,
+# so a violation fails the pre-check and the service never serves
+# (Restart=always loops loudly in the journal). The in-addon gate is
+# defense-in-depth for direct `mitmdump -s` invocations, because
+# mitmproxy's script loader would otherwise swallow the exception and
+# keep serving addon-less.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all

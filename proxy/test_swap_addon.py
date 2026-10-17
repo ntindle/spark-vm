@@ -5307,6 +5307,29 @@ class TestPathJail(unittest.TestCase):
                 self._validate(env)
         self.assertIn("SWAP_SUMMONS_OUTBOX", str(cm.exception))
 
+    def test_base_root_is_noop_jail(self):
+        # base=/ : every absolute path satisfies the jail (commonpath),
+        # the documented no-op relocation for an env writer.
+        self._validate({"SWAP_BASE_DIR": "/",
+                        "SWAP_LOG_FILE": "/tmp/swap.log"})
+
+    def test_relative_base_refused(self):
+        # A relative base would silently re-anchor the jail to the
+        # process CWD via realpath — refused outright instead. (Pinned
+        # on the reason, not just the raise: without the isabs check,
+        # realpath would resolve this relative base onto the jail and
+        # everything would pass.)
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.realpath(os.path.join(d, "jail"))
+            os.makedirs(base)
+            rel = os.path.relpath(base, start=os.getcwd())
+            assert not os.path.isabs(rel)
+            env = self._jail_env(base)
+            env["SWAP_BASE_DIR"] = rel
+            with self.assertRaises(RuntimeError) as cm:
+                self._validate(env)
+            self.assertIn("not an absolute path", str(cm.exception))
+
     def test_init_gate_wires_the_check(self):
         # The __init__ gate is what makes this fail closed at startup:
         # constructing with a mispointed env raises instead of serving.
