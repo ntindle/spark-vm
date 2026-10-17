@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   review. An uppercase `HSURR:` prefix in the plain form (which never
   triggers a swap) no longer produces a phantom refused line; the
   percent-encoded form was already case-insensitive and still audits
-  in wire case. (#TBD)
+  in wire case. (#1658)
 
 ### Added
 
