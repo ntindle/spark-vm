@@ -52,6 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Ingest cursor now survives mid-write crashes (hosted): the box's
+  command cursor is written atomically instead of in place, so a crash
+  can no longer tear it and silently drop the box's epoch evidence.
+  (#1623)
+
 - Hosted owner-alerting docs: the caller-wiring pointers that dangled on a
   closed issue now point at the open build issue that owns the work, so the
   "no page fires yet" rows name the real next step. (#1618)

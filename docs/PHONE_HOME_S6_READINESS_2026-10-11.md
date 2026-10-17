@@ -48,7 +48,7 @@ pattern from #846/#848/#952 — the latest incarnation of that harness
 in the loop workspace; `hidden_files/` is operator-side, there is no
 such directory in the public repo) — that harness is the only pre-live
 verification
-of plane behavior. In-tree `pairing/test_phone_home.py` (94 tests) covers
+of plane behavior. In-tree `pairing/test_phone_home.py` (101 tests) covers
 the box half against a contract-faithful plane stub.
 
 ## 2. Per-item readiness (§11 checklist)
