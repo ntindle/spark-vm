@@ -52,12 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Hosted owner-alerting: the plane-side half of the endpoint-driven push
+- Hosted owner-alerting: the in-repo half of the endpoint-driven push
   wiring is now built — the async enqueue boundary that decides whether a
   box event (approval filed, box revoked) may become a page, with the same
   budget, page-once, and digest-coalescing rules as the sync lane, plus the
   endpoint caller contracts (never page a terminal approval, never page a
-  grandfathered revocation), all pinned by contract tests. (#1625)
+  grandfathered revocation), all pinned by contract tests. The plane
+  endpoint call sites and live verification follow on #1614. (#1625)
 
 - Ingest cursor now survives mid-write crashes (hosted): the box's
   command cursor is written atomically instead of in place, so a crash

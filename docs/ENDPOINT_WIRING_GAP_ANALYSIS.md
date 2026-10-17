@@ -40,7 +40,7 @@ an approval is filed, and the loop degrades to a polling dashboard.
 |---|---|
 | Endpoint mapping policy (sync) | SHIPPED (#1062): `on_approval_filed` / `on_box_revoked` in `hosted/push_events.py`, tested, caller obligations documented (terminal-aid exclusion upstream of the filing write; D65 keyless-grandfathered exclusion) |
 | Endpoint mapping policy (async) | SHIPPED (PR #1608, merged `52881616`): `hosted/push_events_async.py` — async ports with the async boundary injected, stdlib-only, 24/24 tests green, neuter-verified |
-| The async `enqueue_page` boundary | SHIPPED in-repo (#1614 boundary half, PR (#1625)): `hosted/push_enqueue_async.py` — the D10/D52/D57/D54 decision table ported verbatim against the worker's async `_D1`, contract-tested (16/16 incl. D-EW-2 sync/async conformance + both caller-obligation negatives); the two endpoint call sites and the live tick (D-EW-3) remain on #1614 |
+| The async `enqueue_page` boundary | SHIPPED in-repo (#1614 boundary half, PR #1625): `hosted/push_enqueue_async.py` — the D10/D52/D57/D54 decision table ported verbatim against the worker's async `_D1`, contract-tested (16/16 incl. D-EW-2 sync/async conformance + both caller-obligation negatives); the two endpoint call sites and the live tick (D-EW-3) remain on #1614 |
 | The two endpoint call sites | **OPEN, UNOWNED:** the #952 filing endpoint and the revoke endpoint are deployed-worker code with no in-repo source; neither calls the async ports |
 | Owner-alerting contract pointers | STALE: `docs/HOSTED_OWNER_ALERTING.md` (§1 table, §2, §7, O6) and the CHANGELOG #1608 bullet both say the wiring is "still open on #1492" — #1492 is CLOSED (see F-EW-1) |
 | Sweep-driven four | Owned by #1566 (in flight; S2-a/S2-b1 merged) |

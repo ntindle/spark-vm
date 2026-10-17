@@ -51,12 +51,28 @@ posture):
 Conflict handling (the D53 lost-race path): on the worker, a D57
 page-once violation rejects the INSERT's promise; the port cannot name
 the worker's exception class from a stdlib-only module. The rule is
-exception-type-agnostic instead: any failure from the outbox INSERT is
-followed by a re-read of `(box_id, event_kind, event_key)`; if a row is
-there, the race was lost and the verdict is `duplicate` (the reservation
-released if one was taken — one event, one page, one budget unit); if no
-row is there, the original error is re-raised. No other error class is
-swallowed.
+therefore exception-type-agnostic but outcome-gated: any failure from
+the outbox INSERT is followed by a re-read for a same-key row carrying
+a D57-covered outcome (`'queued'`, `'suppressed_budget'`,
+`'suppressed_terminal'`). Only such a row could have rejected the
+INSERT through the page-once index, so only then is the lost race
+declared (`_DedupLost` → `duplicate`, the reservation released if one
+was taken — one event, one page, one budget unit). A same-key row with
+any other outcome (e.g. a sender-loop `'retry'` attempt row, which
+shares the event key but sits outside the index predicate) cannot be
+the conflict: the original error is re-raised, loud. Residual: an
+INSERT that fails for a non-uniqueness reason while a covered row
+happens to exist still reports `duplicate` — narrow, not
+attacker-triggerable, and the budget-safe direction for an anti-DoS
+bound.
+
+Trust posture (D2): this boundary never accepts a box-asserted owner.
+The caller resolves `box_id → owner_principal` from the plane's
+enrollment registry and passes the resolved principal in; a hostile
+box that supplies its own owner string must be rejected upstream —
+this module cannot distinguish it. The obligation travels with this
+file because it drops into `worker.py` verbatim, ahead of the
+endpoint wiring (D-EW-3).
 
 STACKING: this slice resolves the STACKING NOTE in
 `hosted/push_events_async.py` for the boundary half — the async mappings
@@ -279,9 +295,13 @@ async def reserve_budget_async(db, box_id, owner_principal, window_start,
     Async counterpart of `hosted/push_enqueue.reserve_budget`.
     `box_id=None` (the digest) reserves the owner scope only. Success =
     the guarded UPDATE touched all its target rows (2, or 1 for
-    owner-only); anything else took nothing. The ensure INSERTs are
-    `INSERT OR IGNORE` (idempotent across awaits); the UPDATE is the
-    single atomic step.
+    owner-only); anything else took nothing. `meta.changes` counts
+    changed rows and the guarded UPDATE always mutates (`count =
+    count + 1`), so matched == changed here; a backend that reports no
+    `meta` fails closed (changes=0 → reservation refused → the page
+    coalesces into the digest, the budget-safe direction). The ensure
+    INSERTs are `INSERT OR IGNORE` (idempotent across awaits); the
+    UPDATE is the single atomic step.
     """
     if not isinstance(box_bound, int) or isinstance(box_bound, bool) \
             or box_bound < 1:
@@ -325,10 +345,15 @@ async def _insert_result_row(db, at, owner_principal, box_col, event_kind,
 
     A D57 page-once violation rejects the statement. The port cannot
     name the worker's exception class from a stdlib-only module, so the
-    rule is exception-type-agnostic: any failure is followed by a
-    re-read of `(box_id, event_kind, event_key)`; a row there means the
-    D53 dedup race was lost (`_DedupLost`); no row there re-raises the
-    original error — no other failure is swallowed.
+    rule is exception-type-agnostic but outcome-gated: any failure is
+    followed by a re-read for a same-key row with a D57-covered outcome
+    (`'queued'`, `'suppressed_budget'`, `'suppressed_terminal'`) — only
+    such a row could have rejected the INSERT through the page-once
+    index, so only then is the D53 lost race declared (`_DedupLost`).
+    A same-key row with any other outcome (e.g. a sender-loop `'retry'`
+    attempt row) cannot be the conflict, and no row at all means the
+    failure was operational: in both cases the original error is
+    re-raised, loud.
     """
     try:
         raw = await _run(db, _INSERT_RESULT_SQL,
@@ -338,7 +363,9 @@ async def _insert_result_row(db, at, owner_principal, box_col, event_kind,
         row = await _first(
             db,
             "SELECT 1 FROM push_send_results"
-            " WHERE box_id = ? AND event_kind = ? AND event_key = ?",
+            " WHERE box_id = ? AND event_kind = ? AND event_key = ?"
+            " AND outcome IN ('queued', 'suppressed_budget',"
+            " 'suppressed_terminal') LIMIT 1",
             (box_col, event_kind, event_key))
         if row is not None:
             raise _DedupLost(event_key) from exc
@@ -409,6 +436,10 @@ async def enqueue_page_async(db, *, event_kind, owner_principal, box_id,
     slice's deliverable, named by #1492's module docstring): the
     `_async` suffix is the in-repo naming precedent (`push_sweep_async`
     style), keeping it distinct from the sync module it ports.
+
+    D2: `owner_principal` must be resolved by the caller from the
+    plane's enrollment registry — never a box-asserted value (see the
+    module docstring's trust posture).
     """
     if not isinstance(owner_principal, str) or not owner_principal:
         raise ValueError("owner_principal must be a non-empty str")

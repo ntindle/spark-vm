@@ -160,11 +160,16 @@ class _RaceDb:
     `push_send_results` INSERT for that key first writes the
     conflicting row directly (simulating the concurrent winner), so the
     port's own INSERT violates the D57 page-once index.
+    `winner_outcome` selects the winner row's outcome: the default
+    `'queued'` is the genuine lost race; an outcome outside the D57
+    predicate (e.g. `'retry'`) simulates a same-key row that CANNOT be
+    the conflict (B2).
     """
 
-    def __init__(self, inner, conn):
+    def __init__(self, inner, conn, winner_outcome="queued"):
         self._inner = inner
         self._conn = conn
+        self._winner_outcome = winner_outcome
         self._armed = None
 
     def arm(self, box_id, event_kind, event_key):
@@ -181,15 +186,25 @@ class _RaceDb:
                 " (at, owner_principal, box_id, device, event_kind,"
                 "  event_key, outcome, http_status, latency_ms, sent_at,"
                 "  vapid_key_id)"
-                " VALUES (?, 'owner-1', ?, '', ?, ?, 'queued',"
+                " VALUES (?, 'owner-1', ?, '', ?, ?, ?,"
                 "  NULL, NULL, NULL, NULL)",
                 ("2026-10-17T00:00:00+00:00", box_id, event_kind,
-                 event_key))
+                 event_key, self._winner_outcome))
         return self._inner.prepare(sql)
 
 
 class _FailingDb:
-    """INSERTs raise a non-conflict error; no conflicting row exists."""
+    """The outbox INSERT raises a non-conflict error; no conflicting row
+    exists.
+
+    Scoped to `INSERT INTO push_send_results` (the `_RaceDb` gating
+    pattern): the budget-counter ensures and the guarded UPDATE run
+    normally, so the failure genuinely lands in `_insert_result_row`'s
+    re-read-and-reraise path — the port's riskiest novel discipline,
+    since the worker's exception class can't be named. Composes with
+    `_RaceDb` (wrap the race: the winner row lands first, then the
+    INSERT raises).
+    """
 
     def __init__(self, inner, error):
         self._inner = inner
@@ -198,6 +213,8 @@ class _FailingDb:
     def prepare(self, sql):
         stmt = self._inner.prepare(sql)
         error = self._error
+        outbox_insert = sql.lstrip().upper().startswith(
+            "INSERT INTO PUSH_SEND_RESULTS")
 
         class _FailingBound:
             def __init__(self, params):
@@ -210,7 +227,9 @@ class _FailingDb:
                 return await stmt.bind(*self._params).first()
 
             async def run(self):
-                raise error
+                if outbox_insert:
+                    raise error
+                return await stmt.bind(*self._params).run()
 
         class _FailingStmt:
             def bind(self, *params):
@@ -403,6 +422,29 @@ def test_insert_failure_without_conflicting_row_reraises(db):
         _enq(failing, event_kind="approval_filed",
              owner_principal="owner-1", box_id="box-1",
              key_material="aid-boom")
+    assert ei.value is boom
+    # The failure landed in _insert_result_row (not earlier): the D52
+    # reservation was taken first — and, like the sync module on a
+    # non-IntegrityError, it is not released on this loud path.
+    ws = push_enqueue_async.hour_bucket()
+    assert _run(push_enqueue_async.get_counter_async(
+        db, "box", "box-1", ws)) == 1
+
+
+def test_insert_failure_with_uncovered_outcome_row_reraises(conn, db):
+    # B2: the concurrent winner's row carries an outcome OUTSIDE the
+    # D57 predicate — a sender-loop 'retry' attempt row shares the
+    # event key but cannot violate the page-once index, so it cannot
+    # be the conflict. The genuine INSERT failure must stay loud,
+    # not become `duplicate`.
+    boom = RuntimeError("simulated D1 write failure")
+    race = _RaceDb(db, conn, winner_outcome="retry")
+    race.arm("box-1", "approval_filed", "box-1\x00aid-b2")
+    failing = _FailingDb(race, boom)
+    with pytest.raises(RuntimeError) as ei:
+        _enq(failing, event_kind="approval_filed",
+             owner_principal="owner-1", box_id="box-1",
+             key_material="aid-b2")
     assert ei.value is boom
 
 
