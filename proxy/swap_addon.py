@@ -1231,6 +1231,10 @@ class SwapAddon:
         # Initialized here so _swap_headers can never observe the
         # attribute missing (e.g. if a subclass skips _load()).
         self._cookie_swap_name_set = set()
+        # Issue #199: per-request grant-verdict cache, reset by the
+        # swapping hooks (request, websocket_message). Lazily created
+        # by _credential_allows_request for direct callers.
+        self._verdict_cache = None
         self._load()
         log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
@@ -2212,7 +2216,52 @@ class SwapAddon:
         NOPASSWD cred-registry-set and can lift any of them unilaterally.
         The one scoping control the operator cannot lift is the
         root-managed hosts.allow file, which the swap path checks
-        separately."""
+        separately.
+
+        Issue #199: the verdict is cached per request. The verdict is a
+        pure function of (registry, grants, name, host, method, path)
+        evaluated at one instant; without the cache every placeholder
+        in a request re-ran the full grant scan (all grants, one
+        fromisoformat per grant), multiplying synchronous work on the
+        shared event loop for bodies studded with placeholders. The
+        cache key covers every input; the generation tag covers the
+        data. A reload between two placeholders of the same request
+        (an interleaved hook's _maybe_reload, a grants.json revoke)
+        changes the generation and drops the cache instead of serving
+        a stale allow — a revoked grant is therefore honored no later
+        than the next placeholder after the revoke lands. `now` is
+        frozen at the request's first evaluation: a grant expiring
+        mid-request keeps its first verdict for the rest of the
+        request (per-request consistency, not per-placeholder
+        drift). request() and websocket_message() reset the cache;
+        direct callers get a lazily created one."""
+        grants = self._grants()  # mtime-gated: one stat, not a scan
+        gen = (getattr(self, "_grants_mtime", None),
+               getattr(self, "_registry_mtime", None))
+        cache = getattr(self, "_verdict_cache", None)
+        if not isinstance(cache, dict) or cache.get("gen") != gen:
+            cache = {"gen": gen, "d": {}}
+            self._verdict_cache = cache
+        method_up = (method or "").upper()
+        norm_path = _normalize_path(path or "/")
+        key = (name, host, method_up, norm_path)
+        try:
+            return cache["d"][key]
+        except KeyError:
+            pass
+        verdict = self._credential_allows_request_uncached(
+            name, host, method_up, norm_path, grants)
+        cache["d"][key] = verdict
+        return verdict
+
+    def _credential_allows_request_uncached(self, name, host, method_up,
+                                           norm_path, grants):
+        """The grant/registry scan half of _credential_allows_request
+        (issue #199): runs the full evaluation once per distinct
+        (name, host, method, path) per request; the wrapper caches the
+        verdict. method_up is the uppercased method, norm_path the
+        normalized path — both precomputed by the wrapper so the cache
+        key and the scan agree exactly."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
@@ -2222,7 +2271,7 @@ class SwapAddon:
             return False, "unbound-host", None
         # Grants widen methods/paths within the bound host.
         now = datetime.now(timezone.utc)
-        for g in self._grants():
+        for g in grants:
             if not isinstance(g, dict):
                 continue
             if g.get("credential") != name:
@@ -2251,10 +2300,10 @@ class SwapAddon:
                 continue
             if g.get("host") != host:
                 continue
-            if (g.get("method") or "").upper() != (method or "").upper():
+            if (g.get("method") or "").upper() != method_up:
                 continue
             prefix = g.get("path_prefix") or "/"
-            norm = _normalize_path(path or "/")
+            norm = norm_path
             if "%" in norm or ";" in norm or "\\" in norm:
                 # Same smuggling guard as the registry allowed_paths
                 # branch below (finding 42): after fixpoint decoding
@@ -2269,15 +2318,15 @@ class SwapAddon:
         methods = spec.get("allowed_methods")
         if methods is not None:
             allowed = {str(m).upper() for m in methods}
-            if (method or "").upper() not in allowed:
+            if method_up not in allowed:
                 return False, "method-not-allowed", None
         prefixes = spec.get("allowed_paths")
         if prefixes is not None:
-            if (method or "").upper() == "CONNECT":
+            if method_up == "CONNECT":
                 # the proxy cannot see inside the tunnel, so a
                 # path-bound credential never swaps on a CONNECT
                 return False, "path-not-verifiable", None
-            norm = _normalize_path(path or "/")
+            norm = norm_path
             if "%" in norm or ";" in norm or "\\" in norm:
                 # Finding 42: after fixpoint decoding these can only be
                 # smuggling tricks for lenient servers (double-decode
@@ -2476,6 +2525,18 @@ class SwapAddon:
                                      flow_id=flow_id)
         return value, approved_aid
 
+    def _swap_audit_line(self, host, matched, flow_id=None):
+        """Format one `swapped=` audit line. Shared by _audit and
+        _audit_batch (issue #199) so the two writers cannot drift apart
+        in field order, sanitization, or the egress-ip/flow join keys."""
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return ("ts=%s host=%s swapped=%s ip=%s flow=%s\n"
+                % (ts, _sanitize_audit_field(host),
+                   _sanitize_audit_field(matched),
+                   _sanitize_audit_field(
+                       getattr(self, "_current_egress_ip", None) or "-"),
+                   _sanitize_audit_field(flow_id)))
+
     def _audit(self, host, matched, flow_id=None):
         """Append a swap line to the audit log. Returns True when the
         line was durably written, False otherwise — the audit write is
@@ -2488,18 +2549,35 @@ class SwapAddon:
         means the swapped secret never left the box. None renders
         as "-".
         """
-        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
-                f.write("ts=%s host=%s swapped=%s ip=%s flow=%s\n"
-                        % (ts, _sanitize_audit_field(host),
-                           _sanitize_audit_field(matched),
-                           _sanitize_audit_field(
-                               getattr(self, "_current_egress_ip", None)
-                               or "-"),
-                           _sanitize_audit_field(flow_id)))
+                f.write(self._swap_audit_line(host, matched, flow_id))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
+            return False
+        return True
+
+    def _audit_batch(self, entries):
+        """Append many swap lines in a single open (issue #199): the
+        request hot path used to open/write/close the audit log once
+        per swapped placeholder. One open, all lines, one close.
+
+        entries: iterable of (host, matched, flow_id) tuples. The
+        failure contract is _audit's: False on any OSError, and the
+        caller must treat False as a swap refusal — a secret is never
+        released without a trail. Durability is write()-level, the
+        same standard as _audit (Finding 198); no fsync is added here,
+        because adopting fsync in one writer without the others would
+        split the durability posture instead of fixing it."""
+        entries = list(entries)
+        if not entries:
+            return True
+        try:
+            with _open_audit_log() as f:
+                for host, matched, flow_id in entries:
+                    f.write(self._swap_audit_line(host, matched, flow_id))
+        except OSError as e:
+            log.warning("swap: cannot write audit log batch: %s", e)
             return False
         return True
 
@@ -2752,16 +2830,19 @@ class SwapAddon:
         # Flush pass 2's buffered audit writes now that the body equals
         # the validated probe: the trail is durable strictly before the
         # substituted body is released. A flush failure refuses the whole
-        # body rather than releasing it with a partial trail.
-        for sunk_host, matched, approved_aid, sunk_flow_id in sink:
-            if not self._audit(sunk_host, matched,
-                               flow_id=sunk_flow_id):
-                self._approval_signal = signals_before
-                log.warning("swap: JSON swap for %s: audit flush failed; "
-                            "refusing swap, leaving placeholders", host)
-                self._audit_note(host, "json-swap", "audit-flush-failed",
-                                 flow_id=flow_id)
-                return text
+        # body rather than releasing it with a partial trail. Issue
+        # #199: one open for the whole batch, not one per placeholder.
+        if not self._audit_batch(
+                [(sunk_host, sunk_matched, sunk_flow_id)
+                 for sunk_host, sunk_matched, _sunk_aid, sunk_flow_id
+                 in sink]):
+            self._approval_signal = signals_before
+            log.warning("swap: JSON swap for %s: audit flush failed; "
+                        "refusing swap, leaving placeholders", host)
+            self._audit_note(host, "json-swap", "audit-flush-failed",
+                             flow_id=flow_id)
+            return text
+        for _sunk_host, _sunk_matched, approved_aid, _sunk_flow_id in sink:
             if approved_aid:
                 self._record_approval_signal(approved_aid, "approved")
         return new_text
@@ -3215,6 +3296,9 @@ class SwapAddon:
     def request(self, flow):
         self._maybe_reload()
         self._current_egress_ip = None
+        # Issue #199: fresh grant-verdict cache for this request (also
+        # bounds the cache's memory to one request's distinct tuples).
+        self._verdict_cache = None
         # H18 (#133): client-visible approval signals recorded while
         # swapping this request; stashed onto flow.metadata below.
         self._approval_signal = []
@@ -3381,6 +3465,10 @@ class SwapAddon:
         # non-issue on mitmproxy 12.2.3).
         self._maybe_reload()
         self._current_egress_ip = None
+        # Issue #199: fresh grant-verdict cache for this message, like
+        # request() — websocket insertions interleave with requests on
+        # the event loop, so they must not share a request's cache.
+        self._verdict_cache = None
         # H18: no header channel exists on websocket messages, so any
         # approval signal recorded here is discarded (the approval is
         # still filed). Reset per message like _current_egress_ip.

@@ -298,6 +298,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The credential-swapping proxy now evaluates each request's credential
+  grant verdict once and reuses it for every placeholder in that request
+  (2026-10-17): previously a request body studded with placeholders
+  re-ran the full grant scan for each one, multiplying synchronous work
+  on the proxy's shared event loop — a request-shaped availability
+  vector. The verdict cache is dropped whenever the grants or registry
+  reload, so a revoked grant is honored no later than the next
+  placeholder after the revoke lands. (#TBD)
+
 - The credential-swapping proxy now refuses to start when any of its
   configurable file paths points outside its home directory (2026-10-17):
   previously a misconfigured path (secrets, allowlists, registry, or the
