@@ -345,6 +345,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Toolset updater honors the release gate: on a fleet-managed box, the
+  cua-driver and Playwright convergence targets are capped at the gate's
+  maximum permitted pin, and the tick refuses loudly when the fleet is
+  frozen — the same fail-closed posture the repo updater already had.
+  Previously the toolset updater converged past whatever the gate
+  permitted. (#TBD)
+
 - Rollout-controller staleness bound: `--stale-hours` on the fleet
   inventory commands and on rollout promotion now rejects non-finite
   values. Previously `inf` slipped through validation and made every

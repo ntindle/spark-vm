@@ -312,6 +312,15 @@ STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
 STATE_LOCK="$TOOLSET_STATE_DIR/toolset-update.lock"
 INSTALLED_BIN="$TOOLSET_STATE_DIR/bin"
 INSTALLED_SCRIPT="$INSTALLED_BIN/toolset-update.sh"
+# G18 §5 / S1b (#1629): path to the installed gate_query.py the
+# _toolset_gate_cap shells out to. Env-overridable for tests. The timer's
+# $INSTALLED_BIN, not the checkout — same trust model as the updater
+# script itself: re-run install to refresh. Keys arrive via
+# SPARKVM_GATE_KEYS (key_id=/path,...), box identity via SPARKVM_BOX_ID —
+# both set on the box's systemd unit by the operator's install step,
+# never in the repo. Unset keys = gate-unmanaged box (pre-G18 behavior,
+# see _toolset_gate_cap).
+: "${GATE_QUERY:=$INSTALLED_BIN/gate_query.py}"
 SERVICE_NAME="sparkvm-toolset-update"
 
 # --- logging -----------------------------------------------------------------
@@ -835,6 +844,96 @@ _pin_ok() {
     return 0
 }
 
+# _toolset_gate_cap return codes: 0 = target ready on stdout; 1 = nothing
+# to do (wave not live for toolset, or the gate max is at/behind the
+# installed version — a ceiling, not a downgrade order); 2 = frozen or
+# refusal, fail closed.
+#
+# _toolset_gate_cap <tool> <pin> <current> — G18 S1b (#1629): cap the
+# layer's convergence target at the gate's max_permitted_pin, the same
+# fail-closed posture as the repo updater's gate_cap in auto-deploy.sh
+# (pending_range): a box with no gate keys provisioned is gate-UNMANAGED
+# (pre-G18 behavior — proceeds uncapped, warns only on half-provisioning);
+# a provisioned box with a missing, tampered, or expired document is
+# no-signal → frozen, and the layer refuses loudly. A frozen fleet holds
+# toolset pins exactly like repo commits (G15 §5).
+# Prints the (possibly capped) target on stdout. NOTE: often runs inside
+# $( ) — stdout is machine-readable, everything else goes through log()
+# (stderr). Never print key material here — gate_query.py never does.
+_toolset_gate_cap() {
+    local tool="$1" pin="$2" cur="$3"
+    # Byte-wise version comparison regardless of locale.
+    local LC_ALL=C
+    if [ ! -f "$GATE_QUERY" ]; then
+        log "gate unmanaged: $GATE_QUERY not installed — re-run '$0 install' from a checkout carrying fleet/gate_query.py to enable G18 gating"
+        printf '%s' "$pin"
+        return 0
+    fi
+    if [ -z "${SPARKVM_GATE_KEYS:-}" ]; then
+        # Unmanaged has two flavors, same as the repo updater: a box that
+        # was never enrolled (silent, pre-G18 behavior) and a box that
+        # looks half-enrolled (a gate document is present but no keys —
+        # the operator forgot the G18 §5 install step). Only the second
+        # warns.
+        local gate_file="${SPARKVM_GATE_JSON:-/var/lib/sparkvm/gate/gate.json}"
+        if [ -f "$gate_file" ]; then
+            log "gate unmanaged: $gate_file exists but SPARKVM_GATE_KEYS is unset — partial provisioning (G18 §5 install step); proceeding uncapped until keys are provisioned"
+        fi
+        printf '%s' "$pin"
+        return 0
+    fi
+    local state gstate permitted tmax
+    if ! state="$(python3 "$GATE_QUERY" state)"; then
+        # gate_query exits 0 even on no-signal (it prints state=frozen); a
+        # nonzero exit is an invocation failure, not a gate verdict.
+        log "ERROR: $tool: gate_query failed to run — refusing to converge (fail closed)"
+        return 2
+    fi
+    gstate="$(printf '%s\n' "$state" | sed -n 's/^state=//p')"
+    permitted="$(printf '%s\n' "$state" | sed -n 's/^toolset_permitted=//p')"
+    tmax="$(printf '%s\n' "$state" | sed -n 's/^toolset_max=//p')"
+    if [ "$gstate" != "live" ]; then
+        log "ERROR: $tool: gate state is '${gstate:-unknown}' — fleet frozen, refusing to converge (fail closed, G18 §4)"
+        return 2
+    fi
+    if [ "$permitted" != "true" ]; then
+        log "$tool: this box's wave is not live for toolset (toolset_permitted=${permitted:-missing}) — nothing to do"
+        return 1
+    fi
+    if [ -z "$tmax" ]; then
+        log "ERROR: $tool: gate is live but names no toolset max_permitted_pin — refusing to converge"
+        return 2
+    fi
+    if ! _pin_ok "$tmax"; then
+        # The target is interpolated into a release URL and a filename, so
+        # the gate's pin gets the same safety bar as the pins file's.
+        log "ERROR: $tool: gate's max_permitted_pin '$tmax' is not URL/filename-safe — refusing to converge"
+        return 2
+    fi
+    local target="$pin"
+    # Pins are version strings, not commits, so min() is lexicographic
+    # comparison on the date-pin format (docs/RELEASE_GATE_CHANNEL_DESIGN.md
+    # G18 §8) — the operator's pins file and gate document must use
+    # lexicographically comparable version strings.
+    if [[ "$tmax" < "$pin" ]]; then
+        log "$tool: capping convergence target $pin at max_permitted_pin $tmax"
+        target="$tmax"
+    fi
+    case "$cur" in
+        absent|version-unknown|"") ;;
+        *)
+            # The gate is a ceiling, not a downgrade order: a max at or
+            # behind the installed version must not rewind the layer —
+            # nothing to do.
+            if [[ ! "$target" > "$cur" ]]; then
+                log "$tool: max_permitted_pin $tmax is at or behind installed $cur — refusing downgrade (nothing to do)"
+                return 1
+            fi ;;
+    esac
+    printf '%s' "$target"
+    return 0
+}
+
 # Probe the MANAGED cua-driver binary as its owner, never as root — for
 # the same reason as the playwright venv (issue #1252: the timer runs as
 # root, the binary is user-owned, and executing it as root each tick hands
@@ -966,6 +1065,18 @@ _cua_driver_layer() {
         return 1
     fi
     cur="$(_cua_driver_current)"
+    # G18 S1b (#1629): cap the convergence target at the gate's
+    # max_permitted_pin — the release gate's ceiling on the pins file's
+    # authority. Runs inside $( ): stdout is the (possibly capped)
+    # target; rc 0 = proceed, 1 = nothing to do, 2 = frozen/refusal
+    # (fail closed).
+    local _gc_rc=0
+    pin="$(_toolset_gate_cap cua-driver "$pin" "$cur")" || _gc_rc=$?
+    case "$_gc_rc" in
+        0) ;;
+        1) log "cua-driver: release gate says nothing to do — skipping layer"; return 0 ;;
+        *) log "cua-driver: release gate refused — failing closed"; return 1 ;;
+    esac
     case "$cur" in
         "$pin")
             log "cua-driver: already on pin $pin, no-op"
@@ -1761,6 +1872,18 @@ _playwright_layer() {
     py="$PLAYWRIGHT_VENV/bin/python"
     cli="$PLAYWRIGHT_VENV/bin/playwright"
     cur="$(_playwright_current)"
+    # G18 S1b (#1629): cap the convergence target at the gate's
+    # max_permitted_pin — same fail-closed posture as the cua-driver
+    # layer above. Runs inside $( ): stdout is the (possibly capped)
+    # target; rc 0 = proceed, 1 = nothing to do, 2 = frozen/refusal
+    # (fail closed).
+    local _gc_rc=0
+    pin="$(_toolset_gate_cap playwright "$pin" "$cur")" || _gc_rc=$?
+    case "$_gc_rc" in
+        0) ;;
+        1) log "playwright: release gate says nothing to do — skipping layer"; return 0 ;;
+        *) log "playwright: release gate refused — failing closed"; return 1 ;;
+    esac
     local pip_needed=1
     case "$cur" in
         "$pin")
@@ -3130,6 +3253,12 @@ cmd_install() {
     # trust model (docs/SELF_UPDATE.md "Two planes" contract).
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/self_update_pins.conf" "$TOOLSET_STATE_DIR/self_update_pins.conf" \
         || { echo "ERROR: cannot install pins file" >&2; return 1; }
+    # G18 S1b (#1629): the _toolset_gate_cap shells out to the installed
+    # copy of fleet/gate_query.py (the timer's $INSTALLED_BIN, not the
+    # checkout — same trust model as the updater script itself: re-run
+    # install to refresh).
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../fleet/gate_query.py" "$INSTALLED_BIN/gate_query.py" \
+        || { echo "ERROR: cannot install gate_query.py" >&2; return 1; }
     # #1313: publish the installed pins' hash to the world-readable carrier
     # dir so the unprivileged S1 status plane can detect a checkout/installed
     # pins split (a pin bump without a privileged `install` leaves S1
