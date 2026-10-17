@@ -43,11 +43,14 @@ survive the port because the call sites are what obey them):
 - `on_box_revoked`: D65 — never call this for the pre-#844
   keyless-grandfathered path. Only real revocation events page.
 
-STACKING NOTE: the async `enqueue_page` boundary does not exist yet —
-it is the async-boundary port slice's deliverable. This module pins the
-mapping half (#1492's in-repo slice); the plane wires the two together
-when the boundary lands. Do not merge a worker vendoring before the
-boundary exists.
+STACKING NOTE (resolved for the boundary half): the async `enqueue_page`
+boundary landed as `hosted/push_enqueue_async.py` (#1614's in-repo
+slice) — the async mappings now have an async boundary to inject (see
+`hosted/test_push_enqueue_async.py::test_async_mappings_compose_with_async_boundary`).
+This module pinned the mapping half (#1492's in-repo slice). The plane
+wires both halves into the #952 filing endpoint and the revoke endpoint
+when it vendors them; do not vendor the sync modules into the worker
+(F-PP-2).
 """
 
 from __future__ import annotations
