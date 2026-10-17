@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push: the two endpoint-driven paging policies
+  (approval filed, box revoked) now ship as async ports the plane worker
+  can vendor — the in-repo half of the #1492 caller wiring, with the same
+  fail-closed validation, page-once keys, and caller obligations as the
+  sync policy. (#TBD)
+
 - The D9 push-sweep operator guide now documents the async plane port's
   runbook (2026-10-16): how the hosted plane drives the sweep — the
   async database interface, the injected policy boundary with the
