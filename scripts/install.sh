@@ -15,8 +15,15 @@
 # (default: the latest tag on the remote). The fresh clone uses
 # `git clone --branch <tag>`, then the checkout's VERSION file is verified
 # to equal the tag — a retagged or hand-edited tree fails loudly instead of
-# installing silently. An existing checkout must already be the pinned tag
-# (tag-to-tag updates are out of scope: F-PKG-6).
+# installing silently.
+#
+# Update mode (issue #1611, F-PKG-6): once a box has a versioned install,
+#   sudo -iu <agent-user> ./spark-vm/scripts/install.sh --update [--to vX.Y.Z]
+# moves the agent checkout from its current release tag to the target tag
+# (default: the latest tag) — in place, detached at the tag commit, with the
+# same tag verification a fresh install gets. Downgrades and dirty trees
+# refuse loudly; the running stack is untouched, so re-run the installer
+# (without --update) afterwards to converge the stack.
 #
 # Every step checks whether its end state already holds and skips when it
 # does, so re-running converges to the same state (the desktop start and the
@@ -50,8 +57,8 @@ set -euo pipefail
 
 # ${VAR:-default} (not plain assignment): the bootstrap phase re-execs the
 # agent phase with these as environment, and plain assignments would clobber
-# them (notably --agent-user, --force, and --version). CLI parsing below still
-# overrides.
+# them (notably --agent-user, --force, --version, and --update/--to).
+# CLI parsing below still overrides.
 # AGENT_PHASE is deliberately NOT env-preserved (plain assignment): the
 # re-exec passes --agent-phase-internal explicitly, so a stray exported
 # AGENT_PHASE=1 can never silently skip bootstrap.
@@ -60,6 +67,10 @@ DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
 # Empty = install the latest tagged release (resolved at install time).
 INSTALL_VERSION="${INSTALL_VERSION:-}"
+# Update mode (issue #1611): UPDATE=1 selects `--update`; UPDATE_TO holds the
+# `--to vX.Y.Z` target (empty = latest tag, resolved at update time).
+UPDATE="${UPDATE:-0}"
+UPDATE_TO="${UPDATE_TO:-}"
 AGENT_PHASE=0
 
 SCRIPT_ABS="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -70,7 +81,7 @@ REPO_URL="https://github.com/ntindle/spark-vm.git"
 
 usage() {
     cat <<'EOF'
-Usage: install.sh [--agent-user NAME] [--dry-run] [--force] [--version vX.Y.Z] [--help]
+Usage: install.sh [--agent-user NAME] [--dry-run] [--force] [--version vX.Y.Z] [--update [--to vX.Y.Z]] [--help]
 
   --agent-user NAME  agent account the stack runs as (default: ntindle; not root)
   --dry-run          print what would change without changing anything
@@ -78,17 +89,36 @@ Usage: install.sh [--agent-user NAME] [--dry-run] [--force] [--version vX.Y.Z] [
   --version vX.Y.Z   install a tagged release (default: the latest tag on the
                      remote); the checkout's VERSION is verified to equal the
                      tag, and an already-pinned checkout is left untouched
+  --update           move the agent checkout from its current release tag to
+                     a newer one, in place (issue #1611). Requires the
+                     checkout to be at a release tag with a clean tree.
+                     Downgrades refuse; the running stack is untouched —
+                     re-run the installer (without --update) to converge it
+  --to vX.Y.Z        update target (default: the latest tag on the
+                     checkout's origin); needs --update
   --help             this text
 
 Run as root (or with sudo) for the bootstrap phase — creating the agent
 user, the sudoers drop, and the SSH key copy — then the script drops to the
 agent user itself (login shell) for the tailnet + stack phase. Run directly
 as the agent user only once the bootstrap phase already holds.
+Update mode runs as the agent user only (never as root): it touches only
+the agent-owned checkout, so no bootstrap phase is involved.
 EOF
 }
 
 note() { echo "install.sh: $*"; }
 die() { echo "install.sh: ERROR: $*" >&2; exit 1; }
+
+redact_url() { # $1 — strip userinfo for DISPLAY (never echo credentials)
+    # A fork install can carry credentials in its origin URL; error and
+    # plan messages must show the URL without them. The match is greedy to
+    # the LAST @ before the first / (the userinfo/host boundary): a raw @
+    # inside a password must not leave the password's tail visible. URLs
+    # without userinfo (and scp-style git@host: paths, which carry no
+    # secret, and @ inside a path) pass through unchanged.
+    printf '%s' "$1" | sed -e 's#://[^/]*@#://<redacted>@#'
+}
 
 # exec_if_live <description> <command...> — describe the mutation, then run
 # it, unless --dry-run, in which case only describe it. Read-only probes
@@ -113,6 +143,9 @@ parse_args() {
             --force) FORCE=1; shift ;;
             --version) INSTALL_VERSION="${2:?--version needs a tag, e.g. --version v1.2.3}"; shift 2 ;;
             --version=*) INSTALL_VERSION="${1#*=}"; shift ;;
+            --update) UPDATE=1; shift ;;
+            --to) UPDATE_TO="${2:?--to needs a tag, e.g. --to v1.2.4}"; shift 2 ;;
+            --to=*) UPDATE_TO="${1#*=}"; shift ;;
             # Internal re-exec flag (bootstrap -> agent phase). Safe to pass
             # directly once the bootstrap phase already holds.
             --agent-phase-internal) AGENT_PHASE=1; shift ;;
@@ -129,6 +162,14 @@ parse_args() {
     if [ -n "$INSTALL_VERSION" ]; then
         [[ "$INSTALL_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || \
             die "bad --version '$INSTALL_VERSION' — want a release tag like v1.2.3"
+    fi
+    if [ -n "$UPDATE_TO" ]; then
+        [[ "$UPDATE_TO" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || \
+            die "bad --to '$UPDATE_TO' — want a release tag like v1.2.4"
+        [ "$UPDATE" = 1 ] || die "--to needs --update (it is the update target, not an install pin)"
+    fi
+    if [ "$UPDATE" = 1 ] && [ -n "$INSTALL_VERSION" ]; then
+        die "--version is the install pin; use --to vX.Y.Z for the update target"
     fi
 }
 
@@ -400,14 +441,14 @@ resolve_install_version() {
     if [ -n "$INSTALL_VERSION" ]; then
         local probe
         probe="$(git ls-remote --tags "$REPO_URL" "refs/tags/$INSTALL_VERSION" 2>/dev/null)" || \
-            die "cannot reach $REPO_URL to verify tag '$INSTALL_VERSION'"
-        [ -n "$probe" ] || die "no such tag '$INSTALL_VERSION' on $REPO_URL"
+            die "cannot reach $(redact_url "$REPO_URL") to verify tag '$INSTALL_VERSION'"
+        [ -n "$probe" ] || die "no such tag '$INSTALL_VERSION' on $(redact_url "$REPO_URL")"
         printf '%s\n' "$INSTALL_VERSION"
         return 0
     fi
     local tags
     tags="$(git ls-remote --tags "$REPO_URL" 2>/dev/null)" || \
-        die "cannot list tags on $REPO_URL — check the network and re-run $SCRIPT_ABS"
+        die "cannot list tags on $(redact_url "$REPO_URL") — check the network and re-run $SCRIPT_ABS"
     local latest
     # Grammar filter: only release tags compete for "latest" — sort -V over
     # the raw tag namespace would let a non-release tag (e.g. `zzz`, which
@@ -415,7 +456,7 @@ resolve_install_version() {
     # parse_args enforces for --version. Prereleases (v1.2.4-rc.1) compete
     # as ordinary tags — sort -V decides, "latest tag" is literal.
     latest="$(printf '%s\n' "$tags" | awk '{print $2}' | grep -v '\^{}$' | sed 's|^refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | sort -V | tail -n 1)"
-    [ -n "$latest" ] || die "$REPO_URL has no release tags — cannot pick a release to install"
+    [ -n "$latest" ] || die "$(redact_url "$REPO_URL") has no release tags — cannot pick a release to install"
     printf '%s\n' "$latest"
 }
 
@@ -464,8 +505,8 @@ step_repo() {
     fi
     # A versioned install never pulls: the checkout must already be the
     # pinned tag (a fresh `git clone --branch <tag>` lands detached at the
-    # tag's commit, so equality is the whole pin). Tag-to-tag updates are
-    # out of scope (F-PKG-6): die loud with the remedy instead of
+    # tag's commit, so equality is the whole pin). Tag-to-tag moves belong
+    # to --update (step_repo_update): die loud with the remedy instead of
     # half-upgrading a live box.
     local want_commit have_commit
     want_commit="$(git -C "$AGENT_REPO" rev-parse --verify --quiet "$version^{commit}")" || \
@@ -475,10 +516,125 @@ step_repo() {
     if [ "$have_commit" != "$want_commit" ]; then
         local installed
         installed="$(tr -d '[:space:]' < "$AGENT_REPO/VERSION" 2>/dev/null || echo unknown)"
-        die "$AGENT_REPO is at VERSION '$installed' ($have_commit), not $version ($want_commit) — tag-to-tag updates are not supported: move the checkout aside and re-run to install $version (the running stack is untouched)"
+        die "$AGENT_REPO is at VERSION '$installed' ($have_commit), not $version ($want_commit) — run $AGENT_REPO/scripts/install.sh --update as $AGENT_USER to move between releases; a plain re-run never moves the checkout"
     fi
     assert_version_matches "$version" "$AGENT_REPO"
     note "skip: $AGENT_REPO already at release $version"
+}
+
+# ---------------------------------------------------------------------------
+# Update mode (issue #1611, F-PKG-6): move a versioned install's checkout
+# from its current release tag to a newer one, in place.
+# ---------------------------------------------------------------------------
+
+newer_release() { # $1 $2 — true when $1 is a NEWER release than $2
+    [ "$1" != "$2" ] || return 1
+    local first
+    first="$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)"
+    [ "$first" = "$2" ]
+}
+
+current_release_tag() {
+    # The installed release: exactly one release-grammar tag must point at
+    # HEAD (a versioned install is detached at its tag's commit). Zero
+    # matches = not a versioned install; several = ambiguous — both die
+    # loud instead of guessing which release the box runs.
+    local tags
+    tags="$(git -C "$AGENT_REPO" tag --points-at HEAD)" || \
+        die "cannot list tags in $AGENT_REPO — fix the checkout, then re-run $SCRIPT_ABS --update"
+    local matches
+    matches="$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || true)"
+    [ -n "$matches" ] || \
+        die "$AGENT_REPO is not at a release (no release tag points at HEAD) — move the checkout aside and re-run the install instead of --update"
+    [ "$(printf '%s\n' "$matches" | wc -l)" = 1 ] || \
+        die "ambiguous release at HEAD ($(printf '%s' "$matches" | tr '\n' ' ')) — resolve the tags, then re-run $SCRIPT_ABS --update"
+    assert_version_matches "$matches" "$AGENT_REPO"
+    printf '%s\n' "$matches"
+}
+
+resolve_update_target() {
+    # --to is the explicit target; otherwise the latest tag, using the same
+    # grammar-filtered latest-tag rule as a fresh install. The update
+    # follows the checkout's own origin (a fork install updates from its own
+    # source), not the installer constant.
+    local saved_url="$REPO_URL"
+    REPO_URL="$(git -C "$AGENT_REPO" remote get-url origin)" || \
+        die "$AGENT_REPO has no origin remote — fix the checkout, then re-run $SCRIPT_ABS --update"
+    if [ -n "$UPDATE_TO" ]; then
+        INSTALL_VERSION="$UPDATE_TO"
+    fi
+    local target
+    target="$(resolve_install_version)" || { REPO_URL="$saved_url"; return 1; }
+    REPO_URL="$saved_url"
+    printf '%s\n' "$target"
+}
+
+step_repo_update() {
+    # NOTE (subshell-die pitfall): current_release_tag and
+    # resolve_update_target report fatal conditions via `die`, but when this
+    # function runs inside a command substitution or an `if` condition
+    # (where set -e is suspended), that `die` exits only the inner subshell
+    # and the assignment would silently yield the empty string. Every
+    # such capture therefore carries an explicit `|| return 1` — the die
+    # message is already on stderr; this stops the update here instead of
+    # half-upgrading on an empty release name.
+    local current target
+    current="$(current_release_tag)" || return 1   # local: versioned-ness + VERSION pin
+    # Dirty check before any network: the updater never moves a dirty
+    # checkout — a tag move rewrites the tree and would silently drop or
+    # half-merge local edits. Untracked files count: they can collide with
+    # the target tree, and a clean tree is the honest precondition.
+    local dirty
+    dirty="$(git -C "$AGENT_REPO" status --porcelain)" || \
+        die "cannot read git status of $AGENT_REPO — fix the checkout, then re-run $SCRIPT_ABS --update"
+    [ -z "$dirty" ] || \
+        die "$AGENT_REPO has local changes — the updater never moves a dirty checkout (commit them, stash them, or move the tree aside)"
+    target="$(resolve_update_target)" || return 1  # network: dies loud on tag problems
+    if [ "$target" = "$current" ]; then
+        note "skip: $AGENT_REPO already at release $target"
+        return 0
+    fi
+    newer_release "$target" "$current" || \
+        die "$target is older than the installed release $current — downgrades are not supported (rollback is the snapshot plane's job: deploy/toolset-update.sh rollback)"
+    note "updating $AGENT_REPO from release $current to $target"
+    local origin_url
+    origin_url="$(git -C "$AGENT_REPO" remote get-url origin)"
+    exec_if_live "fetch tags from $(redact_url "$origin_url")" \
+        git -C "$AGENT_REPO" fetch origin --tags
+    [ "$DRY_RUN" = 1 ] && return 0
+    # Ref-shadow guard (same as a fresh install): the checkout lands exactly
+    # on the tag's commit — a same-named branch must not shadow the release.
+    local want_commit landed
+    want_commit="$(git -C "$AGENT_REPO" rev-parse --verify --quiet "$target^{commit}")" || \
+        die "fetched tags do not contain $target — the tag vanished from origin after resolution; re-run"
+    git -C "$AGENT_REPO" checkout --detach --quiet "$target" || \
+        die "checkout of $target failed — dirty trees were refused before this point, so the tree should be exactly as it was"
+    landed="$(git -C "$AGENT_REPO" rev-parse HEAD)" || \
+        die "cannot read HEAD of $AGENT_REPO after checkout"
+    [ "$landed" = "$want_commit" ] || \
+        die "checkout of $target landed on $landed, not the tag commit $want_commit — a branch is shadowing the release tag; inspect the checkout before re-running"
+    assert_version_matches "$target" "$AGENT_REPO"
+    note "updated $AGENT_REPO to release $target ($landed)"
+}
+
+run_update() {
+    # Update mode touches only the agent-owned checkout — no bootstrap
+    # phase. It must run as the agent user: the checkout is agent-owned,
+    # and root would leave root-owned objects inside it.
+    if [ -z "${AGENT_REPO:-}" ]; then
+        derive_agent_repo
+    fi
+    [ "$(id -un)" = "$AGENT_USER" ] || \
+        die "update mode must run as $AGENT_USER (ran as $(id -un)) — re-run as the agent user: sudo -iu $AGENT_USER $AGENT_REPO/scripts/install.sh --update"
+    [ -d "$AGENT_REPO/.git" ] || \
+        die "$AGENT_REPO is not a git checkout — run the install (without --update) first"
+    if [ "$DRY_RUN" = 1 ]; then
+        note "dry-run: simulating update mode (identity gate enforced, nothing mutates)"
+    fi
+    # Explicit propagation (see the subshell-die note in step_repo_update):
+    # without it a refused update would fall through to the success note.
+    step_repo_update || return 1
+    note "checkout moved — the running stack still serves the old release: re-run $SCRIPT_ABS (without --update) to converge the stack; S1's provenance drift check names the stale placed copies loudly in between"
 }
 
 step_deploy() {
@@ -751,6 +907,14 @@ run_agent() {
 
 main() {
     parse_args "$@"
+    # Update mode is its own lane: it touches only the agent checkout, so it
+    # dispatches before the delivery-checkout and identity gates below.
+    # Explicit propagation (subshell-die note in step_repo_update): a refused
+    # update must fail the run, never report success.
+    if [ "$UPDATE" = 1 ]; then
+        run_update || return 1
+        return 0
+    fi
     # The agent phase works only in the agent-owned checkout (AGENT_REPO),
     # so the delivery checkout's readability is irrelevant to it — notably
     # Option B, where the invoker's checkout lives under /root (mode 700).

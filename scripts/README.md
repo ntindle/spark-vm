@@ -162,6 +162,7 @@ never drift from what's on disk.
 | `test_hosted_owner_alerting_doc.py` | HOSTED_OWNER_ALERTING.md alert classes ↔ push-lane mapping surface |
 | `test_http_hardening_headers.py` | localhost HTTP hardening-header pin test (issue #1237) |
 | `test_install_sh.py` | `install.sh` idempotent box installer: sourcing safety, per-step skip/mutate idempotency, no-op second run, README no-drift (issue #1526) |
+| `test_install_sh_update.py` | `install.sh --update` tag-to-tag updater: flag contracts, identity gate, real-git move, fail-closed edges (dirty/downgrade/non-versioned), dry-run (issue #1611) |
 | `test_lint_changelog_ritual.py` | changelog ritual linter |
 | `test_local_gate.py` | `local-gate.sh` merge-gate runner |
 | `test_parallel_runner_docs.py` | CONTRIBUTING.md + docs/CI.md parallel-runner docs + pytest-xdist dependency |
