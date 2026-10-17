@@ -35,15 +35,17 @@ RestartSec=5
 # plus the stdlib. Deploy order note: /home/swapd must exist before the
 # unit starts (a missing ReadWritePaths dir fails service startup; it is
 # not auto-created). Contract (issue #709): keep every SWAP_*_DIR/_FILE
-# override under /home/swapd — _env_path does NOT validate this. The
+# override under /home/swapd. The
 # unit sandboxes with ProtectSystem=strict + ReadWritePaths=/home/swapd
 # + PrivateTmp=yes, so: writes outside /home/swapd fail at the first
 # write (EROFS) — except in the service-private /tmp and /var/tmp,
 # which are writable but ephemeral; reads outside /home/swapd still
 # succeed (strict is read-only, not inaccessible), so a mispointed
-# hosts/registry/SSRF path silently reads from outside the jail.
-# Nothing at deploy checks these — the failure (or silent misread)
-# happens at runtime.
+# hosts/registry/SSRF path would silently read from outside the jail.
+# The addon now enforces the contract itself at startup (issue #1609):
+# _validate_path_jail() refuses to start when any SWAP_* path resolves
+# outside SWAP_BASE_DIR (default /home/swapd), so the silent
+# misread/miswrite became a loud refusal.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all

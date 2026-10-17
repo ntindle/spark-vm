@@ -215,12 +215,78 @@ def _env_int(name, default):
 
 # All paths are env-overridable so a second mitmdump instance can run
 # as the inference-only proxy (finding 31) with its own secrets dir,
-# hosts file, registry, and audit log. Contract (issue #709): keep every
-# override under /home/swapd — _env_path does NOT validate this, and
-# ProtectSystem=strict is read-only, not inaccessible: writes outside
+# hosts file, registry, and audit log. Contract (issue #709, enforced
+# at startup by _validate_path_jail — issue #1609): keep every override
+# under SWAP_BASE_DIR (default /home/swapd). ProtectSystem=strict is
+# read-only, not inaccessible: without the startup gate, writes outside
 # /home/swapd fail at the first write (except the service-private /tmp
 # and /var/tmp, writable but ephemeral), while reads outside it still
-# succeed silently. Nothing at deploy checks these.
+# succeed silently — and an audit log pointed at the service-private
+# /tmp would pass the "audit write is part of authorization" writability
+# check while the trail vanishes on restart. A mispointed override now
+# refuses to start instead of running mis-jailed.
+SWAP_BASE_DIR = _env_path("SWAP_BASE_DIR", "/home/swapd")
+
+# (env var, default) for every runtime path the addon reads or writes.
+# _validate_path_jail() checks the env-provided configuration — the
+# deployment surface the #709 contract governs — not the module
+# constants (tests legitimately re-point those after import).
+_PATH_JAIL_VARS = (
+    ("SWAP_SECRETS_DIR", "/home/swapd/secrets"),
+    ("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow"),
+    ("SWAP_SMOKE_HOSTS_FILE", "/home/swapd/smoke-hosts"),
+    ("SWAP_STREAM_HOSTS_FILE", "/home/swapd/stream-hosts"),
+    ("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json"),
+    ("SWAP_LOG_FILE", "/home/swapd/swap.log"),
+    ("SWAP_APPROVALS_DIR", "/home/swapd/approvals"),
+    ("SWAP_GRANTS_FILE", "/home/swapd/grants.json"),
+    ("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow"),
+    ("SWAP_SSRF_DENY_FILE", "/home/swapd/ssrf.deny"),
+)
+
+
+def _validate_path_jail():
+    """Fail closed at startup when a SWAP_* runtime path escapes the base.
+
+    Every SWAP_* path override must realpath-resolve within-or-equal
+    SWAP_BASE_DIR (default /home/swapd). realpath defeats symlink
+    escapes (a link under the base pointing at /etc resolves outside);
+    empty-string env falls back to the default exactly like _env_path;
+    relative paths resolve against the process CWD and fail closed
+    unless they land under the base. On violation raises RuntimeError:
+    mitmproxy aborts the script load, so no proxy ever runs with
+    mis-jailed paths — the silent misread/miswrite becomes a loud
+    refusal to start.
+
+    Honest limit, stated not solved: SWAP_BASE_DIR is itself the trust
+    anchor — an environment writer who sets SWAP_BASE_DIR=/ can pin the
+    whole jail anywhere. The environment is operator-owned (systemd
+    Environment= lines); someone who can write it already owns the
+    process. This gate catches the documented residual — operator
+    misconfiguration, the case the unit files warned "nothing at
+    deploy checks" about — not a privilege boundary.
+    """
+    base = os.path.realpath(os.environ.get("SWAP_BASE_DIR")
+                            or str(SWAP_BASE_DIR))
+    bad = []
+    for var, default in _PATH_JAIL_VARS:
+        v = os.environ.get(var)
+        p = v if v else default
+        rp = os.path.realpath(p)
+        if rp != base and not rp.startswith(base + os.sep):
+            bad.append((var, p))
+    outbox = os.environ.get("SWAP_SUMMONS_OUTBOX")
+    if outbox:
+        rp = os.path.realpath(outbox)
+        if rp != base and not rp.startswith(base + os.sep):
+            bad.append(("SWAP_SUMMONS_OUTBOX", outbox))
+    if bad:
+        raise RuntimeError(
+            "swap_addon: refusing to start: %s outside the SWAP_BASE_DIR "
+            "jail (%s)" % (
+                ", ".join("%s=%r" % (var, p) for var, p in bad), base))
+
+
 SECRETS_DIR = _env_path("SWAP_SECRETS_DIR", "/home/swapd/secrets")
 HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 # §3a smoke echo hosts (G6): requests to these hosts may swap ONLY the
@@ -1046,6 +1112,11 @@ def _is_private_ip(ip):
 
 class SwapAddon:
     def __init__(self):
+        # Issue #1609: the SWAP_* path jail is enforced here, first —
+        # before any file is read or any swap served. A mispointed
+        # override raises RuntimeError, mitmproxy aborts the script
+        # load, and no proxy ever runs with mis-jailed paths.
+        _validate_path_jail()
         self.inference_mode = INFERENCE_MODE
         self.secrets = {}
         self.hosts = []
@@ -4136,7 +4207,16 @@ class SwapAddon:
                 pass
 
 
-addons = [SwapAddon()]
+# Issue #1609: the startup path-jail gate lives in SwapAddon.__init__,
+# which runs here for mitmproxy (the module is imported, not run, so
+# __name__ != "__main__"). The --summons-sweep maintenance entry point
+# below takes explicit paths and never serves swaps, so it must not
+# construct a serving addon — and must not trip the jail gate meant
+# for the proxy's env-provided configuration.
+if __name__ != "__main__":
+    addons = [SwapAddon()]
+else:
+    addons = []
 
 if __name__ == "__main__":
     # G4 S1 (GitHub #428): box-side reconciliation-sweep entry point,

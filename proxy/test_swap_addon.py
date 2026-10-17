@@ -5210,5 +5210,115 @@ class SummonsSweepDecodeTests(unittest.TestCase):
             self.assertNotIn("undecodable", msgs)
 
 
+class TestPathJail(unittest.TestCase):
+    """Issue #1609: the SWAP_* path jail — every runtime path override
+    must realpath-resolve within-or-equal SWAP_BASE_DIR, else the addon
+    refuses to start (fail closed). The gate reads the env-provided
+    configuration (the deployment surface the #709 contract governs);
+    tests legitimately re-point the module constants after import and
+    are not gated."""
+
+    def _validate(self, env):
+        with mock.patch.dict(os.environ, env, clear=False):
+            # Scrub any real SWAP_* vars leaking in from the CI/dev env
+            # so each case is hermetic.
+            for var in list(os.environ):
+                if var.startswith("SWAP_") and var not in env:
+                    del os.environ[var]
+            sa._validate_path_jail()
+
+    def test_clean_env_passes(self):
+        # Control: defaults all live under /home/swapd.
+        self._validate({})
+
+    def test_log_file_outside_base_refused(self):
+        # The audit-evasion case from the issue: an audit log pointed at
+        # the service-private /tmp passes the writability gate while the
+        # trail vanishes on restart.
+        with self.assertRaises(RuntimeError) as cm:
+            self._validate({"SWAP_LOG_FILE": "/tmp/swap.log"})
+        self.assertIn("SWAP_LOG_FILE", str(cm.exception))
+
+    def test_sibling_prefix_not_confused(self):
+        # "/home/swapd-evil" startswith "/home/swapd" — the check must
+        # require a path-separator boundary, not a string prefix.
+        with self.assertRaises(RuntimeError):
+            self._validate({"SWAP_LOG_FILE": "/home/swapd-evil/swap.log"})
+
+    def test_dotdot_escape_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._validate({"SWAP_SECRETS_DIR": "/home/swapd/../etc/secrets"})
+
+    def test_relative_path_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._validate({"SWAP_HOSTS_FILE": "hosts.allow"})
+
+    def _jail_env(self, base):
+        """Env relocating every SWAP_* path under a scratch base."""
+        return {"SWAP_BASE_DIR": base,
+                "SWAP_SECRETS_DIR": os.path.join(base, "secrets"),
+                "SWAP_HOSTS_FILE": os.path.join(base, "hosts.allow"),
+                "SWAP_SMOKE_HOSTS_FILE": os.path.join(base, "smoke-hosts"),
+                "SWAP_STREAM_HOSTS_FILE": os.path.join(base, "stream-hosts"),
+                "SWAP_REGISTRY_FILE": os.path.join(base, "credentials.json"),
+                "SWAP_LOG_FILE": os.path.join(base, "swap.log"),
+                "SWAP_APPROVALS_DIR": os.path.join(base, "approvals"),
+                "SWAP_GRANTS_FILE": os.path.join(base, "grants.json"),
+                "SWAP_SSRF_FILE": os.path.join(base, "ssrf.allow"),
+                "SWAP_SSRF_DENY_FILE": os.path.join(base, "ssrf.deny")}
+
+    def test_symlink_escape_refused(self):
+        # realpath must defeat a link under the base pointing outside.
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, "jail")
+            os.makedirs(base)
+            link = os.path.join(base, "secrets")
+            os.symlink(d, link)
+            env = self._jail_env(base)
+            env["SWAP_SECRETS_DIR"] = link
+            with self.assertRaises(RuntimeError):
+                self._validate(env)
+
+    def test_base_override_relocates_jail(self):
+        # Dev/test relocation: every override under the relocated base
+        # passes; one straggler outside still fails.
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, "jail")
+            os.makedirs(base)
+            self._validate(self._jail_env(base))
+            env = self._jail_env(base)
+            env["SWAP_LOG_FILE"] = "/tmp/straggler.log"
+            with self.assertRaises(RuntimeError):
+                self._validate(env)
+
+    def test_empty_string_falls_back_to_default(self):
+        # Mirrors _env_path: falsy env = default.
+        self._validate({"SWAP_LOG_FILE": ""})
+
+    def test_summons_outbox_override_jailed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, "jail")
+            os.makedirs(base)
+            env = self._jail_env(base)
+            env["SWAP_SUMMONS_OUTBOX"] = os.path.join(base, "outbox.jsonl")
+            self._validate(env)
+            env["SWAP_SUMMONS_OUTBOX"] = "/tmp/outbox.jsonl"
+            with self.assertRaises(RuntimeError) as cm:
+                self._validate(env)
+        self.assertIn("SWAP_SUMMONS_OUTBOX", str(cm.exception))
+
+    def test_init_gate_wires_the_check(self):
+        # The __init__ gate is what makes this fail closed at startup:
+        # constructing with a mispointed env raises instead of serving.
+        with mock.patch.dict(os.environ,
+                             {"SWAP_LOG_FILE": "/tmp/swap.log"},
+                             clear=False):
+            for var in [v for v in os.environ if v.startswith("SWAP_")
+                        and v != "SWAP_LOG_FILE"]:
+                del os.environ[var]
+            with self.assertRaises(RuntimeError):
+                sa.SwapAddon()
+
+
 if __name__ == "__main__":
     unittest.main()

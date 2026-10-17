@@ -308,7 +308,10 @@ def generate_secrets(repo_root, work_dir, frames_dir):
             "ok = SwapAddon()._audit(%r, %r); "
             "assert ok, 'audit write failed'") % (proxy_dir, _DEMO_HOST,
                                                  _DEMO_CRED)
-    env = dict(os.environ, SWAP_LOG_FILE=journal)
+    # Issue #1609: the SWAP_* path jail now requires every override under
+    # SWAP_BASE_DIR (default /home/swapd), so the scratch journal rides
+    # along with its own base.
+    env = dict(os.environ, SWAP_LOG_FILE=journal, SWAP_BASE_DIR=work_dir)
     _sh("python3 -c %s" % _shell_quote(code), repo_root, env)
     with open(journal) as f:
         journal_line = f.read().strip().splitlines()[-1]
