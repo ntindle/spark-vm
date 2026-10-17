@@ -344,6 +344,38 @@ def test_promote_refuses_degraded(store):
     assert _waves_json(store)["live_wave"] == 0
 
 
+@pytest.mark.parametrize("bad", ["inf", "nan", "1e999"])
+def test_promote_rejects_nonfinite_stale_hours(store, bad):
+    # The S2 promote gate shares S1's staleness rule (D-RC-4); a non-finite
+    # --stale-hours must be rejected at the boundary, not laundered into a
+    # vacuous gate. The validation fires before any rollout read, so no
+    # estate setup is needed.
+    # Neuter: reverting the isfinite guard to the bare isnan check must
+    # flip the "inf"/"1e999" cases (they return 0 pre-fix).
+    p = _cli(store, "promote", "--stale-hours", bad)
+    assert p.returncode == 2
+    assert "positive number" in p.stderr
+
+
+def test_promote_huge_finite_stale_hours_fails_closed(store):
+    # The sink-level guard: a huge-but-finite --stale-hours (1e308, still
+    # finite to argparse) overflows stale_hours*3600 to inf inside
+    # is_record_fresh — the same vacuous gate as +inf via a different
+    # path. The gate must fail closed (loud exit 2, wave unmoved), never
+    # promote on the vacuous window.
+    # Neuter: without the is_record_fresh sink guard this promote exits 0
+    # and advances the wave — the vacuous promote this test exists to
+    # forbid.
+    _estate(store, n=2, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    _deploy(store, "plane-0", "w@v1", status="healthy")
+    p = _cli(store, "promote", "--stale-hours", "1e308")
+    assert p.returncode == 2
+    assert "internal error" in p.stderr
+    assert _waves_json(store)["live_wave"] == 0
+
+
 def test_promote_refuses_stale_record(store):
     _estate(store, n=2, canary_tenants=("ct1",))
     _release(store)

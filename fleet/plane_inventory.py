@@ -356,14 +356,27 @@ def is_record_fresh(record, stale_hours):
     non-string observed_at raises TypeError, which the caller's exit-2
     contract turns into a loud failure — a corrupt record must never
     present as a routine "wait and re-run" stale refusal.
+
+    The window itself is guarded at the sink: a non-finite stale_hours,
+    or one whose hour-window product overflows to non-finite (e.g. 1e308
+    x 3600), raises ValueError instead of silently reading every record
+    as fresh — a vacuous window must never launder into "fresh".
     """
+    if not math.isfinite(stale_hours) or stale_hours <= 0:
+        raise ValueError(
+            "stale_hours must be a positive finite number, "
+            f"got {stale_hours!r}")
+    window_s = stale_hours * 3600
+    if not math.isfinite(window_s):
+        raise ValueError(
+            f"stale_hours {stale_hours!r} overflows the freshness window")
     try:
         observed = datetime.fromisoformat(record["observed_at"])
     except (KeyError, ValueError):
         return False
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - observed).total_seconds() <= stale_hours * 3600
+    return (datetime.now(timezone.utc) - observed).total_seconds() <= window_s
 
 
 def _load_json(path, what):
@@ -1290,9 +1303,13 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     stale_hours = getattr(args, "stale_hours", None)
-    # NaN evades `<= 0` (nan <= 0 is False) and would silently mark every
-    # record stale — reject it at the boundary like any other bad value.
-    if stale_hours is not None and (stale_hours <= 0 or math.isnan(stale_hours)):
+    # Non-finite values evade a bare `<= 0` guard: NaN would silently mark
+    # every record stale, while +inf would silently mark every record
+    # fresh — the dangerous direction, vacating the D-RC-4 freshness bound
+    # the S2 promotion gate rests on. Reject at the boundary like any
+    # other bad value (the repo's math.isfinite convention).
+    if (stale_hours is not None
+            and (not math.isfinite(stale_hours) or stale_hours <= 0)):
         _fail("--stale-hours must be a positive number")
     try:
         return args.func(args)

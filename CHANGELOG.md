@@ -325,6 +325,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Rollout-controller staleness bound: `--stale-hours` on the fleet
+  inventory commands and on rollout promotion now rejects non-finite
+  values. Previously `inf` slipped through validation and made every
+  plane record read as "fresh" no matter how old the operator's last
+  observation was — silently vacating the freshness bound that wave
+  promotion rests on. (#1640)
+
 - Rollout-controller deploy driver: a dry-run plan on a store with no
   live rollout (or after `halt`) used to claim the plane was "in" the
   live wave while also reporting no live wave at all — a self-

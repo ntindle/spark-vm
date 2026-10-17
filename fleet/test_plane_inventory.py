@@ -218,6 +218,36 @@ def test_stale_hours_nan_rejected(store):
     assert p.returncode == 2
 
 
+@pytest.mark.parametrize("bad", ["inf", "1e999"])
+def test_stale_hours_nonfinite_rejected(store, bad):
+    # +inf is the dangerous mirror of the NaN case: it evades `<= 0`
+    # (inf > 0) and would silently mark every record fresh, vacating the
+    # D-RC-4 freshness bound the S2 promotion gate rests on.
+    # Neuter: reverting the isfinite guard to the bare isnan check must
+    # flip both cases (they return 0 pre-fix).
+    p = _run(store, "census", "--stale-hours", bad)
+    assert p.returncode == 2
+    assert "positive number" in p.stderr
+    p = _run(store, "stale", "--expected", "worker-template@v1",
+             "--stale-hours", bad)
+    assert p.returncode == 2
+    assert "positive number" in p.stderr
+
+
+def test_stale_hours_huge_finite_fails_closed(store):
+    # The sink-level guard: 1e308 is finite to argparse (passes the CLI
+    # boundary) but overflows stale_hours*3600 to inf inside
+    # is_record_fresh — the same vacuous gate as +inf via a different
+    # path. census must fail closed (loud exit 2), never report the
+    # estate eligible on a vacuous window.
+    # Neuter: without the is_record_fresh sink guard this census exits 0.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    p = _run(store, "census", "--stale-hours", "1e308")
+    assert p.returncode == 2
+    assert "internal error" in p.stderr
+
+
 def test_cost_events_survive_snapshot_republish(store):
     # The cost journal is append-only and independent of planes.json.
     assert _run(store, "register", "--plane-id", "plane-1", "--tenant-id", "t").returncode == 0
