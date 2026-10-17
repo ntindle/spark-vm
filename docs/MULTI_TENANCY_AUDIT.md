@@ -96,8 +96,8 @@ H11's ruling on `MULTITENANT_ISOLATION_RESEARCH.md`'s findings:
    **ADOPTED.** The outage-time behavior is behaviorally verified (no
    outage-time revocation propagation — the designed failure mode is
    *stale authorization*, never *bypassed identity*); Tailscale's own KB
-   1091 was read first-party 2026-10-17 and confirms the recorded
-   behavior verbatim (#1646 closed).
+   1091 was re-read directly on 2026-10-17 and confirms the recorded
+   behavior with no delta (#1646 closed).
 4. **Root: the operator holds root on the outer enforcement layer; the
    tenant gets contained root-equivalent inside their unit; never let the
    human's and the agent's privilege domains collapse into one.** —

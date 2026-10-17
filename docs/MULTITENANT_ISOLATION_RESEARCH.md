@@ -247,7 +247,7 @@ separate shape.
    (see Open verifications; issue #340 — behaviorally verified by an
    independent outage experiment; the first-party vendor read of Tailscale
    KB 1091 completed the same day, #1646 — the KB confirms the recorded
-   behavior verbatim). H11 must never assume an outage "degrades into
+   behavior with no delta). H11 must never assume an outage "degrades into
    bypassed identity checks" — the failure mode to design for is
    *stale authorization*, not bypass.
 4. **Root:** tenant (human owner) may hold root inside their unit; the
@@ -319,13 +319,17 @@ separate shape.
   *stale authorization*, as adopted); key expiry was still enforced
   locally by peers (no bypassed identity checks).
   **KB cross-check (2026-10-17, first-party):** the article confirms
-  every quoted element — no traffic routes through the coordinator;
-  devices keep communicating until one of their locally-stored keys
-  expires (expiry is device-dependent, based on last authentication);
-  firewall rules are cached and enforced per device; and without the
-  coordinator new users/devices cannot be added, keys cannot be refreshed
-  (devices gradually lose access to each other), firewall rules cannot be
-  updated, and existing users cannot have their keys revoked. **No delta**
+  every quoted element, in its own words — no traffic routes through
+  the coordinator; "Devices' keys are stored locally. Devices can
+  continue to communicate with each other until one of the device's keys
+  expires. Note that the expiry time is device-dependent (based on the
+  last time an authentication took place)"; "Firewall rules are cached
+  and enforced on each device, meaning that your existing rules and
+  access control policies will continue to function"; and without the
+  coordinator "New users and devices cannot be added to the network.
+  Keys cannot be refreshed and exchanged, meaning that existing devices
+  will gradually lose access to each other. Firewall rules cannot be
+  updated. Existing users cannot have their keys revoked." **No delta**
   from the recorded verification.
   **Runbook notes:** a `tailscaled` restart during an outage drops the
   node off the network unless netmap caching is on (Tailscale feature
