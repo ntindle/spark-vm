@@ -71,6 +71,7 @@ import ssl
 import stat
 import struct
 import sys
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -100,6 +101,69 @@ def _write_private(path, data):
         os.write(fd, data)
     finally:
         os.close(fd)
+
+
+def _write_all(fd, data):
+    """Write the whole buffer, looping on short writes (os.write is not
+    guaranteed to write everything in one call)."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
+def _write_private_atomic(path, data):
+    """Write data to path atomically via temp+rename (#1620).
+
+    The plain _write_private does O_TRUNC in place: a crash mid-write
+    leaves a torn file for readers. The ingest cursor is written by two
+    concurrent writers (the cron ingest and the S5b socket path under
+    .ingest.lock), and #1019's heal path cannot recover the #947 epoch
+    evidence once the file tears — so the cursor write must never expose
+    a partial file. The temp file lives in the target's own directory
+    (same filesystem, so os.replace is atomic), is created 0600, and
+    replaces the target only after the full write lands. On any write
+    failure the temp file is unlinked and the old target is untouched;
+    the error propagates to the caller.
+
+    Scope, stated honestly: rename atomicity gives readers old-or-new
+    visibility for process crashes (the torn-write protection #1620
+    asked for). fsync — power-loss durability — is deliberately out of
+    scope. Behavior nuance: where _write_private truncated through a
+    symlink, os.replace swaps the link itself (pathological for a state
+    dir, recorded so the change is visible)."""
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=".tmp-atomic-",
+                               suffix=".json")
+    try:
+        try:
+            # 0600 is pinned explicitly (mkstemp already makes 0600) — the
+            # rename carries the temp inode's mode over the target, so a
+            # pre-existing wider mode cannot survive the swap.
+            os.fchmod(fd, 0o600)
+            _write_all(fd, data)
+        finally:
+            # Single close, exactly once: os.close can raise after the fd
+            # is already closed (EIO/ENOSPC on flush) — never close twice.
+            os.close(fd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        # The rename never landed: drop the temp so a failed swap leaves
+        # neither a torn target nor a littered temp behind. (If the
+        # rename did land and we were interrupted, unlink raises
+        # FileNotFoundError — an OSError — and is ignored.)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _read_json_file(path):
@@ -1511,9 +1575,12 @@ def _load_ingest_cursor(d):
 
 
 def _save_ingest_cursor(d, cursor, epoch):
-    _write_private(os.path.join(d, _INGEST_CURSOR_FILE),
-                   json.dumps({"cursor": cursor, "epoch": epoch},
-                              indent=2).encode())
+    # #1620: temp+rename, never O_TRUNC — a crash mid-write must not
+    # tear the file both the cron ingest and the socket path write, or
+    # the #947 epoch evidence is silently dropped by the heal path.
+    _write_private_atomic(os.path.join(d, _INGEST_CURSOR_FILE),
+                          json.dumps({"cursor": cursor, "epoch": epoch},
+                                     indent=2).encode())
 
 
 def _load_ingested(d):

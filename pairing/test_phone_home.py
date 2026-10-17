@@ -19,6 +19,7 @@ import io
 import json
 import os
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -2346,3 +2347,135 @@ def test_phone_home_say_redacts_token_in_log(ctx, monkeypatch):
     for line in _say_log_lines(ctx):
         assert TOKEN not in line
         assert "<redacted>" in line
+
+
+class TestIngestCursorAtomicWrite:
+    """#1620: the shared ingest cursor is temp+rename, never O_TRUNC."""
+
+    def _cursor_path(self, d):
+        return os.path.join(d, spark_pair._INGEST_CURSOR_FILE)
+
+    def test_save_roundtrip_and_mode(self, tmp_path):
+        d = str(tmp_path)
+        spark_pair._save_ingest_cursor(d, 42, 7)
+        cursor, epoch, note = spark_pair._load_ingest_cursor(d)
+        assert (cursor, epoch, note) == (42, 7, None)
+        st = os.stat(self._cursor_path(d))
+        assert stat.S_IMODE(st.st_mode) == 0o600
+        # no temp files linger beside the cursor
+        leftovers = [p for p in os.listdir(d)
+                     if p.startswith(".tmp-atomic-")]
+        assert leftovers == []
+
+    def test_save_goes_through_atomic_writer(self, tmp_path, monkeypatch):
+        # Neuter tripwire: if _save_ingest_cursor is ever reverted to
+        # _write_private (O_TRUNC), this fails — the test pins the
+        # routing, not just the roundtrip.
+        calls = []
+        orig = spark_pair._write_private_atomic
+
+        def recorder(path, data):
+            calls.append(path)
+            return orig(path, data)
+
+        monkeypatch.setattr(spark_pair, "_write_private_atomic", recorder)
+        d = str(tmp_path)
+        spark_pair._save_ingest_cursor(d, 9, 3)
+        assert calls == [self._cursor_path(d)]
+
+    def test_write_failure_keeps_old_target_and_cleans_temp(
+            self, tmp_path, monkeypatch):
+        d = str(tmp_path)
+        target = self._cursor_path(d)
+        with open(target, "wb") as f:
+            f.write(b"old-content")
+
+        def boom(fd, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(spark_pair.os, "write", boom)
+        with pytest.raises(OSError, match="disk full"):
+            spark_pair._write_private_atomic(target, b"new-content")
+        # the old target is untouched (never exposed a partial file)
+        with open(target, "rb") as f:
+            assert f.read() == b"old-content"
+        leftovers = [p for p in os.listdir(d)
+                     if p.startswith(".tmp-atomic-")]
+        assert leftovers == []
+
+    def test_preexisting_wide_mode_does_not_survive(self, tmp_path):
+        # The rename swaps the temp inode over the target: a 0644 file
+        # from an older release comes out 0600.
+        d = str(tmp_path)
+        target = self._cursor_path(d)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.write(fd, b"{}")
+        os.close(fd)
+        spark_pair._write_private_atomic(target, b"{\"a\": 1}")
+        st = os.stat(target)
+        assert stat.S_IMODE(st.st_mode) == 0o600
+        with open(target, "rb") as f:
+            assert f.read() == b"{\"a\": 1}"
+
+    def test_replace_failure_cleans_temp_and_keeps_target(
+            self, tmp_path, monkeypatch):
+        # Regression for the review-found leak: os.replace raising after
+        # the temp was fully written must not litter .tmp-atomic- files,
+        # and the old target must still be intact.
+        d = str(tmp_path)
+        target = self._cursor_path(d)
+        with open(target, "wb") as f:
+            f.write(b"old-content")
+
+        def boom_replace(src, dst):
+            raise OSError("rename failed")
+
+        monkeypatch.setattr(spark_pair.os, "replace", boom_replace)
+        with pytest.raises(OSError, match="rename failed"):
+            spark_pair._write_private_atomic(target, b"new-content")
+        with open(target, "rb") as f:
+            assert f.read() == b"old-content"
+        leftovers = [p for p in os.listdir(d)
+                     if p.startswith(".tmp-atomic-")]
+        assert leftovers == []
+
+    def test_write_all_loops_on_short_writes(self, tmp_path, monkeypatch):
+        # _write_all exists for the short-write case os.write is allowed:
+        # feed it a writer that dribbles 2 bytes at a time.
+        d = str(tmp_path)
+        target = self._cursor_path(d)
+        real_write = os.write
+        chunks = []
+
+        def dribble(fd, data):
+            piece = bytes(data[:2])
+            chunks.append(piece)
+            return real_write(fd, piece)
+
+        monkeypatch.setattr(spark_pair.os, "write", dribble)
+        spark_pair._write_private_atomic(target, b"0123456789")
+        assert b"".join(chunks) == b"0123456789"
+        with open(target, "rb") as f:
+            assert f.read() == b"0123456789"
+
+    def test_commit_is_rename_not_copy(self, tmp_path, monkeypatch):
+        # The atomicity guarantee IS the rename: a copy-based rewrite
+        # would tear the target mid-copy exactly like the old O_TRUNC
+        # write, so the commit mechanism itself is pinned — not just the
+        # helper's public behavior.
+        d = str(tmp_path)
+        target = self._cursor_path(d)
+        calls = []
+        real_replace = os.replace
+
+        def recorder(src, dst):
+            calls.append((src, dst))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(spark_pair.os, "replace", recorder)
+        spark_pair._write_private_atomic(target, b'{"a": 1}')
+        assert len(calls) == 1
+        src, dst = calls[0]
+        assert dst == target
+        # same directory => same filesystem => the rename is atomic
+        assert os.path.dirname(src) == os.path.dirname(target)
