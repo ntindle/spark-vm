@@ -17,8 +17,10 @@ Contract rules (shared with the writer — never re-derived here):
 """
 
 import argparse
+import contextlib
 import datetime as _dt
 import importlib.util as _ilu
+import io as _io
 import os
 import re
 import sys
@@ -30,7 +32,18 @@ def _load_bridge_module():
     spec = _ilu.spec_from_file_location(
         "cua_bridge", os.path.join(_BIN_DIR, "cua-bridge.py"))
     mod = _ilu.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # Importing the writer runs its module-level sandbox-env load, which
+    # prints an "untrusted" warning on stderr — noise this reader never
+    # needs (it imports only the audit-line parser). Quarantine stderr
+    # across the import; if the import itself fails, the captured noise
+    # is replayed before the failure propagates so it stays diagnosable.
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            spec.loader.exec_module(mod)
+    except Exception:
+        sys.stderr.write(buf.getvalue())
+        raise
     return mod
 
 
@@ -41,7 +54,16 @@ _GENERATIONS = _BRIDGE.AUDIT_LOG_GENERATIONS
 _DEFAULT_LOG = _BRIDGE.AUDIT_LOG_PATH
 
 _RELATIVE_RE = re.compile(r"^(\d+)([smhd])$")
-_EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+
+
+def _event_dt(ts):
+    """UTC datetime for an audit ts, or None when it is outside the
+    platform's representable range (out-of-range ts values reach the
+    reader through hand-written or corrupted log lines)."""
+    try:
+        return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _parse_since(spec, now):
@@ -83,10 +105,15 @@ def _log_paths(base, include_rotated):
 
 def _format_event(ev):
     """Render one parsed event: ISO ts, level, kind, then the unescaped
-    message; multi-line messages get continuation lines indented."""
-    ts = _dt.datetime.fromtimestamp(
-        ev["ts"], tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    lines = ev["msg"].split("\n")
+    message; multi-line messages get continuation lines indented. A ts
+    outside the platform's range falls back to the raw integer (the event
+    is still worth showing)."""
+    when = _event_dt(ev["ts"])
+    ts = when.strftime("%Y-%m-%dT%H:%M:%SZ") if when is not None \
+        else str(ev["ts"])
+    # splitlines() (not split("\n")) so \r / U+2028 line boundaries the
+    # writer escapes don't leak through as raw carriage returns.
+    lines = ev["msg"].splitlines() or [""]
     head = f"{ts} {ev['level']} {ev['kind']} "
     return head + lines[0] + "".join("\n    " + line for line in lines[1:])
 
@@ -116,10 +143,12 @@ def _iter_events(paths, kinds, levels, cutoff):
                     continue
                 if levels and ev["level"] not in levels:
                     continue
-                if cutoff is not None and \
-                        _dt.datetime.fromtimestamp(
-                            ev["ts"], tz=_dt.timezone.utc) < cutoff:
-                    continue
+                if cutoff is not None:
+                    when = _event_dt(ev["ts"])
+                    if when is None or when < cutoff:
+                        # Out-of-range ts cannot be compared against the
+                        # cutoff — skip, per the contract's skip rule.
+                        continue
                 yield ev
 
 
@@ -157,7 +186,7 @@ def main(argv=None):
             ap.error(str(exc))
     else:
         cutoff = None
-    paths = _log_paths(args.log, args.all)
+    paths = _log_paths(os.path.expanduser(args.log), args.all)
     try:
         events = list(_iter_events(paths, args.kind, args.level, cutoff))
     except OSError as exc:
@@ -166,8 +195,14 @@ def main(argv=None):
     if args.tail is not None:
         events = events[-args.tail:]
     out = sys.stdout
-    for ev in events:
-        out.write(_format_event(ev) + "\n")
+    try:
+        for ev in events:
+            out.write(_format_event(ev) + "\n")
+    except BrokenPipeError:
+        # `cua-bridge-log big.log | head`: the consumer closed the pipe
+        # early — that is not a failure, so exit cleanly instead of
+        # dumping a traceback.
+        pass
     return 0
 
 

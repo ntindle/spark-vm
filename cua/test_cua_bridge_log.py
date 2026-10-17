@@ -217,3 +217,75 @@ def test_display_shape(tmp_path, bridge):
     assert re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ERROR http-500 "
         r"type=ValueError\n", r.stdout)
+
+
+# --- #1644 residuals -------------------------------------------------------
+
+def test_broken_pipe_is_clean_success(tmp_path, bridge):
+    # `cua-bridge-log big.log | head`: the consumer closes the pipe
+    # early; rc must be 0 with no traceback.
+    log = write_log(tmp_path,
+                    [valid(bridge, msg=f"type=click i={i}")
+                     for i in range(20000)])
+    p = subprocess.Popen([sys.executable, CLI, "--log", log],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True)
+    p.stdout.read(4096)  # consume a headful, then go away like head(1)
+    p.stdout.close()
+    rc = p.wait(timeout=60)
+    err = p.stderr.read()
+    p.stderr.close()
+    assert rc == 0, err
+    assert "Traceback" not in err
+
+
+def test_help_emits_no_stderr_noise():
+    # Importing the writer must not leak its sandbox-env warning into
+    # the reader's stderr (even on --help).
+    r = subprocess.run([sys.executable, CLI, "--help"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0
+    assert r.stderr == "", r.stderr
+
+
+def test_log_tilde_is_expanded(tmp_path, bridge, monkeypatch):
+    log = write_log(tmp_path, [valid(bridge, "mutation", "x")])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    r = run_cli(os.path.join("~", os.path.basename(log)))
+    assert r.returncode == 0
+    assert "mutation" in r.stdout
+
+
+def _raw_ts_line(ts, kind="mutation", msg="m"):
+    return f"ts={ts} level=WARNING kind={kind} msg={msg}\n"
+
+
+def test_out_of_range_ts_without_since_falls_back_to_raw_int(tmp_path):
+    log = write_log(tmp_path, [_raw_ts_line(99999999999999999)])
+    r = run_cli(log)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("99999999999999999 WARNING mutation m\n")
+
+
+def test_out_of_range_ts_with_since_is_skipped(tmp_path):
+    lines = [_raw_ts_line(99999999999999999),
+             _raw_ts_line(int(time.time()), msg="fresh")]
+    log = write_log(tmp_path, lines)
+    r = run_cli(log, "--since", "24h")
+    assert r.returncode == 0, r.stderr
+    assert "99999999999999999" not in r.stdout
+    assert "fresh" in r.stdout
+
+
+def test_splitlines_handles_unicode_line_separator(tmp_path):
+    # A raw U+2028 inside msg (hand-edited or corrupted line) must not
+    # leak through into the output: splitlines() treats it as a line
+    # boundary, like the writer's own escape contract. (A raw \r never
+    # reaches the parser at all — text-mode iteration splits on it —
+    # but U+2028 is not a universal-newline boundary, so it does.)
+    ts = int(time.time())
+    log = write_log(tmp_path, [_raw_ts_line(ts, msg="a\u2028b")])
+    r = run_cli(log)
+    assert r.returncode == 0, r.stderr
+    assert "\u2028" not in r.stdout
+    assert "    b" in r.stdout

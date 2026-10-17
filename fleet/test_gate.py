@@ -210,6 +210,65 @@ def test_publish_freeze_flag(tmp_path, keyfile, registry, manifest):
     assert json.loads(open(out).read())["freeze"] is True
 
 
+# --- G18 date-pin enforcement (#1647) --------------------------------------
+
+def _registry_with_pin(tmp_path, pin):
+    reg = {
+        "repo": {"max_permitted_commit": "a" * 40, "channel": "stable"},
+        "toolset": {"max_permitted_pin": pin, "channel": "stable"},
+        "image": {"max_permitted_image_version": "2026.09.29-0",
+                  "channel": "stable"},
+    }
+    p = tmp_path / "registry.json"
+    p.write_text(json.dumps(reg))
+    return str(p)
+
+
+def test_publish_refuses_semver_toolset_pin(tmp_path, keyfile, manifest):
+    # The fleet compares pins lexicographically, which misfires on
+    # semver (min("1.10.0","1.9.5") == "1.10.0"): a semver max silently
+    # ignores the hold. Refused fail-closed at publish (#1647).
+    reg = _registry_with_pin(tmp_path, "1.10.0")
+    r = run(sys.executable, PUBLISH, "--registry", reg,
+            "--manifest", manifest, "--key-id", KEY_ID,
+            "--key-file", keyfile, "--out", str(tmp_path / "gate.json"))
+    assert r.returncode != 0
+    assert "max_permitted_pin" in r.stderr
+
+
+@pytest.mark.parametrize("pin", ["2026.9.27", "2026.13.01", "2026.00.10",
+                                 "2026.09.32", "not-a-pin", "", "2026/09/27",
+                                 "2026.09.27\n", " 2026.09.27"])
+def test_publish_refuses_malformed_date_pins(tmp_path, keyfile, manifest, pin):
+    # Non-zero-padded, out-of-range, or wrongly-shaped pins are all
+    # rejected: lexicographic == chronological only for YYYY.MM.DD.
+    reg = _registry_with_pin(tmp_path, pin)
+    r = run(sys.executable, PUBLISH, "--registry", reg,
+            "--manifest", manifest, "--key-id", KEY_ID,
+            "--key-file", keyfile, "--out", str(tmp_path / "gate.json"))
+    assert r.returncode != 0, pin
+    assert "max_permitted_pin" in r.stderr
+
+
+@pytest.mark.parametrize("pin", ["2026.09.27", "2000.01.01", "2099.12.31"])
+def test_publish_accepts_valid_date_pins(tmp_path, keyfile, manifest, pin):
+    # Boundary control: well-formed date pins still publish.
+    reg = _registry_with_pin(tmp_path, pin)
+    r = run(sys.executable, PUBLISH, "--registry", reg,
+            "--manifest", manifest, "--key-id", KEY_ID,
+            "--key-file", keyfile, "--out", str(tmp_path / "gate.json"))
+    assert r.returncode == 0, (pin, r.stderr)
+
+
+def test_publish_refuses_nonstr_toolset_pin(tmp_path, keyfile, manifest):
+    reg = _registry_with_pin(tmp_path, 20260927)
+    r = run(sys.executable, PUBLISH, "--registry", reg,
+            "--manifest", manifest, "--key-id", KEY_ID,
+            "--key-file", keyfile, "--out", str(tmp_path / "gate.json"))
+    assert r.returncode != 0
+    assert "max_permitted_pin" in r.stderr
+
+
 # --- query: verify + fail-closed -------------------------------------------
 
 def test_query_live_gate(tmp_path, keyfile, registry, manifest):

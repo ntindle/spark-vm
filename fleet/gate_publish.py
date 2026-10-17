@@ -55,6 +55,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 import sys
 from datetime import datetime, timezone
@@ -65,6 +66,14 @@ COMPONENTS = ("repo", "toolset", "image")
 WAVE_STATES = ("draft", "canary", "wave-1", "wave-2", "wave-3", "wave-4",
                "complete", "halted")
 REPO_COMMIT_RE = set("0123456789abcdef")
+# toolset.max_permitted_pin is compared lexicographically against the
+# operator's pins-file target by the fleet (deploy/toolset-update.sh
+# _toolset_gate_cap, G18 §8) — that comparison matches chronological
+# order ONLY for zero-padded YYYY.MM.DD date pins. Anything else makes
+# the hold silently misfire (a semver max above the pin raises the
+# target; a semver max below it is ignored), so the publisher rejects
+# non-date pins fail-closed instead of signing the ambiguity (#1647).
+DATE_PIN_RE = re.compile(r"^\d{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12]\d|3[01])$")
 ROTATION_LOG_NAME = "gate_rotation_log.json"
 # A rotation window the operator never closes becomes a permanent second
 # signing key (issue #1008). The ledger below makes an open window visible:
@@ -120,6 +129,14 @@ def _validate_registry(registry: dict) -> dict:
                     or any(c not in REPO_COMMIT_RE for c in commit)):
                 sys.exit("ERROR: registry repo.max_permitted_commit must be "
                          "a 40-char lowercase hex commit SHA.")
+        if comp == "toolset":
+            pin = entry.get("max_permitted_pin", "")
+            if not isinstance(pin, str) or not DATE_PIN_RE.fullmatch(pin):
+                sys.exit("ERROR: registry toolset.max_permitted_pin must be "
+                         "a zero-padded YYYY.MM.DD date pin (e.g. "
+                         "2026.09.27) — the fleet compares pins "
+                         "lexicographically, which orders them "
+                         "chronologically only in this format.")
         if entry.get("channel") != "stable":
             sys.exit(f"ERROR: registry {comp}.channel must be 'stable' in S1.")
     extra = set(registry) - set(COMPONENTS)
