@@ -78,10 +78,23 @@ fi
 # for panels and operators; the keepalive only needs "is the bridge alive".
 if ! curl -s --max-time 5 http://127.0.0.1:18731/api/liveness >/dev/null 2>&1; then
   # 9>&-: see above — the bridge must not inherit the run lock.
-  # Bridge log lives in the user's own ~/.cache (never world-writable
-  # /tmp: a planted /tmp/cua-bridge.log symlink would get truncated by
-  # the O_TRUNC open — the #493 symlink primitive — by the 5-minute
-  # keepalive cron, truncating any victim-writable target as this user).
+  # Bridge log: the bridge OWNS its audit sink (#1588) — at startup it
+  # opens ~/.cache/cua-bridge.log itself (O_APPEND|O_NOFOLLOW, 0600),
+  # dup2's it onto its stdout/stderr, and rotates it size-capped (3
+  # generations) under its own write lock. The >> redirect below stays
+  # only as pre-setup capture — the few lines that can print before the
+  # bridge installs its sink (import-time warnings) — and the bridge
+  # closes the inherited fd at install, so rename-based rotation can no
+  # longer silently miss (the pre-#1588 failure: the bridge held the
+  # keepalive's fd for its whole lifetime and kept writing the renamed
+  # inode). If the bridge ever prints its "audit sink not installed"
+  # WARNING, it is running its whole life on this redirect — unbounded,
+  # default permissions — i.e. the audit guarantees are suspended until
+  # the next bridge start. The log still lives in the user's own ~/.cache (never
+  # world-writable /tmp: a planted /tmp/cua-bridge.log symlink would get
+  # truncated by the O_TRUNC open — the #493 symlink primitive — by the
+  # 5-minute keepalive cron, truncating any victim-writable target as this
+  # user).
   setsid $HOME/cua/bin/cua-bridge.py 9>&- >>"$HOME/.cache/cua-bridge.log" 2>&1 < /dev/null &
 fi
 

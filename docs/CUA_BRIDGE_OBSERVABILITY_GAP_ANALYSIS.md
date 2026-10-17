@@ -116,7 +116,8 @@ undiagnosable from the box.
   writing to the renamed inode — growth stays unbounded, the exact
   failure this decision exists to prevent. The mechanism class is one
   of: (a) bridge-side size-capped rotation (the bridge owns the log fd;
-  the keepalive's `>>` redirect is retired), or (b)
+  the keepalive's `>>` redirect is retired as the ownership mechanism —
+  a pre-setup capture redirect remains, closed by the bridge at install), or (b)
   keepalive-coordinated rotate-then-restart. Not open-ended "rotation."
   The audit line format itself is a contract between the bridge
   (writer) and the keepalive/operator tooling (rotator/consumer); it is
@@ -138,6 +139,14 @@ recorded on #1576 itself (not just in this doc).
 1. **S3 — sink rotation + permissions pin.** Per D-CBA-4: mechanism-class
    rotation of `~/.cache/cua-bridge.log` + 0600. Owns F-CBA-4. → filed
    as #1588. **Lands first; gates S1, S2, and #1576.**
+   *(Shipped 2026-10-16: mechanism (a) — the bridge opens the log itself
+   (O_APPEND|O_NOFOLLOW, 0600), dup2's it onto stdout/stderr at startup,
+   and rotates size-capped (1 MiB × 3 generations) under its own write
+   lock; the keepalive's `>>` redirect stays only as pre-setup capture.
+   The audit line format (`ts= level= kind= msg=`, one line per event,
+   newlines escaped) is pinned in the bridge source where it is defined,
+   with `log_bridge_event` as the choke point the S1/S2 writers will
+   use.)*
 2. **S1 — server-side 500 logging.** One-line stderr event per unhandled
    exception in `do_GET`/`do_POST` per D-CBA-2; client responses
    unchanged. Owns F-CBA-2. → filed as #1586.

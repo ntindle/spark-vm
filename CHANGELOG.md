@@ -525,6 +525,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   guards the wording, and the acceptance checklist gains a matching
   denial-worded item. (#1406, #1545)
 
+- CUA bridge log hardened (2026-10-16): the desktop bridge's log — the
+  sink the upcoming audit records will land in — is now opened and owned
+  by the bridge itself with size-capped rotation (three generations,
+  about a megabyte each) and owner-only permissions, replacing the
+  previous unbounded append at default permissions; a planted symlink at
+  the log path is refused instead of followed, and a log written before
+  this change gets its permissions tightened on the next bridge start.
+  The one-line-per-event audit format is pinned where the bridge writes
+  it. (#1588) (#1595)
+
 ### Added
 
 - The control plane can now actively verify a tenant's relay path instead
