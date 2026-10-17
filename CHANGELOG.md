@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and fails on divergence), and the tick's drain half as the
   sender-handoff rather than a direct call; the async port itself,
   the scheduled multiplex, and the manual probe remain to be built.
-  (#1566) (#TBD)
+  (#1566) (#1594)
 
 - Contributor secret-scan pin tests (2026-10-16): the `push.sh` pre-push
   secret scan — the last automated check before a secret can reach the
