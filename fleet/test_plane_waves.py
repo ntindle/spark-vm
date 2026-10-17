@@ -357,6 +357,25 @@ def test_promote_rejects_nonfinite_stale_hours(store, bad):
     assert "positive number" in p.stderr
 
 
+def test_promote_huge_finite_stale_hours_fails_closed(store):
+    # The sink-level guard: a huge-but-finite --stale-hours (1e308, still
+    # finite to argparse) overflows stale_hours*3600 to inf inside
+    # is_record_fresh — the same vacuous gate as +inf via a different
+    # path. The gate must fail closed (loud exit 2, wave unmoved), never
+    # promote on the vacuous window.
+    # Neuter: without the is_record_fresh sink guard this promote exits 0
+    # and advances the wave — the vacuous promote this test exists to
+    # forbid.
+    _estate(store, n=2, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    _deploy(store, "plane-0", "w@v1", status="healthy")
+    p = _cli(store, "promote", "--stale-hours", "1e308")
+    assert p.returncode == 2
+    assert "internal error" in p.stderr
+    assert _waves_json(store)["live_wave"] == 0
+
+
 def test_promote_refuses_stale_record(store):
     _estate(store, n=2, canary_tenants=("ct1",))
     _release(store)

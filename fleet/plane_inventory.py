@@ -356,14 +356,27 @@ def is_record_fresh(record, stale_hours):
     non-string observed_at raises TypeError, which the caller's exit-2
     contract turns into a loud failure — a corrupt record must never
     present as a routine "wait and re-run" stale refusal.
+
+    The window itself is guarded at the sink: a non-finite stale_hours,
+    or one whose hour-window product overflows to non-finite (e.g. 1e308
+    x 3600), raises ValueError instead of silently reading every record
+    as fresh — a vacuous window must never launder into "fresh".
     """
+    if not math.isfinite(stale_hours) or stale_hours <= 0:
+        raise ValueError(
+            "stale_hours must be a positive finite number, "
+            f"got {stale_hours!r}")
+    window_s = stale_hours * 3600
+    if not math.isfinite(window_s):
+        raise ValueError(
+            f"stale_hours {stale_hours!r} overflows the freshness window")
     try:
         observed = datetime.fromisoformat(record["observed_at"])
     except (KeyError, ValueError):
         return False
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - observed).total_seconds() <= stale_hours * 3600
+    return (datetime.now(timezone.utc) - observed).total_seconds() <= window_s
 
 
 def _load_json(path, what):

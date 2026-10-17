@@ -232,6 +232,20 @@ def test_stale_hours_nonfinite_rejected(store, bad):
     assert p.returncode == 2
 
 
+def test_stale_hours_huge_finite_fails_closed(store):
+    # The sink-level guard: 1e308 is finite to argparse (passes the CLI
+    # boundary) but overflows stale_hours*3600 to inf inside
+    # is_record_fresh — the same vacuous gate as +inf via a different
+    # path. census must fail closed (loud exit 2), never report the
+    # estate eligible on a vacuous window.
+    # Neuter: without the is_record_fresh sink guard this census exits 0.
+    assert _run(store, "register", "--plane-id", "plane-1",
+                "--tenant-id", "t").returncode == 0
+    p = _run(store, "census", "--stale-hours", "1e308")
+    assert p.returncode == 2
+    assert "internal error" in p.stderr
+
+
 def test_cost_events_survive_snapshot_republish(store):
     # The cost journal is append-only and independent of planes.json.
     assert _run(store, "register", "--plane-id", "plane-1", "--tenant-id", "t").returncode == 0
