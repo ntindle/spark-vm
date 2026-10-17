@@ -1160,10 +1160,12 @@ def load_pending():
                     # expiry path (alongside the GET detail reap and
                     # _answer_locked), and the only one that never audited
                     # "expired-reaped" — finding 47/53(e) says every
-                    # refusal leaves a trail. Audit exactly once per
-                    # expiry: stamped-or-removed means THIS reap did the
-                    # work; a loser (stamp False + remove failed) stays
-                    # silent so concurrent renders cannot double-audit.
+                    # refusal leaves a trail. Audit at-least-once per
+                    # expiry: stamped-or-removed means THIS reap did work;
+                    # a loser (stamp False + remove failed) stays silent.
+                    # A transient remove failure can audit twice across
+                    # the retry — the trail stays truthful (two reap
+                    # attempts), never silent.
                     if stamped or removed:
                         audit_log("expired-reaped", "confirmd", "",
                                   "id=%s" % aid)
@@ -1305,19 +1307,23 @@ def _stamp_expired_consumed(aid, it, pending_path, expired_by):
             pass
         raise OSError("expired stamp write failed for %s" % aid)
     try:
-        os.link(tmp, path)
-    except FileExistsError:
-        # Another reaper (or a previous run's stamp) already recorded
-        # this aid: the write-if-absent loser moves on without
-        # resurrecting anything — the exact contract the old O_EXCL
-        # open provided.
-        claimed = False
-    else:
-        claimed = True
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # Another reaper (or a previous run's stamp) already recorded
+            # this aid: the write-if-absent loser moves on without
+            # resurrecting anything — the exact contract the old O_EXCL
+            # open provided.
+            claimed = False
+        else:
+            claimed = True
+    finally:
+        # The tmp is unlinked on every exit path — even a non-
+        # FileExistsError link failure (e.g. ENOSPC) leaves no residue.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     return claimed
 
 
