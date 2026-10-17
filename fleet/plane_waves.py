@@ -808,7 +808,10 @@ def cmd_status(args):
                 pid for pid, w in waves["assignments"].items() if w == wave
             )
             # Summary convergence (the promotion gate is authoritative;
-            # this is the operator's at-a-glance view).
+            # this is the operator's at-a-glance view). "landed" is the
+            # convergence half only — "bad_signal" mirrors the gate's
+            # journal half (D-RC-4), so status and promote can no longer
+            # disagree about a wave carrying an unresolved deploy-failed.
             landed = all(
                 (planes.get(pid) or {}).get("template_version") == template
                 and (planes.get(pid) or {}).get("status") == "healthy"
@@ -816,9 +819,17 @@ def cmd_status(args):
                                                    stale_hours)
                 for pid in members
             )
+            # #1638: the S5 update-event journal signal the promotion
+            # gate enforces (unresolved deploy-failed since the rollout's
+            # updated_at), folded into status per wave. Same helper and
+            # same window the gate consumes; fail-closed the same way.
+            bad_signal = [pid for pid, _at in
+                          _unresolved_deploy_failures(store_dir, members,
+                                                     waves)]
             wave_info[str(wave)] = {
                 "planes": members,
                 "landed": landed,
+                "bad_signal": bad_signal,
                 "live": wave == waves.get("live_wave"),
             }
         out["rollout"] = {
