@@ -401,7 +401,9 @@ def test_redact_url_strips_userinfo_for_display():
     code += textwrap.dedent(
         """\
         [ "$(redact_url 'https://user:pass@host/x.git')" = 'https://<redacted>@host/x.git' ] || { echo "creds not stripped"; exit 1; }
+        [ "$(redact_url 'https://user:p@ss@w0rd@host:8080/x.git')" = 'https://<redacted>@host:8080/x.git' ] || { echo "multi-@ password tail leaked"; exit 1; }
         [ "$(redact_url 'https://github.com/ntindle/spark-vm.git')" = 'https://github.com/ntindle/spark-vm.git' ] || { echo "plain url mangled"; exit 1; }
+        [ "$(redact_url 'https://host/x@y')" = 'https://host/x@y' ] || { echo "@-in-path url mangled"; exit 1; }
         [ "$(redact_url 'git@github.com:ntindle/spark-vm.git')" = 'git@github.com:ntindle/spark-vm.git' ] || { echo "scp url mangled"; exit 1; }
         echo OK
         """

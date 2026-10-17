@@ -112,10 +112,12 @@ die() { echo "install.sh: ERROR: $*" >&2; exit 1; }
 
 redact_url() { # $1 — strip userinfo for DISPLAY (never echo credentials)
     # A fork install can carry credentials in its origin URL; error and
-    # plan messages must show the URL without them. URLs without userinfo
-    # (and scp-style git@host: paths, which carry no secret) pass through
-    # unchanged.
-    printf '%s' "$1" | sed -e 's#://[^/@]*@#://<redacted>@#'
+    # plan messages must show the URL without them. The match is greedy to
+    # the LAST @ before the first / (the userinfo/host boundary): a raw @
+    # inside a password must not leave the password's tail visible. URLs
+    # without userinfo (and scp-style git@host: paths, which carry no
+    # secret, and @ inside a path) pass through unchanged.
+    printf '%s' "$1" | sed -e 's#://[^/]*@#://<redacted>@#'
 }
 
 # exec_if_live <description> <command...> — describe the mutation, then run
