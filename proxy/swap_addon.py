@@ -149,7 +149,14 @@ any local process using the proxy can spend any active grant. Do not
 rely on grants for per-job isolation.
 
 Audit: every swap is appended to the log file as
-    ts=<utc> host=<host> swapped=<matched placeholder> ip=<pinned egress ip> flow=<id>
+    ts=<utc> host=<host> swapped=<matched placeholder> ip=<pinned egress ip> tenant=<hint> flow=<id>
+The `tenant=` field (issue #1653, audit A7) is the same unverified hint the
+summons journal carries: SWAP_TENANT when the operator names the tenant,
+otherwise the box hostname — a compromised box can lie about it, so it is
+forensic context only, never an identity claim. H10/#339 enforcement fills
+an authenticated value into this column later; nothing downstream re-parses
+the format for the upgrade. `flow=` stays terminal: the #16 join convention
+(and naive `$`-anchored parsers) rely on it.
 The audit write is part of authorization: if the audit line cannot be
 durably recorded, the swap is refused — a secret is never released
 without a trail.
@@ -2556,13 +2563,21 @@ class SwapAddon:
     def _swap_audit_line(self, host, matched, flow_id=None):
         """Format one `swapped=` audit line. Shared by _audit and
         _audit_batch (issue #199) so the two writers cannot drift apart
-        in field order, sanitization, or the egress-ip/flow join keys."""
+        in field order, sanitization, or the egress-ip/flow join keys.
+
+        The `tenant=` field carries the same unverified hint as the
+        summons journal's `tenant_hint` (issue #1653, audit A7): today
+        SWAP_TENANT-or-hostname, documented-unverified — H10/#339
+        enforcement fills the value in later, so no format migration
+        is owed when it does. `flow=` stays terminal: the #16 join
+        convention (and naive `$`-anchored parsers) rely on it."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        return ("ts=%s host=%s swapped=%s ip=%s flow=%s\n"
+        return ("ts=%s host=%s swapped=%s ip=%s tenant=%s flow=%s\n"
                 % (ts, _sanitize_audit_field(host),
                    _sanitize_audit_field(matched),
                    _sanitize_audit_field(
                        getattr(self, "_current_egress_ip", None) or "-"),
+                   _sanitize_audit_field(_summons_tenant_hint()),
                    _sanitize_audit_field(flow_id)))
 
     def _audit(self, host, matched, flow_id=None):

@@ -2618,18 +2618,71 @@ class AuditFieldSanitizationTests(unittest.TestCase):
 
     def test_audit_well_formed_hosts_unchanged(self):
         """Sanitization is a no-op for well-formed values: the log format
-        for normal traffic is byte-identical to the pre-#17 layout,
-        plus the #16 `flow=` correlator (absent flow renders as "-")."""
+        for normal traffic is the pre-#17 layout plus the #16 `flow=`
+        correlator (absent flow renders as "-") plus the #1653
+        `tenant=` hint field; `flow=` stays terminal."""
         with tempfile.TemporaryDirectory() as d:
             lines = self._audit_in_tmp(
                 d, lambda a: a._audit("api.example.com", "github"))
             line = lines[0]
         self.assertRegex(line,
                          r"^ts=\S+ host=api\.example\.com "
-                         r"swapped=github ip=- flow=-$")
+                         r"swapped=github ip=- tenant=\S+ flow=-$")
         # every interpolated field survives verbatim
         self.assertIn("host=api.example.com", line)
         self.assertIn("swapped=github", line)
+
+    def test_audit_tenant_hint_defaults_to_hostname(self):
+        """Issue #1653: without SWAP_TENANT the `tenant=` field falls
+        back to the box hostname, via the same unverified hint the
+        summons journal carries."""
+        env = {k: v for k, v in os.environ.items() if k != "SWAP_TENANT"}
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(sa.socket, "gethostname",
+                                   return_value="box-07"):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit("api.example.com", "github"))
+        self.assertIn("tenant=box-07", lines[0])
+
+    def test_audit_tenant_hint_honors_swap_tenant_env(self):
+        """Issue #1653: SWAP_TENANT names the tenant on the audit line
+        when the operator sets it."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": "acme"}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit("api.example.com", "github"))
+        self.assertIn("tenant=acme", lines[0])
+
+    def test_audit_tenant_hint_cannot_forge_lines(self):
+        """Issue #1653: a hostile SWAP_TENANT cannot forge extra lines
+        or tokens — the tenant value runs through the same sanitizer
+        as every other audit field."""
+        with tempfile.TemporaryDirectory() as d:
+            hostile = "acme\nts=1970-01-01T00:00:00 host=fake swapped=yes"
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": hostile}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit("api.example.com", "github"))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertNotIn("\n", lines[0])
+        self.assertIn("tenant=acmets=1970-01-01T00:00:00host=fakeswapped=yes",
+                      lines[0])
+
+    def test_audit_batch_lines_carry_tenant(self):
+        """Issue #199 batch writer: `_audit_batch` lines carry the
+        same `tenant=` field as `_audit` (both go through
+        `_swap_audit_line`)."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": "acme"}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit_batch(
+                        [("api.example.com", "github", "f1"),
+                         ("api.example.com", "github", None)]))
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("tenant=acme", lines[0])
+        self.assertIn("tenant=acme", lines[1])
+        self.assertTrue(lines[0].endswith("flow=f1"), lines)
+        self.assertTrue(lines[1].endswith("flow=-"), lines)
 
 
 class Issue16FlowCorrelatorTests(unittest.TestCase):

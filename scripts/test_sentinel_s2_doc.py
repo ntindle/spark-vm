@@ -104,6 +104,7 @@ class TestSentinelS2Doc(unittest.TestCase):
         row = _s2_row()
         for needle in (
             "swapped=",
+            "tenant=",
             "refused=<token",
             "hsurr:name",
             "refused=authority-mismatch",
@@ -152,9 +153,12 @@ class TestSentinelS2Doc(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         fields = _parse(lines[0])
         self.assertEqual(
-            set(fields), {"ts", "host", "swapped", "ip", "flow"})
+            set(fields), {"ts", "host", "swapped", "ip", "tenant", "flow"})
         self.assertEqual(fields["swapped"], "hsurr:github")
         self.assertEqual(fields["flow"], "f1")
+        # Issue #1653: tenant is the unverified hint, never an
+        # identity claim — the pin is presence + sanitization, not value.
+        self.assertIn("tenant", fields)
 
     def test_audit_batch_shape(self):
         """Issue #199: the batch writer emits the same `swapped=` line
@@ -169,7 +173,8 @@ class TestSentinelS2Doc(unittest.TestCase):
         for line, flow in zip(lines, ("f1", "f2")):
             fields = _parse(line)
             self.assertEqual(
-                set(fields), {"ts", "host", "swapped", "ip", "flow"})
+                set(fields), {"ts", "host", "swapped", "ip", "tenant",
+                              "flow"})
             self.assertEqual(fields["swapped"], "hsurr:github")
             self.assertEqual(fields["flow"], flow)
 
