@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Relay liveness (hosted): the tenant-status wiring's four review
+  follow-ups from the R3 relay-liveness build are now pinned by tests —
+  a foreign producer sub-code suspends as unclassified instead of
+  inventing a classification, a latchless suspension never pins the
+  anchor, and the emitted-event vocabulary is closed — so future
+  refactors can't silently regress them. (#1617)
+
 - Hosted phone-approval push: a new analysis pins the last unwired leg of
   the approval-filed buzz — the previous caller-wiring issue closed while
   its plane-side half (the filing and revoke endpoints actually paging)
