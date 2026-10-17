@@ -82,16 +82,19 @@ def test_approval_filed_delegates_exact_args():
 def test_box_revoked_delegates_exact_args():
     db = object()
     boundary = FakeBoundary()
+    now = datetime(2026, 10, 17, 0, 30, tzinfo=timezone.utc)
     r = run(push_events_async.on_box_revoked(
         db, box_id="box-1", owner_principal="owner-1",
-        revoked_at="2026-10-05T17:00:00+00:00", enqueue_page=boundary))
+        revoked_at="2026-10-05T17:00:00+00:00", enqueue_page=boundary,
+        now=now))
     assert r.disposition == "queued"
+    assert r.detail.disposition == "queued"
     assert len(boundary.calls) == 1
     call = boundary.calls[0]
     assert call["db"] is db
     assert call["event_kind"] == "box_revoked"
     assert call["key_material"] == "2026-10-05T17:00:00+00:00"
-    assert call["now"] is None   # boundary defaults it, like the sync port
+    assert call["now"] is now   # N7 regression: the kwarg must be sent
 
 
 def test_disposition_passthrough_verbatim():
