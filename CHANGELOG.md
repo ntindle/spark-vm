@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- cua-bridge observability convergence pin (2026-10-16): the audit-ability
+  analysis of the desktop-control bridge re-verified after the audit sink
+  shipped — the sink's rotation and permissions claims re-checked against
+  the shipped code, the still-open gaps (mutation audit, server-side 500
+  traces, rejected CSRF attempts) re-confirmed at current code with exact
+  references, and one genuinely-new gap filed: nothing on the box reads
+  the audit lines yet, so a small log-reader tool is now on the tracker.
+  (#1597) (#TBD)
+
 - Push-sweep async plane port, sweep half (2026-10-16): the per-minute
   push sweep now has its plane-side async implementation — the same
   three passes (reminders, digests, watchers) rewritten against the

@@ -147,6 +147,11 @@ recorded on #1576 itself (not just in this doc).
    newlines escaped) is pinned in the bridge source where it is defined,
    with `log_bridge_event` as the choke point the S1/S2 writers will
    use.)*
+*(Convergence pin 2026-10-16, main `1d132e64`: see
+`docs/CUA_BRIDGE_OBSERVABILITY_CONVERGENCE_2026-10-16.md` — the S3
+shipped-note above re-verified claim by claim; F-CBA-1–F-CBA-3 still
+open; S1/S2/#1576 unblocked but unbuilt; newly filed F-CBA-6 (#1597),
+the audit-line contract's missing consumer half.)*
 2. **S1 — server-side 500 logging.** One-line stderr event per unhandled
    exception in `do_GET`/`do_POST` per D-CBA-2; client responses
    unchanged. Owns F-CBA-2. → filed as #1586.
