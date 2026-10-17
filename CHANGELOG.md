@@ -1544,7 +1544,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   carries the same 1 MiB in-code cap (with single-generation rotation) as
   the other box state-dir logs. Previously the failure-log cap covered
   only the failure channel, so a sustained control-plane outage could grow
-  the reconnect log unboundedly past it. (#TBD)
+  the reconnect log unboundedly past it. (#1622)
 
 ## [0.8.0] - 2026-10-10
 
