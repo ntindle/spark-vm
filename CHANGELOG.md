@@ -55,7 +55,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Pinned down what the release-gating channel's remaining fleet
   alerts need: per-box gate staleness will surface on the alert board
   (no new command), and the fleet-wide stale-gate rule's signal source
-  already exists, so both are unblocked builds. (#TBD)
+  already exists, so both are unblocked builds. (#1650)
 
 - The desktop bridge's structured audit log now has an operator reader:
   `cua-bridge-log` filters the bridge's audit events by kind or severity
