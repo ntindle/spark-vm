@@ -1,0 +1,57 @@
+{
+  "scenario": "poisoned_candidate",
+  "doc": "A raising candidate is counted poisoned and skipped; the healthy candidate still pages (D78).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "poisoned": 1,
+      "queued": 1
+    },
+    "digests": {},
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 2,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "reminder",
+        "box-a\u0000r1",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [],
+    "push_budget_counters": [
+      [
+        "box",
+        "box-a",
+        "2026-10-05T12",
+        1
+      ],
+      [
+        "owner",
+        "owner-1",
+        "2026-10-05T12",
+        1
+      ]
+    ]
+  }
+}

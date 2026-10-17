@@ -1,0 +1,43 @@
+{
+  "scenario": "reminder_terminal_clock",
+  "doc": "A clock-terminal pending approval writes exactly one idempotent suppressed_terminal audit row \u2014 no page.",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "superseded_terminal": 1
+    },
+    "digests": {},
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 1,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "reminder",
+        "box-a\u0000r1\u0000superseded",
+        "suppressed_terminal",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [],
+    "push_budget_counters": []
+  }
+}

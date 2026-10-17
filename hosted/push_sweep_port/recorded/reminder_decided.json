@@ -1,0 +1,26 @@
+{
+  "scenario": "reminder_decided",
+  "doc": "A decided approval is never a candidate: zero pages, zero audit rows.",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {},
+    "digests": {},
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 0,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [],
+    "push_digest_state": [],
+    "push_budget_counters": []
+  }
+}

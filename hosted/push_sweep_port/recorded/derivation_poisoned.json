@@ -1,0 +1,54 @@
+{
+  "scenario": "derivation_poisoned",
+  "doc": "The stale derivation raises at call time: counted poisoned once, the token watcher still runs (D78).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {},
+    "digests": {},
+    "stale_watchers": {
+      "poisoned": 1
+    },
+    "token_warnings": {
+      "queued": 1
+    },
+    "candidates_seen": 0,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "token_expiry_warning",
+        "box-a\u0000th-1",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [],
+    "push_budget_counters": [
+      [
+        "box",
+        "box-a",
+        "2026-10-05T12",
+        1
+      ],
+      [
+        "owner",
+        "owner-1",
+        "2026-10-05T12",
+        1
+      ]
+    ]
+  }
+}

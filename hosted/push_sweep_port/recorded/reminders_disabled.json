@@ -1,0 +1,59 @@
+{
+  "scenario": "reminders_disabled",
+  "doc": "reminders_enabled=False: reminder pass skipped, digest pass unaffected (the D71 retirement shape).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "skipped": true
+    },
+    "digests": {
+      "queued": 1
+    },
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 0,
+    "pages_truncated": false,
+    "reminders_enabled": false,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "",
+        "",
+        "digest",
+        "owner-1\u00002026-10-05T12",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [
+      [
+        "owner-1",
+        "2026-10-05T12",
+        3,
+        "2026-10-05T12:00:00+00:00"
+      ]
+    ],
+    "push_budget_counters": [
+      [
+        "owner",
+        "owner-1",
+        "2026-10-05T12",
+        1
+      ]
+    ]
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "scenario": "reminders_truncated",
+  "doc": "page_size=2, max_pages=1: the pass pages r1+r2, r3 stays due, pages_truncated is the operator alert (D69).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "queued": 2
+    },
+    "digests": {},
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 2,
+    "pages_truncated": true,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "reminder",
+        "box-a\u0000r1",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        2,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "reminder",
+        "box-a\u0000r2",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [],
+    "push_budget_counters": [
+      [
+        "box",
+        "box-a",
+        "2026-10-05T12",
+        2
+      ],
+      [
+        "owner",
+        "owner-1",
+        "2026-10-05T12",
+        2
+      ]
+    ]
+  }
+}
