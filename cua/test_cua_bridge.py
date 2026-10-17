@@ -43,13 +43,16 @@ Covers:
   filter — a malformed xev candidate is dropped before the PID match and
   the z-order max, so it can never be focused or crash the probe
 """
+import ast
 import importlib.util
+import inspect
 import io
 import json
 import os
 import stat
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from email.message import Message
@@ -2555,3 +2558,241 @@ class TestObservabilityS1S2:
             h = fake_handler(bridge, command, headers, path)
             assert h._csrf_refusal_reason() == want, (command, headers, path)
             assert h._csrf_ok() == (want is None)
+
+
+# ---------------------------------------------------------------- #1576 S3
+
+
+class TestMutationAuditS3:
+    """One structured `mutation` audit line per successful mutating
+    request (#1576). Targets, never content."""
+
+    def _capture_events(self, bridge, monkeypatch):
+        captured = []
+
+        def recorder(kind, msg, level="WARNING"):
+            captured.append({"kind": kind, "msg": msg, "level": level})
+
+        monkeypatch.setattr(bridge, "log_bridge_event", recorder)
+        return captured
+
+    def test_click_logs_mutation_line_with_target(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, _ = req(port, "POST", "/api/click",
+                        {"x": 50, "y": 50, "button": "left"})
+        assert status == 200
+        assert len(captured) == 1
+        evt = captured[0]
+        assert evt["kind"] == "mutation"
+        assert evt["level"] == "WARNING"
+        assert "route=/api/click" in evt["msg"]
+        assert "pid=33" in evt["msg"] and "title=web" in evt["msg"]
+        assert "x=50" in evt["msg"] and "y=50" in evt["msg"]
+        assert "button=left" in evt["msg"]
+
+    def test_click_desktop_scope_targets_desktop(self, live, monkeypatch):
+        # (100, 1060) hits the Xfce4-panel -> the global XTEST branch.
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, _ = req(port, "POST", "/api/click",
+                        {"x": 100, "y": 1060, "button": "right"})
+        assert status == 200
+        assert len(captured) == 1
+        assert "route=/api/click" in captured[0]["msg"]
+        assert "target=desktop" in captured[0]["msg"]
+        assert "button=right" in captured[0]["msg"]
+
+    def test_type_logs_length_never_text(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, _ = req(port, "POST", "/api/type",
+                        {"text": "hunter2-typed"})
+        assert status == 200
+        assert len(captured) == 1
+        msg = captured[0]["msg"]
+        assert captured[0]["kind"] == "mutation"
+        assert "route=/api/type" in msg
+        assert "pid=33" in msg and "chars=13" in msg
+        assert "hunter2-typed" not in msg  # D-CBA-1: never content
+
+    def test_key_named_key_logged_printable_masked(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, _ = req(port, "POST", "/api/key",
+                        {"key": "Enter", "modifiers": ["ctrl"]})
+        assert status == 200
+        msg = captured[0]["msg"]
+        assert "route=/api/key" in msg
+        assert "key=Enter" in msg and "modifiers=modified" in msg
+        status, _ = req(port, "POST", "/api/key", {"key": "a"})
+        assert status == 200
+        assert len(captured) == 2
+        msg2 = captured[1]["msg"]
+        assert "key=<char>" in msg2
+        assert "key=a" not in msg2  # never a verbatim keystroke
+        assert "modifiers=none" in msg2
+        # a shifted printable must not leak WHICH modifier was held —
+        # or even that one was: presence on a masked key reveals the
+        # case/symbol pattern (shift -> uppercase/symbol), so masked keys
+        # read modifiers=none. Named keys keep presence-only.
+        status, _ = req(port, "POST", "/api/key",
+                        {"key": "a", "modifiers": ["shift"]})
+        assert status == 200
+        assert len(captured) == 3
+        msg3 = captured[2]["msg"]
+        assert "key=<char>" in msg3
+        assert "modifiers=none" in msg3
+        assert "shift" not in msg3
+        assert "modified" not in msg3
+
+    def test_launch_logs_allowlisted_app(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "launch_app",
+                            lambda name, singleton=False: {"launched": name})
+        status, _ = req(port, "POST", "/api/launch",
+                        {"app": "xterm", "singleton": True})
+        assert status == 200
+        assert len(captured) == 1
+        msg = captured[0]["msg"]
+        assert "route=/api/launch" in msg
+        assert "app=xterm" in msg and "singleton=True" in msg
+
+    def test_failed_mutation_is_http_500_not_mutation(
+            self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+
+        def boom(tool, args):
+            raise RuntimeError("driver blew up")
+
+        monkeypatch.setattr(bridge, "call", boom)
+        status, _ = req(port, "POST", "/api/click", {"x": 50, "y": 50})
+        assert status == 500
+        kinds = [e["kind"] for e in captured]
+        assert "mutation" not in kinds
+        assert kinds == ["http-500"]
+
+    def test_mutation_label_helpers_unit(self, bridge):
+        assert (bridge._mutation_window_label({"pid": 33, "title": "web"})
+                == "pid=33 title=web")
+        assert (bridge._mutation_window_label({"pid": 1, "title": "x" * 500})
+                == "pid=1 title=" + "x" * 200)
+        assert bridge._mutation_window_label({}) == "pid=? title=?"
+        assert bridge._mutation_window_label(None) == "pid=? title=?"
+        assert bridge._mutation_key_label("Enter") == "Enter"
+        assert bridge._mutation_key_label("F5") == "F5"
+        assert bridge._mutation_key_label("a") == "<char>"
+        assert bridge._mutation_key_label("some-weird-key") == "<char>"
+
+    def test_mutation_kind_passes_real_formatter_vocabulary(
+            self, bridge, capsys):
+        # Composition pin (QA, same class as the S1/S2 pin): the S3
+        # tests monkeypatch log_bridge_event, so the ("mutation",
+        # WARNING) pair would never meet the real _format_bridge_event
+        # vocabulary. Uninstalled sink -> stderr fallback: the line must
+        # appear on stderr verbatim.
+        bridge.record_mutation("/api/click", "pid=33 title=web",
+                               x=1, y=2, button="left")
+        err = capsys.readouterr().err
+        assert "level=WARNING kind=mutation" in err
+        assert "route=/api/click" in err
+
+    def test_hostile_title_cannot_forge_audit_line(self, live, capsys):
+        # QA blocker 1: the S3 writer's own threat model (#1588) says
+        # window titles are attacker-influenced — prove the escape layer
+        # + truncation hold on the REAL writer path (no log_bridge_event
+        # monkeypatch; the uninstalled sink falls back to stderr).
+        # The threat model is str.splitlines(), NOT "\n" — the hostile
+        # title anchors a forged ts= line at EVERY boundary class
+        # (\n, \r, U+2028, U+2029), so a partial escape regression
+        # (any one class left raw) fails this test.
+        bridge, driver, port = live
+        hostile_title = (
+            "evil\nts=111 level=ERROR kind=http-500 msg=lf"
+            "\rts=222 level=ERROR kind=http-500 msg=cr"
+            "\u2028ts=333 level=ERROR kind=http-500 msg=u8"
+            "\u2029ts=444 level=ERROR kind=http-500 msg=u9"
+            + "x" * 300)
+        driver.windows = [
+            {"pid": 99, "window_id": 909, "app_name": "chromium",
+             "title": hostile_title, "is_on_screen": True, "z_index": 9,
+             "bounds": {"x": 0, "y": 0, "width": 100, "height": 100}}]
+        capsys.readouterr()  # drain fixture/setup stderr
+        secret = "hunter2-typed"
+        status, _ = req(port, "POST", "/api/type", {"text": secret})
+        assert status == 200
+        err = capsys.readouterr().err
+        # splitlines, not split("\n"): a raw \r / U+2028 / U+2029 in the
+        # line would forge a second ts= line the "\n"-split cannot see
+        # (legacy free-form diagnostics may share stderr — the contract
+        # only governs ts= lines, which parsers must consume)
+        audit_lines = [l for l in err.splitlines() if l.startswith("ts=")]
+        assert len(audit_lines) == 1
+        parsed = bridge._parse_bridge_event(audit_lines[0])
+        assert parsed["kind"] == "mutation"
+        msg = parsed["msg"]
+        assert secret not in msg  # D-CBA-1
+        # truncation is exact: the first 200 raw chars ride along, then
+        # the " chars=" field — no more, no less
+        assert f"title={hostile_title[:200]} chars=13" in msg
+        # every forged kind stayed embedded in the msg — none became a
+        # line of its own (the splitlines count above is the real pin)
+        assert "kind=http-500 msg=lf" in msg
+        assert "kind=http-500 msg=u9" in msg
+
+    # The mutating-route set is a closed property: a future mutating
+    # endpoint added without record_mutation must fail the suite.
+    # New mutating routes must be added here alongside their handler.
+    MUTATING_ROUTES = [
+        ("/api/click", {"x": 50, "y": 50, "button": "left"}),
+        ("/api/type", {"text": "hi"}),
+        ("/api/key", {"key": "Enter"}),
+        ("/api/launch", {"app": "xterm"}),
+    ]
+
+    @pytest.mark.parametrize("route,body", MUTATING_ROUTES)
+    def test_every_mutating_route_audits_exactly_once(
+            self, live, monkeypatch, route, body):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        if route == "/api/launch":
+            # hermetic: the real launch would spawn a process
+            monkeypatch.setattr(bridge, "launch_app",
+                                lambda name, singleton=False:
+                                {"launched": name})
+        status, _ = req(port, "POST", route, body)
+        assert status == 200, route
+        assert len(captured) == 1, route
+        assert captured[0]["kind"] == "mutation", route
+        assert f"route={route}" in captured[0]["msg"], route
+
+    @staticmethod
+    def _do_post_route_literals(bridge):
+        # The POST routes do_POST dispatches, derived from its source —
+        # so the MUTATING_ROUTES list above cannot silently drift from
+        # the dispatch it claims to cover (a comment is not an
+        # enforcement mechanism).
+        src = textwrap.dedent(inspect.getsource(bridge.Handler.do_POST))
+        routes = set()
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                    and isinstance(node.ops[0], ast.Eq)):
+                for operand in (node.left, *node.comparators):
+                    if (isinstance(operand, ast.Constant)
+                            and isinstance(operand.value, str)
+                            and operand.value.startswith("/api/")):
+                        routes.add(operand.value)
+        return routes
+
+    def test_mutating_route_list_matches_do_post_dispatch(self, bridge):
+        # Any new `route == "/api/…"` branch (or removed route) fails
+        # here until MUTATING_ROUTES is updated — at which point the
+        # parametrized exactly-once test enforces the audit on it. If a
+        # genuinely non-mutating POST route ever appears, the honest
+        # evolution is a second list with
+        # dispatch == MUTATING | NON_MUTATING — the friction that forces
+        # the audit decision explicitly.
+        assert (self._do_post_route_literals(bridge)
+                == {r for r, _ in self.MUTATING_ROUTES})

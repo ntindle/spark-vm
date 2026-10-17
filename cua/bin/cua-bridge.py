@@ -861,6 +861,79 @@ def record_csrf_refusal(reason, source=None):
     return len(lines)
 
 
+# ---------------------------------------------------------------- #1576 S3
+# Mutation audit: one structured line per successful input-injection
+# mutation. Handler.log_message is silenced (`pass`), so today no
+# forensic record exists of what the panel drove the desktop to do.
+# do_POST calls record_mutation() after each mutating endpoint's driver
+# call returns successfully — the audit names what was DONE, never what
+# was merely attempted. A failed mutation raises into do_POST's except
+# handler and is recorded as http-500 per #1586, never as a mutation.
+# Content pins (D-CBA-1): input TARGETS, never input CONTENT. The line
+# names the endpoint, the target window (pid + title — titles are
+# attacker-influenced per #1588, so the sink's escape layer plus the
+# title truncation below both apply), and target-class metadata only:
+# - /api/type logs the text LENGTH, never the text.
+# - /api/key logs named navigation keys by name (they are navigation,
+#   not content) and masks every printable character as "<char>" — a
+#   keystroke stream must never be reassemblable from the audit log.
+# - /api/click logs the request coordinates (a click point is a target,
+#   not content) and the button.
+# - /api/launch logs the allowlisted app name (the allowlist makes the
+#   name non-secret by construction) and the singleton flag.
+# Volume: mutations are operator-driven behind the CSRF gate — unlike
+# the #1587 refusal case there is no hostile amplification path, so no
+# bounding layer; the rotating sink (1 MiB x 3 generations) bounds the
+# stream.
+_MUTATION_WINDOW_TITLE_LEN = 200  # one long title must not grow the log
+# Navigation keys are not content: naming them leaks nothing about what
+# the operator typed. Any key outside this set is logged as "<char>"
+# (see _mutation_key_label).
+_MUTATION_NAMED_KEYS = frozenset({
+    "Enter", "Tab", "Escape", "Backspace", "Delete", "Insert", "Home",
+    "End", "Page_Up", "Page_Down", "Print", "Pause",
+    "Up", "Down", "Left", "Right",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
+    "F11", "F12",
+    "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    "Super_L", "Super_R", "Caps_Lock", "Num_Lock", "Scroll_Lock",
+})
+
+
+def _mutation_window_label(w):
+    """Target label for a window: pid + title (truncated; the sink
+    escapes line-boundary characters). Defensive .get: the audit path
+    must never raise on a driver-shaped window."""
+    pid = w.get("pid", "?") if isinstance(w, dict) else "?"
+    title = w.get("title", "?") if isinstance(w, dict) else "?"
+    return f"pid={pid} title={str(title)[:_MUTATION_WINDOW_TITLE_LEN]}"
+
+
+def _mutation_key_label(key):
+    """Named navigation keys are logged by name; anything else
+    (printable characters, unknown names) is content-adjacent and logged
+    as "<char>" so keystrokes can never be reassembled (#1576)."""
+    if key in _MUTATION_NAMED_KEYS:
+        return key
+    return "<char>"
+
+
+def record_mutation(route, target, **fields):
+    """Emit one structured mutation audit line (#1576 S3).
+
+    `route` is the endpoint path, `target` the human target label
+    (window pid/title, or "desktop" for global clicks / launches), and
+    `fields` the remaining target-class metadata — all content-pinned by
+    the callers. Never raises: the caller has already mutated by the
+    time this runs, and a broken sink must not fail the response."""
+    parts = [f"route={route}", f"target={target}"]
+    parts.extend(f"{k}={v}" for k, v in fields.items())
+    try:
+        log_bridge_event("mutation", " ".join(parts))
+    except Exception:
+        pass
+
+
 def call(tool, args):
     p = subprocess.run(
         [DRIVER, "call", tool],
@@ -1746,6 +1819,16 @@ class Handler(BaseHTTPRequestHandler):
                                          "window_id": w["window_id"],
                                          "x": x - b["x"], "y": y - b["y"],
                                          "button": button})
+                # #1576 S3: audit the mutation AFTER the driver call
+                # succeeded — targets (coordinates, window), never
+                # content. The desktop-scope branch clicks globally, so
+                # its target is the desktop, not the panel window.
+                if w.get("app_name") in ("Xfce4-panel", "Xfdesktop"):
+                    click_target = "desktop"
+                else:
+                    click_target = _mutation_window_label(w)
+                record_mutation("/api/click", click_target,
+                                x=x, y=y, button=button)
                 self._json({"ok": True, "window": w["title"], "result": res})
             elif route == "/api/type":
                 text = str(data.get("text", ""))[:2000]
@@ -1761,6 +1844,10 @@ class Handler(BaseHTTPRequestHandler):
                                          "window_id": w["window_id"],
                                          "text": text,
                                          "delivery_mode": "foreground"})
+                # #1576 S3: the LENGTH is the target-class metadata; the
+                # text itself is content and is never logged.
+                record_mutation("/api/type", _mutation_window_label(w),
+                                chars=len(text))
                 self._json({"ok": True, "result": res})
             elif route == "/api/key":
                 key = str(data.get("key", ""))[:40]
@@ -1778,6 +1865,22 @@ class Handler(BaseHTTPRequestHandler):
                                          "window_id": w["window_id"],
                                          "key": key, "modifiers": mods,
                                          "delivery_mode": "foreground"})
+                # #1576 S3: named navigation keys are logged by name;
+                # printable characters are masked to "<char>" — a typed
+                # password must never be reassemblable from the log.
+                # Modifiers are presence-only, and only for NAMED keys: on
+                # a masked keystroke even presence reveals the case/symbol
+                # pattern of the typed content (a modified printable is
+                # overwhelmingly shift -> uppercase or symbol; ctrl/alt/
+                # meta combos on printables are command keys, not typed
+                # characters) — content-class information is as forbidden
+                # as content itself.
+                key_label = _mutation_key_label(key)
+                record_mutation("/api/key", _mutation_window_label(w),
+                                key=key_label,
+                                modifiers=("modified"
+                                           if (mods and key_label != "<char>")
+                                           else "none"))
                 self._json({"ok": True, "result": res})
             elif route == "/api/launch":
                 app = str(data.get("app", ""))[:80]
@@ -1796,6 +1899,10 @@ class Handler(BaseHTTPRequestHandler):
                                        "pids": e.pids}, 409)
                 except (ValueError, RuntimeError) as e:
                     return self._json({"error": str(e)[:200]}, 400)
+                # #1576 S3: the allowlisted app name is non-secret by
+                # construction; nothing typed goes through this route.
+                record_mutation("/api/launch", "desktop", app=app,
+                                singleton=singleton)
                 self._json({"ok": True, "result": res})
             else:
                 self._json({"error": "not found"}, 404)
