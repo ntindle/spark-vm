@@ -96,7 +96,8 @@ H11's ruling on `MULTITENANT_ISOLATION_RESEARCH.md`'s findings:
    **ADOPTED.** The outage-time behavior is behaviorally verified (no
    outage-time revocation propagation — the designed failure mode is
    *stale authorization*, never *bypassed identity*); Tailscale's own KB
-   1091 direct read is owed as #1646.
+   1091 was read first-party 2026-10-17 and confirms the recorded
+   behavior verbatim (#1646 closed).
 4. **Root: the operator holds root on the outer enforcement layer; the
    tenant gets contained root-equivalent inside their unit; never let the
    human's and the agent's privilege domains collapse into one.** —
@@ -154,8 +155,9 @@ auth fail closed** — an auth-lookup failure denies; "ACL file
 missing/unapplied" means deny; (b) **existing sessions through a
 control-plane outage**: revocation cannot propagate during an outage —
 fail-open for revocation, i.e. design for *stale authorization*
-(verified 2026-10-17 — issue #340, see §6; Tailscale's own KB 1091
-direct read owed as #1646). Never assume an outage degrades into
+(verified 2026-10-17 — issue #340, see §6; vendor KB 1091 read
+first-party the same day, confirming every adopted element — #1646
+closed). Never assume an outage degrades into
 bypassed identity checks.
 
 **Q4 — Who holds root on a tenant box? (DECIDED 2026-09-24 — operator
@@ -264,7 +266,7 @@ noted here for consistency only.
   as the per-tenant implementation — it is the decision record, not the
   build.
 
-## 6. Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified, vendor KB re-read owed #1646 — #340 stays open)
+## 6. Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified + vendor KB 1091 first-party-confirmed 2026-10-17, #1646 closed — #340 stays open)
 
 - Nested-KVM availability on the hosted product's target hosts —
   **VERIFIED: not available on the decided provider (Fly Sprites).**
@@ -282,7 +284,8 @@ noted here for consistency only.
   revocation); enrollment fails closed; key expiry is still enforced
   locally by peers (never bypassed identity checks). Lockout semantics
   may now rely on the behaviorally-verified outage behavior; the
-  vendor-doc confirmation is pending the #1646 direct re-read. Runbook
+  vendor-doc confirmation landed via first-party read 2026-10-17 — no
+  delta (#1646 closed; see the research doc's KB cross-check). Runbook
   notes: a `tailscaled` restart during an outage drops the node unless
   netmap caching is enabled; a restarted node enforces its cached packet
   filter, not newer rules.

@@ -326,7 +326,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
   #340 are now recorded — a Tailscale control-plane outage leaves
   existing tailnet sessions working but unable to propagate revocations
   (design for stale authorization, never assume bypassed identity;
-  behaviorally verified, vendor-doc re-read owed as #1646), and nested
+  behaviorally verified, first-party vendor KB 1091 re-read 2026-10-17
+  closed #1646 with no delta), and nested
   KVM is unavailable on the decided box provider (Fly Sprites), so
   gVisor is the only viable stronger-than-nspawn boundary inside the
   tenant box. (#1645)
@@ -349,6 +350,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   now a loud startup failure instead of a silent misconfiguration. (#1610)
 
 ### Fixed
+
+- The multi-tenancy research and audit docs no longer carry the stale
+  "vendor KB re-read owed" note: Tailscale's own KB 1091 ("What happens
+  if the coordination server is down?") was read first-party on
+  2026-10-17 and confirms every element of the adopted outage behavior —
+  the data plane survives a coordinator outage, revocation cannot
+  propagate (design for stale authorization), enrollment fails closed —
+  with no delta; the KB link now points at its canonical URL. (#TBD)
 
 - The fleet dashboard's byte-identity test now names the drift direction
   when the worker's inlined copy disagrees with the repo's
