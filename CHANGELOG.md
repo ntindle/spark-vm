@@ -52,6 +52,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted owner-alerting docs: the caller-wiring pointers that dangled on a
+  closed issue now point at the open build issue that owns the work, so the
+  "no page fires yet" rows name the real next step. (#1618)
+
 - Relay liveness (hosted): the tenant-status wiring's four review
   follow-ups from the R3 relay-liveness build are now pinned by tests —
   a foreign producer sub-code suspends as unclassified instead of
@@ -78,7 +82,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   owner when an approval is filed or a box is revoked — the two paging
   policies now exist in an async form the plane worker can adopt once its
   async boundary lands. The actual wiring (the filing and revoke endpoints
-  calling them) is still open on #1492, so no pages fire yet. (#1608)
+  calling them) is still open on #1614, so no pages fire yet. (#1608)
 
 - The D9 push-sweep operator guide now documents the async plane port's
   runbook (2026-10-16): how the hosted plane drives the sweep — the
