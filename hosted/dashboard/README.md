@@ -64,7 +64,11 @@ fails CI. The byte-identity test against the *live* worker copy still
 needs a reachable worker checkout, so it runs wherever one exists (the
 loop VM) and skips elsewhere. That split is deliberate, not an
 accident: CI guards the repo-side contract, the loop VM guards the
-deployed copy.
+deployed copy. When the byte-identity test fails, its message names the
+drift direction and the exact remediation — a stale snapshot points at
+`--write-snapshot`; a worker checkout carrying out-of-band edits is
+named as unactionable in-repo (see issue #1299) rather than leaving the
+contributor to debug the wrong copy.
 
 ## Syncing the worker copy
 
