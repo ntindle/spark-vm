@@ -43,21 +43,75 @@ renderings; if you change a cadence here, change it there (the
 ## 2. The scheduled-handler dispatch contract
 
 The plane's `scheduled` handler dispatches on the cron that fired and
-calls the in-repo entry points with the plane-side seams injected. The
-in-repo modules never see a Worker secret, a data key, or a box token.
+calls the plane's async ports — never the in-repo sync entry points
+(the worker's D1 is async-only; the sync/async seam is F-PP-2, and a
+literal "call `sweep_once(conn)` with the worker's `_D1`" fails on the
+first `conn.execute`). The in-repo modules stay the harness and test
+truth (D-PP-1); they never see a Worker secret, a data key, or a box
+token.
 
-### Per-minute tick (`* * * * *`)
+### Async amendment (#1566 S2-a — the dispatch truth)
 
-Call, in this order, with the seams the modules' docstrings name:
+This amendment is authoritative over the older step list below it: the
+older list named the in-repo sync entry points and a direct
+`send_loop(...)` call; both are superseded. The sync modules named
+there remain the conformance harness, not the dispatch targets.
 
-1. `hosted.push_sweep.sweep_once(conn, resolve_owner=resolve_owner)`
-   — the D9 sweep: reminders, then digests, then watchers (D67).
-   `resolve_owner(box_id)` is **required** (D2): owner identity from
-   the enrollment registry, never from a box assertion. Thread one
-   `now` through the sweep (D73).
-2. `hosted.push_send_loop.send_loop(...)` — drains the `queued`
-   outbox the sweep just wrote (#1094 owns this trigger pairing; the
-   sweep alone enqueues, it never sends).
+**Concrete async port entry points** (plane-workspace module paths):
+
+- The async sweep port lives in `control-plane/worker.py` under the
+  marker `# --- BEGIN push_sweep_async (#1566 S2) ---`, following the
+  #844 ed25519 inline precedent (F-PP-4). Its entry point is
+  `async def push_sweep_async_tick(db, *, now, resolve_owner,
+  reminders_enabled=True)` against the worker's async `_D1`
+  (`await db.prepare(...).bind(...).run()` — the worker exposes no
+  synchronous D1).
+- The `scheduled` handler's per-minute branch (D-PP-3) calls it; the
+  `POST /v1/ops/push/sweep` fetch route (§3) calls it for the D72
+  manual probe.
+
+**The D-PP-2 fixture set is the dispatch truth:**
+`hosted/push_sweep_port/` — the scenario fixtures in `scenarios.py`
+plus the recorded outputs in `recorded/`, held by
+`hosted/test_push_sweep_port_conformance.py`. The handler's sweep
+passes must reproduce the recorded outputs for every scenario. A port
+that reproduces them is conformant; the CI test is what keeps it
+conformant.
+
+**Step 2 is the C2 handoff, not a direct `send_loop(...)` call.** After
+the sweep passes, the handler POSTs `{now}` to the `PushSenderDO`
+stub's `/drain` (`env.PUSH_SENDER_DO.idFromName("push-sender")`) and
+awaits the summary — the sweep enqueues, the DO drains. The drain
+build is #1571's; until it lands, the per-minute trigger does not
+register (D-PP-3's stranding rule: a tick that enqueues without
+draining strands pages in the outbox). The C2 fail-safe: if the
+handler's POST to a gate-held `/drain` times out caller-side, the DO
+continues independently and the next tick re-scans — the orphaned tick
+is harmless, never retried into a double-drain.
+
+**The D-PP-3 multiplex.** One `scheduled` handler, branched on
+`controller.cron`: per-minute → the sweep passes, then the C2
+handoff; `30 3 * * *` → the push retention-GC branch (reserved for
+#1568 — the branch exists, the port does not); `17 3 * * *` → the
+existing #1013 phone-home GC, unchanged (no cadence change, no
+behavior change). Unknown cron values log loud and no-op (fail-soft —
+the #1013 handler's existing discipline). The handler carries the
+`reminders_enabled` flag from day one (D71 retirement rule, D-PP-7),
+so the future #958 DO-alarm change flips it off without a second
+port.
+
+### Per-minute tick (`* * * * *`) — superseded step list
+
+Retained for the record; the async amendment above is authoritative:
+
+1. ~~`hosted.push_sweep.sweep_once(conn, resolve_owner=resolve_owner)`~~
+   → the async port's `push_sweep_async_tick` (§2 async amendment).
+   The D67 pass order (reminders, then digests, then watchers), the D2
+   registry resolver, and the single threaded `now` (D73) are
+   unchanged — they are what the D-PP-2 fixtures pin.
+2. ~~`hosted.push_send_loop.send_loop(...)`~~ → the C2 handoff
+   (§2 async amendment): POST `{now}` to the `PushSenderDO` stub's
+   `/drain`, await the summary (#1571's build).
 
 Structured-log the `SweepSummary` where the ops console can see it
 (D75: `pages_truncated` is the operator alert for repeated

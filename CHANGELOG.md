@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-sweep plane-port contract (2026-10-16): the hosted push lane's
+  per-minute sweep now has its plane-side dispatch pinned — the cron
+  contract names the async sweep port the worker must build, the
+  checked-in scenario records every sweep must reproduce (held by a CI
+  conformance test that replays the fixtures against the in-repo sweep
+  and fails on divergence), and the tick's drain half as the
+  sender-handoff rather than a direct call; the async port itself,
+  the scheduled multiplex, and the manual probe remain to be built.
+  (#1566) (#TBD)
+
 - Contributor secret-scan pin tests (2026-10-16): the `push.sh` pre-push
   secret scan — the last automated check before a secret can reach the
   public remote — gets its first test coverage: every secret family the

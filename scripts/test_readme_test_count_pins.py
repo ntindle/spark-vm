@@ -64,6 +64,11 @@ _CLAIMS = [
         r"`test_push_sweep\.py` \((\d+) tests",
     ),
     (
+        "hosted/README.md",
+        "hosted/test_push_sweep_port_conformance.py",
+        r"`test_push_sweep_port_conformance\.py` \((\d+) tests\)",
+    ),
+    (
         "harness/README.md",
         "harness/test_key_registry.py",
         r"`test_key_registry\.py` \((\d+) tests",

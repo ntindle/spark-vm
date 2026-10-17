@@ -1,0 +1,30 @@
+{
+  "scenario": "budget_already_exhausted",
+  "doc": "time_budget_s=0: every pass stops before any candidate; the summary reports budget_truncated (D103).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "budget_exhausted": true
+    },
+    "digests": {
+      "budget_exhausted": true
+    },
+    "stale_watchers": {
+      "budget_exhausted": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 0,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": true,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [],
+    "push_digest_state": [],
+    "push_budget_counters": []
+  }
+}

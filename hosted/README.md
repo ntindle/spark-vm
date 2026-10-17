@@ -176,3 +176,11 @@ per token generation.
 
 Run the tests: `python3 -m pytest hosted/test_push_sweep.py` from the
 repo root.
+
+The async plane port's conformance set lives in `push_sweep_port/`
+(scenarios + recorded outputs, the port's dispatch truth — see its
+README); `test_push_sweep_port_conformance.py` (3 tests) replays every
+scenario against this sync sweep and diffs the outputs against the
+recorded files, failing on divergence. Regenerate the records with
+`python3 -m hosted.push_sweep_port.record` after any intentional
+behavior change.
