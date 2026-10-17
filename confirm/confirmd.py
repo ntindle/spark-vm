@@ -368,11 +368,12 @@ def _aid_xlock(aid):
 
     The aid must pass ``ID_RE`` before it becomes a path (same bar as
     ``_stamp_expired_consumed``); ``ValueError`` otherwise. Lockfiles for
-    dead aids are pruned by ``_prune_locks`` (issue #1601) once their aid
-    has no live approval file anywhere — aids are never reused, so the
-    prune can never alias a live item. A crash can never wedge the lock:
-    flock releases with the open file description, so a dead holder frees
-    it.
+    dead aids are pruned by ``_prune_locks`` (issue #1601, wired into the
+    cadence-gated ``_housekeeping_if_due``) once their aid has no live
+    approval file anywhere — see its docstring for the safety predicate;
+    aids are never reused, so the prune can never alias a live item. A
+    crash can never wedge the lock: flock releases with the open file
+    description, so a dead holder frees it.
 
     If the lockfile cannot be created or opened (a broken approvals
     dir), the failure is audited loudly and the caller proceeds WITHOUT
@@ -382,10 +383,6 @@ def _aid_xlock(aid):
     apply, and refusing every answer would turn a filesystem hiccup
     into a full approval outage. Unreachable whenever the approvals
     dir is healthy (every component already creates files under it).
-
-    Issue #1601: the lockfiles are pruned by _prune_locks() (wired into
-    the cadence-gated _housekeeping_if_due) once their aid has no live
-    approval file anywhere — see its docstring for the safety predicate.
     """
     if not ID_RE.match(aid):
         raise ValueError("refusing to lock for bad aid %r" % (aid,))
@@ -1160,12 +1157,13 @@ def load_pending():
                     # expiry path (alongside the GET detail reap and
                     # _answer_locked), and the only one that never audited
                     # "expired-reaped" — finding 47/53(e) says every
-                    # refusal leaves a trail. Audit at-least-once per
-                    # expiry: stamped-or-removed means THIS reap did work;
-                    # a loser (stamp False + remove failed) stays silent.
-                    # A transient remove failure can audit twice across
-                    # the retry — the trail stays truthful (two reap
-                    # attempts), never silent.
+                    # refusal leaves a trail. Audit when this pass did the
+                    # work (stamped or removed) — the trail is never
+                    # lost. A remove-failure retry can re-audit (the
+                    # GET/_answer paths audit unconditionally); duplicates
+                    # are benign. Losers (stamp False + remove failed)
+                    # stay silent, so concurrent renders cannot
+                    # double-audit.
                     if stamped or removed:
                         audit_log("expired-reaped", "confirmd", "",
                                   "id=%s" % aid)
@@ -1271,7 +1269,8 @@ def _stamp_expired_consumed(aid, it, pending_path, expired_by):
     # the file, then claim the name with an atomic hard link — os.link
     # raises FileExistsError when another reaper already stamped this
     # aid, preserving the write-if-absent contract exactly (the
-    # exactly-once race the test pins: concurrent stamps must not share
+    # exactly-once race pinned by test_stamp_exactly_once_under_race in
+    # test_expired_terminal_record.py: concurrent stamps must not share
     # a tmp, or one thread's unlink would clobber another's and the link
     # would raise FileNotFoundError instead of the FileExistsError
     # gate). A mid-write crash can then only lose the link (the path
@@ -1877,14 +1876,13 @@ def _prune_locks():
 
     Safe predicate: a lockfile is pruned only when no <aid>.json exists
     in pending/, answered/, consumed/, or pending-quarantine/. Every
-    path that takes _aid_xlock does so for an aid with a live file in
-    one of those dirs (the /answer critical section, both confirmd
-    reapers, the ingest's decision stamp); aids are never reused, so an
-    aid with no files anywhere can never take the lock again. The 404
-    paths (GET detail / /answer on a missing aid) take the lock with no
-    live file, but they serialize nothing — a concurrent prune racing
-    one is consequence-free. Re-opened items get NEW aids, so pruning a
-    dead aid's lockfile can never alias a live item.
+    path that mutates the store under _aid_xlock re-validates a live
+    file for the aid while holding the lock; the no-live-file takers
+    (GET-detail and /answer 404s, the ingest's unknown-aid/idempotency
+    rejections) mutate nothing, so a prune racing one only breaks flock
+    rendezvous between parties with nothing to exclude. Re-opens mint
+    new aids, so a pruned lockfile can never alias a live item's
+    exclusion window.
 
     Called by _housekeeping_if_due() (cadence-gated), after
     _prune_quarantine(). Race-benign like _prune_consumed: a lost race
