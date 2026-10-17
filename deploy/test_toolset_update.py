@@ -4037,3 +4037,217 @@ def test_publish_fails_loud_when_pins_unhashable(env, tmp_path):
     assert r.returncode != 0
     assert "cannot hash installed pins file" in r.stderr
     assert "malformed" not in r.stderr
+
+
+# --- G18 S1b: _toolset_gate_cap (#1629) --------------------------------------
+
+def _gate_lines(toolset_max="0.28.2", state="live", permitted="true"):
+    return [
+        f"state={state}",
+        "freeze=true" if state == "frozen" else "freeze=false",
+        "reason=gate ok" if state == "live" else "reason=no-signal: test",
+        "key_id=ctl-test",
+        "answer_age_s=12",
+        "repo_permitted=true",
+        "repo_max=abcdef0123456789abcdef0123456789abcdef01",
+        f"toolset_permitted={permitted}",
+        f"toolset_max={toolset_max}",
+        "toolset_my_wave=1",
+    ]
+
+
+def make_gate_query(tmp_path, lines, exit_code=0):
+    """Stub GATE_QUERY as a real python script: the updater invokes it via
+    `python3 $GATE_QUERY state`, so a shell stub would die with a
+    SyntaxError (invocation failure), not print the canned answer."""
+    q = tmp_path / f"gate_query_{os.getpid()}_{make_gate_query.counter}.py"
+    make_gate_query.counter += 1
+    q.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        + "".join(f'print("{line}")\n' for line in lines)
+        + f"sys.exit({exit_code})\n"
+    )
+    q.chmod(q.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(q)
+
+
+make_gate_query.counter = 0
+
+
+def gate_env(env, tmp_path, lines=None, exit_code=0, keys="ctl-test"):
+    e = dict(env["env"])
+    e.pop("SPARKVM_GATE_KEYS", None)
+    e.pop("SPARKVM_GATE_JSON", None)
+    # An ambient GATE_QUERY would silently re-route the unmanaged test.
+    e.pop("GATE_QUERY", None)
+    if lines is not None:
+        e["GATE_QUERY"] = make_gate_query(tmp_path, lines, exit_code)
+        if keys is not None:
+            e["SPARKVM_GATE_KEYS"] = keys
+    return e
+
+
+def run_log_text(env):
+    """log() writes to the state run log (TOOLSET_STATE_DIR/toolset-update.log),
+    not to stderr — read it back for message assertions."""
+    p = env["state"] / "toolset-update.log"
+    return p.read_text() if p.exists() else ""
+
+
+def test_gate_cap_unmanaged_without_query_file(env):
+    # No GATE_QUERY installed: pre-G18 behavior — proceeds uncapped.
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0",
+                   env_extra=gate_env(env, None, lines=None))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.28.2"
+    assert "gate unmanaged" in run_log_text(env)
+
+
+def test_gate_cap_unmanaged_without_keys(env, tmp_path):
+    # Stub exists but no SPARKVM_GATE_KEYS: unmanaged, proceeds uncapped.
+    e = gate_env(env, tmp_path, _gate_lines(), keys=None)
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.28.2"
+
+
+def test_gate_cap_warns_on_half_enrolled_box(env, tmp_path):
+    # Gate document present but no keys = operator forgot the install step.
+    gate_file = tmp_path / "gate.json"
+    gate_file.write_text("{}")
+    e = gate_env(env, tmp_path, _gate_lines(), keys=None)
+    e["SPARKVM_GATE_JSON"] = str(gate_file)
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.28.2"
+    assert "partial provisioning" in run_log_text(env)
+
+
+def test_gate_cap_fails_closed_on_invocation_failure(env, tmp_path):
+    # A nonzero gate_query exit is an invocation failure, not a verdict.
+    e = gate_env(env, tmp_path, _gate_lines(), exit_code=1)
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "gate_query failed to run" in run_log_text(env)
+
+
+def test_gate_cap_fails_closed_when_frozen(env, tmp_path):
+    e = gate_env(env, tmp_path, _gate_lines(state="frozen"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "fleet frozen" in run_log_text(env)
+
+
+def test_gate_cap_nothing_to_do_when_wave_not_live(env, tmp_path):
+    e = gate_env(env, tmp_path, _gate_lines(permitted="false"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "not live" in run_log_text(env)
+
+
+def test_gate_cap_fails_closed_on_missing_max(env, tmp_path):
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max=""))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "no toolset max_permitted_pin" in run_log_text(env)
+
+
+def test_gate_cap_rejects_hostile_max(env, tmp_path):
+    # The gate's max is interpolated into a release URL and a filename —
+    # it must pass the same _pin_ok bar as the pins file's values.
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.28.2/evil"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "URL/filename-safe" in run_log_text(env)
+
+
+def test_gate_cap_caps_at_max_when_max_below_pin(env, tmp_path):
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.27.5"
+    assert "capping convergence target" in run_log_text(env)
+
+
+def test_gate_cap_passes_pin_through_when_max_covers_it(env, tmp_path):
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.28.2"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.28.2"
+    assert "capping" not in run_log_text(env)
+
+
+def test_gate_cap_refuses_downgrade(env, tmp_path):
+    # The gate is a ceiling, not a downgrade order: a max behind the
+    # installed version must not rewind the layer.
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.28.2", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "refusing downgrade" in run_log_text(env)
+
+
+def test_gate_cap_comparison_is_locale_independent(env, tmp_path):
+    # Best-effort locale coverage for the byte-wise comparison: the
+    # byte-wise guarantee itself is by construction (`local LC_ALL=C` in
+    # _toolset_gate_cap) — digit-vs-digit collation agrees across locales,
+    # so this test cannot detect the line's removal (not neuter-verified).
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
+    e["LC_ALL"] = "et_EE.UTF-8"
+    e["LANG"] = "et_EE.UTF-8"
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0.27.5"
+
+
+def test_cua_driver_dry_run_honors_gate_cap(env, tmp_path):
+    # End-to-end wiring: the layer converges onto the capped target, not
+    # the pins file's pin. Neuter control: the same env without the gate
+    # stub converges onto the pins file's pin.
+    e = cua_env(env, tmp_path, pin="0.28.2", cur_version="0.27.0")
+    e2 = dict(e)
+    e2.update(gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5")))
+    r = run_bash(SRC_PREFIX + "_cua_driver_layer 1", env_extra=e2)
+    assert r.returncode == 0, r.stderr
+    logtext = run_log_text(env)
+    assert "would install cua-driver 0.27.5" in logtext
+    assert "would install cua-driver 0.28.2" not in logtext
+    r = run_bash(SRC_PREFIX + "_cua_driver_layer 1", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert "would install cua-driver 0.28.2" in run_log_text(env)
+
+
+def test_playwright_dry_run_honors_gate_cap(env, tmp_path):
+    # Mirror of the cua-driver wiring test: the playwright layer's
+    # convergence target is the capped pin, and the no-gate neuter control
+    # converges on the pins file's pin.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, pin="1.62.0",
+                                     cur_version="1.61.0")
+    e2 = dict(e)
+    e2.update(gate_env(env, tmp_path, _gate_lines(toolset_max="1.61.5")))
+    r = run_bash(SRC_PREFIX + "_playwright_layer 1", env_extra=e2)
+    assert r.returncode == 0, r.stderr
+    logtext = run_log_text(env)
+    assert "would converge playwright 1.61.5" in logtext
+    assert "would converge playwright 1.62.0" not in logtext
+    r = run_bash(SRC_PREFIX + "_playwright_layer 1", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert "would converge playwright 1.62.0" in run_log_text(env)
+
+
+def test_gate_cap_nothing_to_do_when_max_equals_installed(env, tmp_path):
+    # The ceiling is already reached: converging to it would be a no-op,
+    # so the cap reports nothing to do rather than a spurious deploy.
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.5", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "refusing downgrade" in run_log_text(env)
+
+
+def test_gate_cap_fails_closed_on_duplicate_max_lines(env, tmp_path):
+    # A malformed answer with two toolset_max lines must not yield a
+    # usable target: the sed extraction concatenates them and _pin_ok
+    # rejects the embedded newline.
+    lines = _gate_lines(toolset_max="0.27.5") + ["toolset_max=0.27.5"]
+    e = gate_env(env, tmp_path, lines)
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
