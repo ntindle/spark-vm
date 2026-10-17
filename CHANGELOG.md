@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   fields stay null with a note instead of crashing, and gate-state edge cases
   (missing status file, bad timestamps, unrecognized manual flags) can't
   silently kill the inventory feed — is now pinned by 32 regression tests.
-  (#TBD)
+  (#1599)
 
 - cua-bridge observability convergence pin (2026-10-16): the audit-ability
   analysis of the desktop-control bridge re-verified after the audit sink
