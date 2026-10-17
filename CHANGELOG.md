@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   path. The updater refuses dirty checkouts and downgrades loudly, verifies
   the target tag exactly like a fresh install does, and leaves the running
   stack untouched: re-run the installer afterwards to converge the stack.
-  (#TBD)
+  (#1612)
 
 - Hosted phone-approval push: groundwork so the hosted plane can page an
   owner when an approval is filed or a box is revoked — the two paging
