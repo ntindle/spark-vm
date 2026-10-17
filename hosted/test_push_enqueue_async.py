@@ -32,6 +32,7 @@ import asyncio
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -39,6 +40,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from hosted import push_enqueue, push_enqueue_async, push_events_async
+
+# QA N3: a fixed instant for tests that read the clock on both sides of
+# an enqueue (the enqueue's own `now` default vs the test's
+# `hour_bucket()` call) — an hour rollover in between would flake.
+_FIXED_NOW = datetime(2026, 10, 17, 5, 30, tzinfo=timezone.utc)
 
 # --- Fixture DDL: verbatim from docs/PUSH_SENDER_SCHEMA_CONTRACT.md ---
 
@@ -266,7 +272,7 @@ def _enq(db, **kw):
 
 def test_enqueue_async_happy_path(conn, db):
     r = _enq(db, event_kind="approval_filed", owner_principal="owner-1",
-             box_id="box-1", key_material="aid-1")
+             box_id="box-1", key_material="aid-1", now=_FIXED_NOW)
     assert r.disposition == "queued"
     assert r.event_key == "box-1\x00aid-1"
     assert r.row_id is not None
@@ -278,7 +284,7 @@ def test_enqueue_async_happy_path(conn, db):
     assert tuple(row) == ("owner-1", "box-1", "", "approval_filed",
                           "box-1\x00aid-1", "queued", None, None)
     # D52 — one unit on each scope.
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     assert _run(push_enqueue_async.get_counter_async(
         db, "box", "box-1", ws)) == 1
     assert _run(push_enqueue_async.get_counter_async(
@@ -299,12 +305,12 @@ def test_at_shape_matches_sync_utc_iso(conn, db):
 
 def test_duplicate_fast_path_consumes_no_budget(conn, db):
     kw = dict(event_kind="approval_filed", owner_principal="owner-1",
-              box_id="box-1", key_material="aid-2")
+              box_id="box-1", key_material="aid-2", now=_FIXED_NOW)
     r1 = _enq(db, **kw)
     r2 = _enq(db, **kw)
     assert (r1.disposition, r2.disposition) == ("queued", "duplicate")
     assert r2.row_id is None
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     assert _run(push_enqueue_async.get_counter_async(
         db, "box", "box-1", ws)) == 1
     assert conn.execute(
@@ -314,7 +320,7 @@ def test_duplicate_fast_path_consumes_no_budget(conn, db):
 # --- Budget exhaustion + digest coalescing (D10/D52/D54) ------------------
 
 def test_budget_exhaustion_coalesces_into_digest(conn, db):
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     # Fill the box scope to the default bound (3) so the enqueue path
     # itself overflows.
     for _ in range(push_enqueue_async.BOX_BOUND_DEFAULT):
@@ -323,7 +329,7 @@ def test_budget_exhaustion_coalesces_into_digest(conn, db):
     assert _run(push_enqueue_async.reserve_budget_async(
         db, "box-1", "owner-1", ws)) is False
     r = _enq(db, event_kind="approval_filed", owner_principal="owner-1",
-             box_id="box-1", key_material="aid-3")
+             box_id="box-1", key_material="aid-3", now=_FIXED_NOW)
     assert r.disposition == "suppressed_budget"
     assert r.row_id is not None
     # D54 — the suppressed filing is counted into the digest.
@@ -335,7 +341,7 @@ def test_budget_exhaustion_coalesces_into_digest(conn, db):
     assert tuple(row) == ("box-1\x00aid-3", "suppressed_budget", None)
     # A replayed filing coalesced into the digest stays coalesced.
     r2 = _enq(db, event_kind="approval_filed", owner_principal="owner-1",
-              box_id="box-1", key_material="aid-3")
+              box_id="box-1", key_material="aid-3", now=_FIXED_NOW)
     assert r2.disposition == "duplicate"
     assert _run(push_enqueue_async.get_digest_count_async(
         db, "owner-1", ws)) == 1
@@ -345,7 +351,7 @@ def test_digest_kind_suppression_never_touches_digest_count(conn, db):
     # #1423/D77: a budget-suppressed digest writes only the suffixed
     # suppression audit — the digest is retryable and its retry renders
     # the window's true coalesced count.
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     # Exhaust the owner bound via digest-scoped reservations.
     for _ in range(push_enqueue_async.OWNER_BOUND_DEFAULT):
         assert _run(push_enqueue_async.reserve_budget_async(
@@ -353,7 +359,7 @@ def test_digest_kind_suppression_never_touches_digest_count(conn, db):
     assert _run(push_enqueue_async.reserve_budget_async(
         db, None, "owner-1", ws)) is False
     r = _enq(db, event_kind="digest", owner_principal="owner-1",
-             box_id=None, key_material=ws)
+             box_id=None, key_material=ws, now=_FIXED_NOW)
     assert r.disposition == "suppressed_budget"
     assert _run(push_enqueue_async.get_digest_count_async(
         db, "owner-1", ws)) == 0
@@ -363,16 +369,16 @@ def test_digest_kind_suppression_never_touches_digest_count(conn, db):
     assert keys == ["owner-1\x00" + ws + "\x00suppressed"]
     # Re-suppressing the same digest is duplicate, not a second audit.
     r2 = _enq(db, event_kind="digest", owner_principal="owner-1",
-              box_id=None, key_material=ws)
+              box_id=None, key_material=ws, now=_FIXED_NOW)
     assert r2.disposition == "duplicate"
     assert conn.execute(
         "SELECT COUNT(*) FROM push_send_results").fetchone()[0] == 1
 
 
 def test_digest_reservation_is_owner_only(conn, db):
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     _enq(db, event_kind="digest", owner_principal="owner-1",
-         box_id=None, key_material=ws)
+         box_id=None, key_material=ws, now=_FIXED_NOW)
     assert _run(push_enqueue_async.get_counter_async(
         db, "owner", "owner-1", ws)) == 1
     # No ("box","") shared counter was created for the digest.
@@ -399,11 +405,11 @@ def test_release_is_floored_at_zero(db):
 # --- D53 lost race + conflict-handler discipline -------------------------
 
 def test_lost_dedup_race_returns_duplicate_and_releases(conn, db):
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     race = _RaceDb(db, conn)
     race.arm("box-1", "approval_filed", "box-1\x00aid-race")
     r = _enq(race, event_kind="approval_filed", owner_principal="owner-1",
-             box_id="box-1", key_material="aid-race")
+             box_id="box-1", key_material="aid-race", now=_FIXED_NOW)
     assert r.disposition == "duplicate"
     # One event, one page, one budget unit: the just-taken reservation
     # was released.
@@ -415,18 +421,60 @@ def test_lost_dedup_race_returns_duplicate_and_releases(conn, db):
         "SELECT COUNT(*) FROM push_send_results").fetchone()[0] == 1
 
 
+def test_suppressed_filing_lost_race_returns_duplicate(conn, db):
+    # QA B1: two concurrent enqueues both pass the dedup fast-path and
+    # both exhaust budget — the loser of the coalescing INSERT race
+    # must return `duplicate` (the D53 promise), not leak the internal
+    # `_DedupLost` signal to the caller, and must not touch the digest
+    # count (nothing was coalesced on this path).
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 17, 5, 30, tzinfo=timezone.utc)
+    ws = push_enqueue_async.hour_bucket(now)
+    for _ in range(push_enqueue_async.BOX_BOUND_DEFAULT):
+        assert _run(push_enqueue_async.reserve_budget_async(
+            db, "box-1", "owner-1", ws)) is True
+    race = _RaceDb(db, conn)
+    race.arm("box-1", "approval_filed", "box-1\x00aid-sup")
+    r = _enq(race, event_kind="approval_filed", owner_principal="owner-1",
+             box_id="box-1", key_material="aid-sup", now=now)
+    assert r.disposition == "duplicate"
+    assert r.row_id is None
+    assert _run(push_enqueue_async.get_digest_count_async(
+        db, "owner-1", ws)) == 0
+
+
+def test_to_py_worker_branches():
+    # QA B2: the worker-specific conversions are the module's only
+    # worker-shaped logic — every worker `_first()` no-match arrives
+    # as a JsNull proxy, so a typo in the type-name check would turn
+    # every worker enqueue into a silent `duplicate`. Pin the branches
+    # directly; the shim only ever yields plain dicts/None.
+    to_py = push_enqueue_async._to_py
+    js_null = type("JsNull", (), {})()
+    assert to_py(js_null) is None
+    assert to_py(None) is None
+
+    class _Py:
+        def to_py(self):
+            return {"a": 1}
+
+    assert to_py(_Py()) == {"a": 1}
+    assert to_py("plain") == "plain"
+    assert to_py(0) == 0
+
+
 def test_insert_failure_without_conflicting_row_reraises(db):
     boom = RuntimeError("simulated D1 write failure")
     failing = _FailingDb(db, boom)
     with pytest.raises(RuntimeError) as ei:
         _enq(failing, event_kind="approval_filed",
              owner_principal="owner-1", box_id="box-1",
-             key_material="aid-boom")
+             key_material="aid-boom", now=_FIXED_NOW)
     assert ei.value is boom
     # The failure landed in _insert_result_row (not earlier): the D52
     # reservation was taken first — and, like the sync module on a
     # non-IntegrityError, it is not released on this loud path.
-    ws = push_enqueue_async.hour_bucket()
+    ws = push_enqueue_async.hour_bucket(_FIXED_NOW)
     assert _run(push_enqueue_async.get_counter_async(
         db, "box", "box-1", ws)) == 1
 
@@ -480,6 +528,10 @@ def test_bad_inputs_are_value_errors(db):
         with pytest.raises(ValueError):
             _run(push_enqueue_async.reserve_budget_async(
                 db, "box-1", "owner-1", "w", box_bound=bad))
+        # QA N4: the owner bound gets the same validation.
+        with pytest.raises(ValueError):
+            _run(push_enqueue_async.reserve_budget_async(
+                db, "box-1", "owner-1", "w", owner_bound=bad))
 
 
 # --- D-EW-2 conformance: async port vs sync harness truth ----------------
@@ -515,14 +567,17 @@ def _scenario_events():
 
 
 def test_conformance_matches_sync_dispositions_and_state(db):
-    from datetime import datetime, timezone
-    now = datetime(2026, 10, 17, 5, 30, tzinfo=timezone.utc)
+    now = _FIXED_NOW
+    # QA N2: include the digest kind so the centerpiece D-EW-2 proof
+    # covers the owner-only reservation path too.
+    events = _scenario_events() + [
+        ("digest", None, push_enqueue.hour_bucket(now))]
     # Sync run.
     sync_conn = sqlite3.connect(":memory:")
     sync_conn.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS
                             + DDL_DIGEST_STATE + DDL_PAGE_ONCE_INDEX)
     sync_dispositions = []
-    for kind, box, key in _scenario_events():
+    for kind, box, key in events:
         r = push_enqueue.enqueue_page(
             sync_conn, event_kind=kind, owner_principal="owner-1",
             box_id=box, key_material=key, now=now)
@@ -533,7 +588,7 @@ def test_conformance_matches_sync_dispositions_and_state(db):
     async_dispositions = []
 
     async def drive():
-        for kind, box, key in _scenario_events():
+        for kind, box, key in events:
             r = await push_enqueue_async.enqueue_page_async(
                 db, event_kind=kind, owner_principal="owner-1",
                 box_id=box, key_material=key, now=now)
@@ -617,7 +672,11 @@ class _ObligationHarness:
     mapping. This harness is that endpoint shape, in-repo, so the
     negative assertions #1614 demands are pinned where the contract is
     documented. `terminal_aids` / `grandfathered` stand in for the
-    #872 record read and the D65 keyless-grandfathered check.
+    #872 record read and the D65 keyless-grandfathered check. This pins
+    the obligation's *shape* — the upstream check and the D65 exclusion
+    — not its timing: a TOCTOU gap between the #872 record read and the
+    filing write is covered by the D56(d) gate-2 re-read at send time,
+    not by this check.
     """
 
     def __init__(self, db):
