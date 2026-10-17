@@ -12,11 +12,13 @@ A green run proves the fixture set is self-consistent; the records are
 what the port is held to.
 """
 
+import json
 import os
 import sys
 
 import pytest
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from hosted.push_sweep_port import conformance, scenarios
