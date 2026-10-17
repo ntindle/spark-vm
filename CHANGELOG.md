@@ -351,6 +351,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The bridge log reader no longer dumps a traceback when piped to `head`
+  (it exits cleanly on a closed pipe), no longer prints the bridge's
+  sandbox-env warning on its own stderr (even `--help` is quiet), expands
+  `~` in `--log`, and handles out-of-range timestamps without a traceback:
+  skipped when they can't be compared against `--since`, shown as the raw
+  number otherwise. (#1644)
+
+- The release-gate publisher now rejects toolset pins that aren't
+  zero-padded `YYYY.MM.DD` date pins instead of signing them: the fleet
+  compares pins lexicographically, which only matches chronological order
+  in the date-pin format, so a semver hold could be silently ignored or
+  misfire. (#1647)
+
 - The multi-tenancy research and audit docs no longer carry the stale
   "vendor KB re-read owed" note: Tailscale's own KB 1091 ("What happens
   if the coordination server is down?") was re-read directly on
