@@ -226,6 +226,10 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     # audit writes are durably recorded; the addon fails closed when
     # they are not (tested separately)
     a._audit = lambda host, matched, flow_id=None: True
+    # Issue #199: the batch writer gets the same stub — tests that want
+    # the real one `del a._audit_batch` like the disk-guard tests do
+    # with _audit.
+    a._audit_batch = lambda entries: True
     a._current_egress_ip = None
     a._approval_signal = None  # reset per request by request()
     a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
@@ -1554,6 +1558,10 @@ class JsonSwapValidityTests(unittest.TestCase):
         audits = []
         a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
+        # Issue #199: the pass-2 sink flushes through _audit_batch, not
+        # _audit — record the batch the same way.
+        a._audit_batch = lambda entries: audits.extend(
+            (h, m) for h, m, _f in entries) or True
         real_resolve = a._resolve
 
         def resolve_with_aid(name, entry, host, method, path, location,
@@ -1585,6 +1593,10 @@ class JsonSwapValidityTests(unittest.TestCase):
         audits = []
         a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
+        # Issue #199: the pass-2 sink flushes through _audit_batch, not
+        # _audit — record the batch the same way.
+        a._audit_batch = lambda entries: audits.extend(
+            (h, m) for h, m, _f in entries) or True
         real_resolve = a._resolve
 
         def resolve_with_aid(name, entry, host, method, path, location,
@@ -1617,6 +1629,11 @@ class JsonSwapValidityTests(unittest.TestCase):
         audits = []
         a._audit = lambda host, matched, flow_id=None: audits.append(
             (host, matched)) or True
+        # Issue #199: the pass-2 sink flushes through _audit_batch — stub
+        # it to record too, so a regression that flushed on abort would
+        # show up in `audits`.
+        a._audit_batch = lambda entries: audits.extend(
+            (h, m) for h, m, _f in entries) or True
         real_resolve = a._resolve
         calls = []
 
@@ -1653,6 +1670,9 @@ class JsonSwapValidityTests(unittest.TestCase):
         failure itself audited."""
         a = make_addon()
         a._audit = lambda host, matched, flow_id=None: False  # audit log unwritable
+        # Issue #199: the pass-2 sink flushes through _audit_batch — fail
+        # the batch too, so the test still simulates an unwritable log.
+        a._audit_batch = lambda entries: False
         flow = Flow(Request("api.github.com", "/cfg",
                             [("Content-Type", "application/json")],
                             b'{"k": "hsurr:github"}'))
@@ -5341,6 +5361,261 @@ class TestPathJail(unittest.TestCase):
                 del os.environ[var]
             with self.assertRaises(RuntimeError):
                 sa.SwapAddon()
+
+
+class Issue199HotPathTests(unittest.TestCase):
+    """Issue #199: the request hot path re-ran the full grant scan
+    (every grant, one fromisoformat per grant) and opened/wrote/closed
+    the audit log once per swapped placeholder. The grant verdict is
+    now cached per request; the JSON sink flush writes its batch in a
+    single open."""
+
+    def _grant_addon(self, grants):
+        from datetime import datetime, timedelta, timezone
+        exp = (datetime.now(timezone.utc)
+               + timedelta(days=1)).isoformat()
+        # Static registry deliberately narrower than the v1 grant: the
+        # grant widens the path, so revoking it flips the verdict to
+        # "path-not-allowed" — the cache-drop test's observable.
+        reg = {"api": {"allowed_hosts": ["api.example.com"],
+                       "allowed_methods": ["POST"],
+                       "allowed_paths": ["/v1/"]}}
+        a = make_addon(hosts=["api.example.com"],
+                       secrets={"api": "API-TOKEN"},
+                       registry=reg)
+        a._grants_cache = grants(exp)
+        # Issue #199: the verdict cache's generation tag is counter-
+        # based; the fixture sets the counters as _load()/_grants()
+        # would have after installing this data.
+        a._grants_gen = 1
+        a._registry_gen = 1
+        return a
+
+    def _allow_grants(self, exp):
+        return [{"credential": "api", "host": "api.example.com",
+                 "method": "POST", "path_prefix": "/repos/",
+                 "expires": exp, "approval_id": "grantaid1"}]
+
+    class _CountingList(list):
+        """A grants list that counts full scans (iterations)."""
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    def _counting(self, a, grants):
+        counting = self._CountingList(grants)
+        a._grants = lambda: counting
+        return counting
+
+    def test_verdict_cache_single_scan_for_many_placeholders(self):
+        """Five placeholders, one (credential, host, method, path):
+        the grant list is scanned once, not five times — and every
+        placeholder still swaps."""
+        a = self._grant_addon(self._allow_grants)
+        counting = self._counting(a, a._grants_cache)
+        a._verdict_cache = None  # fresh request, like request() does
+        body = " ".join("hsurr:api" for _ in range(5))
+        out = a._swap_text(body, "api.example.com", "POST", "/repos/x",
+                           location=("body", None), flow_id="f1")
+        self.assertEqual(out, " ".join(["API-TOKEN"] * 5))
+        self.assertEqual(counting.iterations, 1)
+
+    def test_verdict_cache_keyed_on_path(self):
+        """Control for the test above: distinct paths re-scan. A cache
+        key that ignored the path would serve the first path's verdict
+        for every later path — a grant-widening hole."""
+        a = self._grant_addon(self._allow_grants)
+        counting = self._counting(a, a._grants_cache)
+        a._verdict_cache = None
+        for i, path in enumerate("/repos/%d" % i for i in range(3)):
+            ok, _, _ = a._credential_allows_request(
+                "api", "api.example.com", "POST", path)
+            self.assertTrue(ok)
+        self.assertEqual(counting.iterations, 3)
+
+    def test_verdict_cache_keyed_on_method(self):
+        """Same path, different method: the method refusal is its own
+        cached verdict — no grant scan is shared across methods."""
+        a = self._grant_addon(self._allow_grants)
+        counting = self._counting(a, a._grants_cache)
+        a._verdict_cache = None
+        ok, reason, _ = a._credential_allows_request(
+            "api", "api.example.com", "GET", "/repos/x")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "method-not-allowed")
+        ok, _, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertTrue(ok)
+        self.assertEqual(counting.iterations, 2)
+
+    def test_verdict_cache_dropped_on_grants_reload(self):
+        """A grants.json change between two placeholders drops the
+        cache: the second verdict sees the new grants, never a stale
+        allow. (A revoked grant is honored no later than the next
+        placeholder after the revoke lands.)"""
+        a = self._grant_addon(self._allow_grants)
+        counting = self._counting(a, a._grants_cache)
+        a._verdict_cache = None
+        ok, _, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertTrue(ok)
+        # Owner revokes: new grants list, bumped generation, no allow
+        # grant. The static registry (allowed_paths ["/v1/"]) now refuses.
+        a._grants_cache = []
+        a._grants_gen = 2
+        counting2 = self._counting(a, a._grants_cache)
+        ok, reason, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "path-not-allowed")
+        self.assertEqual(counting2.iterations, 1)
+
+    def test_verdict_cache_dropped_on_registry_replace(self):
+        """B1 (Engineering round 1): the generation tag covers the
+        data, not the files' mtimes. Simulates `_load()`'s read-failure
+        path — the registry object is replaced (now empty) with no
+        mtime moving — and the cached allow must NOT be served against
+        the vanished data."""
+        a = self._grant_addon(self._allow_grants)
+        self._counting(a, a._grants_cache)
+        a._verdict_cache = None
+        ok, _, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertTrue(ok)
+        a.registry = {}
+        a._registry_gen += 1  # what _load() does on every replacement
+        ok, reason, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unbound-host")
+
+    def test_verdict_cache_reset_per_request(self):
+        """request() starts with a fresh cache: entries cannot leak
+        across requests (and the cache cannot grow without bound on a
+        long-lived proxy)."""
+        a = self._grant_addon(self._allow_grants)
+        counting = self._counting(a, a._grants_cache)
+        a._verdict_cache = {"gen": ("x", "y"), "d": {("stale",): True}}
+        req = Request("api.example.com", "/repos/x", method="POST",
+                      headers=[("Authorization", "Bearer hsurr:api")])
+        a.request(Flow(req))
+        # The stale entry is gone: the per-request reset dropped the
+        # cache (getattr: a placeholder-free request leaves it None —
+        # lazily recreated only when a verdict is actually needed).
+        cache_d = (a._verdict_cache or {}).get("d", {})
+        self.assertNotIn(("stale",), cache_d)
+        # The request re-scanned (its own verdict, not the stale one)
+        # and the swap still went through.
+        self.assertGreaterEqual(counting.iterations, 1)
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer API-TOKEN")
+
+    def _real_audit_addon(self, tmp):
+        a = make_addon()
+        del a._audit  # exercise the real one, like the disk-guard tests
+        del a._audit_batch
+        return a
+
+    @staticmethod
+    def _statvfs_1g():
+        # 1 GiB free: comfortably above both Finding-198 thresholds, so
+        # the guard never fires and only the write path is exercised.
+        return os.statvfs_result(
+            (4096, 4096, 1 << 20, 1 << 20, 1 << 18,
+             1 << 20, 1 << 20, 1 << 18, 0, 255))
+
+    def test_swap_audit_line_matches_audit_format(self):
+        """_audit_batch must not drift from _audit's line format: one
+        line through each, ts= stripped, the rest byte-identical."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = str(Path(tmp) / "swap.log")
+            with mock.patch.object(sa, "LOG_FILE", Path(log_file)), \
+                 mock.patch("os.statvfs",
+                            return_value=self._statvfs_1g()):
+                a = self._real_audit_addon(tmp)
+                self.assertTrue(a._audit("h.example", "hsurr:api",
+                                         flow_id="f9"))
+                line1 = Path(log_file).read_text().splitlines()[0]
+                line2 = a._swap_audit_line("h.example", "hsurr:api",
+                                           "f9").strip()
+                strip = lambda s: re.sub(r"^ts=\S+ ", "", s)  # noqa: E731
+                self.assertEqual(strip(line1), strip(line2))
+
+    def test_audit_batch_single_open(self):
+        """Three entries, one open: the batch writer opens the log
+        once, writes every line, and returns True."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "swap.log"
+            opens = []
+            real_open = sa._open_audit_log
+
+            def counting_open():
+                opens.append(1)
+                return real_open()
+
+            with mock.patch.object(sa, "LOG_FILE", log_file), \
+                 mock.patch("os.statvfs",
+                            return_value=self._statvfs_1g()), \
+                 mock.patch.object(sa, "_open_audit_log", counting_open):
+                a = self._real_audit_addon(tmp)
+                entries = [("h.example", "hsurr:api", "f1"),
+                           ("h.example", "hsurr:api:totp", "f1"),
+                           ("h.example", "hsurr:api", "f2")]
+                self.assertTrue(a._audit_batch(entries))
+            self.assertEqual(len(opens), 1)
+            lines = log_file.read_text().splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertIn("swapped=hsurr:api:totp", lines[1])
+            self.assertIn("flow=f2", lines[2])
+
+    def test_audit_batch_empty_and_failure(self):
+        """Empty batch: True without opening. Open failure: False —
+        the caller's fail-closed contract, same as _audit."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "swap.log"
+            with mock.patch.object(sa, "LOG_FILE", log_file):
+                a = self._real_audit_addon(tmp)
+                self.assertTrue(a._audit_batch([]))
+                with mock.patch.object(
+                        sa, "_open_audit_log",
+                        side_effect=OSError(28, "No space left")):
+                    self.assertFalse(
+                        a._audit_batch([("h", "hsurr:api", None)]))
+
+    def test_json_flush_uses_single_open(self):
+        """End to end: a JSON body with three placeholders flushes its
+        sink through one audit-log open, swaps every placeholder, and
+        the body stays valid JSON."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "swap.log"
+            opens = []
+            real_open = sa._open_audit_log
+
+            def counting_open():
+                opens.append(1)
+                return real_open()
+
+            with mock.patch.object(sa, "LOG_FILE", log_file), \
+                 mock.patch("os.statvfs",
+                            return_value=self._statvfs_1g()), \
+                 mock.patch.object(sa, "_open_audit_log", counting_open):
+                a = make_addon()
+                del a._audit_batch  # real batch; _audit stays stubbed
+                body = json.dumps({"a": "hsurr:github",
+                                   "b": "hsurr:github",
+                                   "c": "hsurr:github"})
+                out = a._swap_json_text(body, "github.com", "POST",
+                                        "/x", flow_id="fj")
+                self.assertEqual(json.loads(out),
+                                 {"a": "ghp_TOKEN", "b": "ghp_TOKEN",
+                                  "c": "ghp_TOKEN"})
+            self.assertEqual(len(opens), 1)
+            self.assertEqual(
+                len(log_file.read_text().splitlines()), 3)
 
 
 if __name__ == "__main__":
