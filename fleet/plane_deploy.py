@@ -394,7 +394,11 @@ def cmd_deploy(args):
             "deployment_id": deployment_id,
             "worker_sha256": worker_sha256,
             "gates": {"frozen": False, "live_wave": live_wave,
-                      "in_live_wave": True},
+                      # _gates() refuses when a live wave excludes this plane,
+                      # so a surviving print means the plane is in the live
+                      # wave — but when no wave is live (live_wave None) the
+                      # plane cannot be "in" one: #1627.
+                      "in_live_wave": live_wave is not None},
         }, indent=2))
         return 0
 
@@ -503,7 +507,9 @@ def cmd_rollback(args):
             "deployment_id": deployment_id,
             "worker_sha256": worker_sha256,
             "gates": {"frozen": False, "live_wave": live_wave,
-                      "in_live_wave": True},
+                      # Same _gates() reasoning as the deploy dry-run above:
+                      # no live wave => the plane cannot be "in" one: #1627.
+                      "in_live_wave": live_wave is not None},
         }, indent=2))
         return 0
 

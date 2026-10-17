@@ -317,6 +317,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Rollout-controller deploy driver: a dry-run plan on a store with no
+  live rollout (or after `halt`) used to claim the plane was "in" the
+  live wave while also reporting no live wave at all — a self-
+  contradictory answer on the operator's deploy path. The flag is now
+  derived from the wave state instead of hardcoded, and the full
+  operator loop (assign, land, promote, halt, roll back) is pinned by a
+  new cross-component test that exercises the wave-assigner, deploy
+  driver, and update-event journal together, so the seams they share
+  can't drift apart unnoticed. (#1628)
+
 - The desktop-control bridge now keeps a server-side record of every
   unhandled request failure and every rejected CSRF/host check (2026-10-17):
   previously the caller saw the error but the box recorded nothing, and a
