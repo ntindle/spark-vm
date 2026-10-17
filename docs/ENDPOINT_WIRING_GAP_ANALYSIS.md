@@ -9,10 +9,11 @@ state and work to do, not promises. Nothing here sends a push.
 
 **Non-overlap map (what this doc is not):**
 - `docs/PUSH_LANE_PLANE_PORT_GAP_ANALYSIS.md` (2026-10-16) — the port
-  plan for the sweep/sender/GC chain (filed #1565–#1568). It kept the
-  endpoint-driven mappings on their "existing tracker" (#1492) — which
-  has since closed. This doc owns that orphaned half; it does not
-  re-decide the port strategy (F-PP-2 async rewrite stands).
+  plan for the sweep/sender/GC chain (filed #1565–#1568). It never filed
+  the request-path async-boundary port at all (F-EW-2) — the endpoint-driven
+  mappings' port had no tracker once #1492 closed. This doc owns that
+  orphaned half; it does not re-decide the port strategy (F-PP-2 async
+  rewrite stands).
 - `docs/HOSTED_OWNER_ALERTING.md` (2026-10-14) — the owner-facing
   alerting contract that pins the two mappings as "caller unwired
   (#1492)". This doc consumes it; the issue-pointer refresh is D-EW-4.
@@ -78,13 +79,14 @@ an approval is filed, and the loop degrades to a polling dashboard.
   live re-verification precedent: deployed-bytes checks + test-row
   cleanup). An in-repo-only PR cannot close this.
 - **F-EW-4 — ordering is a chain, not a pile.** #1565's live D1 migration
-  (the four push tables + D57 page-once index) must land before any
-  enqueue path writes real rows; the boundary must land before either
-  endpoint calls it (the STACKING NOTE); the two call sites are
-  independent of each other once the boundary exists. The boundary is
-  independently testable in-repo against a contract-faithful async `_D1`
-  stub — #1492's tests already inject `enqueue_page`, so the boundary's
-  contract is consumer-pinned before it is built.
+  (the four push tables + D57 page-once index) landed 2026-10-16 — the
+  schema gate is already clear, so the chain is now: the boundary must
+  land before either endpoint calls it (the STACKING NOTE); the two call
+  sites are independent of each other once the boundary exists. The
+  boundary is independently testable in-repo against a
+  contract-faithful async `_D1` stub — #1492's tests already inject
+  `enqueue_page`, so the boundary's contract is consumer-pinned before
+  it is built. (#1614 is immediately actionable on both halves.)
 - **F-EW-5 — the caller obligations are the trap, not the code.** The
   sync docstrings pin two obligations the call sites must obey:
   (a) `on_approval_filed`: never call for an aid whose #872 record is
@@ -128,8 +130,9 @@ an approval is filed, and the loop degrades to a polling dashboard.
   `enqueue_page` boundary against the worker's async `_D1` (D-EW-2),
   `on_approval_filed` called from the #952 filing endpoint with the
   terminal-aid upstream check, `on_box_revoked` called from the revoke
-  endpoint with the D65 exclusion, live acceptance (D-EW-3). Blocked on
-  #1565 (schema live migration) for the live half only.
+  endpoint with the D65 exclusion, live acceptance (D-EW-3). The schema
+  gate is already clear (#1565 closed 2026-10-16 — the live tables
+  exist), so both halves are immediately actionable.
 - **#1615 (p3)** — docs pointer refresh: retarget
   `docs/HOSTED_OWNER_ALERTING.md`'s "caller unwired (#1492)" rows and the
   CHANGELOG #1608 bullet to the new wiring issue (D-EW-4).
@@ -150,7 +153,7 @@ wiring issue), on #849 (endpoint leg's remaining-build status).
 
 | Build | Owner | State |
 |---|---|---|
-| D1 schema live migration | #1565 (open) | Blocks the live half of everything below |
+| D1 schema live migration | #1565 (closed 2026-10-16 — S1 landed; live tables exist; #1614's live half is NOT gated) |
 | Async `enqueue_page` boundary | #1614 (filed this turn) | Unowned before this turn |
 | Filing/revoke endpoint wiring | #1614 (filed this turn) | The core buzz; live acceptance |
 | Owner-alerting pointer refresh | #1615 (filed this turn, p3) | Docs delta |
