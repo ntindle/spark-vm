@@ -96,6 +96,11 @@ which repo commit they came from.
 - **F-PKG-6 — no update executor for the versioned path.** auto-deploy covers
   main-following operators; a user who installs a tagged release has no
   supported path to the next tag (self_update's executor is a roadmap slice).
+  **Status (2026-10-17, #1611):** `install.sh --update` closes this — the
+  versioned install's checkout moves between release tags in place (latest
+  or explicit `--to`), with the same tag verification a fresh install gets;
+  dirty trees and downgrades refuse loudly, and the stack converges on a
+  plain re-run of the installer.
 
 ## Decisions
 

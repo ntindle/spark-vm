@@ -153,7 +153,13 @@ CUA desktop). Tailscale installs from its signed apt repository, never a
 piped shell script. **Version pinning:** the installer installs the latest
 tagged release by default — `sudo ./spark-vm/scripts/install.sh --version vX.Y.Z`
 installs a specific release instead (the checkout's `VERSION` is verified
-against the tag, and a mismatched tree fails loudly). Re-run it any time:
+against the tag, and a mismatched tree fails loudly). Already installed
+from a release and want a newer one? `sudo -iu ntindle
+~ntindle/spark-vm/scripts/install.sh --update` (or `--to vX.Y.Z` for a
+specific release) moves the agent checkout in place — dirty trees and
+downgrades refuse loudly, the running stack is untouched, and a plain
+re-run of the installer afterwards converges the stack. Re-run it any
+time:
 completed steps are skipped — the desktop start always runs but is a no-op
 when current, and an already-pinned checkout is left untouched — and
 anything the script cannot complete fails loudly with a diagnostic

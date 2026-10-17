@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Box installer: a box already installed from a tagged release can now be
+  moved to a newer release in place (`--update`, or `--update --to` for a
+  specific release) — closing the tag-to-tag gap in the versioned install
+  path. The updater refuses dirty checkouts and downgrades loudly, verifies
+  the target tag exactly like a fresh install does, and leaves the running
+  stack untouched: re-run the installer afterwards to converge the stack.
+  (#TBD)
+
 - Hosted phone-approval push: groundwork so the hosted plane can page an
   owner when an approval is filed or a box is revoked — the two paging
   policies now exist in an async form the plane worker can adopt once its

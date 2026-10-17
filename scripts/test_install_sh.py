@@ -56,6 +56,11 @@ STEP_FNS = [
     "run_agent",
     "parse_args",
     "main",
+    "newer_release",
+    "current_release_tag",
+    "resolve_update_target",
+    "step_repo_update",
+    "run_update",
 ]
 
 
@@ -104,12 +109,14 @@ def test_env_flags_survive_sourcing():
     # plain assignments would clobber them (notably --agent-user, --force,
     # and --version).
     code = (
-        "export AGENT_USER=alice DRY_RUN=1 FORCE=1 INSTALL_VERSION=v1.2.3; "
+        "export AGENT_USER=alice DRY_RUN=1 FORCE=1 INSTALL_VERSION=v1.2.3 UPDATE=1 UPDATE_TO=v1.2.4; "
         f"source {SCRIPT} >/dev/null 2>&1; "
         '[ "$AGENT_USER" = alice ] || { echo "AGENT_USER clobbered: $AGENT_USER"; exit 1; }; '
         '[ "$DRY_RUN" = 1 ] || { echo "DRY_RUN clobbered: $DRY_RUN"; exit 1; }; '
         '[ "$FORCE" = 1 ] || { echo "FORCE clobbered: $FORCE"; exit 1; }; '
         '[ "$INSTALL_VERSION" = v1.2.3 ] || { echo "INSTALL_VERSION clobbered: $INSTALL_VERSION"; exit 1; }; '
+        '[ "$UPDATE" = 1 ] || { echo "UPDATE clobbered: $UPDATE"; exit 1; }; '
+        '[ "$UPDATE_TO" = v1.2.4 ] || { echo "UPDATE_TO clobbered: $UPDATE_TO"; exit 1; }; '
         "echo OK"
     )
     proc = run_bash(code)
