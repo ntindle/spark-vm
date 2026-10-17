@@ -305,7 +305,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   on the proxy's shared event loop — a request-shaped availability
   vector. The verdict cache is dropped whenever the grants or registry
   reload, so a revoked grant is honored no later than the next
-  placeholder after the revoke lands. (#TBD)
+  placeholder after the revoke lands. (#1626)
 
 - The credential-swapping proxy now refuses to start when any of its
   configurable file paths points outside its home directory (2026-10-17):
