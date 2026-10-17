@@ -248,6 +248,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Approval-page hardening (2026-10-16): the per-approval cross-process lock
+  files are now pruned once their approval is fully resolved, instead of
+  accumulating one file per approval forever; re-opened approvals are
+  re-filed owner-only (0600) like every other filing instead of inheriting
+  the umask; the expired-approval terminal record is now claimed
+  crash-durably, so a mid-write crash can no longer leave a torn record the
+  next sweep mistakes for a completed one; and expiries reaped during page
+  renders now leave the same audit-trail event as the other expiry paths.
+  (#1606)
 - `muse-job watch` pages on a buried `question` claim (2026-10-16): `question`
   was read from the tail-line event, which issue #23 B3 proved buryable for
   `done` — a newer trailing line silently suppressed the page. Questions are

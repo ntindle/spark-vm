@@ -55,6 +55,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -366,12 +367,13 @@ def _aid_xlock(aid):
     points above do.
 
     The aid must pass ``ID_RE`` before it becomes a path (same bar as
-    ``_stamp_expired_consumed``); ``ValueError`` otherwise. Lockfiles are
-    never unlinked — aids are never reused, so one small empty file per
-    approval accumulates in ``locks/`` (unlike ``consumed/``, which
-    ``_prune_consumed`` caps at ``_CONSUMED_KEEP`` — a future turn may
-    prune ``locks/`` alongside). A crash can never wedge the lock: flock
-    releases with the open file description, so a dead holder frees it.
+    ``_stamp_expired_consumed``); ``ValueError`` otherwise. Lockfiles for
+    dead aids are pruned by ``_prune_locks`` (issue #1601, wired into the
+    cadence-gated ``_housekeeping_if_due``) once their aid has no live
+    approval file anywhere — see its docstring for the safety predicate;
+    aids are never reused, so the prune can never alias a live item. A
+    crash can never wedge the lock: flock releases with the open file
+    description, so a dead holder frees it.
 
     If the lockfile cannot be created or opened (a broken approvals
     dir), the failure is audited loudly and the caller proceeds WITHOUT
@@ -1043,15 +1045,25 @@ def _quarantine_corrupt_pending(aid, src):
 
 
 def _sweep_stale_tmp(d):
-    """Issue #232: remove crash-residue *.tmp files from pending/.
+    """Issue #232: remove crash-residue *.tmp files from a writer dir.
 
-    Atomic writers (confirm-request, swap_addon.py's filer) hold the tmp
-    name only for the write+replace window, so a *.tmp older than
-    _TMP_SWEEP_GRACE_S is residue from a crashed writer, never an
-    in-flight one. (Issue #78 retired the GET path's nonce write-back —
-    the GET render no longer rewrites the pending file at all.) Best-effort: races are fail-silent,
-    the next render retries."""
-    for fn in sorted(os.listdir(d)):
+    Atomic writers (confirm-request, swap_addon.py's filer, the #1603
+    expiry stamper) hold the tmp name only for the write+replace window,
+    so a *.tmp older than _TMP_SWEEP_GRACE_S is residue from a crashed
+    writer, never an in-flight one. (Issue #78 retired the GET path's
+    nonce write-back — the GET render no longer rewrites the pending
+    file at all.) Best-effort: races are fail-silent, the next pass
+    retries. Called for pending/ on every render and for consumed/ from
+    the cadence-gated housekeeping (the stamper's per-attempt tmps are
+    unique, so a stale one can only come from a crashed stamp). A
+    missing/unreadable dir is a no-op — the sweep never creates the dir
+    it sweeps (same discipline as _prune_quarantine/_prune_locks), so the
+    housekeeping call passes a joined path, not consumed_dir()."""
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return
+    for fn in names:
         if not fn.endswith(".tmp"):
             continue
         p = os.path.join(d, fn)
@@ -1122,15 +1134,16 @@ def load_pending():
                     # while the reverse order could lose the expiry with
                     # no record at all). If the answer path already
                     # consumed this aid while we waited on the lock, its
-                    # terminal record exists and our O_EXCL create fails
+                    # terminal record exists and our link claim fails
                     # -> False: the human answer wins, and we must not
                     # resurrect the pending file.
                     try:
-                        _stamp_expired_consumed(aid, it, p, "confirmd")
+                        stamped = _stamp_expired_consumed(aid, it, p,
+                                                          "confirmd")
                     except ValueError:
                         # Malformed aid: refuse to touch consumed/, but
                         # still reap the expired file below.
-                        pass
+                        stamped = False
                     except OSError:
                         # Stamp failed (e.g. ENOSPC): keep the pending
                         # file so the next render retries the stamp.
@@ -1138,6 +1151,7 @@ def load_pending():
                         continue
                     try:
                         os.remove(p)
+                        removed = True
                     except OSError:
                         # Lost the race with the answer path, which
                         # consumed the item while we waited on the lock —
@@ -1145,7 +1159,21 @@ def load_pending():
                         # other OSError is fail-safe here too: the item is
                         # skipped from this render and the remove is
                         # retried on the next one.
-                        pass
+                        removed = False
+                    # Issue #1604: the Finding-58 render reap is the third
+                    # expiry path (alongside the GET detail reap and
+                    # _answer_locked), and the only one that never audited
+                    # "expired-reaped" — finding 47/53(e) says every
+                    # refusal leaves a trail. Audit when this pass did the
+                    # work (stamped or removed) — the trail is never
+                    # lost. A remove-failure retry can re-audit (the
+                    # GET/_answer paths audit unconditionally); duplicates
+                    # are benign. Losers (stamp False + remove failed)
+                    # stay silent, so concurrent renders cannot
+                    # double-audit.
+                    if stamped or removed:
+                        audit_log("expired-reaped", "confirmd", "",
+                                  "id=%s" % aid)
                     # Arch 2026-09-21: keep the per-aid lock registry
                     # bounded — the item left pending here too. Evicting
                     # unconditionally is safe: aids are never reused and
@@ -1207,9 +1235,12 @@ def file_owner_name(path):
 def _stamp_expired_consumed(aid, it, pending_path, expired_by):
     """S1 (#511): stamp the expired-approval terminal record.
 
-    Write-if-absent via O_EXCL: the winner of the confirmd-render-reap /
-    proxy-filing-scan race creates consumed/<aid>.json; the loser gets
-    FileExistsError and must move on without resurrecting anything.
+    Write-if-absent via an atomic os.link claim (issue #1603): the
+    winner of the confirmd-render-reap / proxy-filing-scan race creates
+    consumed/<aid>.json; the loser gets FileExistsError and must move on
+    without resurrecting anything. The record is written to a tmp and
+    fsync'd BEFORE the link, so a mid-write crash can never leave a torn
+    record that future reaps mistake for a completed stamp.
     Returns True when this call created the record, False when one
     already existed (the other reaper — or the answer path — won).
 
@@ -1236,28 +1267,70 @@ def _stamp_expired_consumed(aid, it, pending_path, expired_by):
     # is invented before H10.
     rec["tenant_id"] = None
     path = os.path.join(consumed_dir(), aid + ".json")
-    try:
-        # Issue #1211: 0600, not 0644 — same data class as the 0600
-        # audit log (credential names, hosts, methods, path prefixes;
-        # finding 198), and consumed/ has no directory-level
-        # restriction. O_EXCL: always newly created, so the create
-        # mode suffices (umask cannot weaken 0600).
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return False
+    cdir = consumed_dir()
+    # Issue #1603: crash-durable claim. The old code wrote directly via
+    # O_EXCL: a crash mid-write (power loss — the BaseException unlink
+    # never runs) left a torn record that future reaps EEXIST-skipped as
+    # "already stamped", losing the expiry with no truthful record
+    # anywhere. Write to a per-attempt tmp (mkstemp: 0600, O_EXCL), fsync
+    # the file, then claim the name with an atomic hard link — os.link
+    # raises FileExistsError when another reaper already stamped this
+    # aid, preserving the write-if-absent contract exactly (the
+    # exactly-once race pinned by test_stamp_exactly_once_under_race in
+    # test_expired_terminal_record.py: concurrent stamps must not share
+    # a tmp, or one thread's unlink would clobber another's and the link
+    # would raise FileNotFoundError instead of the FileExistsError
+    # gate). A mid-write crash can then only lose the link (the path
+    # never exists), and the next reap re-stamps instead of skipping a
+    # torn record. The tmp is unlinked on every exit path; a stale tmp
+    # from a crashed stamp is inert (nothing reads *.tmp) and swept by
+    # the housekeeping tmp sweep.
+    #
+    # Issue #1211: 0600, not 0644 — same data class as the 0600
+    # audit log (credential names, hosts, methods, path prefixes;
+    # finding 198), and consumed/ has no directory-level
+    # restriction. mkstemp creates 0600 from birth (umask cannot weaken
+    # it); the link inherits the tmp's mode.
+    fd, tmp = tempfile.mkstemp(prefix=aid + ".", suffix=".tmp", dir=cdir)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(rec, f, indent=2)
+            f.flush()
+            # Crash durability (issue #72 twin): the link below only
+            # names complete data if the file content is durable first.
+            # (The directory entry itself is not fsync'd — a crash at
+            # that exact instant loses the link, not a torn record, and
+            # the next reap re-stamps; the torn-record hole this fixes
+            # is closed by the file fsync above.)
+            os.fsync(f.fileno())
     except BaseException:
-        # A torn record must not stand: the loser mistakes presence
-        # for a win. Best-effort unlink, then re-raise as OSError so
-        # callers keep the pending file for the next reap's retry.
+        # A torn tmp must not stand: best-effort unlink, then re-raise
+        # as OSError so callers keep the pending file for the next
+        # reap's retry.
         try:
-            os.unlink(path)
+            os.unlink(tmp)
         except OSError:
             pass
         raise OSError("expired stamp write failed for %s" % aid)
-    return True
+    try:
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # Another reaper (or a previous run's stamp) already recorded
+            # this aid: the write-if-absent loser moves on without
+            # resurrecting anything — the exact contract the old O_EXCL
+            # open provided.
+            claimed = False
+        else:
+            claimed = True
+    finally:
+        # The tmp is unlinked on every exit path — even a non-
+        # FileExistsError link failure (e.g. ENOSPC) leaves no residue.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return claimed
 
 
 STYLE = """<style>
@@ -1757,7 +1830,8 @@ def _prune_quarantine(limit=None):
     """Delete pending-quarantine/ history beyond the newest `limit` files.
 
     Called by _housekeeping_if_due() (cadence-gated), after
-    _prune_consumed(). Mirrors _prune_consumed's race-benign shape: only
+    _prune_consumed() and before _prune_locks(). Mirrors
+    _prune_consumed's race-benign shape: only
     the oldest files are ever deletion candidates, all OSError paths
     tolerated, and the count gate skips the mtime stat storm when the
     dir is within the cap. Quarantine moves never collide with the prune
@@ -1798,6 +1872,52 @@ def _prune_quarantine(limit=None):
             pass
 
 
+def _prune_locks():
+    """Issue #1601: delete locks/<aid>.lock files for aids with no live
+    approval file.
+
+    The #945 cross-process lockfiles accumulated one empty file per
+    approval for the daemon's lifetime — the one confirmd store with no
+    cap (the audit log rolls, consumed/ keeps _CONSUMED_KEEP, quarantine
+    keeps _QUARANTINE_KEEP, the in-memory rings are capped).
+
+    Safe predicate: a lockfile is pruned only when no <aid>.json exists
+    in pending/, answered/, consumed/, or pending-quarantine/. Every
+    path that mutates the store under _aid_xlock re-validates a live
+    file for the aid while holding the lock; the no-live-file takers
+    (GET-detail and /answer 404s, the ingest's unknown-aid/idempotency
+    rejections) mutate nothing, so a prune racing one only breaks flock
+    rendezvous between parties with nothing to exclude. Re-opens mint
+    new aids, so a pruned lockfile can never alias a live item's
+    exclusion window.
+
+    Called by _housekeeping_if_due() (cadence-gated), after
+    _prune_quarantine(). Race-benign like _prune_consumed: a lost race
+    surfaces as FileNotFoundError, which is tolerated. A missing locks/
+    dir means nothing to prune — the prune never creates the dir it
+    prunes, the same discipline as _prune_quarantine.
+    """
+    d = os.path.join(APPROVALS, "locks")
+    try:
+        names = [fn for fn in os.listdir(d) if fn.endswith(".lock")]
+    except OSError:
+        return
+    live = set()
+    for sub in ("pending", "answered", "consumed", "pending-quarantine"):
+        try:
+            for fn in os.listdir(os.path.join(APPROVALS, sub)):
+                if fn.endswith(".json"):
+                    live.add(fn[:-len(".json")])
+        except OSError:
+            continue
+    for fn in names:
+        if fn[:-len(".lock")] not in live:
+            try:
+                os.remove(os.path.join(d, fn))
+            except OSError:
+                pass
+
+
 def _sweep_answered(grace=None):
     """Move answered/ strays older than `grace` seconds to consumed/."""
     if grace is None:
@@ -1827,12 +1947,14 @@ def _repair_approval_file_modes():
     Records written before the #1211 deploy keep their 0644 mode — the
     O_EXCL stampers return False on FileExistsError and never touch an
     existing file, and the answered->consumed renames preserve whatever
-    mode the file was born with. At startup, walk answered/ + consumed/
-    and chmod 0600 every *.json, best-effort: a mode we cannot tighten
+    mode the file was born with. Issue #1602: pending/ joins the walk —
+    the H20 re-file path wrote umask-governed modes before its O_EXCL
+    0600 pin. At startup, walk pending/ + answered/ + consumed/ and
+    chmod 0600 every *.json, best-effort: a mode we cannot tighten
     is loud, never fatal — serving must not fail closed over a
     hardening repair.
     """
-    for d in (answered_dir(), consumed_dir()):
+    for d in (pending_dir(), answered_dir(), consumed_dir()):
         try:
             names = os.listdir(d)
         except OSError:
@@ -1906,18 +2028,19 @@ def _reset_housekeeping_for_tests():
 
 
 def _housekeeping_if_due():
-    """Run the answered-sweep + consumed-prune + quarantine-prune at most
-    once per interval.
+    """Run the answered-sweep + consumed-prune + quarantine-prune +
+    locks-prune + consumed tmp-sweep at most once per interval.
 
-    Returns True when the trio ran. Benign under handler concurrency: the
-    timestamp commits under _housekeeping_lock before the work starts, so
-    two threads can't both decide "due"; the sweep and both prunes are
-    individually race-tolerant (unique filenames — aids are never reused —
-    oldest-only deletes, all OSError paths tolerated). Note the quarantine
-    prune's mtime snapshot can go stale: a quarantine move replaces in
-    place via os.replace, refreshing mtime, so a stale snapshot can evict
-    a recently-refreshed file early — the eviction itself stays safe and
-    every quarantine move is journaled in the audit log."""
+    Returns True when the set ran. Benign under handler concurrency:
+    the timestamp commits under _housekeeping_lock before the work starts,
+    so two threads can't both decide "due"; the sweep and all three prunes
+    are individually race-tolerant (unique filenames — aids are never
+    reused — oldest-only deletes, all OSError paths tolerated). Note the
+    quarantine prune's mtime snapshot can go stale: a quarantine move
+    replaces in place via os.replace, refreshing mtime, so a stale
+    snapshot can evict a recently-refreshed file early — the eviction
+    itself stays safe and every quarantine move is journaled in the audit
+    log."""
     with _housekeeping_lock:
         global _last_housekeeping_mono
         now = time.monotonic()
@@ -1928,6 +2051,12 @@ def _housekeeping_if_due():
     _sweep_answered()
     _prune_consumed()
     _prune_quarantine()
+    _prune_locks()
+    # Issue #1603: sweep crash-residue stamper tmps from consumed/ — the
+    # per-attempt tmp names are unique, so anything older than the grace
+    # period is a crashed stamp, never an in-flight one. Joined path, no
+    # makedirs: a sweep must never create the dir it sweeps.
+    _sweep_stale_tmp(os.path.join(APPROVALS, "consumed"))
     return True
 
 
@@ -2978,8 +3107,23 @@ class Handler(BaseHTTPRequestHandler):
         new["original_requester"] = old.get("requester") or "unknown"
         dst = os.path.join(pending_dir(), new_aid + ".json")
         tmp = dst + ".tmp"
-        with open(tmp, "w") as f:
+        # Issue #1602: the re-filed item must meet the README's operator
+        # contract — owner-only (0600), atomic (tmp + fsync + os.replace)
+        # — like every other pending writer. The old bare open() left the
+        # mode to the umask (0644 under 022), truncated a stale tmp in
+        # place, followed a planted tmp symlink instead of refusing it,
+        # and never fsync'd. Mirror the _answer_locked pattern (#1211):
+        # unlink a stale tmp first, O_EXCL creates 0600 from birth and
+        # refuses a planted symlink, fsync before the replace.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(new, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, dst)
         # Issue #537: the new item is pending — index it so the next
         # idempotency check opens one file instead of scanning pending/.

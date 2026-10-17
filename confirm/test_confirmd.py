@@ -1176,25 +1176,33 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(remaining, names)
 
     def test_housekeeping_runs_when_due(self):
-        """First call after a reset runs the sweep+prune trio."""
+        """First call after a reset runs the sweep+prune set."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
              mock.patch.object(cd, "_prune_consumed") as pr, \
-             mock.patch.object(cd, "_prune_quarantine") as pq:
+             mock.patch.object(cd, "_prune_quarantine") as pq, \
+             mock.patch.object(cd, "_prune_locks") as pl, \
+             mock.patch.object(cd, "_sweep_stale_tmp") as st:
             self.assertTrue(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
         pq.assert_called_once_with()
+        pl.assert_called_once_with()
+        st.assert_called_once()
 
     def test_housekeeping_skips_when_not_due(self):
-        """A second immediate call is gated — one trio per interval."""
+        """A second immediate call is gated — one set per interval."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
              mock.patch.object(cd, "_prune_consumed") as pr, \
-             mock.patch.object(cd, "_prune_quarantine") as pq:
+             mock.patch.object(cd, "_prune_quarantine") as pq, \
+             mock.patch.object(cd, "_prune_locks") as pl, \
+             mock.patch.object(cd, "_sweep_stale_tmp") as st:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertFalse(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
         pq.assert_called_once_with()
+        pl.assert_called_once_with()
+        st.assert_called_once()
 
     def test_housekeeping_zero_interval_always_runs(self):
         """Patching the interval to 0 restores the old every-answer
@@ -1202,10 +1210,14 @@ class ConfirmdTests(unittest.TestCase):
         with mock.patch.object(cd, "_HOUSEKEEPING_INTERVAL_S", 0), \
              mock.patch.object(cd, "_sweep_answered") as sw, \
              mock.patch.object(cd, "_prune_consumed") as pr, \
-             mock.patch.object(cd, "_prune_quarantine") as pq:
+             mock.patch.object(cd, "_prune_quarantine") as pq, \
+             mock.patch.object(cd, "_prune_locks") as pl, \
+             mock.patch.object(cd, "_sweep_stale_tmp") as st:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertTrue(cd._housekeeping_if_due())
         self.assertEqual(sw.call_count, 2)
+        self.assertEqual(pl.call_count, 2)
+        self.assertEqual(st.call_count, 2)
         self.assertEqual(pr.call_count, 2)
         self.assertEqual(pq.call_count, 2)
 
@@ -2845,6 +2857,140 @@ class ReopenTests(unittest.TestCase):
                                 "credential": "openai"})
         self.assertNotIn("Re-opened from a denied request", plain)
 
+
+    # --- 1601: locks/ prune --------------------------------------------
+
+    def test_1601_prune_locks_removes_only_dead_aids(self):
+        """_prune_locks() deletes lockfiles for aids with no live approval
+        file anywhere, and keeps every other lockfile (pending, answered,
+        consumed, quarantine) plus non-.lock strays. Leaving the dead-aid
+        lockfile in place must fail this test."""
+        locks = self.approvals / "locks"
+        locks.mkdir()
+        live_pending = "live-pending-1"
+        live_answered = "live-answered-1"
+        live_consumed = "live-consumed-1"
+        live_quar = "live-quar-1"
+        dead = "dead-aid-1"
+        (self.approvals / "pending"
+         / (live_pending + ".json")).write_text("{}")
+        (self.approvals / "answered"
+         / (live_answered + ".json")).write_text("{}")
+        (self.approvals / "consumed"
+         / (live_consumed + ".json")).write_text("{}")
+        (self.approvals / "pending-quarantine").mkdir(exist_ok=True)
+        (self.approvals / "pending-quarantine"
+         / (live_quar + ".json")).write_text("{}")
+        for aid in (live_pending, live_answered, live_consumed, live_quar,
+                    dead):
+            (locks / (aid + ".lock")).write_text("")
+        (locks / "not-a-lock.txt").write_text("")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_locks()
+        for aid in (live_pending, live_answered, live_consumed, live_quar):
+            self.assertTrue((locks / (aid + ".lock")).exists(), aid)
+        self.assertFalse((locks / (dead + ".lock")).exists())
+        self.assertTrue((locks / "not-a-lock.txt").exists())
+
+    def test_1601_prune_locks_missing_dir_is_noop(self):
+        """A locks/ dir that was never created (fresh box) prunes to a
+        no-op instead of raising — the prune never creates the dir it
+        prunes."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_locks()  # must not raise
+
+    def test_1601_housekeeping_runs_locks_prune(self):
+        """The locks prune rides the cadence-gated housekeeping — a dead
+        lockfile is gone after one due housekeeping run."""
+        locks = self.approvals / "locks"
+        locks.mkdir()
+        dead = locks / "dead-aid-9.lock"
+        dead.write_text("")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self.assertTrue(cd._housekeeping_if_due())
+        self.assertFalse(dead.exists())
+
+    # --- 1602: re-open write contract -----------------------------------
+
+    def test_1602_reopen_refile_is_0600(self):
+        """The H20 re-filed pending item must be owner-only 0600 even
+        under a permissive umask — the README's operator contract. With
+        the old bare open() the file landed 0644 under umask 022."""
+        aid = "deny-old-1602"
+        self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, headers = self._handler()
+        old_umask = os.umask(0o022)
+        try:
+            with mock.patch.object(cd, "_push_enqueue_reopen"):
+                got = self._reopen(h, aid, nonce)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(calls.get("code"), 303, got)
+        new_aid = headers["Location"].rsplit("/", 1)[-1]
+        p = self.approvals / "pending" / (new_aid + ".json")
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+
+    def test_1602_repair_tightens_pending_too(self):
+        """_repair_approval_file_modes now covers pending/ (pre-#1602
+        re-files landed umask-governed and were never repaired)."""
+        p = self.approvals / "pending" / "old-refile-1.json"
+        p.write_text("{}")
+        os.chmod(p, 0o644)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._repair_approval_file_modes()
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+
+    # --- 1603: crash-durable stamp claim ---------------------------------
+
+    def test_1603_stamp_is_write_if_absent_and_leaves_no_tmp(self):
+        """_stamp_expired_consumed keeps its write-if-absent contract
+        (second stamp returns False) through the tmp+link claim, and
+        leaves no *.tmp residue. The crash-durability property itself
+        (fsync-before-link) is structural — this test pins the preserved
+        contract and the no-residue invariant."""
+        aid = "stamp-claim-1"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps({"id": aid,
+                                 "expires": "2020-01-01T00:00:00+00:00"}))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self.assertTrue(cd._stamp_expired_consumed(aid, {"id": aid},
+                                                       str(p), "confirmd"))
+            self.assertFalse(cd._stamp_expired_consumed(aid, {"id": aid},
+                                                        str(p), "confirmd"))
+        rec = json.loads((self.approvals / "consumed"
+                          / (aid + ".json")).read_text())
+        self.assertEqual(rec["decision"], "expired")
+        self.assertEqual(
+            list((self.approvals / "consumed").glob("*.tmp")), [])
+        self.assertEqual(stat.S_IMODE(os.stat(
+            self.approvals / "consumed" / (aid + ".json")).st_mode), 0o600)
+
+    # --- 1604: render-reap audit -----------------------------------------
+
+    def test_1604_render_reap_audits_expired_reaped_once(self):
+        """The Finding-58 render reap must audit 'expired-reaped' when it
+        does the work — and exactly once: a second render sees nothing to
+        reap and stays silent."""
+        aid = "reap-audit-1"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps({"id": aid,
+                                 "expires": "2020-01-01T00:00:00+00:00"}))
+        events = []
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda e, pe, lo, d="":
+                               events.append((e, pe, lo, d))):
+            cd.load_pending()
+            self.assertFalse(p.exists())
+            cd.load_pending()
+        reaped = [e for e in events if e[0] == "expired-reaped"]
+        self.assertEqual(len(reaped), 1)
+        self.assertEqual(reaped[0][1], "confirmd")
+        self.assertIn("id=%s" % aid, reaped[0][3])
+        rec = json.loads((self.approvals / "consumed"
+                          / (aid + ".json")).read_text())
+        self.assertEqual(rec["decision"], "expired")
 
 class AuditLogTests(unittest.TestCase):
     """confirmd.audit_log durability posture (arch finding A5, sentinel

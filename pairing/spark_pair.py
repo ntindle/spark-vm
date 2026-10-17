@@ -1192,8 +1192,10 @@ def _ingest_aid_xlock(d, approvals, aid):
     loud-degrade as confirmd's half: the pre-#945 mitigations (O_EXCL
     write-if-absent, the pre/post-mint terminal re-checks, the loud
     APPROVE/TERMINAL RACE journal) still apply. Lockfiles are never
-    unlinked (aids are never reused); a future turn may prune ``locks/``
-    alongside confirmd's ``_prune_consumed``. A bad aid raises
+    unlinked (aids are never reused) except by confirmd's ``_prune_locks``
+    (issue #1601), which removes a lockfile once its aid has no live
+    approval file anywhere — a pruned lockfile can never alias a live
+    item. A bad aid raises
     ValueError (it must never become a path); the decision entry point
     already validated it via ``_ingest_decision_payload``, so that is
     unreachable — but the bar is enforced here too.
