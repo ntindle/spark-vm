@@ -61,6 +61,7 @@ producthunt.com
 red5.net
 release-compare-url
 severitydaily.com
+techstartups.com
 termsquad.com
 theregister.com
 tvgreport.com

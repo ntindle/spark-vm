@@ -485,6 +485,88 @@ def test_status_reports_rollout(store):
     assert _json(_cli(store, "status"))["frozen"] is True
 
 
+def test_status_bad_signal_mirrors_gate(store):
+    # #1638 (fix shape (a)): status folds the S5 journal signal the
+    # promotion gate enforces into a per-wave bad_signal field, so the
+    # at-a-glance view and the gate can no longer disagree silently.
+    _estate(store, n=3, canary_tenants=("ct1", "ct2"))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1",
+                "--buckets", "1").returncode == 0
+    for pid in ("plane-0", "plane-1", "plane-2"):
+        _deploy(store, pid, "w@v1")
+    waves = _json(_cli(store, "status"))["rollout"]["waves"]
+    assert waves["0"]["landed"] is True
+    assert waves["0"]["bad_signal"] == []
+    # The issue's divergence: converged records, but the gate refuses.
+    assert _inv(store, "event", "--plane-id", "plane-0", "--kind",
+                "deploy-failed", "--template", "w@v1",
+                "--notes", "smoke failed").returncode == 0
+    waves = _json(_cli(store, "status"))["rollout"]["waves"]
+    assert waves["0"]["landed"] is True  # convergence half unchanged
+    assert waves["0"]["bad_signal"] == ["plane-0"]  # journal half now visible
+    p = _cli(store, "promote")
+    assert p.returncode != 0 and "bad-signal" in p.stderr  # the gate agrees
+    # A fresh landing clears the signal.
+    assert _inv(store, "event", "--plane-id", "plane-0", "--kind",
+                "deploy-landed", "--template", "w@v1",
+                "--notes", "ok now").returncode == 0
+    waves = _json(_cli(store, "status"))["rollout"]["waves"]
+    assert waves["0"]["bad_signal"] == []
+
+
+def test_status_bad_signal_ignores_pre_wave_events(store):
+    # The window is the rollout's updated_at, like the gate: a failure
+    # that predates the rollout never pages the 2am operator. plane-0's
+    # LATEST journal event is the pre-assign failure (plane-0 is never
+    # deployed, so no deploy-landed event supersedes it) — the window
+    # guard is what excludes it. Neuter: removing the `at < wave_since`
+    # guard flips this test (bad_signal == ["plane-0"]).
+    _estate(store, n=3, canary_tenants=("ct1", "ct2"))
+    _release(store)
+    assert _inv(store, "event", "--plane-id", "plane-0", "--kind",
+                "deploy-failed", "--template", "w@v1",
+                "--notes", "old news").returncode == 0
+    assert _cli(store, "assign", "--template", "w@v1",
+                "--buckets", "1").returncode == 0
+    for pid in ("plane-1", "plane-2"):
+        _deploy(store, pid, "w@v1")
+    waves = _json(_cli(store, "status"))["rollout"]["waves"]
+    assert waves["0"]["bad_signal"] == []
+    # Sanity: the pre-assign failure IS plane-0's latest journal event,
+    # so only the window explains its absence.
+    kinds = [ev["kind"] for ev in plane_inventory.read_plane_events(store)
+             if ev["plane_id"] == "plane-0"]
+    assert kinds == ["deploy-failed"]
+
+
+def test_status_bad_signal_fail_closed(store):
+    # The journal is the wave-health signal's trust root: status fails
+    # closed exactly like the gate — no silent empty history.
+    _estate(store, n=3, canary_tenants=("ct1", "ct2"))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1",
+                "--buckets", "1").returncode == 0
+    _deploy(store, "plane-0", "w@v1")
+    # Corrupt journal line -> status exits 2, not a clean empty view.
+    path = os.path.join(store, plane_inventory.PLANE_EVENTS_JOURNAL_NAME)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("this is not json\n")
+    p = _cli(store, "status")
+    assert p.returncode == 2
+    assert "cannot read plane event journal" in p.stderr
+    os.remove(path)
+    # Missing updated_at -> status exits 2 (the gate's exact refusal).
+    waves = _waves_json(store)
+    del waves["updated_at"]
+    with open(os.path.join(store, "waves.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(waves, fh)
+    p = _cli(store, "status")
+    assert p.returncode == 2
+    assert "updated_at" in p.stderr
+
+
 def test_canary_tenants_roundtrip(store):
     assert _json(_cli(store, "canary-tenants", "--list")) == {"canary_tenants": []}
     assert _cli(store, "canary-tenants", "--add", "ct1").returncode == 0
