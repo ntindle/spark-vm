@@ -260,7 +260,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   audit log itself) would silently read or write somewhere unintended —
   including an audit log pointed at temporary storage, where the audit
   trail would vanish on restart while swaps kept flowing. A bad path is
-  now a loud startup failure instead of a silent misconfiguration. (#TBD)
+  now a loud startup failure instead of a silent misconfiguration. (#1610)
 
 ### Fixed
 
