@@ -325,7 +325,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   operator loop (assign, land, promote, halt, roll back) is pinned by a
   new cross-component test that exercises the wave-assigner, deploy
   driver, and update-event journal together, so the seams they share
-  can't drift apart unnoticed. (#TBD)
+  can't drift apart unnoticed. (#1628)
 
 - The desktop-control bridge now keeps a server-side record of every
   unhandled request failure and every rejected CSRF/host check (2026-10-17):
