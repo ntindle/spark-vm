@@ -53,10 +53,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 
 - The swap proxy's audit trail now records a `tenant` field on every
-  swap line, so a future multi-tenant host can attribute each swapped
-  credential to a tenant without changing the log format later. The
-  value is an unverified operator hint (a set name or the box
-  hostname), not an identity claim — enforcement still belongs to the
+  `swapped=` line, so a future multi-tenant host can attribute each
+  swapped credential to a tenant without changing the log format
+  later. The value is an unverified operator hint — set it with the
+  `SWAP_TENANT` environment variable, otherwise the box hostname —
+  not an identity claim, and enforcement still belongs to the
   multi-tenancy work. (#1653)
 
 - Pinned down what the release-gating channel's remaining fleet
