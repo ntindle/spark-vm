@@ -96,7 +96,7 @@ The pipeline is `fleet/box_snapshot.py` (box emits) →
   convenience (emit-time age, clearly labeled as such in the doc).
   Recomputed age is `max(0, now − generated_at)` in aware UTC —
   negative deltas are clock skew, floored exactly like
-  `_read_gate_status` floors them (box_snapshot.py:98-101), so the
+  `_read_gate_status` floors them (box_snapshot.py:96-102), so the
   rule and the surface can never diverge on the same record.
 - **D-SC-2 — carry `emitted_at` on the inventory record** (the
   snapshot's own emission timestamp, box clock). `observed_at` keeps
