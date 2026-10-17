@@ -88,7 +88,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   gate answer's own timestamp (so a stale-gate rule can recompute age
   honestly instead of reading a frozen-at-emission age), and the
   null-signal contract is written down for every future rule.
-  (#TBD)
+  (#1660)
 
 - The desktop bridge's structured audit log now has an operator reader:
   `cua-bridge-log` filters the bridge's audit events by kind or severity

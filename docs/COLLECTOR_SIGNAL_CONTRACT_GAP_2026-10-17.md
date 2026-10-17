@@ -3,8 +3,8 @@
 **Scope:** the fleet collector's operator-facing signal contract — what
 `fleet/inventory.py` records promise vs what the S1 alert rules
 (`docs/UPDATE_EVENT_REPORTING.md` §4) and the operator surfaces actually
-need. Open-source track (operator estates), serving #1631 (fifth alert
-rule) and #1632 (`fleet status` gate-stale line).
+need. Open-source track (operator estates), serving #1631 (the G18 §7
+fifth alert rule) and #1632 (`fleet status` gate-stale line).
 
 **Pinned to:** main `0a70109b` (2026-10-17). Follow-up to the 2026-10-17
 alert-stack analysis (`ROLLOUT_ALERT_STACK_GAP_2026-10-17.md`), which
@@ -15,12 +15,13 @@ named these seams but scoped them to #1631's rule.
 The design corpus promises the collector as the fleet's single
 signal source:
 
-- `UPDATE_EVENT_REPORTING.md` §4's five alert rules are "evaluated on
-  every collect" — rules 1–4 read the event journal; the fifth
-  (correlated gate-stale, #1631) must read the collector's gate
-  answer-age field, because a fleet-wide sync outage is invisible in
-  the event stream by design (G17 §3: the S1 canonicalizer infers
-  nothing from gate silence).
+- `UPDATE_EVENT_REPORTING.md` §4 S1's five alert rules are evaluated on
+  every collect: rules 1–4 read the event journal; rule 5, tail
+  discontinuity (#1006), fires from the collector's continuity check.
+  The correlated gate-stale rule (#1631, specified by G18 §7) must
+  read the collector's gate answer-age field, because a fleet-wide
+  sync outage is invisible in the event stream by design (G17 §3: the
+  S1 canonicalizer infers nothing from gate silence).
 - The inventory table and the crosscheck surface render per-box gate
   state (`frozen`) with an explicit three-state rendering
   (`inventory.py`: "yes"/"no"/"n/a").
@@ -70,8 +71,9 @@ The pipeline is `fleet/box_snapshot.py` (box emits) →
   by accident, not by contract: the table renders "n/a" explicitly
   (inventory.py:731), the crosscheck falls null `frozen` through to
   `"unexplained"` (inventory.py:850) rather than misreading it as
-  live — correct behavior today, but nothing pins it, and D-GA-3
-  (null-age = unknown, never stale) was scoped to #1631's rule only.
+  live — correct behavior today, but nothing pins it, and the
+  null-age = unknown pin (F-GA-4, via D-GA-1) was scoped to #1631's
+  rule only.
 - **F-SC-4 — the gate notes reach the operator but unstructured.**
   "gate status file not present" vs "answer.state not frozen/live"
   vs "generated_at in the future" all arrive as one `"box snapshot
@@ -92,12 +94,20 @@ The pipeline is `fleet/box_snapshot.py` (box emits) →
   box couldn't parse one). Readers that need truth recompute age as
   `now − generated_at`; `answer_age_s` stays as the box-computed
   convenience (emit-time age, clearly labeled as such in the doc).
+  Recomputed age is `max(0, now − generated_at)` in aware UTC —
+  negative deltas are clock skew, floored exactly like
+  `_read_gate_status` floors them (box_snapshot.py:98-101), so the
+  rule and the surface can never diverge on the same record.
 - **D-SC-2 — carry `emitted_at` on the inventory record** (the
   snapshot's own emission timestamp, box clock). `observed_at` keeps
   its meaning (collector receive time). The difference becomes the
-  transport/collection-delay signal; both clocks stay visible.
+  transport/collection-delay signal; both clocks stay visible. Box
+  and collector clocks are unsynchronized, so the delta inherits the
+  module's existing skew discipline: `FUTURE_SKEW_TOLERANCE_S = 300`
+  (flag, don't drop; ordering never trusts box clocks) — a negative
+  `observed_at − emitted_at` is skew, not time travel.
 - **D-SC-3 — pin the null contract for gate fields, generalizing
-  D-GA-3:** null `answer_age_s`/`generated_at` = unknown, never stale
+  F-GA-4 / D-GA-1:** null `answer_age_s`/`generated_at` = unknown, never stale
   by itself (hook-dead is its own incident, visible via the notes);
   null `frozen` = undecidable, i.e. no evidence — alert rules and
   surfaces must treat it as "no evidence", never as "live" or
@@ -105,9 +115,11 @@ The pipeline is `fleet/box_snapshot.py` (box emits) →
   (table "n/a", crosscheck "unexplained") as the contract.
 - **D-SC-4 — #1631's acceptance is amended:** the correlated
   gate-stale rule reads `generated_at` (recomputing age at eval
-  time), not the stored `answer_age_s`. The D-GA-3 staleness
-  threshold (`max(600s, 3×hook_interval + sync_cadence)`) applies to
-  the recomputed age.
+  time), not the stored `answer_age_s`. The F-GA-5 staleness
+  threshold (`max(600s, 3×hook_interval + sync_cadence)`, pinned via
+  D-GA-1) applies to the recomputed age (whether pull latency stays
+  inside that formula now that `emitted_at` makes it computable is
+  #1631's build-thread detail, not this doc's).
 - **D-SC-5 — no structured gate-note schema is owed in S1.** The
   prose notes already reach the operator; no consumer parses them.
   If a future rule needs a machine-readable gate-failure class, that
@@ -115,11 +127,13 @@ The pipeline is `fleet/box_snapshot.py` (box emits) →
 
 ## Build slices filed
 
-- **#1660** (p3, open-source) — record-schema additions: carry
-  `gate.generated_at` + `emitted_at` through `inventory.py` (D-SC-1,
-  D-SC-2), with tests pinning the pass-through, the null cases, and
-  the "age is recomputed, not stored" doc note. Unblocks #1631's
-  amended acceptance (D-SC-4). Filed from this analysis.
+- **#1660** (p3, open-source) — record-schema additions: emit
+  `gate.generated_at` from `box_snapshot.py` (surfaced from
+  `_read_gate_status`, which parses it today and discards it), then
+  carry `gate.generated_at` + `emitted_at` through `inventory.py`
+  (D-SC-1, D-SC-2), with tests pinning the pass-through, the null
+  cases, and the "age is recomputed, not stored" doc note. Unblocks
+  #1631's amended acceptance (D-SC-4). Filed from this analysis.
 
 ## Honest summary
 
