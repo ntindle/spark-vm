@@ -227,9 +227,11 @@ def test_stale_hours_nonfinite_rejected(store, bad):
     # flip both cases (they return 0 pre-fix).
     p = _run(store, "census", "--stale-hours", bad)
     assert p.returncode == 2
+    assert "positive number" in p.stderr
     p = _run(store, "stale", "--expected", "worker-template@v1",
              "--stale-hours", bad)
     assert p.returncode == 2
+    assert "positive number" in p.stderr
 
 
 def test_stale_hours_huge_finite_fails_closed(store):
