@@ -423,8 +423,10 @@ WantedBy=multi-user.target
 ```
 
 `phone_home.log` in the state dir is append-only (one line per
-connection-lifecycle event, never per keepalive ping); rotate it with
-logrotate `copytruncate` or ship it to your log aggregator.
+connection-lifecycle event, never per keepalive ping), capped at 1 MiB
+with single-generation rotation in the client itself (D21, #1619 — the
+same cap the `_fail`-family logs carry); ship it to your log aggregator
+if you want longer retention.
 
 **Exit codes:** `0` — stopped on SIGTERM/SIGINT. `1` — fatal, needs a
 human: revoked token (re-pair with `request` + `redeem`), a second
@@ -718,10 +720,11 @@ gate re-arms on its own with no restart.
   not a page.
 - The state-dir failure logs — `heartbeat.log`, `ingest.log`,
   `upload-filings.log` (the `_fail` family) — are capped at 1 MiB with
-  single-generation rotation (D21, #1020): the "bound them with
-  logrotate" rough edge in the systemd section is closed for these
-  logs. `phone_home.log` is NOT capped — it is a plain append-only
-  lifecycle log, so do not assume it is bounded. The supervisord outer
+  single-generation rotation (D21, #1020). The daemon's `phone_home.log`
+  shares the same cap: the `_phone_home_say` info channel that appends
+  the reconnect lifecycle lines carries the same 1 MiB /
+  single-generation rotation (#1619), so the whole file is bounded —
+  the earlier "not capped" carve-out is closed. The supervisord outer
   logs rotate at 10MB×5 per `supervisord.conf`.
 - Claims verified against the wired configuration
   (`deploy/golden-image/supervisord.conf`, `pair-tick-wrapper.sh`, the

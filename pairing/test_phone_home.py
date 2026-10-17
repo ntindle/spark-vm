@@ -2277,3 +2277,65 @@ def test_phone_home_vend_mode_drift_fails_loud_at_startup(ctx, monkeypatch,
     monkeypatch.setattr(spark_pair, "_ws_upgrade", _no_upgrade)
     assert spark_pair.cmd_phone_home(ctx) == 1
     assert "credential-mode drift" in capsys.readouterr().err
+
+
+def _say_log_lines(ctx):
+    with open(os.path.join(ctx.dir, "phone_home.log")) as f:
+        return f.read().splitlines()
+
+
+def test_phone_home_say_rotates_at_cap(ctx, monkeypatch, capsys):
+    # The D21 fix (#1020) capped only the _fail path; _phone_home_say
+    # shares the same file and must carry the same cap (#1619).
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 200)
+    old = "x" * 180  # one over-cap line already in the log
+    with open(os.path.join(ctx.dir, "phone_home.log"), "w") as f:
+        f.write(old + "\n")
+    spark_pair._phone_home_say(ctx.dir, "reconnecting with backoff")
+    # The old generation moved to phone_home.log.1; the fresh log holds
+    # exactly the new line.
+    with open(os.path.join(ctx.dir, "phone_home.log.1")) as f:
+        assert f.read() == old + "\n"
+    lines = _say_log_lines(ctx)
+    assert len(lines) == 1
+    assert "reconnecting with backoff" in lines[0]
+    out = capsys.readouterr()
+    assert "log-rotation FAILED" not in out.out  # clean rotation, no noise
+
+
+def test_phone_home_say_no_rotation_under_cap(ctx, monkeypatch):
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 10_000)
+    with open(os.path.join(ctx.dir, "phone_home.log"), "w") as f:
+        f.write("existing\n")
+    spark_pair._phone_home_say(ctx.dir, "channel open")
+    assert not os.path.exists(os.path.join(ctx.dir, "phone_home.log.1"))
+    assert _say_log_lines(ctx) == ["existing",
+                                   _say_log_lines(ctx)[1]]
+    assert "channel open" in _say_log_lines(ctx)[1]
+
+
+def test_phone_home_say_rotation_failure_keeps_the_line(ctx, monkeypatch,
+                                                        capsys):
+    # A wedged .1 (a directory here) must never eat the line: it stays
+    # loud on stdout and still lands in the over-cap log.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 200)
+    with open(os.path.join(ctx.dir, "phone_home.log"), "w") as f:
+        f.write("y" * 180 + "\n")
+    os.mkdir(os.path.join(ctx.dir, "phone_home.log.1"))
+    spark_pair._phone_home_say(ctx.dir, "socket lost")
+    out = capsys.readouterr()
+    assert "log-rotation FAILED" in out.out
+    lines = _say_log_lines(ctx)
+    assert any("socket lost" in line for line in lines)
+    assert len(lines) == 2  # the over-cap old line + the new one
+
+
+def test_phone_home_say_redacts_token_in_log(ctx, monkeypatch):
+    # The rotation rework must not regress the redaction discipline:
+    # the token stays out of the file channel too.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 10_000)
+    spark_pair._phone_home_say(ctx.dir, f"close reason mentions {TOKEN}",
+                               token=TOKEN)
+    for line in _say_log_lines(ctx):
+        assert TOKEN not in line
+        assert "<redacted>" in line

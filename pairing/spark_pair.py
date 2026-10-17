@@ -2775,7 +2775,18 @@ def _phone_home_say(d, msg, token=()):
 
     Mirrors _fail's redaction discipline; frames never carry the token by
     construction, but a hostile plane's close `reason` is echoed here, so
-    the redact pass stays."""
+    the redact pass stays.
+
+    Bounded growth (D21, #1020 twin): the log is capped at 1 MiB — when
+    the new line would overflow it, the log rotates to `phone_home.log.1`
+    (single generation; the previous `.1` is replaced) and the new line
+    starts a fresh log. The D21 slice capped only the `_fail` path; this
+    channel shares the same file, so it carries the same cap — otherwise
+    the reconnect lifecycle lines (a sustained plane outage writes
+    ~1-2 lines/min at the 60 s backoff cap) grow it unboundedly past the
+    cap the `_fail` half enforces. A failed rotation is loud on stdout
+    but never loses the line: it still lands in the over-cap log.
+    """
     if isinstance(token, str):
         token = (token,)
     for secret in token:
@@ -2783,8 +2794,19 @@ def _phone_home_say(d, msg, token=()):
             msg = msg.replace(secret, "<redacted>")
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} phone-home: {msg}"
     print(line)
+    path = os.path.join(d, "phone_home.log")
     try:
-        with open(os.path.join(d, "phone_home.log"), "a") as f:
+        if os.path.isfile(path):
+            line_bytes = len((line + "\n").encode("utf-8"))
+            if os.path.getsize(path) + line_bytes > _LOG_MAX_BYTES:
+                err = _rotate_log(path)
+                if err is not None:
+                    # Loud, not fatal: the new line below still lands in
+                    # the (over-cap) log — a wedged .1 must never eat it.
+                    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
+                          f"phone-home log-rotation FAILED for "
+                          f"phone_home.log: {err}")
+        with open(path, "a") as f:
             f.write(line + "\n")
     except OSError:
         pass  # stdout is the loud channel; a broken log must not mask it
