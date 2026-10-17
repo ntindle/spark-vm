@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-sweep async plane port, sweep half (2026-10-16): the per-minute
+  push sweep now has its plane-side async implementation — the same
+  three passes (reminders, digests, watchers) rewritten against the
+  worker's async database, proven by replaying all 17 checked-in
+  conformance scenarios and reproducing the recorded outputs exactly;
+  the paging-policy calls ride an explicit boundary the async policy
+  port will fill next. The scheduled trigger wiring, the manual probe
+  endpoint, and the policy port remain to be built. (#1566) (#TBD)
+
 - Push-sweep plane-port contract (2026-10-16): the hosted push lane's
   per-minute sweep now has its plane-side dispatch pinned — the cron
   contract names the async sweep port the worker must build, the
