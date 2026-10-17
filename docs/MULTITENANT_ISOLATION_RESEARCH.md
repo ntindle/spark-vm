@@ -243,9 +243,10 @@ separate shape.
    domain with the same fail-closed prescription); (b) **existing
    sessions through a control-plane outage** survive on the data plane
    without the coordinator, so revocation cannot propagate during an outage
-   — fail-open for revocation semantics. (b) is **unverified** (see Open
-   verifications); H11 must verify it before relying on Tailscale for
-   lockout semantics, and must never assume an outage "degrades into
+   — fail-open for revocation semantics. (b) is **VERIFIED 2026-10-17**
+   (see Open verifications; issue #340 — behaviorally verified by an
+   independent outage experiment; Tailscale's own KB 1091 direct read is
+   owed as #1646). H11 must never assume an outage "degrades into
    bypassed identity checks" — the failure mode to design for is
    *stale authorization*, not bypass.
 4. **Root:** tenant (human owner) may hold root inside their unit; the
@@ -277,7 +278,7 @@ separate shape.
   separation is a finding-2 follow-up, not a current property; any root
   claim about vendors (undocumented — see survey caveats).
 
-## Open verifications (two verified 2026-10-17 — see #340; rest unchanged)
+## Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified, vendor KB re-read owed #1646; rest unchanged)
 
 - Nested KVM availability on the hosted product's target hosts —
   **VERIFIED 2026-10-17: NOT available on the decided provider.**
@@ -297,10 +298,12 @@ separate shape.
   boundary — so this settles the in-box layering question, not the
   tenant boundary.
 - Tailscale control-plane-outage semantics for existing sessions —
-  **VERIFIED 2026-10-17.** Tailscale documents the outage behavior
+  **behaviorally VERIFIED 2026-10-17** (issue #340's Tailscale half stays
+  open pending #1646). Tailscale documents the outage behavior
   ([What happens if the coordination server is down](https://tailscale.com/kb/1091/what-happens-if-the-coordination-server-is-down);
   the direct fetch failed during verification, so the citation below is
-  quoted via the measured experiment, which links it): the data plane is
+  quoted via the measured experiment, which links it — a direct
+  first-party re-read is owed as #1646): the data plane is
   independent of the control plane, and during an outage "existing users
   cannot have their keys revoked." A measured outage experiment against
   real `tailscaled` clients
@@ -308,16 +311,22 @@ separate shape.
   corroborates every element of the adopted design: existing tunnels kept
   working (27/27 probes — fresh connections between existing peers, not
   just held sessions); new-device joins failed (`NeedsLogin` —
-  fail-closed for enrollment, as adopted); revocation was impossible
-  (the admin API *is* the control server — fail-open for revocation,
-  i.e. design for *stale authorization*, as adopted); key expiry was
-  still enforced locally by peers (no bypassed identity checks).
-  **Runbook note:** a `tailscaled` restart during an outage drops the
+  fail-closed for enrollment, as adopted); revocation could not
+  propagate during the outage (even if recorded server-side, peers
+  receive no updated netmap — fail-open for revocation, i.e. design for
+  *stale authorization*, as adopted); key expiry was still enforced
+  locally by peers (no bypassed identity checks).
+  **Runbook notes:** a `tailscaled` restart during an outage drops the
   node off the network unless netmap caching is on (Tailscale feature
   flag, expected on-by-default from client 1.104); cached nodes recover
   by advertising their new disco key directly to peers over the tunnel.
-  **Consequence:** lockout semantics may now rely on the verified
-  behavior — stale authorization, never bypass.
+  A restarted node enforces the packet filter it had cached, not newer
+  rules — the same stale-authorization trade-off a running node already
+  makes during an outage, extended across restarts.
+  **Consequence:** lockout semantics may now rely on the
+  behaviorally-verified outage behavior — stale authorization, never
+  bypass; the vendor-doc confirmation is pending the #1646 direct
+  re-read.
 - Vendor root semantics remain publicly undocumented for all ten vendors —
   do not assert them; re-survey if any vendor publishes an isolation
   whitepaper.
