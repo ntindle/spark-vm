@@ -810,8 +810,11 @@ def cmd_status(args):
             # Summary convergence (the promotion gate is authoritative;
             # this is the operator's at-a-glance view). "landed" is the
             # convergence half only — "bad_signal" mirrors the gate's
-            # journal half (D-RC-4), so status and promote can no longer
-            # disagree about a wave carrying an unresolved deploy-failed.
+            # journal half (D-RC-4) for the live wave exactly, so status
+            # and promote can no longer disagree about a live wave
+            # carrying an unresolved deploy-failed. For not-yet-live
+            # waves the field is prospective (the gate re-baselines the
+            # window on every advance), an early warning, not a verdict.
             landed = all(
                 (planes.get(pid) or {}).get("template_version") == template
                 and (planes.get(pid) or {}).get("status") == "healthy"

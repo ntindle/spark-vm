@@ -64,8 +64,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 
 - The fleet rollout status now reports `bad_signal` on every wave: the
-  planes carrying an unresolved deploy-failed event since the rollout
-  went live — the same journal signal the promotion gate already
+  planes carrying an unresolved deploy-failed event from the current
+  rollout window — the same journal signal the promotion gate already
   enforces. A wave can look fully landed while the gate still refuses
   it; the new field makes that disagreement visible at a glance, so
   the 2am operator sees why promotion is blocked. (#TBD)
