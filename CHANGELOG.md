@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Competitor watch, 2026-10-17 morning: the Vercel KVM zero-day now
+  has a formal CVE — CVE-2026-99999 (Critical, CVSS 9.3,
+  kernel-maintainer-rated) — with the fix backported to stable kernel
+  branches (first fixed versions 5.10.272 through 7.2.11); also tracked
+  the Daytona SDK V0.225.0 release (NVIDIA B200 GPU type). (#1641)
+
 - Fleet rollout: a new analysis pins the #777 box-layer rollout
   controller and release-gate channel remainders — every unowned slice
   (toolset-update gate cap, G17 event mapping rows, the correlated
