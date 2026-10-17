@@ -140,12 +140,14 @@ shared-host shape:
   benchmarks, not vendor-published), syscall-compat gaps;
   Kata = per-workload guest kernel (hardware boundary), needs KVM,
   roughly ~125–500 ms boot depending on backend (rough benchmarks); Firecracker = minimal microVM, ~125 ms boot,
-  snapshot/restore in ms, needs KVM. **Operational note for the strategy
-  loop:** the hosted product is *assumed* to run on virtualized cloud hosts
-  (unverified assumption — see the nested-KVM open verification below); without
-  verified nested KVM, **gVisor is the only one of the three that works**.
-  Firecracker/Kata imply bare-metal or nested-virt-capable hosts (verify
-  before choosing).
+  snapshot/restore in ms, needs KVM. **Operational note (VERIFIED
+  2026-10-17, issue #340):** the hosted product's decided provider is Fly
+  Sprites — Firecracker microVMs whose guests get no `/dev/kvm` and no
+  nested virtualization (see the nested-KVM verification below) — so
+  **gVisor is the only one of the three that works as a
+  stronger-than-nspawn boundary inside the tenant box**. Firecracker/Kata
+  would imply bare-metal or nested-virt-capable hosts, which the decided
+  provider is not.
 - **bubblewrap / nsjail**: per-*process* sandboxes (namespaces + seccomp +
   cgroups), no daemon. Production users: Compiler Explorer runs production
   compiler/user-binary execution in nsjail; Google kCTF; Windmill wraps job
@@ -241,9 +243,10 @@ separate shape.
    domain with the same fail-closed prescription); (b) **existing
    sessions through a control-plane outage** survive on the data plane
    without the coordinator, so revocation cannot propagate during an outage
-   — fail-open for revocation semantics. (b) is **unverified** (see Open
-   verifications); H11 must verify it before relying on Tailscale for
-   lockout semantics, and must never assume an outage "degrades into
+   — fail-open for revocation semantics. (b) is **VERIFIED 2026-10-17**
+   (see Open verifications; issue #340 — behaviorally verified by an
+   independent outage experiment; Tailscale's own KB 1091 direct read is
+   owed as #1646). H11 must never assume an outage "degrades into
    bypassed identity checks" — the failure mode to design for is
    *stale authorization*, not bypass.
 4. **Root:** tenant (human owner) may hold root inside their unit; the
@@ -275,13 +278,55 @@ separate shape.
   separation is a finding-2 follow-up, not a current property; any root
   claim about vendors (undocumented — see survey caveats).
 
-## Open verifications (later turns; nothing blocked)
+## Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified, vendor KB re-read owed #1646; rest unchanged)
 
-- Nested KVM availability on the hosted product's target hosts (decides
-  whether Firecracker/Kata are even options; gVisor works regardless).
-- Tailscale control-plane-outage semantics for existing sessions
-  (fail-closed for enrollment is architectural; existing-session behavior
-  needs verification before H11 relies on it).
+- Nested KVM availability on the hosted product's target hosts —
+  **VERIFIED 2026-10-17: NOT available on the decided provider.**
+  Fly.io runs every workload, including Sprites, as a Firecracker
+  microVM ([Fly: MicroVM vs Container](https://fly.io/learn/microvm-vs-container/));
+  Firecracker's guest device model is six emulated devices only
+  (virtio-net, virtio-balloon, virtio-block, virtio-vsock, serial
+  console, minimal keyboard controller —
+  [Firecracker FAQ](https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/FAQ.md)),
+  with no KVM passthrough into guests and no nested-virtualization
+  support (third-party survey
+  [corroborates](https://sumofbytes.com/blog/micro-vms-firecaracker-v8-isolates-gvisor-new-era-of-virtualization/)).
+  **Consequence:** Firecracker and Kata are not options for a
+  stronger-than-nspawn boundary *inside* the tenant box on Fly; gVisor
+  (no KVM required) is the only one of the three that works there. The
+  tenant box itself is already a Firecracker microVM — the hardware
+  boundary — so this settles the in-box layering question, not the
+  tenant boundary.
+- Tailscale control-plane-outage semantics for existing sessions —
+  **behaviorally VERIFIED 2026-10-17** (issue #340's Tailscale half stays
+  open pending #1646). Tailscale documents the outage behavior
+  ([What happens if the coordination server is down](https://tailscale.com/kb/1091/what-happens-if-the-coordination-server-is-down);
+  the direct fetch failed during verification, so the citation below is
+  quoted via the measured experiment, which links it — a direct
+  first-party re-read is owed as #1646): the data plane is
+  independent of the control plane, and during an outage "existing users
+  cannot have their keys revoked." A measured outage experiment against
+  real `tailscaled` clients
+  ([dev.to, 2026-10-05](https://dev.to/devopsdaily/we-took-down-our-mesh-vpn-control-plane-here-is-what-kept-working-d6e))
+  corroborates every element of the adopted design: existing tunnels kept
+  working (27/27 probes — fresh connections between existing peers, not
+  just held sessions); new-device joins failed (`NeedsLogin` —
+  fail-closed for enrollment, as adopted); revocation could not
+  propagate during the outage (even if recorded server-side, peers
+  receive no updated netmap — fail-open for revocation, i.e. design for
+  *stale authorization*, as adopted); key expiry was still enforced
+  locally by peers (no bypassed identity checks).
+  **Runbook notes:** a `tailscaled` restart during an outage drops the
+  node off the network unless netmap caching is on (Tailscale feature
+  flag, expected on-by-default from client 1.104); cached nodes recover
+  by advertising their new disco key directly to peers over the tunnel.
+  A restarted node enforces the packet filter it had cached, not newer
+  rules — the same stale-authorization trade-off a running node already
+  makes during an outage, extended across restarts.
+  **Consequence:** lockout semantics may now rely on the
+  behaviorally-verified outage behavior — stale authorization, never
+  bypass; the vendor-doc confirmation is pending the #1646 direct
+  re-read.
 - Vendor root semantics remain publicly undocumented for all ten vendors —
   do not assert them; re-survey if any vendor publishes an isolation
   whitepaper.

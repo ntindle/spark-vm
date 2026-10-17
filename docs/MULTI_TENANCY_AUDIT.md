@@ -92,11 +92,11 @@ H11's ruling on `MULTITENANT_ISOLATION_RESEARCH.md`'s findings:
    authenticate *tenants*, not just requests.
 3. **Tailnet: enrollment-time / new-request auth fails closed; existing
    sessions through a control-plane outage are fail-open for revocation
-   semantics — unverified, and H11 must verify before relying on
-   Tailscale for lockout.** — **ADOPTED, verification owed.** Filed as
-   an open verification (filed this turn as #340). Until verified, no lockout
-   semantics may assume outage-time revocation propagation; the designed
-   failure mode is *stale authorization*, never *bypassed identity*.
+   semantics — VERIFIED 2026-10-17 (issue #340; see §6).** —
+   **ADOPTED.** The outage-time behavior is behaviorally verified (no
+   outage-time revocation propagation — the designed failure mode is
+   *stale authorization*, never *bypassed identity*); Tailscale's own KB
+   1091 direct read is owed as #1646.
 4. **Root: the operator holds root on the outer enforcement layer; the
    tenant gets contained root-equivalent inside their unit; never let the
    human's and the agent's privilege domains collapse into one.** —
@@ -153,9 +153,9 @@ Adopted from research finding 3: (a) **enrollment-time and new-request
 auth fail closed** — an auth-lookup failure denies; "ACL file
 missing/unapplied" means deny; (b) **existing sessions through a
 control-plane outage**: revocation cannot propagate during an outage —
-fail-open for revocation, i.e. design for *stale authorization*, and the
-outage-time behavior must be verified before any lockout semantics rely
-on it (open verification, §7). Never assume an outage degrades into
+fail-open for revocation, i.e. design for *stale authorization*
+(verified 2026-10-17 — issue #340, see §6; Tailscale's own KB 1091
+direct read owed as #1646). Never assume an outage degrades into
 bypassed identity checks.
 
 **Q4 — Who holds root on a tenant box? (DECIDED 2026-09-24 — operator
@@ -264,13 +264,28 @@ noted here for consistency only.
   as the per-tenant implementation — it is the decision record, not the
   build.
 
-## 6. Open verifications (unchanged from the research doc; filed §7)
+## 6. Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified, vendor KB re-read owed #1646 — #340 stays open)
 
-- Nested-KVM availability on the hosted product's target hosts (decides
-  whether Firecracker/Kata are even options; gVisor works regardless).
-- Tailscale control-plane-outage semantics for lockout (fail-closed
-  enrollment is architectural; existing-session revocation behavior
-  needs verification).
+- Nested-KVM availability on the hosted product's target hosts —
+  **VERIFIED: not available on the decided provider (Fly Sprites).**
+  Fly runs every workload as a Firecracker microVM; Firecracker guests
+  get no `/dev/kvm` and no nested virtualization. Firecracker/Kata are
+  therefore not options for a stronger-than-nspawn boundary *inside*
+  the tenant box; gVisor (no KVM required) is the only one of the three
+  that works there. This settles the in-box layering question, not the
+  tenant boundary — the tenant box itself is already a Firecracker
+  microVM (the hardware boundary).
+- Tailscale control-plane-outage semantics for lockout —
+  **behaviorally VERIFIED:** existing sessions keep working through an
+  outage (data plane independent of the control plane); revocation
+  cannot propagate (design for *stale authorization* — fail-open for
+  revocation); enrollment fails closed; key expiry is still enforced
+  locally by peers (never bypassed identity checks). Lockout semantics
+  may now rely on the behaviorally-verified outage behavior; the
+  vendor-doc confirmation is pending the #1646 direct re-read. Runbook
+  notes: a `tailscaled` restart during an outage drops the node unless
+  netmap caching is enabled; a restarted node enforces its cached packet
+  filter, not newer rules.
 - Vendor root semantics remain publicly undocumented — assert nothing.
 
 ## 7. Issues filed this turn
