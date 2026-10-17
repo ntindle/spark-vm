@@ -33,11 +33,11 @@ exists today or lives in an open issue.
 
 | Class | Source signal | Channel today | Owner action | Tracked |
 |---|---|---|---|---|
-| approval filed | `hosted/push_events.py::on_approval_filed` — the mapping exists and is tested, but no caller invokes it: the #952 filing endpoint records the filing and returns | no page fires — caller unwired (#1492) | Decide it in the dashboard pending card (#954); the push page fires once the caller is wired | mapping shipped (#1062), caller unwired |
+| approval filed | `hosted/push_events.py::on_approval_filed` — the mapping exists and is tested, but no caller invokes it: the #952 filing endpoint records the filing and returns | no page fires — caller unwired (#1614) | Decide it in the dashboard pending card (#954); the push page fires once the caller is wired | mapping shipped (#1062), caller unwired |
 | approval reminder | sweep reminder pass → `maybe_enqueue_reminder` | push page, D12 two-gate lease | Decide the pending approval; reminders stop when it goes terminal | shipped (#1062) |
 | hourly digest | sweep digest pass → `maybe_enqueue_digest` | digest | None required — informational summary | shipped (#1062) |
 | heartbeat stale | sweep watcher pass → `on_heartbeat_stale` | push page + dashboard `Stale` chip | None defined today: the repo names no owner-facing recovery for a stale box; it heals when heartbeats resume | shipped (#1062) |
-| box revoked | `hosted/push_events.py::on_box_revoked` — the mapping exists and is tested, but the revoke endpoint only stamps `revoked_at` and never calls it | no page fires — caller unwired (#1492) | Re-pair the box (request + redeem) — revocation is one-way | mapping shipped (#1062), caller unwired |
+| box revoked | `hosted/push_events.py::on_box_revoked` — the mapping exists and is tested, but the revoke endpoint only stamps `revoked_at` and never calls it | no page fires — caller unwired (#1614) | Re-pair the box (request + redeem) — revocation is one-way | mapping shipped (#1062), caller unwired |
 | token-expiry warning | sweep watcher pass → `on_token_expiry_warning` | push page, once per token generation | Advance notice, not a dashboard fix: the box's hourly auto-rotation has failed; a 401 in the rotate output means re-pair, a 403 means the box clock is off | shipped (#1062) |
 | provisioned, never paired | provision record + attestation-token TTL, plane-side | nothing | Owner action when #1214 ships: [TBD] | open — #1214 |
 | phone-home died, heartbeat still fresh | `phone_home_events` DO journal terminal closes + valid token + fresh heartbeat, plane-side | nothing | Owner action when #1489 ships: [TBD] | open — #1489 |
@@ -55,7 +55,7 @@ exists and is tested — page-once per (box_id, aid) via the #990 boundary's
 page-once dedup (D57) — but **no caller invokes it**: the #952 filing
 endpoint records the filing and returns (verified: zero call sites in the
 repo, every parallel worktree, and the deployed plane worker checkout).
-The push page never fires; wiring the caller is tracked on #1492. Caller
+The push page never fires; wiring the caller is tracked on #1614. Caller
 obligation for whoever wires it (documented at the mapping): never emit a
 filing event for an aid whose #872 record is already terminal — there is
 no gate-1 re-read on this path by design (filing *is* the plane's own
@@ -102,7 +102,7 @@ bare date could repeat across same-day revocations and silently collapse
 them) — but **no caller invokes it**: the revoke endpoint stamps
 `revoked_at` and the token 401s everywhere immediately, never calling the
 mapper. The revocation page never fires; wiring the caller is tracked on
-#1492. D65 caller obligation for whoever wires it: never call this for
+#1614. D65 caller obligation for whoever wires it: never call this for
 the keyless-grandfathered path. A revoked box's heartbeat 401s too, so
 the dashboard degrades alongside the (currently unwired) page.
 
@@ -152,11 +152,11 @@ close.
 
 | Class | Dashboard chip | Push page | Digest |
 |---|---|---|---|
-| approval filed | pending card in approval list (#954) | no — caller unwired (#1492) | — |
+| approval filed | pending card in approval list (#954) | no — caller unwired (#1614) | — |
 | reminder | pending card (until terminal) | yes, D12-leased (only when the sweep is driven) | coalesces here when over budget (D10) |
 | digest | — | — | yes (only when the sweep is driven) |
 | heartbeat stale | `Stale` chip at 300 s | yes, once per stale-epoch (F7 quiet period; only when the sweep is driven) | — |
-| box revoked | chip degrades with the 401ing heartbeat | no — caller unwired (#1492) | — |
+| box revoked | chip degrades with the 401ing heartbeat | no — caller unwired (#1614) | — |
 | token-expiry warning | — | yes, once per token generation (only when the sweep is driven) | — |
 | never paired | nothing | nothing | nothing |
 | phone-home died, fresh heartbeat | nothing | nothing | nothing |
@@ -207,7 +207,7 @@ all shipped in the #990 boundary and the #1062 mapping layer:
   implies the plane will re-drive the dead channel. Re-drive is a
   separate decision the alert does not make.
 - **O6 — every due page goes through the boundary.** A future #1489,
-  #1214, or #1492 page is an `enqueue_page` call like the other mappings
+  #1214, or #1614 page is an `enqueue_page` call like the other mappings
   — D10 budgets, D57 dedup, and D61 audit apply by construction, not by
   the slice remembering to add them.
 
@@ -223,7 +223,7 @@ all shipped in the #990 boundary and the #1062 mapping layer:
 - No provisioned hosted box exists; the four sweep-driven rows are the
   contract (they fire only when the sweep is driven — the #1069 cron
   wiring is not landed), approval-filed and box-revoked have mappings but
-  no callers (#1492), and the two `nothing` rows are tracked gaps (#1214,
+  no callers (#1614), and the two `nothing` rows are tracked gaps (#1214,
   #1489) with no delivery commitment — they read `nothing` until the
   issues ship.
 - The fleet/operator lane (`docs/ALERT_PUSH_FANOUT_SPEC.md`) has its own
@@ -235,8 +235,8 @@ all shipped in the #990 boundary and the #1062 mapping layer:
 
 | Issue | Class | State |
 |---|---|---|
-| #1062 | approval filed, reminder, digest, heartbeat-stale, revoked, token-expiry | mappings shipped, closed — but the approval-filed and box-revoked mappings have no callers (see #1492), and the sweep-driven four fire only when the sweep is driven (#1069 unlanded) |
-| #1492 | wire the push-lane callers for `on_approval_filed` / `on_box_revoked` | open (p2, filed by this doc's review) |
+| #1062 | approval filed, reminder, digest, heartbeat-stale, revoked, token-expiry | mappings shipped, closed — but the approval-filed and box-revoked mappings have no callers (see #1614), and the sweep-driven four fire only when the sweep is driven (#1069 unlanded) |
+| #1614 | wire the push-lane callers for `on_approval_filed` / `on_box_revoked` (async `enqueue_page` boundary + the #952 filing and revoke endpoint call sites) | open (p2 — owns #1492's orphaned plane half; #1492 closed) |
 | #1063 | sweep cadence (D9) | open — #1069 owns the cron-trigger half |
 | #1069 | plane-workspace cron-trigger wiring | open |
 | #1488 / #1273 | healthy-box contract (the operator-side half of the failure classes) | shipped, closed |

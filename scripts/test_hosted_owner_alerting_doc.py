@@ -49,7 +49,7 @@ GAP_CLASSES = (
 )
 GAP_MARKER = "nothing"
 
-# The two mappings with no caller anywhere (E1, #1492): the doc must
+# The two mappings with no caller anywhere (E1, #1614): the doc must
 # keep saying so. The §1 table row naming each function must carry the
 # unwired marker — a re-added "the endpoint calls <fn>" claim fails.
 UNWIRED_MAPPINGS = ("on_approval_filed", "on_box_revoked")
