@@ -41,8 +41,6 @@ RestartSec=5
 # otherwise swallow the exception and keep serving addon-less.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
-#
-# NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all
 # (grep-verified) — so locking out privilege acquisition costs nothing.
 # The kernel trio is set because these are system units (installed to
