@@ -2309,9 +2309,16 @@ def test_phone_home_say_no_rotation_under_cap(ctx, monkeypatch):
         f.write("existing\n")
     spark_pair._phone_home_say(ctx.dir, "channel open")
     assert not os.path.exists(os.path.join(ctx.dir, "phone_home.log.1"))
-    assert _say_log_lines(ctx) == ["existing",
-                                   _say_log_lines(ctx)[1]]
-    assert "channel open" in _say_log_lines(ctx)[1]
+    lines = _say_log_lines(ctx)
+    assert lines[0] == "existing"
+    assert lines[1].endswith("phone-home: channel open")
+
+
+def test_log_max_bytes_is_one_mib():
+    # The D21 cap's deployed value is load-bearing: every rotation test
+    # monkeypatches it, so pin the real wiring here (one test suffices —
+    # _fail and _phone_home_say read the same module global).
+    assert spark_pair._LOG_MAX_BYTES == 1024 * 1024
 
 
 def test_phone_home_say_rotation_failure_keeps_the_line(ctx, monkeypatch,

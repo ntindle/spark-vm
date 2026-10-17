@@ -753,10 +753,10 @@ def _rotate_log(path):
     """Best-effort single-generation rotation: <log> -> <log>.1.
 
     Never raises: returns the OSError on failure (None on success) so
-    a failed rotation degrades loudly on stderr without losing the
-    line being logged — the caller still appends to the (over-cap)
-    log. `os.replace` is atomic on POSIX, so the old generation is
-    either fully moved or untouched.
+    a failed rotation degrades loudly on the caller's loud channel
+    without losing the line being logged — the caller still appends to
+    the (over-cap) log. `os.replace` is atomic on POSIX, so the old
+    generation is either fully moved or untouched.
     """
     try:
         os.replace(path, path + ".1")
