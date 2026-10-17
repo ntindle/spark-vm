@@ -2955,10 +2955,22 @@ class SwapAddon:
         Every distinct placeholder name becomes a refused= audit line:
         a journal warning alone is too easy to miss, and this is the
         only signal that a placeholder went somewhere it should not.
+
+        The presence gate is case-insensitive (cheap, on a lowered copy),
+        but the names are extracted from the ORIGINAL-case blob: the swap
+        path's literal placeholder regex (PLACEHOLDER_RE) is case-sensitive,
+        so extracting from the lowered copy would audit a name the store
+        never resolves (e.g. wire `hsurr:GitHub` audited as `hsurr:github`),
+        and an uppercase `HSURR:` literal prefix — which the swap engine
+        never treats as a placeholder — would audit a phantom credential.
+        Note the percent-encoded form (ENCODED_PLACEHOLDER_RE) is
+        case-insensitive by design (re.IGNORECASE, for the hex digits): both
+        the warn and swap paths share the same regexes, so the audited name
+        is exactly what the engine would have resolved.
         """
         hay = b"hsurr:"
         hay_enc = b"hsurr%3a"  # urlencoded forms percent-encode the colon
-        chunks = [(flow.request.content or b"").lower()]
+        chunks = [flow.request.content or b""]
         for k in flow.request.headers.keys():
             for v in flow.request.headers.get_all(k):
                 chunks.append(v.encode("utf-8", "ignore"))
@@ -2967,14 +2979,15 @@ class SwapAddon:
                     if decoded:
                         chunks.append(decoded.encode("utf-8", "ignore"))
         chunks.append(flow.request.path.encode("utf-8", "ignore"))
-        blob = b"\n".join(chunks).lower()
-        if hay not in blob and hay_enc not in blob:
+        joined = b"\n".join(chunks)
+        gate = joined.lower()
+        if hay not in gate and hay_enc not in gate:
             return
         log.warning(
             "swap: placeholder seen for non-allowlisted host %s; "
             "passing through unchanged", host)
         seen = set()
-        text = blob.decode("utf-8", "ignore")
+        text = joined.decode("utf-8", "ignore")
         for rx in (PLACEHOLDER_RE, ENCODED_PLACEHOLDER_RE):
             for m in rx.finditer(text):
                 if m.group(1) not in seen:
