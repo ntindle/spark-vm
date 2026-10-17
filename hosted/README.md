@@ -202,8 +202,8 @@ iterables (tests) or async iterables (the worker). The worker's
 deploy time (D-PP-5 order); anti-drift is the D-PP-2 conformance, not
 byte-identity (F-PP-2).
 
-Tested by `test_push_sweep_async.py` (4 tests, neutering-verified
-non-vacuous): all 17 D-PP-2 scenarios replayed through the async port
+Tested by `test_push_sweep_async.py` (6 tests, neutering-verified
+non-vacuous): all 21 D-PP-2 scenarios replayed through the async port
 and diffed (summary + DB state) against the recorded outputs; the
 record adapter's parity with the sync adapter; the policy boundary's
 fail-closed validation; worker-shaped async-generator derivations.

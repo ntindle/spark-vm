@@ -130,8 +130,17 @@ class AsyncTestPolicy:
     async def maybe_enqueue_reminder(self, db, *, box_id,
                                      owner_principal, aid, get_record,
                                      now=None):
-        # get_record is the port's async bridge; the sync policy takes
-        # the sync reader over the same data — both read the same rows.
+        # B1: the port's async get_record bridge must agree with the
+        # sync reader over the same rows — without this check the
+        # bridge (the only new async inter-component wiring in this
+        # slice) is masked: a swapped-args bridge still passes the
+        # suite. A divergence fails here loudly instead of hiding
+        # behind the policy's own reader.
+        bridge_val = await get_record(aid)
+        sync_val = self._reader(box_id)(aid)
+        assert bridge_val == sync_val, (
+            "port get_record bridge diverged from the sync reader for "
+            "aid=%r: %r != %r" % (aid, bridge_val, sync_val))
         return push_events.maybe_enqueue_reminder(
             self._conn, box_id=box_id, owner_principal=owner_principal,
             aid=aid, get_record=self._reader(box_id), now=now)
@@ -293,17 +302,27 @@ def test_policy_boundary_validated():
     try:
         db = AsyncD1Shim(conn)
 
-        class BadPolicy:
+        class NoMethods:
             reminder_min_ttl_seconds = 300
 
         with pytest.raises(ValueError):
             asyncio.run(push_sweep_async.push_sweep_async_tick(
                 db, now=0, resolve_owner=lambda b: "o",
-                policy=BadPolicy()))
+                policy=NoMethods()))
+
+        async def _ok(*args, **kwargs):
+            return push_events.MapResult("queued", None)
 
         class BadTtl:
+            # Four valid async stubs so the method-callability gate
+            # passes and the ttl check itself is exercised (B2: a
+            # None-method policy trips the earlier gate, leaving the
+            # ttl check unguarded against deletion).
             reminder_min_ttl_seconds = "300"
-            maybe_enqueue_reminder = None
+            maybe_enqueue_reminder = _ok
+            maybe_enqueue_digest = _ok
+            on_heartbeat_stale = _ok
+            on_token_expiry_warning = _ok
 
         with pytest.raises(ValueError):
             asyncio.run(push_sweep_async.push_sweep_async_tick(
@@ -336,5 +355,70 @@ def test_async_derivation_supported():
                 derive_token_warnings=lambda db, moment: _agen_warn()))
         assert summary.stale_watchers.get("queued") == 1
         assert summary.token_warnings.get("queued") == 1
+    finally:
+        conn.close()
+
+
+def test_async_derivation_abandoned_on_budget():
+    """A budget-exhausted async derivation gets GeneratorExit (D103).
+
+    Async mirror of the sync sweep's abandoned-derivation test: the
+    infinite async generator is abandoned when the deadline trips
+    between items, and the awaited aclose() delivers GeneratorExit
+    deterministically — try/finally cleanup runs, no GC-timing
+    assumption.
+    """
+    closed = []
+
+    async def _agen():
+        try:
+            n = 0
+            while True:
+                n += 1
+                yield ("box-a", "epoch-%d" % n)
+        finally:
+            closed.append(True)
+
+    conn = scenarios.new_db()
+    try:
+        db = AsyncD1Shim(conn)
+        policy = AsyncTestPolicy(conn, now=scenarios.EPOCH_T0)
+        summary = asyncio.run(
+            push_sweep_async.push_sweep_async_tick(
+                db, now=scenarios.EPOCH_T0,
+                resolve_owner=scenarios.registry({"box-a": "owner-1"}),
+                policy=policy,
+                derive_stale=lambda db, moment: _agen(),
+                time_budget_s=0.2))
+        assert summary.stale_watchers.get("budget_exhausted") is True
+        assert closed == [True]
+    finally:
+        conn.close()
+
+
+def test_async_tick_overrun_note():
+    """A sweep exceeding its schedule interval notes tick_overrun (D103).
+
+    Async mirror of the sync sweep's overrun test.
+    """
+    async def slow_derive(db, moment):
+        await asyncio.sleep(0.05)
+        if False:
+            yield
+
+    conn = scenarios.new_db()
+    try:
+        db = AsyncD1Shim(conn)
+        policy = AsyncTestPolicy(conn, now=scenarios.EPOCH_T0)
+        summary = asyncio.run(
+            push_sweep_async.push_sweep_async_tick(
+                db, now=scenarios.EPOCH_T0,
+                resolve_owner=scenarios.registry({"box-a": "owner-1"}),
+                policy=policy,
+                derive_stale=slow_derive,
+                tick_interval_s=0))
+        keys = [k for k, _ in summary.notes]
+        assert keys == ["tick_overrun"]
+        assert "0.0s schedule interval" in summary.notes[0][1]
     finally:
         conn.close()
