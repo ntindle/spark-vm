@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push: groundwork so the hosted plane can page an
+  owner when an approval is filed or a box is revoked — the two paging
+  policies now exist in an async form the plane worker can adopt once its
+  async boundary lands. The actual wiring (the filing and revoke endpoints
+  calling them) is still open on #1492, so no pages fire yet. (#1608)
+
 - The D9 push-sweep operator guide now documents the async plane port's
   runbook (2026-10-16): how the hosted plane drives the sweep — the
   async database interface, the injected policy boundary with the
