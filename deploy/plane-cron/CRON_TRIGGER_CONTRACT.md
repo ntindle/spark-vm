@@ -67,6 +67,21 @@ the conformance harness, not the dispatch targets.
   reminders_enabled=True)` against the worker's async `_D1`
   (`await db.prepare(...).bind(...).run()` — the worker exposes no
   synchronous D1).
+- **S2-b1 pin (#1566, shipped):** the port's canonical copy is
+  `hosted/push_sweep_async.py` — the async rewrite of
+  `hosted/push_sweep.py` against the worker's async `_D1` interface.
+  The four policy calls are an injected async `policy` boundary
+  (`maybe_enqueue_reminder`, `maybe_enqueue_digest`,
+  `on_heartbeat_stale`, `on_token_expiry_warning`, plus
+  `policy.reminder_min_ttl_seconds` carrying the D8 bound so the
+  hint/gate single-source #1507 holds across the seam); the async
+  policy port itself is the next slice. Watcher derivations may be
+  sync iterables (tests) or async iterables (the worker). The
+  worker.py marked section is derived from this file at deploy time
+  (D-PP-5 order); anti-drift is the D-PP-2 conformance, not
+  byte-identity (F-PP-2). `hosted/test_push_sweep_async.py` replays
+  all 17 D-PP-2 scenarios through the port and diffs summary + DB
+  state against the recorded outputs.
 - The `scheduled` handler's per-minute branch (D-PP-3) calls it; the
   `POST /v1/ops/push/sweep` fetch route (§3) calls it for the D72
   manual probe.

@@ -184,3 +184,29 @@ scenario against this sync sweep and diffs the outputs against the
 recorded files, failing on divergence. Regenerate the records with
 `python3 -m hosted.push_sweep_port.record` after any intentional
 behavior change.
+
+## push_sweep_async.py — the D9 sweep's async plane port (#1566 S2-b1)
+
+The canonical async rewrite of `push_sweep.py` against the plane
+worker's async `_D1` (`await db.prepare(sql).bind(*params).all()` /
+`.first()` / `.run()`; rows as dicts). Entry point
+`push_sweep_async_tick(db, *, now, resolve_owner, policy,
+reminders_enabled=True, ...)` — the four policy calls
+(`maybe_enqueue_reminder`, `maybe_enqueue_digest`, `on_heartbeat_stale`,
+`on_token_expiry_warning`) are an injected async `policy` boundary
+(the async policy port is the next slice); the D8 bound rides the
+policy as `reminder_min_ttl_seconds` so the hint/gate single-source
+(#1507) holds across the seam. Watcher derivations may be sync
+iterables (tests) or async iterables (the worker). The worker's
+`control-plane/worker.py` derives its marked section from this file at
+deploy time (D-PP-5 order); anti-drift is the D-PP-2 conformance, not
+byte-identity (F-PP-2).
+
+Tested by `test_push_sweep_async.py` (6 tests, neutering-verified
+non-vacuous): all 21 D-PP-2 scenarios replayed through the async port
+and diffed (summary + DB state) against the recorded outputs; the
+record adapter's parity with the sync adapter; the policy boundary's
+fail-closed validation; worker-shaped async-generator derivations.
+
+Run the tests: `python3 -m pytest hosted/test_push_sweep_async.py`
+from the repo root.

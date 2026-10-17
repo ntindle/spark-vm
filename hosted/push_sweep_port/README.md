@@ -8,7 +8,7 @@ and the recorded outputs it must reproduce.
 
 ## The mechanism (D-PP-2)
 
-- `scenarios.py` defines 17 deterministic scenarios: each pins the
+- `scenarios.py` defines 21 deterministic scenarios: each pins the
   sweep's clock (`now`), the owner registry, and the watcher
   derivations, builds a fixture SQLite database, and runs
   `sweep_once`.
@@ -76,6 +76,10 @@ under test, so a hand-edited record or a drifted module fails loudly.
 | `stale_epoch_quiet` | New stale epoch within 4h of the last stale page: `suppressed_quiet_period`, no row, no budget (F7/D62). |
 | `reminder_terminal_clock_replay` | The D61 audit row already exists: gate-1 writes nothing, exactly one audit row ever (D61). |
 | `derivation_poisoned` | The stale derivation raises at call time: `poisoned` once, the token watcher still runs (D78). |
+| `reminder_mid_transition` | Pending approval with `decision_seq` set: never a candidate, not counted (D68). |
+| `reminders_multi_page` | Three reminders, `page_size=2`, `max_pages=2`: keyset advances, all page, `pages_truncated` False (D69). |
+| `digest_already_enqueued` | Digest window with `enqueued_at` set: never re-fires, row untouched (D76). |
+| `d8_ttl_boundary` | `ttl=200` never a candidate, `ttl=400` pages once — hint and gate agree on 300s (D8). |
 
 Deliberately not fixture-able: partial-budget stops (wall-clock
 interleaving) and the `tick_overrun` note (measures wall-clock

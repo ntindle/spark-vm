@@ -405,6 +405,59 @@ def build_derivation_poisoned(conn):
                      derive_token_warnings=[("box-a", "th-1")])
 
 
+def build_reminder_mid_transition(conn):
+    """A pending approval with decision_seq set is never a candidate.
+
+    The D68 hint's `decision_seq IS NULL` predicate excludes the
+    mid-transition row (decision recorded, not yet consumed): it is
+    not counted in candidates_seen and produces no disposition.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400,
+                  decision="approve", decision_seq=1)
+    return base_spec()
+
+
+def build_reminders_multi_page(conn):
+    """Keyset pagination advances across pages (D69).
+
+    Three due reminders with page_size=2, max_pages=2: the first page
+    takes r1+r2, the keyset predicate advances past them, the second
+    page takes r3 — pages_truncated stays False and all three page.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400)
+    file_approval(conn, "box-a", "r2", ttl=600, age=400)
+    file_approval(conn, "box-a", "r3", ttl=600, age=400)
+    return base_spec(sweep_kwargs={"page_size": 2, "max_pages": 2})
+
+
+def build_digest_already_enqueued(conn):
+    """A digest window with enqueued_at set never re-fires (D76).
+
+    The pending-window scan's `enqueued_at IS NULL` predicate skips the
+    already-fired window: zero dispositions, the row untouched.
+    """
+    window = push_enqueue.hour_bucket(T0)
+    conn.execute(
+        "INSERT INTO push_digest_state (owner_principal, window_start,"
+        " count, enqueued_at) VALUES (?, ?, ?, ?)",
+        ("owner-1", window, 3, "2026-10-05T11:00:00+00:00"))
+    conn.commit()
+    return base_spec()
+
+
+def build_d8_ttl_boundary(conn):
+    """The D8 TTL bound: ttl=200 never a candidate, ttl=400 pages (300 bound).
+
+    The hint's `(expires_at - created_at) >= 300` predicate and the
+    policy's gate agree on the bound (#1507): the short-TTL approval
+    is not counted in candidates_seen and produces nothing; the
+    400s-TTL approval is due and pages exactly once.
+    """
+    file_approval(conn, "box-a", "short", ttl=200, age=150)
+    file_approval(conn, "box-a", "r1", ttl=400, age=300)
+    return base_spec()
+
+
 SCENARIOS = [
     {"name": "reminder_due",
      "doc": "One due reminder produces exactly one queued page.",
@@ -477,6 +530,23 @@ SCENARIOS = [
      "doc": "The stale derivation raises at call time: counted "
             "poisoned once, the token watcher still runs (D78).",
      "build": build_derivation_poisoned},
+    {"name": "reminder_mid_transition",
+     "doc": "A pending approval with decision_seq set is never a "
+            "candidate: not counted, no disposition (D68).",
+     "build": build_reminder_mid_transition},
+    {"name": "reminders_multi_page",
+     "doc": "Three due reminders, page_size=2, max_pages=2: the keyset "
+            "predicate advances, all three page, pages_truncated stays "
+            "False (D69).",
+     "build": build_reminders_multi_page},
+    {"name": "digest_already_enqueued",
+     "doc": "A digest window with enqueued_at set never re-fires: zero "
+            "dispositions, the row untouched (D76).",
+     "build": build_digest_already_enqueued},
+    {"name": "d8_ttl_boundary",
+     "doc": "ttl=200 never a candidate, ttl=400 pages exactly once — the "
+            "hint and the gate agree on the 300s bound (D8, #1507).",
+     "build": build_d8_ttl_boundary},
 ]
 
 
