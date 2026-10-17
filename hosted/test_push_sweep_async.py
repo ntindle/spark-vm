@@ -366,7 +366,10 @@ def test_async_derivation_abandoned_on_budget():
     infinite async generator is abandoned when the deadline trips
     between items, and the awaited aclose() delivers GeneratorExit
     deterministically — try/finally cleanup runs, no GC-timing
-    assumption.
+    assumption. The AcloseRecorder proxy proves the *driver's*
+    abandonment hook (not asyncio.run's shutdown_asyncgens at loop
+    teardown) delivered the close: a driver that never calls aclose()
+    leaves aclose_calls empty and fails this test.
     """
     closed = []
 
@@ -379,6 +382,27 @@ def test_async_derivation_abandoned_on_budget():
         finally:
             closed.append(True)
 
+    class AcloseRecorder:
+        """Proxy exposing aclose(); records the driver's abandonment call."""
+
+        def __init__(self, agen):
+            self._agen = agen
+            self.aclose_calls = []
+
+        def __aiter__(self):
+            return self._agen.__aiter__()
+
+        async def aclose(self):
+            self.aclose_calls.append(True)
+            await self._agen.aclose()
+
+    recorder = []
+
+    def _derive(db, moment):
+        rec = AcloseRecorder(_agen())
+        recorder.append(rec)
+        return rec
+
     conn = scenarios.new_db()
     try:
         db = AsyncD1Shim(conn)
@@ -388,9 +412,10 @@ def test_async_derivation_abandoned_on_budget():
                 db, now=scenarios.EPOCH_T0,
                 resolve_owner=scenarios.registry({"box-a": "owner-1"}),
                 policy=policy,
-                derive_stale=lambda db, moment: _agen(),
+                derive_stale=_derive,
                 time_budget_s=0.2))
         assert summary.stale_watchers.get("budget_exhausted") is True
+        assert recorder[0].aclose_calls == [True]
         assert closed == [True]
     finally:
         conn.close()
