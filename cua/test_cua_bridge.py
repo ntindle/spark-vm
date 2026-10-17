@@ -38,6 +38,8 @@ Covers:
   infinite driver window_id is filtered as malformed (and non-finite
   /api/click coordinates answer 400 "bad coordinates", not 500)
 - #1580: the #492 probe's window pick runs through the same #1575 shape
+- #1583: non-numeric/negative Content-Length answers 400 "bad content-length"
+  (bad-coordinates contract), never 500 with the int() exception text echoed
   filter — a malformed xev candidate is dropped before the PID match and
   the z-order max, so it can never be focused or crash the probe
 """
@@ -478,6 +480,24 @@ class TestBody:
         h = self._h(bridge, b"x", content_length=2_000_000)
         assert h._body() is None
 
+    def _h_garbage(self, bridge, raw_length):
+        h = fake_handler(bridge, "POST", {"Host": "127.0.0.1:18731",
+                                          "X-CUA": "1"})
+        h.headers["Content-Length"] = raw_length
+        h.rfile = io.BytesIO(b'{"x": 1}')
+        return h
+
+    def test_garbage_content_length_is_bad_length(self, bridge):
+        # Issue #1583: a non-numeric Content-Length used to ValueError out
+        # of int() into do_POST's outer 500 (exception text echoed).
+        h = self._h_garbage(bridge, "abc")
+        assert h._body() is h._BAD_CONTENT_LENGTH
+
+    def test_negative_content_length_is_bad_length(self, bridge):
+        # A negative length is the same class of client bug as garbage.
+        h = self._h_garbage(bridge, "-5")
+        assert h._body() is h._BAD_CONTENT_LENGTH
+
 
 # ---------------------------------------------------------------- end-to-end HTTP
 
@@ -735,6 +755,16 @@ class TestEndpoints:
         resp = conn.getresponse()
         assert resp.status == 413
         conn.close()
+
+    def test_garbage_content_length_400(self, live):
+        # Issue #1583: garbage Content-Length is a client bug (400, the
+        # bad-coordinates contract), never a 500 with the int() exception
+        # text echoed.
+        _, _, port = live
+        status, body = req(port, "POST", "/api/click", {"x": 1, "y": 2},
+                           headers={"Content-Length": "abc"})
+        assert status == 400
+        assert body["error"] == "bad content-length"
 
 
 # ---------------------------------------------------------------- #494 focus assertion

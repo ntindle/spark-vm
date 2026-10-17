@@ -207,6 +207,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- `muse-job watch` pages on a buried `question` claim (2026-10-16): `question`
+  was read from the tail-line event, which issue #23 B3 proved buryable for
+  `done` — a newer trailing line silently suppressed the page. Questions are
+  now triaged oldest-first across the whole event file on every pass,
+  mirroring the `blocked` claim-only scan (PR #1560), with the same
+  `question-repeated` burst coalescing; still no job-state transition, no
+  dedup cursor, no latch. (#1561) (#TBD)
+- A non-numeric or negative `Content-Length` on the CUA bridge no longer
+  answers 500 with the `int()` exception text echoed (2026-10-16): it is a
+  client bug answered 400 "bad content-length", matching the #1578
+  bad-coordinates contract. (#1583) (#TBD)
 - Waitlist public pages no longer stall behind operator jobs (2026-10-16):
   the confirm, forget, and claim pages rendered under the same exclusive
   lock the lifecycle jobs hold, so a drop/purge rewrite, invite wave, or
