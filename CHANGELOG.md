@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push: a new analysis pins the last unwired leg of
+  the approval-filed buzz — the previous caller-wiring issue closed while
+  its plane-side half (the filing and revoke endpoints actually paging)
+  still had no owner. The analysis names the missing pieces and files the
+  follow-up build issues (#1614, #1615), so the work is tracked again.
+  (#1616)
+
 - Box installer: a box already installed from a tagged release can now be
   moved to a newer release in place (`--update`, or `--update --to` for a
   specific release) — closing the tag-to-tag gap in the versioned install
