@@ -57,7 +57,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   async database interface, the injected policy boundary with the
   TTL bound it carries, async watcher derivations — and what stays
   identical to the sync sweep (three passes, summary shape,
-  disposition vocabulary, capacity knobs, failure catalog). (#TBD)
+  disposition vocabulary, capacity knobs, failure catalog). (#1600)
 
 - Fleet version inventory: the box-side snapshot emitter's contract — unknown
   fields stay null with a note instead of crashing, and gate-state edge cases
