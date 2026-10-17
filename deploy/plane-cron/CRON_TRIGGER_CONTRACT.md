@@ -52,10 +52,11 @@ token.
 
 ### Async amendment (#1566 S2-a — the dispatch truth)
 
-This amendment is authoritative over the older step list below it: the
-older list named the in-repo sync entry points and a direct
-`send_loop(...)` call; both are superseded. The sync modules named
-there remain the conformance harness, not the dispatch targets.
+This amendment is authoritative over the older step list below it and
+over §3's endpoint table: the older text named the in-repo sync entry
+points (`sweep_once`, `gc_push_tables`) and a direct `send_loop(...)`
+call; all three are superseded. The sync modules named there remain
+the conformance harness, not the dispatch targets.
 
 **Concrete async port entry points** (plane-workspace module paths):
 
@@ -127,14 +128,21 @@ pass is unaffected: DO alarms replace reminders, not the D54 digest
 trigger. Enabling alarms with the reminder sweep on must not
 double-fire.
 
-### Daily tick (`30 3 * * *`)
+### Daily tick (`30 3 * * *`) — superseded step
 
-Call `hosted.push_gc.gc_push_tables(conn)` with the contract's
-defaults (90-day retention, batch size 1000). Log the returned
-per-table counts; the module already emits one line per sweep
-(`push_gc: retention_days=90 deleted={...} total=M`). Batch size and
-retention window are positive-int validated before any DELETE — a
-misconfigured trigger fails loud, not silent.
+Retained for the record; the async amendment's D-PP-3 multiplex is
+authoritative: the `30 3 * * *` branch is reserved for #1568's async
+retention-GC port — the branch exists, the port does not, and nothing
+on this cron runs until it lands.
+
+~~Call `hosted.push_gc.gc_push_tables(conn)` with the contract's
+defaults (90-day retention, batch size 1000).~~ The in-repo sync
+module is the conformance harness, not the dispatch target (F-PP-2):
+the daily branch calls the #1568 async port with the contract's
+defaults (90-day retention, batch size 1000), positive-int validated
+before any DELETE — a misconfigured trigger fails loud, not silent.
+Log the returned per-table counts; the sync module already emits one
+line per sweep, and the port reproduces that line.
 
 ## 3. Manual ops triggers (the #1013 pattern)
 
@@ -144,8 +152,8 @@ explicitly refused, and the response returns the run's counts.
 
 | Endpoint | Runs | Returns |
 |---|---|---|
-| `POST /v1/ops/push/sweep` | one `sweep_once` | the `SweepSummary` |
-| `POST /v1/ops/push/gc` | one `gc_push_tables` | the deleted-row counts |
+| `POST /v1/ops/push/sweep` | one `push_sweep_async_tick` (the §2 async port — never the in-repo sync `sweep_once`; F-PP-2) | the `SweepSummary` |
+| `POST /v1/ops/push/gc` | one async retention-GC port call (#1568's build — never the in-repo sync `gc_push_tables`; F-PP-2) | the deleted-row counts |
 
 Use these for verification runs and catch-up after trigger outages —
 the manual trigger is how the operator proves the scheduled one was

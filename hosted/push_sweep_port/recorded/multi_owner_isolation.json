@@ -1,0 +1,105 @@
+{
+  "scenario": "multi_owner_isolation",
+  "doc": "Two owners, two boxes: every page, digest row, and budget counter stays scoped to its own owner (tenant isolation).",
+  "sweep_module_sha256": "61dd64ee999033d1a08596ee1a3d3f2ce126838f6f6b7f4b717b9e9f6b376d3f",
+  "summary": {
+    "reminders": {
+      "queued": 2
+    },
+    "digests": {
+      "queued": 1
+    },
+    "stale_watchers": {
+      "skipped": true
+    },
+    "token_warnings": {
+      "skipped": true
+    },
+    "candidates_seen": 2,
+    "pages_truncated": false,
+    "reminders_enabled": true,
+    "notes": [],
+    "budget_truncated": false,
+    "digests_truncated": false
+  },
+  "db": {
+    "push_send_results": [
+      [
+        1,
+        "2026-10-05T12:00:00+00:00",
+        "owner-1",
+        "box-a",
+        "",
+        "reminder",
+        "box-a\u0000r1",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        2,
+        "2026-10-05T12:00:00+00:00",
+        "owner-2",
+        "box-b",
+        "",
+        "reminder",
+        "box-b\u0000r2",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        3,
+        "2026-10-05T12:00:00+00:00",
+        "owner-2",
+        "",
+        "",
+        "digest",
+        "owner-2\u00002026-10-05T12",
+        "queued",
+        null,
+        null,
+        null,
+        null
+      ]
+    ],
+    "push_digest_state": [
+      [
+        "owner-2",
+        "2026-10-05T12",
+        2,
+        "2026-10-05T12:00:00+00:00"
+      ]
+    ],
+    "push_budget_counters": [
+      [
+        "box",
+        "box-a",
+        "2026-10-05T12",
+        1
+      ],
+      [
+        "box",
+        "box-b",
+        "2026-10-05T12",
+        1
+      ],
+      [
+        "owner",
+        "owner-1",
+        "2026-10-05T12",
+        1
+      ],
+      [
+        "owner",
+        "owner-2",
+        "2026-10-05T12",
+        2
+      ]
+    ]
+  }
+}
