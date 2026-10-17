@@ -52,11 +52,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Rollout alert-stack gap analysis for the release-gating channel's
-  remaining trackers: the fleet-wide gate answer-age collector the
-  fifth alert rule was waiting on already exists, so #1631 is now a
-  rule-only build, and the `fleet status` line #1632 asked for folds
-  into the alert board rather than a new command. (#TBD)
+- Pinned down what the release-gating channel's remaining fleet
+  alerts need: per-box gate staleness will surface on the alert board
+  (no new command), and the fleet-wide stale-gate rule's signal source
+  already exists, so both are unblocked builds. (#TBD)
 
 - The desktop bridge's structured audit log now has an operator reader:
   `cua-bridge-log` filters the bridge's audit events by kind or severity
