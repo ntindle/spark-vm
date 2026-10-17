@@ -68,7 +68,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rollout window — the same journal signal the promotion gate already
   enforces. A wave can look fully landed while the gate still refuses
   it; the new field makes that disagreement visible at a glance, so
-  the 2am operator sees why promotion is blocked. (#TBD)
+  the 2am operator sees why promotion is blocked. (#1659)
 
 - The swap proxy's audit trail now records a `tenant` field on every
   `swapped=` line, so a future multi-tenant host can attribute each
