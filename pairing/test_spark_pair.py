@@ -840,6 +840,34 @@ def test_heartbeat_success_is_quiet_and_records_last_ok(ctx, monkeypatch,
     assert isinstance(last["last_ok_at"], int)
 
 
+def test_heartbeat_midwrite_crash_keeps_prior_file(ctx, monkeypatch):
+    # #1621: last_heartbeat.json is the operator's freshness signal (per
+    # docs/HOSTED_AUTH_OPERATOR_RUNBOOK.md). A mid-write crash must leave
+    # the previous file intact — never torn JSON — via temp+rename.
+    # Neuter that must flip this test: revert to _write_private (O_TRUNC
+    # in place) -> the file holds 5 torn bytes, not the old content.
+    _run_init(ctx)
+    _enroll(ctx)
+    hb = os.path.join(ctx.dir, "last_heartbeat.json")
+    old = json.dumps({"box_id": "box_xyz", "last_ok_at": 1234,
+                      "plane_ok": True}, indent=2)
+    with open(hb, "w") as fh:
+        fh.write(old)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (200, {"ok": True}))
+    real_write = os.write
+
+    def boom(fd, data):
+        buf = bytes(data) if isinstance(data, memoryview) else data
+        real_write(fd, buf[:5])
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(os, "write", boom)
+    with pytest.raises(OSError, match="simulated crash mid-write"):
+        spark_pair.cmd_heartbeat(ctx)
+    assert open(hb).read() == old
+
+
 def test_heartbeat_transport_failure_is_loud(ctx, monkeypatch, capsys):
     _run_init(ctx)
     _enroll(ctx)
