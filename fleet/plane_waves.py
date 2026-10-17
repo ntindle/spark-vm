@@ -480,7 +480,7 @@ def _wave_gate(store_dir, waves, template, stale_hours):
 
 
 def _unresolved_deploy_failures(store_dir, wave_planes, waves):
-    """Latest update-event per live-wave plane since the wave went live.
+    """Latest update-event per given wave's planes since the wave went live.
 
     Returns [(plane_id, observed_at)] for planes whose latest event in
     the window is deploy-failed. Events before the wave's updated_at
