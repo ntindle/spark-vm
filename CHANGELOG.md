@@ -1538,6 +1538,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   sweep likewise skips a single undecodable line loudly instead of
   abandoning the whole sweep. (#1334)
 
+### Fixed
+
+- Box phone-home log growth: the daemon's connection-lifecycle log now
+  carries the same 1 MiB in-code cap (with single-generation rotation) as
+  the other box state-dir logs. Previously the failure-log cap covered
+  only the failure channel, so a sustained control-plane outage could grow
+  the reconnect log unboundedly past it. (#1622)
+
 ## [0.8.0] - 2026-10-10
 
 ### Added
