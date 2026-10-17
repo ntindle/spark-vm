@@ -52,6 +52,7 @@ STEP_FNS = [
     "stage_repo_copy",
     "staged_copy_current",
     "derive_agent_repo",
+    "redact_url",
     "run_bootstrap",
     "run_agent",
     "parse_args",

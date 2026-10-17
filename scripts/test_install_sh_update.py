@@ -16,8 +16,8 @@ Tests pin:
 2. Happy path — the checkout moves v1.2.3 -> v1.2.4 (detached, VERSION
    verified), and the identity gate refuses the wrong user.
 3. Fail-closed edges — dirty tree, downgrade, non-versioned checkout,
-   ambiguous tags, unknown --to target all die loudly; same-version is an
-   idempotent skip; --dry-run mutates nothing.
+   ambiguous tags, branch-shadowing-the-tag, unknown --to target all die
+   loudly; same-version is an idempotent skip; --dry-run mutates nothing.
 """
 
 import subprocess
@@ -165,14 +165,74 @@ def test_update_identity_gate_refuses_wrong_user(tmp_path):
 
 
 def test_update_refuses_dirty_tree(tmp_path):
+    # Honest fixture: the dirt must NOT break the VERSION pin — otherwise
+    # current_release_tag's assertion dies before the dirty check is ever
+    # reached and the test is vacuous. An untracked file dirties the tree
+    # while the release pin holds, so this pins the dirty check itself.
     _upstream, box = _update_fixture(tmp_path)
-    (box / "VERSION").write_text("tampered\n")  # dirty, no commit
+    (box / "UNTRACKED").write_text("x\n")
     who = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
     code = _source()
     code += textwrap.dedent(
         f"""\
         AGENT_USER={who}; AGENT_REPO="{box}"; UPDATE=1; UPDATE_TO=v1.2.4; DRY_RUN=0
-        if ( run_update ) 2>/dev/null; then echo "dirty checkout accepted"; exit 1; fi
+        rc=0; out=$(run_update 2>&1) || rc=$?
+        [ $rc != 0 ] || {{ echo "dirty checkout accepted"; exit 1; }}
+        echo "$out" | grep -q "local changes" || {{ echo "wrong refusal: $out"; exit 1; }}
+        [ "$(cat "{box}/VERSION")" = "1.2.3" ] || {{ echo "checkout moved on refused update"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = _run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_update_refuses_ambiguous_tags(tmp_path):
+    # Two release-grammar tags point at HEAD: the updater must not guess
+    # which release the box runs.
+    _upstream, box = _update_fixture(tmp_path)
+    who = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(box), "tag", "v1.2.3-alias"], check=True, timeout=60
+    )
+    code = _source()
+    code += textwrap.dedent(
+        f"""\
+        AGENT_USER={who}; AGENT_REPO="{box}"; UPDATE=1; UPDATE_TO=v1.2.4; DRY_RUN=0
+        rc=0; out=$(run_update 2>&1) || rc=$?
+        [ $rc != 0 ] || {{ echo "ambiguous release accepted"; exit 1; }}
+        echo "$out" | grep -q "ambiguous release" || {{ echo "wrong refusal: $out"; exit 1; }}
+        [ "$(cat "{box}/VERSION")" = "1.2.3" ] || {{ echo "checkout moved on refused update"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = _run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_update_refuses_shadowed_branch(tmp_path):
+    # A branch shadowing the release tag: `git checkout --detach <tag>`
+    # resolves the branch first (unlike rev-parse, which prefers refs/tags),
+    # so the checkout lands on the branch tip — and the landed==want_commit
+    # guard must refuse loudly instead of installing the branch as the
+    # release. This pins the guard itself.
+    _upstream, box = _update_fixture(tmp_path)
+    who = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(box), "branch", "v1.2.4", "v1.2.3^{commit}"],
+        check=True,
+        timeout=60,
+    )
+    code = _source()
+    code += textwrap.dedent(
+        f"""\
+        AGENT_USER={who}; AGENT_REPO="{box}"; UPDATE=1; UPDATE_TO=v1.2.4; DRY_RUN=0
+        rc=0; out=$(run_update 2>&1) || rc=$?
+        [ $rc != 0 ] || {{ echo "shadowed tag accepted"; exit 1; }}
+        echo "$out" | grep -q "shadowing the release tag" || {{ echo "wrong refusal: $out"; exit 1; }}
+        [ "$(cat "{box}/VERSION")" = "1.2.3" ] || {{ echo "release moved on refused update"; exit 1; }}
         echo OK
         """
     )
@@ -306,6 +366,43 @@ def test_update_unknown_target_dies_loud(tmp_path):
         AGENT_USER={who}; AGENT_REPO="{box}"; UPDATE=1; UPDATE_TO=v9.9.9; DRY_RUN=0
         if ( run_update ) 2>/dev/null; then echo "unknown tag accepted"; exit 1; fi
         [ "$(cat "{box}/VERSION")" = "1.2.3" ] || {{ echo "checkout moved on refused target"; exit 1; }}
+        echo OK
+        """
+    )
+    proc = _run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_tag_grammar_rejects_smuggled_whitespace():
+    # A pasted tag carrying a trailing newline must not validate: the =~
+    # grammar's character class admits no whitespace (verified — bash's $
+    # anchor does not match before a trailing newline, so the grammar
+    # itself is the rejecting layer). ($() strips trailing newlines, so
+    # the newline is appended via $'\n'.)
+    code = _source()
+    code += textwrap.dedent(
+        """\
+        nl_to="v1.2.4"; nl_to+=$'\n'
+        if ( parse_args --update --to "$nl_to" ) 2>/dev/null; then echo "newline --to accepted"; exit 1; fi
+        nl_ver="v1.2.3"; nl_ver+=$'\n'
+        if ( parse_args --version "$nl_ver" ) 2>/dev/null; then echo "newline --version accepted"; exit 1; fi
+        if ( UPDATE_TO="$nl_to" parse_args --update ) 2>/dev/null; then echo "env newline accepted"; exit 1; fi
+        echo OK
+        """
+    )
+    proc = _run_bash(code)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert proc.stdout.strip().endswith("OK")
+
+
+def test_redact_url_strips_userinfo_for_display():
+    code = _source()
+    code += textwrap.dedent(
+        """\
+        [ "$(redact_url 'https://user:pass@host/x.git')" = 'https://<redacted>@host/x.git' ] || { echo "creds not stripped"; exit 1; }
+        [ "$(redact_url 'https://github.com/ntindle/spark-vm.git')" = 'https://github.com/ntindle/spark-vm.git' ] || { echo "plain url mangled"; exit 1; }
+        [ "$(redact_url 'git@github.com:ntindle/spark-vm.git')" = 'git@github.com:ntindle/spark-vm.git' ] || { echo "scp url mangled"; exit 1; }
         echo OK
         """
     )

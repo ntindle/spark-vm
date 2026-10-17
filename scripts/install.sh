@@ -110,6 +110,14 @@ EOF
 note() { echo "install.sh: $*"; }
 die() { echo "install.sh: ERROR: $*" >&2; exit 1; }
 
+redact_url() { # $1 — strip userinfo for DISPLAY (never echo credentials)
+    # A fork install can carry credentials in its origin URL; error and
+    # plan messages must show the URL without them. URLs without userinfo
+    # (and scp-style git@host: paths, which carry no secret) pass through
+    # unchanged.
+    printf '%s' "$1" | sed -e 's#://[^/@]*@#://<redacted>@#'
+}
+
 # exec_if_live <description> <command...> — describe the mutation, then run
 # it, unless --dry-run, in which case only describe it. Read-only probes
 # always run for real so a dry run reports the true plan.
@@ -431,14 +439,14 @@ resolve_install_version() {
     if [ -n "$INSTALL_VERSION" ]; then
         local probe
         probe="$(git ls-remote --tags "$REPO_URL" "refs/tags/$INSTALL_VERSION" 2>/dev/null)" || \
-            die "cannot reach $REPO_URL to verify tag '$INSTALL_VERSION'"
-        [ -n "$probe" ] || die "no such tag '$INSTALL_VERSION' on $REPO_URL"
+            die "cannot reach $(redact_url "$REPO_URL") to verify tag '$INSTALL_VERSION'"
+        [ -n "$probe" ] || die "no such tag '$INSTALL_VERSION' on $(redact_url "$REPO_URL")"
         printf '%s\n' "$INSTALL_VERSION"
         return 0
     fi
     local tags
     tags="$(git ls-remote --tags "$REPO_URL" 2>/dev/null)" || \
-        die "cannot list tags on $REPO_URL — check the network and re-run $SCRIPT_ABS"
+        die "cannot list tags on $(redact_url "$REPO_URL") — check the network and re-run $SCRIPT_ABS"
     local latest
     # Grammar filter: only release tags compete for "latest" — sort -V over
     # the raw tag namespace would let a non-release tag (e.g. `zzz`, which
@@ -446,7 +454,7 @@ resolve_install_version() {
     # parse_args enforces for --version. Prereleases (v1.2.4-rc.1) compete
     # as ordinary tags — sort -V decides, "latest tag" is literal.
     latest="$(printf '%s\n' "$tags" | awk '{print $2}' | grep -v '\^{}$' | sed 's|^refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' | sort -V | tail -n 1)"
-    [ -n "$latest" ] || die "$REPO_URL has no release tags — cannot pick a release to install"
+    [ -n "$latest" ] || die "$(redact_url "$REPO_URL") has no release tags — cannot pick a release to install"
     printf '%s\n' "$latest"
 }
 
@@ -506,7 +514,7 @@ step_repo() {
     if [ "$have_commit" != "$want_commit" ]; then
         local installed
         installed="$(tr -d '[:space:]' < "$AGENT_REPO/VERSION" 2>/dev/null || echo unknown)"
-        die "$AGENT_REPO is at VERSION '$installed' ($have_commit), not $version ($want_commit) — run $SCRIPT_ABS --update (as $AGENT_USER) to move between releases; a plain re-run never moves the checkout"
+        die "$AGENT_REPO is at VERSION '$installed' ($have_commit), not $version ($want_commit) — run $AGENT_REPO/scripts/install.sh --update as $AGENT_USER to move between releases; a plain re-run never moves the checkout"
     fi
     assert_version_matches "$version" "$AGENT_REPO"
     note "skip: $AGENT_REPO already at release $version"
@@ -589,7 +597,7 @@ step_repo_update() {
     note "updating $AGENT_REPO from release $current to $target"
     local origin_url
     origin_url="$(git -C "$AGENT_REPO" remote get-url origin)"
-    exec_if_live "fetch tags from $origin_url" \
+    exec_if_live "fetch tags from $(redact_url "$origin_url")" \
         git -C "$AGENT_REPO" fetch origin --tags
     [ "$DRY_RUN" = 1 ] && return 0
     # Ref-shadow guard (same as a fresh install): the checkout lands exactly
