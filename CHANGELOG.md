@@ -54,7 +54,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Hosted owner-alerting docs: the caller-wiring pointers that dangled on a
   closed issue now point at the open build issue that owns the work, so the
-  "no page fires yet" rows name the real next step. (#TBD)
+  "no page fires yet" rows name the real next step. (#1618)
 
 - Relay liveness (hosted): the tenant-status wiring's four review
   follow-ups from the R3 relay-liveness build are now pinned by tests —
