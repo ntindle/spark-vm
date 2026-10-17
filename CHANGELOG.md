@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   gate-stale alert rule, the `fleet status` gate-stale line, G15 S2
   operator tooling and wave assignment, G15 S3 hosted remainders) now
   has its own tracker issue (#1629–#1634), so the work is owned again.
-  (#TBD)
+  (#1635)
 
 - Hosted owner-alerting: the in-repo half of the endpoint-driven push
   wiring is now built — the async enqueue boundary that decides whether a
