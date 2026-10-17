@@ -2592,6 +2592,73 @@ def triage_blocked_events(job, uuid, now, events):
         events.append(sig)
 
 
+def question_events(uuid, now):
+    """All `question`-state events in the file, oldest first by normalized ts.
+
+    Issue #1561: residual of the #21 item-2 fix (PR #1560). The tail-line
+    reader the old question handling used is buryable (issue #23 B3 proved
+    it for `done`; the item-2 turn fixed `blocked` the same way): a buried
+    genuine question produced a suppressed advisory page, so every visible
+    question event is triaged on every pass, oldest first by the sanitized
+    _claim_ts cursor. Mirrors blocked_events.
+    """
+    evs = []
+    for e in _iter_events(uuid):
+        if e.get("state") == "question":
+            evs.append((e, _claim_ts(e, now)))
+    evs.sort(key=lambda t: t[1])
+    return evs
+
+
+def handle_question_claim(job, ev, slug, now=None, recent_count=0):
+    """Triage a hook `question` event into an operator page. ALWAYS returns a
+    signal dict -- never None.
+
+    Issue #1561: mirrors handle_blocked_claim. A question claim, like a
+    blocked claim, has no protocol to verify against: whether the agent is
+    genuinely stuck awaiting operator input is a human judgment call the
+    manager cannot re-derive, so every visible question event pages as
+    `question`, every pass (fail loud), oldest first. Consequence is
+    advisory-only: a buried genuine question suppresses a page (now closed
+    by the whole-file scan) and a forged question is one spurious page --
+    it cannot fake completion or blind the watchdog.
+
+    Burst coalescing mirrors blocked: when more than 3 question claims from
+    the last 24h are visible in the event file, claims are labeled
+    `question-repeated` (count derived from the event file via
+    `recent_count`, never from agent-writable job.json).
+    """
+    if now is None:
+        now = time.time()
+    ev = ev or {}
+    detail = _clean_text(ev.get("detail", ""))
+    text = f"agent asked a question (operator must answer): {detail}"
+    if recent_count > 3:
+        return {"signal": "question-repeated",
+                "detail": f"{recent_count} question claims in 24h; coalesced: {text}"}
+    return {"signal": "question", "detail": text}
+
+
+def triage_question_events(job, uuid, now, events):
+    """Triage every question event in the file, oldest-first, always paging.
+
+    Issue #1561: mirrors triage_blocked_events -- no tail-line reader, no
+    dedup cursor, no suppression latch (a latch or cursor in agent-writable
+    job.json would be plantable per the issue #3 final review). The 24h
+    burst count comes from the event file, never from agent-writable
+    job.json. Appends signal dicts (with `job` filled) to `events`. Does
+    not mutate the job record, so no save.
+    """
+    slug = job["slug"]
+    evs = question_events(uuid, now)
+    recent_count = sum(1 for _, ts in evs if 0 <= now - ts <= 24 * 3600)
+    for ev, _ts in evs:
+        sig = handle_question_claim(job, ev, slug, now,
+                                    recent_count=recent_count)
+        sig["job"] = slug
+        events.append(sig)
+
+
 def check_events_liveness(job, st, now):
     """Watchdog liveness (issue #3): detect event-file blinding.
 
@@ -3666,9 +3733,13 @@ def cmd_watch(args):
 
         ev = st["last_hook_event"] or {}
         estate = ev.get("state")
-        if estate == "question":
-            events.append({"job": slug, "signal": "question",
-                           "detail": _clean_text(ev.get("detail", ""))})
+        # Issue #1561: `question` is triaged oldest-first across the whole
+        # event file, mirroring `blocked` -- the tail-line reader the old
+        # emission used proved buryable (issue #23 B3). The tail line above
+        # still feeds the idle-unexplained heuristic below via `estate`;
+        # that heuristic's semantics are unchanged by this turn.
+        if uuid:
+            triage_question_events(job, uuid, now, events)
         # Issue #21 item 2: `blocked` is claim-only -- never transition job
         # state on the forgeable hook event (see triage_blocked_events).
         if uuid:

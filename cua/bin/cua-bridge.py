@@ -1052,6 +1052,13 @@ class BridgeServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server_version = "cua-bridge/1.0"
 
+    # Issue #1583: Content-Length is client-controlled; a non-numeric (or
+    # negative) value is a client bug answered 400, not a server failure
+    # 500 with the exception text echoed (the #1578 bad-coordinates
+    # contract). The sentinel distinguishes garbage-length from the
+    # too-large None; callers check identity.
+    _BAD_CONTENT_LENGTH = object()
+
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -1082,7 +1089,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(png)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            # Issue #1583: garbage Content-Length used to ValueError out of
+            # int() into do_POST's outer 500 (exception text echoed). A
+            # negative length is the same class of client bug.
+            return self._BAD_CONTENT_LENGTH
+        if n < 0:
+            return self._BAD_CONTENT_LENGTH
         if n > 1_000_000:
             return None  # body too large; caller answers 413
         raw = self.rfile.read(n) if n else b"{}"
@@ -1212,6 +1227,11 @@ class Handler(BaseHTTPRequestHandler):
             data = self._body()
             if data is None:
                 return self._json({"error": "body too large"}, 413)
+            if data is self._BAD_CONTENT_LENGTH:
+                # Issue #1583: garbage Content-Length is a client bug (400),
+                # matching the bad-coordinates contract -- never a 500 with
+                # the int() exception text echoed back.
+                return self._json({"error": "bad content-length"}, 400)
             route = urlparse(self.path).path  # same query-string
             # normalization as do_GET
             if route == "/api/click":

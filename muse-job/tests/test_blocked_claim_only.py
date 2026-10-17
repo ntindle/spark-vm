@@ -11,7 +11,9 @@ Covers:
   3. Burst coalescing mirrors done: >3 blocked claims in 24h -> the
      `blocked-repeated` label, still one signal per claim; the count comes
      from the event file, never from job.json.
-  4. `question` keeps its tail-line behavior (out of scope for item 2).
+  4. Issue #1561 (residual): `question` has since moved to the same
+     whole-file scan (test_question_scan.py); the tail-line scope note
+     above is historical only.
 """
 import importlib.machinery
 import importlib.util
