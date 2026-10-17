@@ -1290,9 +1290,13 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     stale_hours = getattr(args, "stale_hours", None)
-    # NaN evades `<= 0` (nan <= 0 is False) and would silently mark every
-    # record stale — reject it at the boundary like any other bad value.
-    if stale_hours is not None and (stale_hours <= 0 or math.isnan(stale_hours)):
+    # Non-finite values evade a bare `<= 0` guard: NaN would silently mark
+    # every record stale, while +inf would silently mark every record
+    # fresh — the dangerous direction, vacating the D-RC-4 freshness bound
+    # the S2 promotion gate rests on. Reject at the boundary like any
+    # other bad value (the repo's math.isfinite convention).
+    if (stale_hours is not None
+            and (not math.isfinite(stale_hours) or stale_hours <= 0)):
         _fail("--stale-hours must be a positive number")
     try:
         return args.func(args)

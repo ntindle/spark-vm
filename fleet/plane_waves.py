@@ -635,9 +635,13 @@ def cmd_assign(args):
 def cmd_promote(args):
     store_dir = plane_inventory.ensure_store(args.store)
     stale_hours = args.stale_hours
-    # NaN evades `<= 0` (nan <= 0 is False) and would silently mark every
-    # record stale — reject it at the boundary like S1 does.
-    if stale_hours is not None and (stale_hours <= 0 or math.isnan(stale_hours)):
+    # Non-finite values evade a bare `<= 0` guard: NaN would silently mark
+    # every record stale, while +inf would silently mark every record
+    # fresh — the dangerous direction, vacating the D-RC-4 freshness bound
+    # this gate rests on. Reject at the boundary like S1 does (the repo's
+    # math.isfinite convention).
+    if (stale_hours is not None
+            and (not math.isfinite(stale_hours) or stale_hours <= 0)):
         _fail("--stale-hours must be a positive number")
     if stale_hours is None:
         stale_hours = plane_inventory.DEFAULT_STALE_HOURS

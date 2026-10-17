@@ -344,6 +344,19 @@ def test_promote_refuses_degraded(store):
     assert _waves_json(store)["live_wave"] == 0
 
 
+@pytest.mark.parametrize("bad", ["inf", "nan", "1e999"])
+def test_promote_rejects_nonfinite_stale_hours(store, bad):
+    # The S2 promote gate shares S1's staleness rule (D-RC-4); a non-finite
+    # --stale-hours must be rejected at the boundary, not laundered into a
+    # vacuous gate. The validation fires before any rollout read, so no
+    # estate setup is needed.
+    # Neuter: reverting the isfinite guard to the bare isnan check must
+    # flip the "inf"/"1e999" cases (they return 0 pre-fix).
+    p = _cli(store, "promote", "--stale-hours", bad)
+    assert p.returncode == 2
+    assert "positive number" in p.stderr
+
+
 def test_promote_refuses_stale_record(store):
     _estate(store, n=2, canary_tenants=("ct1",))
     _release(store)
