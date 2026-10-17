@@ -1,6 +1,7 @@
 # D9 push-sweep operator guide
 
-(2026-10-12, #1063 — pinned to main `0fa65a7`.)
+(2026-10-12, #1063 — pinned to main `0fa65a7`; §13 added 2026-10-16
+for the async plane port (#1566 S2-b1), pinned to main `5e7371e4`.)
 
 The push lane's paging policy exists and is tested, but the policy does
 nothing on its own — the sweep is the cadence that calls it. This is the
@@ -354,3 +355,90 @@ this turn — comment-only, no behavior change; the suite re-runs
 green. If you are reconciling old notes: the module's older docstring
 ("writes exactly one idempotent `suppressed_terminal` audit row") was
 the accurate one.
+
+## 13. The async plane port (2026-10-16, #1566 S2-b1)
+
+Everything above describes the in-repo sync sweep,
+`hosted.push_sweep.sweep_once` — the harness and test truth, which runs
+against a synchronous sqlite connection. The plane worker has no
+synchronous database at all, so the sweep's plane-side implementation
+is a canonical async rewrite, `hosted/push_sweep_async.py` (shipped as
+the sweep half of the #1566 S2 build). If you are holding the pager
+for the hosted plane, this section is your entry point; the sync
+module is what the plane-side module is kept faithful to.
+
+**Driving it.** The entry point is
+
+```python
+from hosted import push_sweep_async
+summary = await push_sweep_async.push_sweep_async_tick(
+    db, now=now, resolve_owner=resolve_owner, policy=policy)
+```
+
+per `deploy/plane-cron/CRON_TRIGGER_CONTRACT.md` §2 (the entry-point
+authority the port module itself cites):
+
+- `db` is the worker's async database interface: `db.prepare(sql)` →
+  `.bind(*params)` → `await .all()` / `.first()` / `.run()`. Rows
+  arrive as dicts (`.first()` returns `None` on no match) — the same
+  shape the worker's own wrapper produces.
+- `policy` is the sweep's injected async boundary: four awaitable
+  calls — `maybe_enqueue_reminder`, `maybe_enqueue_digest`,
+  `on_heartbeat_stale`, `on_token_expiry_warning`, each returning an
+  object with `.disposition` — plus `policy.reminder_min_ttl_seconds`
+  carrying the D8 bound. The hint query reads the TTL bound off the
+  policy, never a second local definition, so the hint and the
+  policy's gate-1 still agree by construction. A policy missing any of
+  the four callables, or carrying a non-numeric TTL bound, fails
+  closed at sweep start — before the first pass. (The boundary is
+  validated as callable, not as coroutine — a sync `def` method passes
+  validation and fails when awaited in its pass.)
+- Watcher derivations (`derive_stale`, `derive_token_warnings`) may
+  return sync iterables or async iterables (the worker's are async
+  generators); the same D78 per-candidate isolation and the same D103
+  budget-abandonment contract hold either way.
+
+**What stays the same.** The three passes run in the same order with
+the same contracts: the hint + gate-1 split (§1, §4), the digest
+pending-window semantics (§5), watcher derivations owned by the
+caller (§6), and the disposition vocabulary of §3 — the async port
+returns the same `SweepSummary` field set as the sync sweep, and the
+conformance harness asserts that field set, so a drifted summary
+fails the tripwire instead of silently passing. The capacity knobs
+are the same (100 candidates × 100 pages, 1000 pending digest
+windows, one `time_budget_s`), the failure catalog of §9 keeps its
+shapes, and the loud channel is still stderr — prefixed
+`[push_sweep_async]` (the async port's own prefix; the sync sweep's
+`[push_sweep]` prefix lives in the in-repo sweep only — grep both
+when correlating plane and harness logs). §3–§9 read verbatim against
+either entry point apart from the log prefix; nothing below §13
+otherwise contradicts them.
+
+**Honest-model notes — what this slice is not.**
+
+- The async *policy* port is the next slice, not this one. The four
+  `policy` calls here are an injected boundary whose shape mirrors
+  the sync policy entry points minus the synchronous connection —
+  the shipped async policy implementation is not this file, and
+  until it lands the policy boundary is something the deploy owns.
+- The deploy-time derivation of the worker's marked section is a
+  later S2 slice (b2/c), not this one: the in-repo sync module
+  remains the harness and test truth, and anti-drift is the D-PP-2
+  conformance (all checked-in scenarios replayed through the port,
+  summary + database state diffed against the recorded outputs),
+  not byte-identity with the worker.
+- The #1069 trigger note (§2) applies here too: nothing in-repo runs
+  the async tick on a schedule. The per-minute trigger on the
+  control-plane Worker calls this entry point once #1069 lands.
+
+**Verification.** From the repo root:
+
+```console
+python3 -m pytest hosted/test_push_sweep_async.py        # the port's own suite, incl. the async D-PP-2 conformance replay
+python3 -m pytest hosted/test_push_sweep_port_conformance.py  # the conformance replay for the in-repo sync sweep
+```
+
+Every §3 disposition above is a port-tested behavior, not an
+aspiration: the port replays the recorded conformance scenarios and
+diffs summary and database state against the recorded outputs, so a
+behavior the guide claims is a behavior the port reproduces.

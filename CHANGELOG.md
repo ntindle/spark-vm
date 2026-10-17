@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The D9 push-sweep operator guide now documents the async plane port's
+  runbook (2026-10-16): how the hosted plane drives the sweep — the
+  async database interface, the injected policy boundary with the
+  TTL bound it carries, async watcher derivations — and what stays
+  identical to the sync sweep (three passes, summary shape,
+  disposition vocabulary, capacity knobs, failure catalog). (#1600)
+
 - Fleet version inventory: the box-side snapshot emitter's contract — unknown
   fields stay null with a note instead of crashing, and gate-state edge cases
   (missing status file, bad timestamps, unrecognized manual flags) can't
