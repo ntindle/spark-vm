@@ -56,8 +56,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
   audit line names the credential exactly as it appeared on the wire.
   A mixed-case placeholder used to be audited in lowercase, naming a
   credential that doesn't exist in the store and confusing incident
-  review. Uppercase `HSURR:` prefixes (which never trigger a swap) no
-  longer produce phantom refused lines either. (#TBD)
+  review. An uppercase `HSURR:` prefix in the plain form (which never
+  triggers a swap) no longer produces a phantom refused line; the
+  percent-encoded form was already case-insensitive and still audits
+  in wire case. (#TBD)
 
 ### Added
 

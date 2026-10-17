@@ -2958,11 +2958,15 @@ class SwapAddon:
 
         The presence gate is case-insensitive (cheap, on a lowered copy),
         but the names are extracted from the ORIGINAL-case blob: the swap
-        path's placeholder regexes are case-sensitive, so extracting
-        from the lowered copy would audit a name the store never
-        resolves (e.g. wire `hsurr:GitHub` audited as `hsurr:github`),
-        and an uppercase `HSURR:` prefix — which the swap engine never
-        treats as a placeholder — would audit a phantom credential.
+        path's literal placeholder regex (PLACEHOLDER_RE) is case-sensitive,
+        so extracting from the lowered copy would audit a name the store
+        never resolves (e.g. wire `hsurr:GitHub` audited as `hsurr:github`),
+        and an uppercase `HSURR:` literal prefix — which the swap engine
+        never treats as a placeholder — would audit a phantom credential.
+        Note the percent-encoded form (ENCODED_PLACEHOLDER_RE) is
+        case-insensitive by design (re.IGNORECASE, for the hex digits): both
+        the warn and swap paths share the same regexes, so the audited name
+        is exactly what the engine would have resolved.
         """
         hay = b"hsurr:"
         hay_enc = b"hsurr%3a"  # urlencoded forms percent-encode the colon
