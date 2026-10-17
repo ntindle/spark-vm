@@ -1055,8 +1055,15 @@ def _sweep_stale_tmp(d):
     file at all.) Best-effort: races are fail-silent, the next pass
     retries. Called for pending/ on every render and for consumed/ from
     the cadence-gated housekeeping (the stamper's per-attempt tmps are
-    unique, so a stale one can only come from a crashed stamp)."""
-    for fn in sorted(os.listdir(d)):
+    unique, so a stale one can only come from a crashed stamp). A
+    missing/unreadable dir is a no-op — the sweep never creates the dir
+    it sweeps (same discipline as _prune_quarantine/_prune_locks), so the
+    housekeeping call passes a joined path, not consumed_dir()."""
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return
+    for fn in names:
         if not fn.endswith(".tmp"):
             continue
         p = os.path.join(d, fn)
@@ -2047,8 +2054,9 @@ def _housekeeping_if_due():
     _prune_locks()
     # Issue #1603: sweep crash-residue stamper tmps from consumed/ — the
     # per-attempt tmp names are unique, so anything older than the grace
-    # period is a crashed stamp, never an in-flight one.
-    _sweep_stale_tmp(consumed_dir())
+    # period is a crashed stamp, never an in-flight one. Joined path, no
+    # makedirs: a sweep must never create the dir it sweeps.
+    _sweep_stale_tmp(os.path.join(APPROVALS, "consumed"))
     return True
 
 
