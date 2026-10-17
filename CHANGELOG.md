@@ -350,6 +350,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The fleet dashboard's byte-identity test now names the drift direction
+  when the worker's inlined copy disagrees with the repo's
+  `dashboard.html`: a page edited without `--write-snapshot` gets the
+  one-command remediation, and a worker checkout carrying out-of-band
+  edits (unactionable in-repo) is named as such with a pointer at the
+  owning issue — the old bare "has drifted" told a contributor nothing
+  actionable. (#1651)
+
 - Toolset updater honors the release gate: on a fleet-managed box, the
   cua-driver and Playwright convergence targets are capped at the gate's
   maximum permitted pin, and the tick refuses loudly when the fleet is

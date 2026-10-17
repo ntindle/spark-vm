@@ -6,7 +6,11 @@
   path resolves as SPARKVM_WORKER_PATH (env) or the loop VM's
   control-plane checkout default — set the env to point the test at a
   real worker instead of relying on the skip. Skipped only when no
-  worker source is reachable (e.g. CI on a fork).
+  worker source is reachable (e.g. CI on a fork). On a mismatch the
+  failure names the drift direction (see _drift_diagnosis): a contributor
+  whose edit is not yet snapshotted gets the --write-snapshot step, and a
+  worker checkout carrying out-of-band edits (the #1299 state) is named
+  as unactionable in-repo — the bare "has drifted" told neither.
 - snapshot (#1339 F1): the committed dashboard.inlined.txt is the exact
   block sync writes between the markers; the freshness test needs no
   worker checkout, so the canonical-copy rule is CI-visible. An edit to
@@ -62,11 +66,72 @@ def _inline_html(worker_path=WORKER_PATH):
     return m.group(1)
 
 
+def _drift_diagnosis(inline, html):
+    """Name the drift direction behind a byte-identity mismatch.
+
+    The bare "has drifted" assertion wasted a contributor's debug cycle:
+    it never said which copy moved or what to run. Two cases:
+    - the repo's dashboard.html is newer than its committed snapshot (a
+      contributor edited the page and skipped --write-snapshot): the
+      remediation is in-repo, one command.
+    - the snapshot is fresh but the worker copy matches neither the page
+      nor the snapshot (the checkout was synced from an unmerged branch
+      or hand-edited — the #1299 state): nothing in this repo can fix
+      it; the message says so and forbids the hand-edit workaround.
+    """
+    fresh = (sync_dashboard.render_inline_block(sync_dashboard._load_html())
+             == _snapshot())
+    if not fresh:
+        return ("direction: repo copy is ahead of its snapshot — "
+                "dashboard.html was edited without regenerating the "
+                "committed snapshot. Remediation: run "
+                "hosted/dashboard/sync_dashboard.py --write-snapshot and "
+                "re-run the suite (the snapshot-freshness test pins this "
+                "too).")
+    return ("direction: the worker copy at %s is NOT mechanical output of "
+            "this repo's dashboard.html — it matches neither the page nor "
+            "the committed snapshot, so the checkout was synced from an "
+            "unmerged branch or hand-edited and this repo cannot regenerate "
+            "it. Do not hand-edit the inlined block (or dashboard.html to "
+            "match it); see issue #1299 for the owning lane." % WORKER_PATH)
+
+
 def test_worker_inline_copy_byte_identical():
     if not os.path.exists(WORKER_PATH):
         pytest.skip(_SKIP_MSG)
-    assert _inline_html() == _html(), \
-        "worker.py's inlined dashboard.html has drifted"
+    inline, html = _inline_html(), _html()
+    assert inline == html, \
+        "worker.py's inlined dashboard.html has drifted: " + \
+        _drift_diagnosis(inline, html)
+
+
+def test_drift_diagnosis_points_at_snapshot_regen_when_repo_html_stale(
+        tmp_path, monkeypatch):
+    # Case 1: the contributor edited dashboard.html and skipped
+    # --write-snapshot — the remediation must be the one in-repo command,
+    # not a hint to touch the worker copy.
+    mutated = str(tmp_path / "mutated.html")
+    with open(mutated, "w", encoding="utf-8") as f:
+        f.write(_html() + "\n<!-- un-synced edit -->\n")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", mutated)
+    msg = _drift_diagnosis(_html(), _html())  # inline value irrelevant:
+    # the stale-snapshot branch is decided before the worker copy is read
+    assert "repo copy is ahead of its snapshot" in msg
+    assert "--write-snapshot" in msg
+
+
+def test_drift_diagnosis_names_worker_checkout_when_worker_ahead():
+    # Case 2 (#1299 state on the loop VM): the snapshot is fresh and the
+    # worker copy matches neither the page nor the snapshot — the message
+    # must name the checkout as the drift source, forbid hand-editing
+    # either copy, and point at the owning issue. Hermetic: no worker
+    # checkout needed, the out-of-band section is synthesized.
+    html = _html()
+    msg = _drift_diagnosis(html + "\n<!-- out-of-band section -->\n", html)
+    assert "NOT mechanical output" in msg
+    assert WORKER_PATH in msg
+    assert "Do not hand-edit" in msg
+    assert "#1299" in msg
 
 
 def test_fleet_rows_keyboard_accessible():
