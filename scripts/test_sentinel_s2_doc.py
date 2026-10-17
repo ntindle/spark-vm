@@ -10,9 +10,9 @@ flow's `swapped=` lines to its later refusal lines") is exactly the egress
 case.
 
 What these tests pin, at writer-method level: (a) the set of SwapAddon
-methods that open the audit log is exactly the five known writers, so a
-sixth writer fails; (b) every `refused=<literal>` the row names appears
-among the values the five writers emit, so a row claim no writer emits
+methods that open the audit log is exactly the six known writers, so a
+seventh writer fails; (b) every `refused=<literal>` the row names appears
+among the values the six writers emit, so a row claim no writer emits
 fails; (c) each writer emits exactly its documented field set.
 `_audit_note` token values stay exemplified, not enumerated: a new
 verbatim token alone does not fail the pin — the row's generic
@@ -76,12 +76,15 @@ def _addon():
 
 
 def _emit_all_lines():
-    """Drive all five writers once against one temp log; return parsed lines."""
+    """Drive all six writers once against one temp log; return parsed lines."""
     addon = _addon()
     with tempfile.TemporaryDirectory() as tmp:
         log_file = Path(tmp) / "swap.log"
         with mock.patch.object(sa, "LOG_FILE", log_file):
             addon._audit("example.com", "hsurr:github", flow_id="f1")
+            # Issue #199: the batch writer emits the same `swapped=`
+            # shape as _audit, in a single open.
+            addon._audit_batch([("example.com", "hsurr:github", "f1")])
             addon._audit_refused(
                 "example.com", "github", "unknown-credential", flow_id="f1")
             addon._audit_note(
@@ -110,7 +113,7 @@ class TestSentinelS2Doc(unittest.TestCase):
         ):
             self.assertIn(needle, row, "S2 row omits %r" % needle)
 
-    def test_audit_writer_set_is_exactly_the_five_known(self):
+    def test_audit_writer_set_is_exactly_the_six_known(self):
         writers = set()
         for name, fn in inspect.getmembers(
                 sa.SwapAddon, predicate=inspect.isfunction):
@@ -124,7 +127,7 @@ class TestSentinelS2Doc(unittest.TestCase):
                 writers.add(name)
         self.assertEqual(
             writers,
-            {"_audit", "_audit_refused", "_audit_note",
+            {"_audit", "_audit_batch", "_audit_refused", "_audit_note",
              "_audit_authority_mismatch", "_audit_ssrf_refused"})
 
     def test_s2_row_refused_literals_match_emitted_values(self):
@@ -152,6 +155,23 @@ class TestSentinelS2Doc(unittest.TestCase):
             set(fields), {"ts", "host", "swapped", "ip", "flow"})
         self.assertEqual(fields["swapped"], "hsurr:github")
         self.assertEqual(fields["flow"], "f1")
+
+    def test_audit_batch_shape(self):
+        """Issue #199: the batch writer emits the same `swapped=` line
+        shape as _audit — one open, not one per line, must not change
+        what the sentinel consumer parses."""
+        addon = _addon()
+        lines = _emit(
+            lambda: addon._audit_batch(
+                [("example.com", "hsurr:github", "f1"),
+                 ("example.com", "hsurr:github", "f2")]))
+        self.assertEqual(len(lines), 2)
+        for line, flow in zip(lines, ("f1", "f2")):
+            fields = _parse(line)
+            self.assertEqual(
+                set(fields), {"ts", "host", "swapped", "ip", "flow"})
+            self.assertEqual(fields["swapped"], "hsurr:github")
+            self.assertEqual(fields["flow"], flow)
 
     def test_audit_refused_shape(self):
         addon = _addon()
