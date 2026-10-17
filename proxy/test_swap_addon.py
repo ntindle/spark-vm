@@ -2668,6 +2668,19 @@ class AuditFieldSanitizationTests(unittest.TestCase):
         self.assertIn("tenant=acmets=1970-01-01T00:00:00host=fakeswapped=yes",
                       lines[0])
 
+    def test_audit_tenant_hint_whitespace_only_renders_dash(self):
+        """Issue #1653 (QA round-1): a whitespace-only SWAP_TENANT is
+        truthy for the hint but sanitizes to nothing — the field falls
+        back to "-", keeping the line parseable under the S2 strict
+        token parser (no empty `tenant=` token)."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": "   "}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit("api.example.com", "github"))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("tenant=-", lines[0])
+        self.assertNotIn("tenant= ", lines[0])
+
     def test_audit_batch_lines_carry_tenant(self):
         """Issue #199 batch writer: `_audit_batch` lines carry the
         same `tenant=` field as `_audit` (both go through

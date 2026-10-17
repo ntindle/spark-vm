@@ -2577,7 +2577,11 @@ class SwapAddon:
                    _sanitize_audit_field(matched),
                    _sanitize_audit_field(
                        getattr(self, "_current_egress_ip", None) or "-"),
-                   _sanitize_audit_field(_summons_tenant_hint()),
+                   # QA nit (issue #1653): a whitespace-only SWAP_TENANT
+                   # is truthy for the hint but sanitizes to nothing —
+                   # fall back to "-" so the field is never empty and the
+                   # S2 strict-parser soundness holds.
+                   _sanitize_audit_field(_summons_tenant_hint()) or "-",
                    _sanitize_audit_field(flow_id)))
 
     def _audit(self, host, matched, flow_id=None):
