@@ -149,7 +149,9 @@ def test_deploy_dry_run_prints_plan_and_writes_nothing(store):
     assert plan["deployment_id"] == "dep-1"
     assert plan["worker_sha256"] == _SHA_A
     assert plan["gates"] == {"frozen": False, "live_wave": None,
-                             "in_live_wave": True}
+                             # #1627: no live wave => the plane cannot be "in"
+                             # one (previously hardcoded True here).
+                             "in_live_wave": False}
     # No journal write, no cost event, no freeze file from a dry run.
     assert _journal_lines(store) == before
     assert _journal_lines(store, "costs.jsonl") == []
