@@ -57,6 +57,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   can no longer tear it and silently drop the box's epoch evidence.
   (#1623)
 
+- Desktop-input audit trail: the local bridge now records one audit line
+  for every click, typed input, keypress, and app launch it performs —
+  naming the target window, not what was typed — so operators can see
+  what was driven on their desktop. (#1624)
+
 - Hosted owner-alerting docs: the caller-wiring pointers that dangled on a
   closed issue now point at the open build issue that owns the work, so the
   "no page fires yet" rows name the real next step. (#1618)
