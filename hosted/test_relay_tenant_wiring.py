@@ -17,7 +17,9 @@ the pre-fix behavior and passes with the fix; see the module docstring
 notes per test).
 """
 
+import ast
 import contextlib
+import pathlib
 
 import pytest
 
@@ -726,3 +728,137 @@ def test_nested_down_with_differing_subcode_notes_both_legs():
     # Same leg as the headline: no note.
     _, notes2 = wiring.plan_events(arc, _down("cert"))
     assert not any("different leg" in n for n in notes2)
+
+
+# ---------------------------------------------------------------------------
+# #1563 follow-ups (from the #1416 round-1 / narrow re-confirm reviews)
+
+
+def test_down_with_foreign_subcode_suspends_as_unclassified():
+    # #1563 item 1: a present-but-foreign sub-code (outside
+    # relay_path_state.SUBCODES) rides the same path as the
+    # missing-None case — the wiring never invents a classification:
+    # no detail kwarg, the tenant layer's generic "relay-down"
+    # default marks the entry unclassified, and the anomaly rides the
+    # notes loud. Neuter check: the exact-equality
+    # `events == [("relay-down", {})]` fails if a foreign sub-code is
+    # passed through into detail.
+    arc = _arc()
+    events, notes = wiring.plan_events(
+        arc, _reading(rps.STATE_DOWN, sub_code="bogus-leg"))
+    assert events == [("relay-down", {})]
+    assert any("sub-code" in n and "bogus-leg" in n for n in notes)
+    wiring._emit(arc, events)
+    assert arc.code == "connection-unreachable"
+    assert arc.detail == "relay-down"  # generic default: unclassified
+    assert arc.latched == "live"
+    assert arc.relay_reachable is False
+
+
+def test_anchor_passes_to_healthy_box_over_latchless_suspension():
+    # #1563 item 2: a latchless connection-unreachable is an anchor
+    # candidate but never pins the anchor — the sticky pool is latched
+    # suspensions only — so the healthy box keeps the anchor even
+    # though the broken box is a candidate. Neuter check: if a
+    # latchless suspension pinned like a latched one, box-b would
+    # steal the anchor.
+    healthy = _arc("box-a", created_at="2026-10-01T00:00:00Z")
+    broken = _arc("box-b", code="connection-unreachable",
+                  created_at="2026-10-02T00:00:00Z",
+                  relay_reachable=False)
+    assert broken.latched is None  # corrupt suspension: no latch
+    assert wiring.select_live_anchor([broken, healthy]) is healthy
+
+
+def test_anchor_pins_on_latched_suspension_over_earlier_healthy():
+    # Contrast for item 2: a LATCHED suspension pins the anchor even
+    # when later-created — stickiness beats earliest-created. Together
+    # with the previous test this pins the exact rule: only a
+    # non-None latch joins the sticky pool.
+    healthy = _arc("box-a", created_at="2026-10-01T00:00:00Z")
+    suspended = _arc("box-b", code="connection-unreachable",
+                     latched="live",
+                     created_at="2026-10-02T00:00:00Z",
+                     relay_reachable=False)
+    assert wiring.select_live_anchor([suspended, healthy]) is suspended
+
+
+def test_emitted_event_vocabulary_is_closed():
+    # #1563 item 3: the wiring's emitted-event vocabulary is closed —
+    # plan_events can only ever plan relay-down, relay-reachable, and
+    # relay-recovered (the "no new status codes" acceptance item,
+    # previously proved by inspection only). Static AST pin over every
+    # events mutation channel: append/extend call sites with literal
+    # event names are collected; any other mutation of `events`
+    # (insert, +=, subscript assignment, rebind, a second assignment,
+    # ...) fails loudly so a new event kind can't slip the pin.
+    def _is_events_target(t):
+        return ((isinstance(t, ast.Name) and t.id == "events")
+                or (isinstance(t, ast.Subscript)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "events"))
+    src = pathlib.Path(wiring.__file__).read_text()
+    tree = ast.parse(src)
+    names = set()
+    assigns = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AugAssign) and _is_events_target(node.target):
+            raise AssertionError(
+                "event-vocabulary pin: `events` augmented-assigned at "
+                "line %d — extend this pin deliberately" % node.lineno)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = ([node.target] if isinstance(node, ast.AnnAssign)
+                       else node.targets)
+            for target in targets:
+                if _is_events_target(target):
+                    if isinstance(target, ast.Subscript):
+                        raise AssertionError(
+                            "event-vocabulary pin: `events[...]` "
+                            "subscript assignment at line %d — extend "
+                            "this pin deliberately" % node.lineno)
+                    if getattr(node, "value", None) is not None:
+                        assigns += 1
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "events"):
+            attr = node.func.attr
+            if attr == "append":
+                first = node.args[0]
+                assert (isinstance(first, ast.Tuple)
+                        and isinstance(first.elts[0], ast.Constant)), (
+                    "event-vocabulary pin: non-literal planned event at "
+                    "line %d — extend this pin deliberately" % node.lineno)
+                names.add(first.elts[0].value)
+            elif (attr == "extend" and node.args
+                    and isinstance(node.args[0], ast.List)):
+                for elt in node.args[0].elts:
+                    assert (isinstance(elt, ast.Tuple)
+                            and isinstance(elt.elts[0], ast.Constant)), (
+                        "event-vocabulary pin: non-literal planned event "
+                        "at line %d — extend this pin deliberately"
+                        % node.lineno)
+                    names.add(elt.elts[0].value)
+            else:
+                raise AssertionError(
+                    "event-vocabulary pin: `events.%s` call at line %d — "
+                    "extend this pin deliberately" % (attr, node.lineno))
+    assert assigns == 1, (
+        "event-vocabulary pin: expected exactly one `events = ...` "
+        "assignment, found %d" % assigns)
+    assert names == {"relay-down", "relay-reachable", "relay-recovered"}
+
+
+def test_anchor_latchless_earliest_created_still_wins():
+    # QA nit 2 (round 1): pins the reworded select_live_anchor
+    # docstring's caveat — a latchless suspension doesn't pin the
+    # anchor, but it IS a candidate, so the earliest-created latchless
+    # box still wins via earliest-created-among-all. Neuter check:
+    # excluding latchless boxes from candidacy entirely makes the
+    # healthy box win, failing this.
+    broken = _arc("box-a", code="connection-unreachable",
+                  created_at="2026-10-01T00:00:00Z",
+                  relay_reachable=False)
+    healthy = _arc("box-b", created_at="2026-10-02T00:00:00Z")
+    assert broken.latched is None  # corrupt suspension: no latch
+    assert wiring.select_live_anchor([healthy, broken]) is broken

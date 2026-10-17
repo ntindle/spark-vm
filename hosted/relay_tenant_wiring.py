@@ -204,8 +204,11 @@ def select_live_anchor(arcs: List[ts.BoxArc]) -> Optional[ts.BoxArc]:
     would orphan the suspended box's recovery pair and wedge it
     unreachable forever (delivery-semantics item (c)). Only when no
     latched suspension is active does earliest-created-among-all
-    resume. A latchless suspension can't auto-recover, so the anchor
-    passes to a healthy box in that case.
+    resume. A latchless suspension does not pin the anchor — there is
+    no latch whose recovery needs protecting — so with no latched
+    suspension active the anchor is earliest-created among ALL
+    candidates: a healthy box wins unless the latchless box is itself
+    the earliest-created candidate.
 
     Reprovision carve-out (§7/G7 rule 2): a rule-7 restart leaves the
     anchor's new session at ``provisioning`` — not a candidate — so the
