@@ -310,6 +310,10 @@ class SummonsSweepCliTests(unittest.TestCase):
                                  "swap_addon.py")
             env = dict(os.environ, SWAP_APPROVALS_DIR=tmp,
                        SWAP_TENANT="test-tenant")
+            # Issue #1609: the --summons-sweep CLI validates its paths
+            # against the base, so the scratch approvals dir needs its
+            # own relocated jail.
+            env["SWAP_BASE_DIR"] = tmp
             env.pop("SWAP_SUMMONS_OUTBOX", None)
             proc = subprocess.run(
                 [sys.executable, addon, "--summons-sweep"],
@@ -320,6 +324,23 @@ class SummonsSweepCliTests(unittest.TestCase):
                     open(os.path.join(tmp, "summons-outbox.jsonl"))
                     .read().splitlines() if line.strip()]
             self.assertEqual(rows[0]["aid"], "aaaabbbbccccdddd")
+
+    def test_cli_refuses_misjailed_paths(self):
+        # Issue #1609: the --summons-sweep CLI validates its two real
+        # paths against the base — a scratch approvals dir without a
+        # relocated base refuses instead of running mis-jailed.
+        with tempfile.TemporaryDirectory() as tmp:
+            addon = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "swap_addon.py")
+            env = dict(os.environ, SWAP_APPROVALS_DIR=tmp,
+                       SWAP_TENANT="test-tenant")
+            env.pop("SWAP_SUMMONS_OUTBOX", None)
+            env.pop("SWAP_BASE_DIR", None)
+            proc = subprocess.run(
+                [sys.executable, addon, "--summons-sweep"],
+                capture_output=True, text=True, env=env, timeout=60)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("SWAP_BASE_DIR", proc.stderr)
 
 
 if __name__ == "__main__":

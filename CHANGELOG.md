@@ -252,6 +252,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reachability signal instead of stacking a second suspension.
   (#1416) (#1562)
 
+### Security
+
+- The credential-swapping proxy now refuses to start when any of its
+  configurable file paths points outside its home directory (2026-10-17):
+  previously a misconfigured path (secrets, allowlists, registry, or the
+  audit log itself) would silently read or write somewhere unintended —
+  including an audit log pointed at temporary storage, where the audit
+  trail would vanish on restart while swaps kept flowing. A bad path is
+  now a loud startup failure instead of a silent misconfiguration. (#1610)
+
 ### Fixed
 
 - The desktop-control bridge now keeps a server-side record of every

@@ -286,6 +286,12 @@ def _flatten_transcript(transcript, ncols):
 def _sh(cmd, cwd, env=None):
     r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
                        text=True, env=env, timeout=60)
+    # Issue #1609: failures are loud. A silent nonzero exit used to
+    # surface two steps later as a FileNotFoundError on the journal
+    # the failed subprocess never wrote.
+    if r.returncode != 0:
+        raise RuntimeError("command failed (%d): %s\n%s" %
+                           (r.returncode, cmd, r.stderr))
     return r.stdout.rstrip("\n")
 
 
@@ -308,7 +314,18 @@ def generate_secrets(repo_root, work_dir, frames_dir):
             "ok = SwapAddon()._audit(%r, %r); "
             "assert ok, 'audit write failed'") % (proxy_dir, _DEMO_HOST,
                                                  _DEMO_CRED)
-    env = dict(os.environ, SWAP_LOG_FILE=journal)
+    # Issue #1609: the SWAP_* path jail requires every override under
+    # SWAP_BASE_DIR (default /home/swapd), so the scratch journal rides
+    # along with a fully relocated jail — every (var, default) mirrored
+    # by basename into the work dir, then the journal override on top.
+    # (Imported from the addon so the table can't drift from the gate.)
+    sys.path.insert(0, proxy_dir)
+    from swap_addon import _SWAP_PATH_DEFAULTS
+    env = dict(os.environ)
+    env["SWAP_BASE_DIR"] = work_dir
+    for var, default in _SWAP_PATH_DEFAULTS.items():
+        env[var] = os.path.join(work_dir, os.path.basename(default))
+    env["SWAP_LOG_FILE"] = journal
     _sh("python3 -c %s" % _shell_quote(code), repo_root, env)
     with open(journal) as f:
         journal_line = f.read().strip().splitlines()[-1]
