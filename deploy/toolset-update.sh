@@ -859,7 +859,8 @@ _pin_ok() {
 # toolset pins exactly like repo commits (G15 §5).
 # Prints the (possibly capped) target on stdout. NOTE: often runs inside
 # $( ) — stdout is machine-readable, everything else goes through log()
-# (stderr). Never print key material here — gate_query.py never does.
+# (the run log, or stderr when no log file is set). Never print key
+# material here — gate_query.py never does.
 _toolset_gate_cap() {
     local tool="$1" pin="$2" cur="$3"
     # Byte-wise version comparison regardless of locale.
@@ -926,7 +927,7 @@ _toolset_gate_cap() {
             # behind the installed version must not rewind the layer —
             # nothing to do.
             if [[ ! "$target" > "$cur" ]]; then
-                log "$tool: max_permitted_pin $tmax is at or behind installed $cur — refusing downgrade (nothing to do)"
+                log "$tool: convergence target $target is at or behind installed $cur — refusing downgrade (nothing to do)"
                 return 1
             fi ;;
     esac

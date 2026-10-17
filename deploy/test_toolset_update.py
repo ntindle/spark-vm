@@ -4078,6 +4078,8 @@ def gate_env(env, tmp_path, lines=None, exit_code=0, keys="ctl-test"):
     e = dict(env["env"])
     e.pop("SPARKVM_GATE_KEYS", None)
     e.pop("SPARKVM_GATE_JSON", None)
+    # An ambient GATE_QUERY would silently re-route the unmanaged test.
+    e.pop("GATE_QUERY", None)
     if lines is not None:
         e["GATE_QUERY"] = make_gate_query(tmp_path, lines, exit_code)
         if keys is not None:
@@ -4185,8 +4187,10 @@ def test_gate_cap_refuses_downgrade(env, tmp_path):
 
 
 def test_gate_cap_comparison_is_locale_independent(env, tmp_path):
-    # The design's lexicographic min must hold byte-wise regardless of
-    # locale: run under a locale whose collation order differs.
+    # Best-effort locale coverage for the byte-wise comparison: the
+    # byte-wise guarantee itself is by construction (`local LC_ALL=C` in
+    # _toolset_gate_cap) — digit-vs-digit collation agrees across locales,
+    # so this test cannot detect the line's removal (not neuter-verified).
     e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
     e["LC_ALL"] = "et_EE.UTF-8"
     e["LANG"] = "et_EE.UTF-8"
@@ -4210,3 +4214,40 @@ def test_cua_driver_dry_run_honors_gate_cap(env, tmp_path):
     r = run_bash(SRC_PREFIX + "_cua_driver_layer 1", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert "would install cua-driver 0.28.2" in run_log_text(env)
+
+
+def test_playwright_dry_run_honors_gate_cap(env, tmp_path):
+    # Mirror of the cua-driver wiring test: the playwright layer's
+    # convergence target is the capped pin, and the no-gate neuter control
+    # converges on the pins file's pin.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, pin="1.62.0",
+                                     cur_version="1.61.0")
+    e2 = dict(e)
+    e2.update(gate_env(env, tmp_path, _gate_lines(toolset_max="1.61.5")))
+    r = run_bash(SRC_PREFIX + "_playwright_layer 1", env_extra=e2)
+    assert r.returncode == 0, r.stderr
+    logtext = run_log_text(env)
+    assert "would converge playwright 1.61.5" in logtext
+    assert "would converge playwright 1.62.0" not in logtext
+    r = run_bash(SRC_PREFIX + "_playwright_layer 1", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert "would converge playwright 1.62.0" in run_log_text(env)
+
+
+def test_gate_cap_nothing_to_do_when_max_equals_installed(env, tmp_path):
+    # The ceiling is already reached: converging to it would be a no-op,
+    # so the cap reports nothing to do rather than a spurious deploy.
+    e = gate_env(env, tmp_path, _gate_lines(toolset_max="0.27.5"))
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.5", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "refusing downgrade" in run_log_text(env)
+
+
+def test_gate_cap_fails_closed_on_duplicate_max_lines(env, tmp_path):
+    # A malformed answer with two toolset_max lines must not yield a
+    # usable target: the sed extraction concatenates them and _pin_ok
+    # rejects the embedded newline.
+    lines = _gate_lines(toolset_max="0.27.5") + ["toolset_max=0.27.5"]
+    e = gate_env(env, tmp_path, lines)
+    r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
+    assert r.returncode == 2, r.stderr
