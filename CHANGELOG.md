@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   conformance scenarios and reproducing the recorded outputs exactly;
   the paging-policy calls ride an explicit boundary the async policy
   port will fill next. The scheduled trigger wiring, the manual probe
-  endpoint, and the policy port remain to be built. (#1566) (#TBD)
+  endpoint, and the policy port remain to be built. (#1566) (#1596)
 
 - Push-sweep plane-port contract (2026-10-16): the hosted push lane's
   per-minute sweep now has its plane-side dispatch pinned — the cron
