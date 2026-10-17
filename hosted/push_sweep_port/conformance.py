@@ -26,6 +26,16 @@ import os
 from hosted import push_sweep
 from hosted.push_sweep_port import scenarios
 
+# The SweepSummary fields this serializer pins. A future field added to
+# the namedtuple must be dispositioned here (serialize it or document
+# why not) — the assert below fails loudly instead of silently dropping
+# it from the records the port is held to.
+PINNED_SUMMARY_FIELDS = {
+    "reminders", "digests", "stale_watchers", "token_warnings",
+    "candidates_seen", "pages_truncated", "reminders_enabled", "notes",
+    "budget_truncated", "digests_truncated",
+}
+
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 RECORDED_DIR = os.path.join(_PACKAGE_DIR, "recorded")
 
@@ -39,6 +49,10 @@ def sweep_module_sha256():
 
 def serialize_summary(summary):
     """A SweepSummary as a canonical JSON-able dict."""
+    assert set(summary._fields) == PINNED_SUMMARY_FIELDS, (
+        "SweepSummary gained/lost fields %s — disposition them in "
+        "PINNED_SUMMARY_FIELDS before recording" % (
+            set(summary._fields) ^ PINNED_SUMMARY_FIELDS))
     return {
         "reminders": dict(sorted(summary.reminders.items())),
         "digests": dict(sorted(summary.digests.items())),
@@ -91,6 +105,11 @@ def run_scenario(scenario):
         if spec["derive_stale"] is not None:
             kwargs["derive_stale"] = scenarios.derive(
                 spec["derive_stale"])
+        elif spec.get("derive_stale_raiser"):
+            def _raises(conn, moment):
+                raise RuntimeError(
+                    "fixture poison: stale derivation failed at call time")
+            kwargs["derive_stale"] = _raises
         if spec["derive_token_warnings"] is not None:
             kwargs["derive_token_warnings"] = scenarios.derive(
                 spec["derive_token_warnings"])

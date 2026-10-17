@@ -26,7 +26,7 @@ not the live database: no fixture reads or writes outside its own
 in-memory database.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from hosted import push_enqueue, push_sweep
 
@@ -132,11 +132,35 @@ def base_spec(**overrides):
         "registry": {"box-a": "owner-1"},
         "derive_stale": None,
         "derive_token_warnings": None,
+        "derive_stale_raiser": False,
         "sweep_kwargs": {},
         "record_adapter": None,
     }
     spec.update(overrides)
     return spec
+
+
+def insert_result_row(conn, *, at, owner_principal, box_id, device,
+                      event_kind, event_key, outcome):
+    """Pre-insert one push_send_results row (the post-prior-sweep state)."""
+    conn.execute(
+        "INSERT INTO push_send_results"
+        " (at, owner_principal, box_id, device, event_kind, event_key,"
+        "  outcome, http_status, latency_ms, sent_at, vapid_key_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+        (at, owner_principal, box_id, device, event_kind, event_key,
+         outcome))
+    conn.commit()
+
+
+def set_budget(conn, scope_type, scope_id, window_start, count):
+    """Pre-fill a budget counter (the at-bound / mid-window state)."""
+    conn.execute(
+        "INSERT INTO push_budget_counters"
+        " (scope_type, scope_id, window_start, count)"
+        " VALUES (?, ?, ?, ?)",
+        (scope_type, scope_id, window_start, count))
+    conn.commit()
 
 
 # --- scenario builders ------------------------------------------------
@@ -231,6 +255,156 @@ def build_budget_already_exhausted(conn):
     )
 
 
+def build_reminder_already_paged(conn):
+    """A due reminder whose page row already exists (D75 anti-join).
+
+    The post-first-sweep state: the page went out on an earlier tick.
+    The hint's anti-join must exclude it — the candidate is never
+    re-selected, the policy's duplicate path is never even reached,
+    and a truncated sweep's remainder is actually reached next tick.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400)
+    key = push_enqueue.event_key_for("reminder", "owner-1", "box-a", "r1")
+    insert_result_row(
+        conn, at=T0.isoformat(), owner_principal="owner-1", box_id="box-a",
+        device="", event_kind="reminder", event_key=key,
+        outcome="queued")
+    return base_spec()
+
+
+def build_multi_owner_isolation(conn):
+    """Two owners, two boxes: pages, digests, and budgets stay per-owner.
+
+    Tenant isolation is the central hosted-product risk a port could
+    silently break while staying "conformant" on single-owner fixtures:
+    every queued page, digest row, and budget counter must be scoped to
+    its own owner.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400, owner="owner-1")
+    file_approval(conn, "box-b", "r2", ttl=600, age=400, owner="owner-2")
+    window = push_enqueue.hour_bucket(T0)
+    conn.execute(
+        "INSERT INTO push_digest_state (owner_principal, window_start, count)"
+        " VALUES (?, ?, ?)",
+        ("owner-2", window, 2))
+    conn.commit()
+    return base_spec(registry={"box-a": "owner-1", "box-b": "owner-2"})
+
+
+def build_reminders_truncated(conn):
+    """Small page cap: the pass stops at max_pages and reports it (D69).
+
+    Keyset pagination is ordered by (box_id, aid): r1 and r2 page, r3
+    stays due for the next tick, and `pages_truncated` is the operator
+    alert (distinct from the D103 time-budget stop).
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400)
+    file_approval(conn, "box-a", "r2", ttl=600, age=400)
+    file_approval(conn, "box-a", "r3", ttl=600, age=400)
+    return base_spec(sweep_kwargs={"page_size": 2, "max_pages": 1})
+
+
+def build_digests_truncated(conn):
+    """Small window cap: the digest pass stops at max_windows (D1383).
+
+    Three pending windows, oldest first: the first two fire, the third
+    stays pending for the next tick, and `digests_truncated` is the
+    operator alert — behavior-preserving, never a skip.
+    """
+    for hours_ago in (2, 1, 0):
+        moment = T0 - timedelta(hours=hours_ago)
+        window = push_enqueue.hour_bucket(moment)
+        conn.execute(
+            "INSERT INTO push_digest_state"
+            " (owner_principal, window_start, count)"
+            " VALUES (?, ?, ?)",
+            ("owner-1", window, 2))
+    conn.commit()
+    return base_spec(sweep_kwargs={"max_windows": 2})
+
+
+def build_reminder_over_budget(conn):
+    """A due reminder with both budget scopes at bound (D10/D54).
+
+    The reminder is suppressed (no page, no budget consumed) and
+    coalesces into the digest (count+1, enqueued_at NULL); the same
+    sweep's digest pass then attempts the window and is itself
+    suppressed at the owner bound — its suppression audit carries the
+    U+0000 "suppressed" suffix (D77), never the exact page key.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=400)
+    window = push_enqueue.hour_bucket(T0)
+    set_budget(conn, "box", "box-a", window,
+               push_enqueue.BOX_BOUND_DEFAULT)
+    set_budget(conn, "owner", "owner-1", window,
+               push_enqueue.OWNER_BOUND_DEFAULT)
+    return base_spec()
+
+
+def build_digest_over_budget(conn):
+    """A pending digest window with the owner budget at bound (D77).
+
+    The digest is suppressed — no page, `enqueued_at` stays NULL so a
+    later sweep retries, and the suppression audit row (suffixed key)
+    is the record. The window must stay retryable, never wedged.
+    """
+    window = push_enqueue.hour_bucket(T0)
+    conn.execute(
+        "INSERT INTO push_digest_state (owner_principal, window_start, count)"
+        " VALUES (?, ?, ?)",
+        ("owner-1", window, 4))
+    conn.commit()
+    set_budget(conn, "owner", "owner-1", window,
+               push_enqueue.OWNER_BOUND_DEFAULT)
+    return base_spec()
+
+
+def build_stale_epoch_quiet(conn):
+    """A new stale epoch within 4h of the last stale page (F7/D62).
+
+    The pre-inserted `accepted` row (a delivered page, not just a
+    queued work item) arms the quiet window: the new epoch is
+    suppressed with no row written and no budget consumed.
+    """
+    key = push_enqueue.event_key_for(
+        "heartbeat_stale", "owner-1", "box-a", "epoch-4")
+    insert_result_row(
+        conn, at=(T0 - timedelta(hours=1)).isoformat(),
+        owner_principal="owner-1", box_id="box-a", device="",
+        event_kind="heartbeat_stale", event_key=key, outcome="accepted")
+    return base_spec(derive_stale=[("box-a", "epoch-5")])
+
+
+def build_reminder_terminal_clock_replay(conn):
+    """The D61 audit replayed: the audit row already exists (D61).
+
+    The post-first-sweep state for a clock-terminal approval. The
+    gate-1 SELECT fast-path finds the existing audit row, writes
+    nothing, and the terminal approval accrues exactly one audit row
+    no matter how many overlapping sweeps observe it.
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=900)
+    page_key = push_enqueue.event_key_for(
+        "reminder", "owner-1", "box-a", "r1")
+    insert_result_row(
+        conn, at=(T0 - timedelta(minutes=30)).isoformat(),
+        owner_principal="owner-1", box_id="box-a", device="",
+        event_kind="reminder", event_key=page_key + "\x00superseded",
+        outcome="suppressed_terminal")
+    return base_spec()
+
+
+def build_derivation_poisoned(conn):
+    """A derivation that raises at call time (D78, watcher level).
+
+    The stale watcher is counted `poisoned` once and stops; the token
+    watcher still runs — a derivation failure stops only its own
+    watcher, never the whole sweep.
+    """
+    return base_spec(derive_stale_raiser=True,
+                     derive_token_warnings=[("box-a", "th-1")])
+
+
 SCENARIOS = [
     {"name": "reminder_due",
      "doc": "One due reminder produces exactly one queued page.",
@@ -263,6 +437,46 @@ SCENARIOS = [
      "doc": "time_budget_s=0: every pass stops before any candidate; "
             "the summary reports budget_truncated (D103).",
      "build": build_budget_already_exhausted},
+    {"name": "reminder_already_paged",
+     "doc": "A due reminder whose page row already exists is anti-joined "
+            "out of the hint: never re-selected, zero new rows (D75).",
+     "build": build_reminder_already_paged},
+    {"name": "multi_owner_isolation",
+     "doc": "Two owners, two boxes: every page, digest row, and budget "
+            "counter stays scoped to its own owner (tenant isolation).",
+     "build": build_multi_owner_isolation},
+    {"name": "reminders_truncated",
+     "doc": "page_size=2, max_pages=1: the pass pages r1+r2, r3 stays "
+            "due, pages_truncated is the operator alert (D69).",
+     "build": build_reminders_truncated},
+    {"name": "digests_truncated",
+     "doc": "max_windows=2 over three pending windows: two fire, one "
+            "stays pending, digests_truncated is the operator alert "
+            "(D1383).",
+     "build": build_digests_truncated},
+    {"name": "reminder_over_budget",
+     "doc": "Both budget scopes at bound: the reminder is suppressed "
+            "and coalesces into the digest; the same sweep's digest "
+            "attempt is suppressed with the suffixed audit key (D10, "
+            "D54, D77).",
+     "build": build_reminder_over_budget},
+    {"name": "digest_over_budget",
+     "doc": "Pending digest window with the owner budget at bound: "
+            "suppressed, enqueued_at stays NULL, the window stays "
+            "retryable (D77).",
+     "build": build_digest_over_budget},
+    {"name": "stale_epoch_quiet",
+     "doc": "A new stale epoch within 4h of the last stale page: "
+            "suppressed_quiet_period, no row, no budget (F7/D62).",
+     "build": build_stale_epoch_quiet},
+    {"name": "reminder_terminal_clock_replay",
+     "doc": "The D61 audit row already exists: gate-1 writes nothing, "
+            "the terminal approval accrues exactly one audit row (D61).",
+     "build": build_reminder_terminal_clock_replay},
+    {"name": "derivation_poisoned",
+     "doc": "The stale derivation raises at call time: counted "
+            "poisoned once, the token watcher still runs (D78).",
+     "build": build_derivation_poisoned},
 ]
 
 
