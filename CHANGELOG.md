@@ -256,7 +256,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   crash-durably, so a mid-write crash can no longer leave a torn record the
   next sweep mistakes for a completed one; and expiries reaped during page
   renders now leave the same audit-trail event as the other expiry paths.
-  (#TBD)
+  (#1606)
 - `muse-job watch` pages on a buried `question` claim (2026-10-16): `question`
   was read from the tail-line event, which issue #23 B3 proved buryable for
   `done` — a newer trailing line silently suppressed the page. Questions are
