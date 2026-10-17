@@ -2147,3 +2147,221 @@ class TestHardeningHeaders:
         status, headers, _ = self._raw(port, "GET", "/api/screenshot")
         assert status == 200
         assert headers.get("x-content-type-options") == "nosniff"
+
+
+# ---------------------------------------------------------------- audit sink shape (#1588)
+
+
+class TestAuditSink:
+    """Issue #1588 (D-CBA-4): the bridge owns its audit sink — O_APPEND|
+    O_NOFOLLOW open at 0600, size-capped rotation with a bounded number of
+    generations, and a one-line-per-event contract the S1/S2 writers will
+    use. These tests drive _RotatingBridgeLog directly (never install() on
+    the module-global — install dup2's the test process's own fds)."""
+
+    def _log(self, bridge, tmp_path, **kw):
+        kw.setdefault("max_bytes", 400)
+        kw.setdefault("generations", 2)
+        return bridge._RotatingBridgeLog(
+            path=str(tmp_path / "cua-bridge.log"), **kw)
+
+    def _open_fd(self, log):
+        fd = log._open()
+        assert fd is not None
+        log._fd = fd
+        return log
+
+    def test_open_creates_0600(self, bridge, tmp_path):
+        log = self._log(bridge, tmp_path)
+        fd = log._open()
+        assert fd is not None
+        os.close(fd)
+        mode = stat.S_IMODE(os.stat(str(tmp_path / "cua-bridge.log")).st_mode)
+        assert mode == 0o600
+
+    def test_open_tightens_legacy_0644(self, bridge, tmp_path):
+        # A log written before #1588 under a default umask must not stay
+        # world-readable while naming window titles.
+        p = tmp_path / "cua-bridge.log"
+        p.write_text("legacy line\n")
+        os.chmod(p, 0o644)
+        log = self._log(bridge, tmp_path)
+        fd = log._open()
+        assert fd is not None
+        os.close(fd)
+        mode = stat.S_IMODE(os.stat(str(p)).st_mode)
+        assert mode == 0o600
+        assert p.read_text() == "legacy line\n"  # content preserved
+
+    def test_open_refuses_symlink(self, bridge, tmp_path, capsys):
+        target = tmp_path / "victim.log"
+        target.write_text("do not touch\n")
+        link = tmp_path / "cua-bridge.log"
+        os.symlink(target, link)
+        log = self._log(bridge, tmp_path)
+        assert log._open() is None  # refused, not followed
+        assert "symlink" in capsys.readouterr().err
+        assert target.read_text() == "do not touch\n"
+
+    def test_event_format_is_one_line(self, bridge, tmp_path):
+        log = self._open_fd(self._log(bridge, tmp_path))
+        line = bridge._format_bridge_event(
+            "csrf-reject",
+            "bad-host\nINJECTED\rline \\ backslash\x0bVT\x0cFF\u2028\u2029\x1bESC")
+        assert log.write_line(line)
+        os.close(log._fd)
+        lines = (tmp_path / "cua-bridge.log").read_text().splitlines()
+        assert len(lines) == 1  # the hostile line-breaks never became lines
+        assert "INJECTED" in lines[0] and "\\n" in lines[0]
+        assert "\\r" in lines[0] and "\\\\" in lines[0]
+        assert "\\u000b" in lines[0] and "\\u000c" in lines[0]
+        assert "\\u2028" in lines[0] and "\\u2029" in lines[0]
+        assert "\\u001b" in lines[0]
+        assert " level=WARNING " in lines[0]
+        assert " kind=csrf-reject " in lines[0]
+        assert lines[0].startswith("ts=") and " msg=" in lines[0]
+
+    def test_bad_kind_and_level_rejected(self, bridge):
+        for bad_kind in ("", "has space", "new\nline", "semi;colon",
+                         "x" * 65, None):
+            try:
+                bridge._format_bridge_event(bad_kind, "m")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"kind {bad_kind!r} not rejected")
+        try:
+            bridge._format_bridge_event("ok-kind", "m", level="INFO")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("level INFO not rejected")
+
+    def test_rotation_caps_size_and_generations(self, bridge, tmp_path):
+        log = self._open_fd(self._log(bridge, tmp_path, max_bytes=300,
+                                      generations=2))
+        for i in range(40):
+            line = bridge._format_bridge_event("evt", f"payload-{i:02d}")
+            assert log.write_line(line)
+        os.close(log._fd)
+        base = tmp_path / "cua-bridge.log"
+        # At most <cap> + one line in the live file; exactly 2 rotated
+        # generations; nothing beyond .2 — total disk bounded.
+        assert os.path.getsize(base) < 300 + 200
+        assert (tmp_path / "cua-bridge.log.1").exists()
+        assert (tmp_path / "cua-bridge.log.2").exists()
+        assert not (tmp_path / "cua-bridge.log.3").exists()
+        total = sum(p.stat().st_size for p in tmp_path.iterdir())
+        assert total < 3 * (300 + 200)
+
+    def test_install_rotates_oversized_existing_log(self, bridge, tmp_path):
+        # A log that outgrew the cap while the bridge was down rotates at
+        # the next install — but install() dup2's the test process's own
+        # fds 1/2, so save and restore them around the call.
+        p = tmp_path / "cua-bridge.log"
+        p.write_text("x" * 5000)
+        log = self._log(bridge, tmp_path, max_bytes=300, generations=2)
+        save1, save2 = os.dup(1), os.dup(2)
+        try:
+            assert log.install()
+            assert log.installed
+            # fd 1 now points at the (fresh) log — the dup2 landed.
+            assert os.fstat(1).st_ino == os.stat(str(p)).st_ino
+        finally:
+            os.dup2(save1, 1)
+            os.dup2(save2, 2)
+            os.close(save1)
+            os.close(save2)
+            os.close(log._fd)
+            log._fd = None
+        assert (tmp_path / "cua-bridge.log.1").exists()
+        assert os.path.getsize(p) < 300
+
+    def test_write_line_false_when_uninstalled(self, bridge):
+        log = bridge._RotatingBridgeLog(path="/nonexistent-dir/x.log")
+        assert log.write_line("ts=1 level=WARNING kind=k msg=m\n") is False
+
+    def test_log_bridge_event_falls_back_to_stderr(self, bridge, tmp_path,
+                                                   monkeypatch, capsys):
+        # The module-global sink is never installed in tests; the choke
+        # point must still emit — to plain stderr — never drop.
+        monkeypatch.setattr(bridge, "_BRIDGE_LOG",
+                            bridge._RotatingBridgeLog(
+                                path=str(tmp_path / "never-installed.log")))
+        bridge.log_bridge_event("probe-reject", "missing-csrf-header")
+        err = capsys.readouterr().err
+        assert "kind=probe-reject" in err
+        assert "missing-csrf-header" in err
+        assert not (tmp_path / "never-installed.log").exists()
+
+    def test_event_parse_round_trip(self, bridge):
+        # The contract's parse rule (BLOCKING-1): structured fields are
+        # four fixed-order tokens, msg is everything after "msg=" to
+        # end-of-line. A hostile msg with spaces, "=", the literal
+        # " msg=", every splitlines() boundary char, and backslashes must
+        # round-trip exactly.
+        hostile = ("a b=c msg= INJECTED\nline\r\\ tail\x0b\x0c\u2028\u2029"
+                   "\x1b\x85")
+        line = bridge._format_bridge_event("evt-1", hostile, level="ERROR")
+        parsed = bridge._parse_bridge_event(line)
+        assert parsed == {"ts": parsed["ts"], "level": "ERROR",
+                          "kind": "evt-1", "msg": hostile}
+        assert isinstance(parsed["ts"], int)
+
+    def test_parse_rejects_non_contract_lines(self, bridge):
+        # Skip rule: legacy free-form diagnostics do not start with "ts="
+        # and must be rejected, never parsed.
+        for bad in ("cua-bridge: WARNING: something happened\n",
+                    "ts=abc level=WARNING kind=k msg=m\n",
+                    "ts=1 level=INFO kind=k msg=m\n",
+                    "ts=1 level=WARNING kind=bad kind msg=m\n",
+                    "ts=1 level=WARNING kind=k\n",
+                    "level=WARNING kind=k msg=m\n",
+                    ""):
+            try:
+                bridge._parse_bridge_event(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"line not rejected: {bad!r}")
+
+    def test_write_line_recovers_after_rotation_open_failure(
+            self, bridge, tmp_path, monkeypatch):
+        # BLOCKING-2: a rotation whose reopen fails must not wedge the
+        # sink permanently — one reopen attempt per write recovers it.
+        log = self._open_fd(self._log(bridge, tmp_path, max_bytes=200,
+                                      generations=1))
+        log._install_attempted = True  # as install() would set
+        real_open_quiet = log._open_quiet
+        monkeypatch.setattr(log, "_open_quiet", lambda: None)
+        for i in range(20):
+            log.write_line(bridge._format_bridge_event("evt", f"p{i}"))
+        assert log._fd is None  # sink down, the BLOCKING-2 scenario
+        monkeypatch.setattr(log, "_open_quiet", real_open_quiet)
+        # The recovery path dup2's the test process's own fds 1/2 —
+        # save and restore them around the call.
+        save1, save2 = os.dup(1), os.dup(2)
+        try:
+            assert log.write_line(
+                bridge._format_bridge_event("evt", "recovered"))
+            assert log._fd is not None
+        finally:
+            os.dup2(save1, 1)
+            os.dup2(save2, 2)
+            os.close(save1)
+            os.close(save2)
+        os.close(log._fd)
+        log._fd = None
+        assert "msg=recovered" in (tmp_path / "cua-bridge.log").read_text()
+
+    def test_never_installed_sink_does_not_open_files(
+            self, bridge, tmp_path, monkeypatch, capsys):
+        # A sink that was never installed keeps the plain-stderr fallback
+        # — write_line must not open the log path behind the caller's
+        # back (the _install_attempted gate).
+        monkeypatch.setattr(bridge, "_BRIDGE_LOG",
+                            bridge._RotatingBridgeLog(
+                                path=str(tmp_path / "never-installed.log")))
+        bridge.log_bridge_event("k", "v")
+        assert "kind=k" in capsys.readouterr().err
+        assert not (tmp_path / "never-installed.log").exists()

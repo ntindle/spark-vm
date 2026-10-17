@@ -35,6 +35,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import select
 import shutil
 import stat
@@ -396,6 +397,367 @@ def _load_launched():
 
 
 _load_launched()
+
+
+# ---------------------------------------------------------------------------
+# Audit-sink shape (#1588, D-CBA-4): the bridge OWNS its log fd.
+#
+# The keepalive used to own the sink (`>>"$HOME/.cache/cua-bridge.log" 2>&1`):
+# the bridge held that inherited fd for its whole lifetime, so rename-based
+# rotation silently did nothing — the bridge kept writing the renamed inode
+# and growth stayed unbounded, the exact failure this section exists to
+# prevent. The bridge now opens the log itself (O_APPEND|O_NOFOLLOW, 0600)
+# and dup2's it onto stdout/stderr at startup (install_bridge_log); rotation
+# closes and re-opens under the write lock, so the old-inode failure class
+# is closed. The keepalive's redirect stays only as pre-setup capture — the
+# few lines that can print before install_bridge_log runs (import-time
+# warnings, the pkill stop path) — and the bridge closes the inherited fd
+# at install; the redirect is no longer the ownership mechanism.
+#
+# Rotation: size-capped at AUDIT_LOG_MAX_BYTES with AUDIT_LOG_GENERATIONS
+# rotated generations (cua-bridge.log.1 .. .N); the size check runs on
+# every structured write and once at install, so a log that grew past the
+# cap while the bridge was down rotates on the next start. 0600 is pinned
+# at open — a log written before this change under a default umask is
+# tightened in place — because the audit stream names window titles, which
+# are operator-sensitive by construction (#1588).
+#
+# Audit line format — the contract between the bridge (writer) and the
+# keepalive/operator tooling (consumer). Documented HERE, where it is
+# defined, not spread across READMEs (D-CBA-4):
+#   ts=<unix-epoch> level=<WARNING|ERROR> kind=<event-kind> msg=<one-line>
+# One line per event, always: every line-boundary character Python's
+# str.splitlines() splits on (\x0b, \x0c, \x1c-\x1e, \x85, \u2028, \u2029 —
+# not just \n/\r) plus the C0/C1 controls and backslash is escaped, so a
+# hostile string can never inject a fake line into the operator-visible
+# stream. This matters because the audit names window titles, which are
+# attacker-influenced — any X client sets its own title, and a malicious
+# webpage's document.title is remote-influenced (#1588). kind is the
+# stable greppable vocabulary the S1/S2 writers (#1586/#1587) will
+# extend; level is WARNING or ERROR only.
+#
+# Parse rule (pinned so writer and consumer share one parser, not two
+# assumptions): the structured fields are exactly four whitespace-
+# separated tokens in fixed order — ts=, level=, kind=, then msg=... last.
+# ts/level/kind never contain spaces, so msg is parsed as everything
+# after the leading "msg=" token to end-of-line, then unescaped
+# (\\n -> newline, \\r -> CR, \\uXXXX -> the character, \\\\ ->
+# backslash, matched left-to-right). A msg containing the literal
+# " msg=" or "=" is unambiguous under this rule.
+# Skip rule: lines NOT beginning with "ts=" are legacy free-form
+# diagnostics (import-time warnings, the sink's own failure warnings) —
+# contract parsers must skip them, never parse them.
+# Extensibility rule: kind is the extension vocabulary; any future
+# structured field goes BETWEEN kind and msg — msg stays last, always.
+# _parse_bridge_event below is the reference implementation; the
+# round-trip test pins writer and parser together.
+AUDIT_LOG_PATH = os.path.join(_HOME, ".cache", "cua-bridge.log")
+AUDIT_LOG_MAX_BYTES = 1_000_000      # ~1 MiB per generation
+AUDIT_LOG_GENERATIONS = 3            # cua-bridge.log.1 .. .3, then drop
+_AUDIT_LEVELS = ("WARNING", "ERROR")
+_AUDIT_KIND_RE = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+
+
+def _format_bridge_event(kind, msg, level="WARNING"):
+    """Render one audit line per the contract above. Raises ValueError on
+    a kind/level outside the vocabulary — the writer is internal, so a bad
+    kind is a programming error, fail fast."""
+    if level not in _AUDIT_LEVELS:
+        raise ValueError(f"bad audit level: {level!r}")
+    if not re.fullmatch(_AUDIT_KIND_RE, kind or ""):
+        raise ValueError(f"bad audit kind: {kind!r}")
+    return (f"ts={int(time.time())} level={level} kind={kind} "
+            f"msg={_escape_msg(msg)}\n")
+
+
+# Every character Python's str.splitlines() treats as a line boundary,
+# plus the C0/C1 controls and the escape character itself. \u2028/\u2029
+# are named explicitly: they are the splitlines() boundaries outside the
+# \x00-\x9f ranges (a hostile window title carrying U+2028 followed by a
+# forged "ts= ..." prefix must not become a fake audit line).
+_MSG_ESCAPE_RE = re.compile(r"[\\\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _escape_msg(msg):
+    """Escape msg to a single line per the contract. \n -> \\n, \r -> \\r,
+    backslash -> \\\\, every other matched control -> \\uXXXX."""
+    def _esc(m):
+        ch = m.group(0)
+        if ch == "\\":
+            return "\\\\"
+        if ch == "\n":
+            return "\\n"
+        if ch == "\r":
+            return "\\r"
+        return f"\\u{ord(ch):04x}"
+    return _MSG_ESCAPE_RE.sub(_esc, str(msg))
+
+
+_UNESCAPE_RE = re.compile(r"\\(\\|n|r|u[0-9a-fA-F]{4})")
+
+
+def _unescape_msg(raw):
+    """Inverse of _escape_msg (left-to-right, so \\\\u0041 decodes to a
+    literal backslash followed by "u0041", not to "A")."""
+    def _un(m):
+        g = m.group(1)
+        if g == "\\":
+            return "\\"
+        if g == "n":
+            return "\n"
+        if g == "r":
+            return "\r"
+        return chr(int(g[1:], 16))
+    return _UNESCAPE_RE.sub(_un, raw)
+
+
+def _parse_bridge_event(line):
+    """Reference parser for the audit-line contract (see the #1588 section
+    above). Returns {"ts": int, "level": str, "kind": str, "msg": str} with
+    msg unescaped. Raises ValueError on anything outside the contract —
+    including legacy free-form lines, which consumers must SKIP (they do
+    not start with "ts="), never parse. Writer and consumer share this one
+    parser instead of two assumptions."""
+    if not isinstance(line, str) or not line.startswith("ts="):
+        raise ValueError("not an audit line: missing ts= prefix")
+    parts = line.rstrip("\n").split(" ", 3)
+    if len(parts) != 4:
+        raise ValueError("not an audit line: want 4 tokens")
+    ts_tok, level_tok, kind_tok, msg_tok = parts
+    try:
+        ts = int(ts_tok[3:])
+    except ValueError:
+        raise ValueError(f"bad ts token: {ts_tok!r}")
+    level = level_tok[len("level="):] if level_tok.startswith("level=") \
+        else None
+    if level not in _AUDIT_LEVELS:
+        raise ValueError(f"bad level token: {level_tok!r}")
+    kind = kind_tok[len("kind="):] if kind_tok.startswith("kind=") else ""
+    if not re.fullmatch(_AUDIT_KIND_RE, kind):
+        raise ValueError(f"bad kind token: {kind_tok!r}")
+    if not msg_tok.startswith("msg="):
+        raise ValueError("not an audit line: msg= not last")
+    raw = msg_tok[len("msg="):]
+    return {"ts": ts, "level": level, "kind": kind,
+            "msg": _unescape_msg(raw)}
+
+
+class _RotatingBridgeLog:
+    """The bridge's own audit sink: open/rotate/write under one lock.
+
+    Constructed with explicit params so tests can point it at tmp dirs;
+    __init__ touches nothing on disk — install() does the open. The
+    module-global _BRIDGE_LOG below is installed once from __main__; it is
+    never installed at import, so importing this module (tests, tooling)
+    has no fd side effects.
+    """
+
+    def __init__(self, path=AUDIT_LOG_PATH,
+                 max_bytes=AUDIT_LOG_MAX_BYTES,
+                 generations=AUDIT_LOG_GENERATIONS):
+        self._path = path
+        self._max_bytes = max_bytes
+        self._generations = generations
+        self._lock = threading.Lock()
+        self._fd = None
+        # Set by install(): distinguishes "never installed" (tests, or a
+        # bridge that never ran __main__) from "installed but the fd is
+        # down" — only the latter gets a reopen retry in write_line, so a
+        # never-installed sink keeps its plain-stderr fallback instead of
+        # opening files behind the caller's back.
+        self._install_attempted = False
+
+    def _open(self):
+        """Open the log O_APPEND|O_NOFOLLOW at 0600. Returns the fd, or None
+        with a loud stderr line on any failure — a broken sink must not
+        take down the control surface (fail-open to the inherited stderr,
+        the pre-#1588 behavior). O_NOFOLLOW refuses a planted symlink
+        instead of following it."""
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        except OSError as e:
+            print(f"cua-bridge: WARNING: cannot create log dir for "
+                  f"{self._path}: {e} — audit sink not installed",
+                  file=sys.stderr)
+            return None
+        try:
+            fd = os.open(self._path,
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                print(f"cua-bridge: WARNING: {self._path} is a symlink — "
+                      f"refusing to open it (not installed)",
+                      file=sys.stderr)
+            else:
+                print(f"cua-bridge: WARNING: cannot open audit log "
+                      f"{self._path}: {e} — audit sink not installed",
+                      file=sys.stderr)
+            return None
+        try:
+            # Pin 0600 even on a pre-existing file: a log written before
+            # #1588 under a default umask (0644) would otherwise stay
+            # world-readable while naming window titles.
+            os.fchmod(fd, 0o600)
+        except OSError as e:
+            print(f"cua-bridge: WARNING: cannot chmod 0600 {self._path}: "
+                  f"{e} — audit sink not installed", file=sys.stderr)
+            os.close(fd)
+            return None
+        return fd
+
+    def install(self):
+        """Own the sink: open the log, dup2 it onto stdout/stderr (closing
+        the keepalive's inherited redirect fd), and rotate once in case
+        the log outgrew the cap while the bridge was down. Returns True on
+        success, False with a loud warning on failure."""
+        self._install_attempted = True
+        fd = self._open()
+        if fd is None:
+            return False
+        with self._lock:
+            os.dup2(fd, 1)
+            os.dup2(fd, 2)
+            self._fd = fd
+            self._maybe_rotate_locked()
+        return True
+
+    @property
+    def installed(self):
+        return self._fd is not None
+
+    def _maybe_rotate_locked(self):
+        """Size check + rotation. The lock must be held. Best-effort: a
+        failed shift reopens the unrotated log and keeps serving — a
+        broken sink never takes down the bridge, and the size check on
+        the next write retries the rotation. Soft cap, stated honestly:
+        the check runs on structured writes and at install; legacy
+        free-form prints bypass it (fine at current volumes)."""
+        if self._fd is None:
+            return
+        try:
+            if os.fstat(self._fd).st_size < self._max_bytes:
+                return
+        except OSError:
+            return
+        os.close(self._fd)
+        self._fd = None
+        try:
+            # Shift newest-first so no generation is clobbered: .2 -> .3,
+            # .1 -> .2, log -> .1; the oldest generation falls off. A
+            # rename failing for any reason other than a missing source
+            # aborts the shift (the finally below reopens unrotated) —
+            # rotation must not propagate an exception into the bridge.
+            for i in range(self._generations, 0, -1):
+                src = self._path if i == 1 else f"{self._path}.{i - 1}"
+                dst = f"{self._path}.{i}"
+                try:
+                    os.replace(src, dst)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    break
+            fd = self._open_quiet()
+            if fd is not None:
+                os.dup2(fd, 1)
+                os.dup2(fd, 2)
+                self._fd = fd
+        finally:
+            if self._fd is None:
+                # Rotation failed halfway: reopen the (unrotated) path so
+                # the bridge keeps a working stderr; the size check on the
+                # next write retries.
+                fd = self._open_quiet()
+                if fd is not None:
+                    os.dup2(fd, 1)
+                    os.dup2(fd, 2)
+                    self._fd = fd
+
+    def _open_quiet(self):
+        """Like _open but silent — used mid-rotation where _open's own
+        warnings would recurse into a half-rotated sink."""
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            fd = os.open(self._path,
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | os.O_NOFOLLOW, 0o600)
+            os.fchmod(fd, 0o600)
+            return fd
+        except OSError:
+            return None
+
+    def write_line(self, line):
+        """Write one pre-formatted line (with trailing newline) through
+        the rotating sink. Returns True; False when the sink is not
+        installed (caller falls back to plain stderr). A broken sink can
+        never raise into the caller: every sink-side OSError is contained
+        here and reported as False."""
+        with self._lock:
+            if self._fd is None and self._install_attempted:
+                # Recovery: a failed rotation (or a failed install) left
+                # the sink down — one reopen attempt per write keeps the
+                # documented retry real, instead of falling back to the
+                # inherited stderr (the renamed old inode) forever.
+                # Never-installed sinks skip this: their callers expect
+                # the plain-stderr fallback, not a file opened behind
+                # their back.
+                fd = self._open_quiet()
+                if fd is None:
+                    return False
+                try:
+                    os.dup2(fd, 1)
+                    os.dup2(fd, 2)
+                except OSError:
+                    os.close(fd)
+                    return False
+                self._fd = fd
+            if self._fd is None:
+                return False
+            try:
+                self._maybe_rotate_locked()
+            except OSError:
+                # Rotation blew up (disk full, permissions) — the reopen
+                # in _maybe_rotate_locked's finally already ran; report
+                # False and let the caller fall back, never propagate.
+                return False
+            if self._fd is None:
+                return False
+            try:
+                os.write(self._fd, line.encode())
+            except OSError:
+                return False
+            return True
+
+
+_BRIDGE_LOG = _RotatingBridgeLog()
+
+
+def install_bridge_log():
+    """Install the module-global audit sink (see the #1588 section above).
+    Called once from __main__ before anything that can write. Returns
+    True on success; False (loud warning already printed) leaves the
+    bridge on its inherited stderr."""
+    return _BRIDGE_LOG.install()
+
+
+def log_bridge_event(kind, msg, level="WARNING"):
+    """Write one structured audit line through the rotating sink — the
+    choke point the S1/S2 writers (#1586/#1587) and the #1576 audit writer
+    will use. Content pins live here by reference: D-CBA-1 (targets and
+    one-line summaries, never request bodies / typed text / raw
+    driver-stderr blobs) and D-CBA-2 (no multi-line traces — the sink is
+    one-line-per-event) govern every future caller. Falls back to plain
+    stderr when the sink is not installed (tests, install failure), so no
+    event is ever silently dropped — and the fallback itself is guarded:
+    a broken sink (closed stderr, full disk) must never raise into the
+    bridge's request handlers."""
+    line = _format_bridge_event(kind, msg, level)
+    if not _BRIDGE_LOG.write_line(line):
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except OSError:
+            pass
 
 
 def call(tool, args):
@@ -1328,6 +1690,10 @@ if __name__ == "__main__":
         # bracket-trick so the pkill pattern never matches this process itself
         os.system("pkill -f 'cua-bridge[.]py' 2>/dev/null")
         sys.exit(0)
+    # Own the audit sink (#1588) before anything that can write: the
+    # singleton-lock failure line below must land in the shaped log, not
+    # just the keepalive's inherited redirect.
+    install_bridge_log()
     # Singleton guard (#495): overlapping keepalive invocations (or a manual
     # double-start) must not run two bridges — the second bind would fail
     # silently under the keepalive's setsid. Exit rather than limp.
