@@ -14,6 +14,8 @@ listens publicly: no VNC, no RDP, no unauthenticated control port.
   cua-desktop.sh       supervisor: start/stop/status of Xvfb :98 + D-Bus + XFCE + driver daemon
   start-xfce.sh        launches xfwm4 + xfce4-panel + xfdesktop as components (see gotchas)
   cua-bridge.py        localhost-only HTTP bridge on 127.0.0.1:18731
+  cua-bridge-log       read the bridge's structured audit log: filter by
+                       kind/level, tail by time (#1597 operator reader)
   cua-keepalive.sh     run from ntindle's crontab every 5 min; restarts anything down
   launch-blender-gui.sh  wrapper for the `blender` allowlist entry (Wayland-safe env)
 ```
