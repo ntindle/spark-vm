@@ -1180,6 +1180,13 @@ class SwapAddon:
         # monotonic seen-set instead.
         self._smoke_startup_checked = False
         self.registry = {}
+        # Issue #199: monotonic data-generation counters for the
+        # grant-verdict cache's invalidation tag. Bumped whenever
+        # _load() / _grants() replace the underlying data (never
+        # mutated in place), so the tag covers the data itself — a
+        # counter never repeats, unlike an id() after GC.
+        self._registry_gen = 0
+        self._grants_gen = 0
         self.ssrf_hosts = []
         self.ssrf_nets = []
         self.deny_hosts = []
@@ -1481,6 +1488,11 @@ class SwapAddon:
         # self.registry — and _swap_headers no longer rescans the whole
         # registry on each Cookie-bearing request.
         self._cookie_swap_name_set = self._cookie_swap_names()
+        # Issue #199: the registry object was just (re)placed — bump
+        # the generation even on the read-failure path (registry == {}),
+        # so a verdict cached against the old object can never be
+        # served after the data changed identity.
+        self._registry_gen = getattr(self, "_registry_gen", 0) + 1
 
     @staticmethod
     def _mtime(p):
@@ -1631,6 +1643,11 @@ class SwapAddon:
                     self._grants_cache = g if isinstance(g, list) else []
                 except (OSError, ValueError):
                     self._grants_cache = []
+                # Issue #199: the grants object was just (re)placed —
+                # bump the generation even on the read-failure path
+                # (cache == []), so the verdict cache's tag tracks the
+                # data, not the file's mtime.
+                self._grants_gen = getattr(self, "_grants_gen", 0) + 1
             return getattr(self, "_grants_cache", [])
         except Exception:
             return []
@@ -2225,19 +2242,30 @@ class SwapAddon:
         fromisoformat per grant), multiplying synchronous work on the
         shared event loop for bodies studded with placeholders. The
         cache key covers every input; the generation tag covers the
-        data. A reload between two placeholders of the same request
-        (an interleaved hook's _maybe_reload, a grants.json revoke)
-        changes the generation and drops the cache instead of serving
-        a stale allow — a revoked grant is therefore honored no later
-        than the next placeholder after the revoke lands. `now` is
-        frozen at the request's first evaluation: a grant expiring
-        mid-request keeps its first verdict for the rest of the
-        request (per-request consistency, not per-placeholder
-        drift). request() and websocket_message() reset the cache;
-        direct callers get a lazily created one."""
+        data. The generation is a pair of monotonic counters
+        (`_grants_gen`, `_registry_gen`) bumped whenever `_grants()` /
+        `_load()` replace the underlying data — including the
+        read-failure paths where the data becomes empty without any
+        file mtime moving (a chmod changes ctime, not mtime), so the
+        tag attests to the data the verdict actually reads, not just
+        the files' mtimes. A reload between two placeholders of the
+        same request (a grants.json revoke picked up by `_grants()`'s
+        per-call mtime gate) bumps the counter and drops the cache
+        rather than serving a stale allow — a revoked grant is
+        therefore honored no later than the next placeholder after the
+        revoke lands. `now` is frozen per cache key at that key's first
+        evaluation: a grant expiring mid-request keeps its first verdict
+        for the rest of the request for the same
+        (credential, host, method, path) tuple, while a distinct tuple
+        evaluated later sees a fresh `now` (the fail-closed direction).
+        request() and websocket_message() reset the cache; the per-call
+        `_grants()` mtime gate is defense-in-depth for direct callers —
+        the per-hook reset is the real cross-hook guard (hooks are
+        synchronous; exactly one `_maybe_reload` runs per hook, before
+        the reset); direct callers get a lazily created cache."""
         grants = self._grants()  # mtime-gated: one stat, not a scan
-        gen = (getattr(self, "_grants_mtime", None),
-               getattr(self, "_registry_mtime", None))
+        gen = (getattr(self, "_grants_gen", 0),
+               getattr(self, "_registry_gen", 0))
         cache = getattr(self, "_verdict_cache", None)
         if not isinstance(cache, dict) or cache.get("gen") != gen:
             cache = {"gen": gen, "d": {}}

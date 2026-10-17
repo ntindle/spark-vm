@@ -5384,8 +5384,11 @@ class Issue199HotPathTests(unittest.TestCase):
                        secrets={"api": "API-TOKEN"},
                        registry=reg)
         a._grants_cache = grants(exp)
-        a._grants_mtime = 7
-        a._registry_mtime = None
+        # Issue #199: the verdict cache's generation tag is counter-
+        # based; the fixture sets the counters as _load()/_grants()
+        # would have after installing this data.
+        a._grants_gen = 1
+        a._registry_gen = 1
         return a
 
     def _allow_grants(self, exp):
@@ -5460,16 +5463,35 @@ class Issue199HotPathTests(unittest.TestCase):
         ok, _, _ = a._credential_allows_request(
             "api", "api.example.com", "POST", "/repos/x")
         self.assertTrue(ok)
-        # Owner revokes: new grants list, bumped mtime, no allow grant.
-        # The static registry (allowed_paths ["/v1/"]) now refuses.
+        # Owner revokes: new grants list, bumped generation, no allow
+        # grant. The static registry (allowed_paths ["/v1/"]) now refuses.
         a._grants_cache = []
-        a._grants_mtime = 8
+        a._grants_gen = 2
         counting2 = self._counting(a, a._grants_cache)
         ok, reason, _ = a._credential_allows_request(
             "api", "api.example.com", "POST", "/repos/x")
         self.assertFalse(ok)
         self.assertEqual(reason, "path-not-allowed")
         self.assertEqual(counting2.iterations, 1)
+
+    def test_verdict_cache_dropped_on_registry_replace(self):
+        """B1 (Engineering round 1): the generation tag covers the
+        data, not the files' mtimes. Simulates `_load()`'s read-failure
+        path — the registry object is replaced (now empty) with no
+        mtime moving — and the cached allow must NOT be served against
+        the vanished data."""
+        a = self._grant_addon(self._allow_grants)
+        self._counting(a, a._grants_cache)
+        a._verdict_cache = None
+        ok, _, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertTrue(ok)
+        a.registry = {}
+        a._registry_gen += 1  # what _load() does on every replacement
+        ok, reason, _ = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/repos/x")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unbound-host")
 
     def test_verdict_cache_reset_per_request(self):
         """request() starts with a fresh cache: entries cannot leak
@@ -5481,7 +5503,11 @@ class Issue199HotPathTests(unittest.TestCase):
         req = Request("api.example.com", "/repos/x", method="POST",
                       headers=[("Authorization", "Bearer hsurr:api")])
         a.request(Flow(req))
-        self.assertNotIn(("stale",), a._verdict_cache["d"])
+        # The stale entry is gone: the per-request reset dropped the
+        # cache (getattr: a placeholder-free request leaves it None —
+        # lazily recreated only when a verdict is actually needed).
+        cache_d = (a._verdict_cache or {}).get("d", {})
+        self.assertNotIn(("stale",), cache_d)
         # The request re-scanned (its own verdict, not the stale one)
         # and the swap still went through.
         self.assertGreaterEqual(counting.iterations, 1)
