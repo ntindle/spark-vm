@@ -1018,6 +1018,46 @@ class SwapAddonTests(unittest.TestCase):
         self.assertIn(("evil.example", "github", "host-not-allowlisted"),
                       a.refused)
 
+    def test_warn_placeholder_audits_wire_case_name(self):
+        """The placeholder warn path audits the name in its wire case.
+
+        The swap path's placeholder regexes are case-sensitive, so the
+        old lowercased-blob extraction audited `hsurr:GitHub` as
+        `hsurr:github` — a name the case-sensitive secret store never
+        resolves (forensic fidelity; advisory nit from the
+        20261017-1359 arch turn).
+        """
+        a = make_addon()
+        req = Request("evil.example", "/", content=b"key=hsurr:GitHub")
+        a.request(Flow(req))
+        self.assertIn(("evil.example", "GitHub", "host-not-allowlisted"),
+                      a.refused)
+        self.assertNotIn(("evil.example", "github", "host-not-allowlisted"),
+                         a.refused)
+
+    def test_warn_placeholder_case_variants_audit_separately(self):
+        """Case variants of a name are distinct credentials in the
+        case-sensitive store, so each gets its own refused= line."""
+        a = make_addon()
+        req = Request("evil.example", "/",
+                      content=b"a=hsurr:github&b=hsurr:GitHub")
+        a.request(Flow(req))
+        self.assertIn(("evil.example", "github", "host-not-allowlisted"),
+                      a.refused)
+        self.assertIn(("evil.example", "GitHub", "host-not-allowlisted"),
+                      a.refused)
+
+    def test_warn_placeholder_uppercase_prefix_not_a_phantom(self):
+        """`HSURR:name` (uppercase prefix) never swaps — the swap
+        engine's placeholder regex is case-sensitive — so the warn path
+        must not audit it as a refused placeholder. The old
+        lowercased-blob extraction audited a phantom `hsurr:github`
+        here."""
+        a = make_addon()
+        req = Request("evil.example", "/", content=b"key=HSURR:github")
+        a.request(Flow(req))
+        self.assertEqual(a.refused, [])
+
     def test_nit_multi_entry_bad_line_warns(self):
         """REVIEW item 40b: a non-k=v line in a multi file is dropped with
         a warning naming the line number, never the content."""

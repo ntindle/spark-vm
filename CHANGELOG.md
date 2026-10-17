@@ -50,6 +50,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Security
+
+- Fixed the swap proxy's placeholder warning so the refused-credential
+  audit line names the credential exactly as it appeared on the wire.
+  A mixed-case placeholder used to be audited in lowercase, naming a
+  credential that doesn't exist in the store and confusing incident
+  review. Uppercase `HSURR:` prefixes (which never trigger a swap) no
+  longer produce phantom refused lines either. (#TBD)
+
 ### Added
 
 - The swap proxy's audit trail now records a `tenant` field on every
