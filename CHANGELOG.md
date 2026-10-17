@@ -256,7 +256,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   structured line — the error's class and location, never request content
   or driver output — and probe refusals are counted per reason class
   (first occurrence plus periodic summaries) instead of logged
-  line-by-line, so a probe flood can't grow the log at will. (#TBD)
+  line-by-line, so a probe flood can't grow the log at will. (#1607)
 
 - Approval-page hardening (2026-10-16): the per-approval cross-process lock
   files are now pruned once their approval is fully resolved, instead of
