@@ -52,6 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The desktop bridge's structured audit log now has an operator reader:
+  `cua-bridge-log` filters the bridge's audit events by kind or severity
+  and tails them by time, so reconstructing what the bridge did no longer
+  means grepping raw log lines. (#1643)
+
 - Competitor watch, 2026-10-17 morning: the Vercel KVM zero-day now
   has a formal CVE — CVE-2026-99999 (Critical, CVSS 9.3,
   kernel-maintainer-rated) — with the fix backported to stable kernel
