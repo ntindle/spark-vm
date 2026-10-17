@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet rollout: a new analysis pins the #777 box-layer rollout
+  controller and release-gate channel remainders — every unowned slice
+  (toolset-update gate cap, G17 event mapping rows, the correlated
+  gate-stale alert rule, the `fleet status` gate-stale line, G15 S2
+  operator tooling and wave assignment, G15 S3 hosted remainders) now
+  has its own tracker issue (#1629–#1634), so the work is owned again.
+  (#TBD)
+
 - Hosted owner-alerting: the in-repo half of the endpoint-driven push
   wiring is now built — the async enqueue boundary that decides whether a
   box event (approval filed, box revoked) may become a page, with the same
