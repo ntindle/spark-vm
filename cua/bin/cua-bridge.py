@@ -44,6 +44,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -760,6 +761,106 @@ def log_bridge_event(kind, msg, level="WARNING"):
             pass
 
 
+# ---------------------------------------------------------------- #1586 S1
+# Unhandled-500 audit. The two `except Exception` handlers in
+# Handler.do_GET/do_POST answer {"error": str(e)[:300]} with a 500 — the
+# caller learns, the box keeps no record (F-CBA-2). One structured audit
+# line per unhandled exception fixes the asymmetry; the client contract
+# is untouched. Content is an error-class label only — never the
+# exception text, never a multi-line traceback (D-CBA-2), never request
+# bodies / typed text / raw driver-stderr blobs (D-CBA-1: call() wraps
+# opaque driver stderr in RuntimeError, and that stderr can echo the
+# text the driver failed to inject).
+
+
+def _http_500_label(exc):
+    """One-line error-class label for an unhandled HTTP 500 (#1586 S1).
+
+    Exception type name + the deepest frame's location
+    (file:line in function) — the condensed frame summary the issue
+    asks for, not a traceback. The label never carries str(exc): driver
+    failures arrive as RuntimeError whose text is opaque driver stderr.
+    Bounded to 200 chars so one 500 can never grow the log; the
+    _format_bridge_event escape layer is a second, independent bound.
+    """
+    try:
+        tb = traceback.extract_tb(exc.__traceback__)
+        if tb:
+            frame = tb[-1]
+            loc = f" {frame.filename}:{frame.lineno} in {frame.name}"
+        else:
+            loc = ""
+    except Exception:
+        loc = ""
+    return f"{type(exc).__name__}{loc}"[:200]
+
+
+# ---------------------------------------------------------------- #1587 S2
+# csrf-refusal audit with volume bounding. A hostile page on the
+# operator's own machine can probe the bridge in a loop, so the refusal
+# signal must be visible WITHOUT letting the attacker grow the log at
+# will: the first refusal per reason class per window logs a full line;
+# further refusals are counted silently, with one summary line at each
+# power-of-ten boundary (10, 100, 1000, ...); a window rollover logs the
+# old window's totals. The reason is a fixed class (bad-host /
+# missing-csrf-header) — never the hostile header value, never request
+# bodies (D-CBA-1). Window: 5 minutes on the monotonic clock.
+_CSRF_REFUSAL_WINDOW_S = 300
+_CSRF_REFUSAL_SUMMARY_AT = (10, 100, 1000, 10000, 100000, 1000000)
+_csrf_refusal_lock = threading.Lock()
+_csrf_refusal_state = {"window_start": 0.0, "counts": {}}
+
+
+def _reset_csrf_refusal_state():
+    """Reset the S2 volume-bounding state — tests only, never called by
+    the bridge itself. The live bridge's state persists for the process
+    lifetime by design."""
+    with _csrf_refusal_lock:
+        _csrf_refusal_state["window_start"] = 0.0
+        _csrf_refusal_state["counts"] = {}
+
+
+def record_csrf_refusal(reason, source=None):
+    """Record one _check_csrf refusal (#1587 S2).
+
+    Emits 0..2 structured audit lines through the log_bridge_event
+    choke point (level WARNING) and returns the number of lines
+    emitted, so tests can assert the bounding. Never raises: a broken
+    clock must not fail the 403 answer, and the choke point is itself
+    fail-safe. `source` is the TCP peer (client_address), not any
+    request content — omitted when unavailable (unit tests)."""
+    lines = []
+    try:
+        now = time.monotonic()
+    except Exception:
+        return 0
+    with _csrf_refusal_lock:
+        st = _csrf_refusal_state
+        if now - st["window_start"] >= _CSRF_REFUSAL_WINDOW_S:
+            old, total = st["counts"], sum(st["counts"].values())
+            st["counts"] = {}
+            st["window_start"] = now
+            if total:
+                parts = " ".join(f"{r}={c}" for r, c in sorted(old.items()))
+                lines.append(
+                    ("csrf-refusal",
+                     f"window summary: {total} refusals ({parts})"))
+        n = st["counts"].get(reason, 0) + 1
+        st["counts"][reason] = n
+        src = f" src={source}" if source else ""
+        if n == 1:
+            lines.append(("csrf-refusal", f"refusal: reason={reason}{src}"))
+        elif n in _CSRF_REFUSAL_SUMMARY_AT:
+            lines.append(("csrf-refusal",
+                          f"count summary: reason={reason} count={n}"))
+    for kind, msg in lines:
+        try:
+            log_bridge_event(kind, msg)
+        except Exception:
+            pass
+    return len(lines)
+
+
 def call(tool, args):
     p = subprocess.run(
         [DRIVER, "call", tool],
@@ -1468,12 +1569,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _csrf_ok(self):
+    def _csrf_refusal_reason(self):
+        """None when the CSRF/host gate passes; else the refusal's reason
+        class for the #1587 S2 audit line. The reason is a FIXED class —
+        never the hostile header value (D-CBA-1). Behavior-identical to
+        the old _csrf_ok, split so the audit can name the class."""
         host = (self.headers.get("Host") or "").split(",")[0].strip().lower()
         if host not in ALLOWED_HOSTS:
-            return False
+            return "bad-host"
         if self.command in ("POST", "PUT", "DELETE"):
-            return self.headers.get(CSRF_HEADER) == CSRF_VALUE
+            if self.headers.get(CSRF_HEADER) != CSRF_VALUE:
+                return "missing-csrf-header"
+            return None
         if self.command == "GET":
             # Issue #1574: /api/status?probe=1 is a state-changing GET
             # (spawns xev, hops focus, injects an XTEST key) hiding behind
@@ -1487,11 +1594,21 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(getattr(self, "path", "") or "")
             if (parsed.path == "/api/status"
                     and parse_qs(parsed.query).get("probe") == ["1"]):
-                return self.headers.get(CSRF_HEADER) == CSRF_VALUE
-        return True
+                if self.headers.get(CSRF_HEADER) != CSRF_VALUE:
+                    return "missing-csrf-header"
+        return None
+
+    def _csrf_ok(self):
+        return self._csrf_refusal_reason() is None
 
     def _check_csrf(self):
-        if not self._csrf_ok():
+        reason = self._csrf_refusal_reason()
+        if reason is not None:
+            # Issue #1587 (S2): a refusal is a security signal, not just a
+            # 403 — record it in the audit stream (volume-bounded by
+            # record_csrf_refusal), then answer exactly as before.
+            peer = getattr(self, "client_address", None)
+            record_csrf_refusal(reason, source=peer[0] if peer else None)
             self._json({"error": "forbidden"}, 403)
             return False
         return True
@@ -1580,6 +1697,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
+            # Issue #1586 (S1): one structured audit line per unhandled
+            # exception — the box keeps a record the client never sees.
+            # Client response shape unchanged ({"error": ...}, 500).
+            log_bridge_event("http-500", _http_500_label(e), level="ERROR")
             self._json({"error": str(e)[:300]}, 500)
 
     def do_POST(self):
@@ -1679,6 +1800,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
+            # Issue #1586 (S1): same as do_GET — audit the unhandled
+            # exception server-side, keep the client contract unchanged.
+            log_bridge_event("http-500", _http_500_label(e), level="ERROR")
             self._json({"error": str(e)[:300]}, 500)
 
     def log_message(self, *a):

@@ -2365,3 +2365,193 @@ class TestAuditSink:
         bridge.log_bridge_event("k", "v")
         assert "kind=k" in capsys.readouterr().err
         assert not (tmp_path / "never-installed.log").exists()
+
+
+# ------------------------------------------------- #1586 S1 / #1587 S2
+# The bridge owned its audit sink since #1588, but wrote nothing into it
+# from the request path: unhandled 500s left no server-side trace
+# (F-CBA-2, #1586) and CSRF/host refusals were invisible on the box
+# (F-CBA-3, #1587). These tests pin the S1/S2 writers — kind vocabulary,
+# content rules (D-CBA-1/D-CBA-2), and the S2 volume bound.
+
+
+class TestObservabilityS1S2:
+    def _capture_events(self, bridge, monkeypatch):
+        captured = []
+
+        def recorder(kind, msg, level="WARNING"):
+            captured.append({"kind": kind, "msg": msg, "level": level})
+
+        monkeypatch.setattr(bridge, "log_bridge_event", recorder)
+        bridge._reset_csrf_refusal_state()
+        return captured
+
+    # -- S1: unhandled 500s -------------------------------------------------
+
+    def _boom(self, tool, args):
+        # call() wraps opaque driver stderr in RuntimeError — that stderr
+        # can echo the text the driver failed to inject, so the audit
+        # line must name the class, never this text.
+        raise RuntimeError("driver stderr: failed to type 'hunter2-typed'")
+
+    def test_get_500_writes_http_500_audit_line(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "call", self._boom)
+        status, body = req(port, "GET", "/api/windows")
+        # Client contract unchanged: truncated exception text, 500.
+        assert status == 500
+        assert body == {"error": "driver stderr: failed to type "
+                                 "'hunter2-typed'"}
+        assert len(captured) == 1
+        evt = captured[0]
+        assert evt["kind"] == "http-500"
+        assert evt["level"] == "ERROR"
+        assert "RuntimeError" in evt["msg"]
+        assert "hunter2-typed" not in evt["msg"]  # D-CBA-1
+        assert "\n" not in evt["msg"]  # D-CBA-2: one line
+        assert ".py:" in evt["msg"]  # condensed frame summary
+
+    def test_post_500_writes_http_500_audit_line(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "call", self._boom)
+        status, body = req(port, "POST", "/api/click",
+                           {"x": 50, "y": 50, "button": "left"})
+        assert status == 500
+        assert body["error"].startswith("driver stderr:")
+        assert len(captured) == 1
+        assert captured[0]["kind"] == "http-500"
+        assert captured[0]["level"] == "ERROR"
+        assert "hunter2-typed" not in captured[0]["msg"]
+
+    def test_http_500_label_never_carries_exception_text(self, bridge):
+        try:
+            raise RuntimeError("opaque blob: hunter2-typed")
+        except RuntimeError as e:
+            label = bridge._http_500_label(e)
+        assert label.startswith("RuntimeError ")
+        assert "hunter2-typed" not in label
+        assert ".py:" in label  # deepest frame location
+        assert "\n" not in label and len(label) <= 200
+
+    def test_http_500_label_without_traceback(self, bridge):
+        # An exception that was never raised has no __traceback__ —
+        # the label degrades to the bare class name, never crashes.
+        label = bridge._http_500_label(RuntimeError("x"))
+        assert label == "RuntimeError"
+
+    def test_s1_s2_kinds_pass_the_real_formatter_vocabulary(
+            self, bridge, capsys):
+        # Composition pin (QA): the S1/S2 tests monkeypatch
+        # log_bridge_event, so the (kind, level) pairs the writers use
+        # would never meet the real _format_bridge_event vocabulary.
+        # If _AUDIT_LEVELS ever dropped "ERROR", the S1 line would raise
+        # ValueError INSIDE the do_GET/do_POST except handler and abort
+        # the 500 response — this test catches that drift.
+        bridge.log_bridge_event("http-500", "RuntimeError x", level="ERROR")
+        bridge.log_bridge_event("csrf-refusal", "refusal: reason=bad-host")
+        err = capsys.readouterr().err
+        assert "level=ERROR kind=http-500" in err
+        assert "level=WARNING kind=csrf-refusal" in err
+
+    # -- S2: csrf-refusal audit ------------------------------------------------
+
+    def test_csrf_refusal_logs_full_line_first_time(self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, body = req(port, "POST", "/api/click", {"x": 1, "y": 1},
+                           headers={"X-CUA": REMOVE})
+        # Refusal contract unchanged: bare 403, no server detail.
+        assert status == 403
+        assert body == {"error": "forbidden"}
+        assert len(captured) == 1
+        evt = captured[0]
+        assert evt["kind"] == "csrf-refusal"
+        assert evt["level"] == "WARNING"
+        assert "reason=missing-csrf-header" in evt["msg"]
+        assert "src=127.0.0.1" in evt["msg"]
+
+    def test_csrf_refusal_reason_never_carries_header_value(
+            self, live, monkeypatch):
+        bridge, _, port = live
+        captured = self._capture_events(bridge, monkeypatch)
+        status, _ = req(port, "POST", "/api/click", {"x": 1, "y": 1},
+                        headers={"Host": "evil.example"})
+        assert status == 403
+        assert len(captured) == 1
+        assert "reason=bad-host" in captured[0]["msg"]
+        assert "evil.example" not in captured[0]["msg"]  # D-CBA-1
+
+    def test_csrf_refusal_volume_bounding(self, bridge, monkeypatch):
+        # 120 refusals must not emit 120 lines: full line + summaries at
+        # 10, 100 — then silence again. Routed through the recorder so
+        # the real-sink stderr fallback stays quiet during the suite.
+        captured = self._capture_events(bridge, monkeypatch)
+        emitted = [bridge.record_csrf_refusal("bad-host") for _ in range(120)]
+        assert sum(emitted) == 3  # n=1 full, n=10 summary, n=100 summary
+        assert emitted[0] == 1 and emitted[9] == 1 and emitted[99] == 1
+        assert all(e == 0 for i, e in enumerate(emitted)
+                   if i not in (0, 9, 99))
+        assert len(captured) == 3
+        assert "reason=bad-host" in captured[0]["msg"]
+        assert "count=10" in captured[1]["msg"]
+        assert "count=100" in captured[2]["msg"]
+        assert bridge._csrf_refusal_state["counts"] == {"bad-host": 120}
+
+    def test_csrf_refusal_reason_classes_are_independent(self, bridge,
+                                                         monkeypatch):
+        captured = self._capture_events(bridge, monkeypatch)
+        assert bridge.record_csrf_refusal("bad-host") == 1
+        assert bridge.record_csrf_refusal("missing-csrf-header") == 1
+        assert len(captured) == 2
+        assert "reason=bad-host" in captured[0]["msg"]
+        assert "reason=missing-csrf-header" in captured[1]["msg"]
+
+    def test_csrf_refusal_window_rollover_logs_totals(self, bridge,
+                                                      monkeypatch):
+        captured = self._capture_events(bridge, monkeypatch)
+        assert bridge.record_csrf_refusal("bad-host") == 1
+        assert bridge.record_csrf_refusal("bad-host") == 0
+        assert len(captured) == 1  # only the first full line so far
+        real_monotonic = bridge.time.monotonic
+        monkeypatch.setattr(bridge.time, "monotonic",
+                            lambda: real_monotonic() + 400)
+        # Rollover: the old window's totals first, then the new window's
+        # first refusal as a fresh full line.
+        assert bridge.record_csrf_refusal("bad-host") == 2
+        assert "window summary" in captured[1]["msg"]
+        assert "bad-host=2" in captured[1]["msg"]
+        assert "reason=bad-host" in captured[2]["msg"]
+        assert bridge._csrf_refusal_state["counts"] == {"bad-host": 1}
+
+    def test_csrf_refusal_never_raises_on_broken_clock(self, bridge,
+                                                       monkeypatch):
+        monkeypatch.setattr(bridge.time, "monotonic",
+                            lambda: (_ for _ in ()).throw(OSError("clock")))
+        assert bridge.record_csrf_refusal("bad-host") == 0  # 403 still out
+
+    def test_csrf_refusal_reason_matrix(self, bridge):
+        # _csrf_ok's gate semantics are unchanged by the reason-class
+        # refactor: every old False maps to a reason, every old True to
+        # None.
+        cases = [
+            (("GET", {"Host": "127.0.0.1:18731"}, "/"), None),
+            (("POST", {"Host": "127.0.0.1:18731"}, "/"), "missing-csrf-header"),
+            (("POST", {"Host": "127.0.0.1:18731", "X-CUA": "1"}, "/"), None),
+            (("PUT", {"Host": "127.0.0.1:18731"}, "/"),
+             "missing-csrf-header"),
+            (("PUT", {"Host": "127.0.0.1:18731", "X-CUA": "1"}, "/"), None),
+            (("GET", {"Host": "evil.example"}, "/"), "bad-host"),
+            (("POST", {"Host": "evil.example", "X-CUA": "1"}, "/"),
+             "bad-host"),
+            (("GET", {"Host": "127.0.0.1:18731"}, "/api/status"), None),
+            (("GET", {"Host": "127.0.0.1:18731"}, "/api/status?probe=1"),
+             "missing-csrf-header"),
+            (("GET", {"Host": "127.0.0.1:18731", "X-CUA": "1"},
+              "/api/status?probe=1"), None),
+        ]
+        for (command, headers, path), want in cases:
+            h = fake_handler(bridge, command, headers, path)
+            assert h._csrf_refusal_reason() == want, (command, headers, path)
+            assert h._csrf_ok() == (want is None)
