@@ -101,7 +101,13 @@ Body (JSON):
             "auth": "<base64url 16B secret>" } }
 ```
 
-**D99. Validation (all 400, loud, before any write).**
+**D99. Validation (all 400, loud, before any write).** Order is part of
+the contract: the request body is validated **first** (400s), and the
+ownership check runs **after** (404 for an unowned box). A malformed
+request is the client's bug even for a foreign box id; reporting 400
+first leaks nothing an authenticated owner couldn't learn from the 404
+path, and it keeps the plane's re-implementations from diverging on
+ordering.
 - `box_id` owned by the caller (else 404).
 - `device`: 1–64 chars, `[A-Za-z0-9._-]` — the aid charset precedent
   the #988 schema pins (so device names are URL-path-safe and
