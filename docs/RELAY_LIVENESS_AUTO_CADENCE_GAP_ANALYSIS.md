@@ -136,8 +136,9 @@ resync only run when an operator remembers to tick.
   driver module (the test truth, stdlib-only like the rest of the
   lane) + plane async port + `wrangler.toml` cron line + verifier
   entry (F-AC-6, F-PP-2). The self-hosted packaging (cron/systemd
-  unit driving the existing `--tick` CLI) ships in the same slice —
-  one driver design, two deployments, per the both-supported default.
+  unit driving the existing `--tick` CLI) follows the same driver
+  design — one design, two deployments, per the both-supported
+  default — but ships as its own slice (S3, gated on S1).
 
 ## 4. Slices (filed)
 
