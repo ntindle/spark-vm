@@ -955,6 +955,61 @@ def test_promote_refused_not_converged_is_audited(store):
     assert "has not landed" in refused[0]["reason"]
 
 
+def test_promote_crash_window_absorbed_not_regenerated(store):
+    # #1636: the promote record is appended AFTER the waves.json advance,
+    # so a crash in between leaves the advance unrecorded. The accepted
+    # contract is best-effort audit, not crash-completeness: re-running
+    # promote absorbs the advance (the rollout identity check passes and
+    # the gate evaluates the next wave) and does NOT regenerate the
+    # missing record — the missing record stays missing, and the wave
+    # file's own updated_at is the ground truth. The mirror ordering
+    # (record before advance) is deliberately not used: a record for a
+    # promote that never happened misleads an operator audit more than a
+    # missing record.
+    # Neuter: making promote refuse (or regenerate a record) when the
+    # expected promote record is absent must flip the re-promote
+    # assertions below.
+    _estate(store, n=4, canary_tenants=("ct1",))
+    _release(store)
+    assert _cli(store, "assign", "--template", "w@v1").returncode == 0
+    assignments = _waves_json(store)["assignments"]
+    first_next = min(w for w in assignments.values() if w > 0)
+    _deploy(store, "plane-0", "w@v1", status="healthy")
+    assert _cli(store, "promote").returncode == 0
+    assert _waves_json(store)["live_wave"] == first_next
+
+    def _journal():
+        return [json.loads(ln) for ln in
+                open(os.path.join(store, "waves_journal.jsonl"),
+                     encoding="utf-8") if ln.strip()]
+
+    assert [r for r in _journal() if r["action"] == "promote"]
+
+    # Simulate the crash window: the waves.json advance survives, the
+    # promote record does not (the record is appended after the advance).
+    kept = [ln for ln in
+            open(os.path.join(store, "waves_journal.jsonl"),
+                 encoding="utf-8")
+            if ln.strip() and json.loads(ln)["action"] != "promote"]
+    with open(os.path.join(store, "waves_journal.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.writelines(kept)
+
+    # Land the next wave's planes and re-promote: the absorbed advance is
+    # the ground truth — re-promotion is not refused, and the missing
+    # record is not regenerated.
+    for pid, wave in assignments.items():
+        if wave == first_next:
+            _deploy(store, pid, "w@v1", status="healthy")
+    p = _cli(store, "promote")
+    assert p.returncode == 0, p.stderr
+    promoted = [r for r in _journal() if r["action"] == "promote"]
+    assert len(promoted) == 1
+    assert promoted[0]["from_wave"] == first_next
+    assert promoted[0]["to_wave"] == _json(p)["to_wave"]
+    assert _waves_json(store)["live_wave"] == promoted[0]["to_wave"]
+
+
 def test_promote_audit_records_stale_hours(store):
     # #1343 item 2: the successful-promote audit records the staleness
     # window the wave was promoted on — default and explicit alike.
