@@ -6,7 +6,7 @@ corpus: what `acked_by` is allowed to claim (#1704), and what re-acking does
 to `acked_at` (#1705). This doc answers both, and D-ACK-6 answers the entry
 ticket's remaining question (#1703). Everything below is pinned to main
 `956881e3` (D-ACK-6 pinned to main `abb03984`); every cited line was read
-against that tree.
+against its pinned tree.
 
 ## What the ack is
 
@@ -80,7 +80,7 @@ The bar, exactly:
 3. **Rendering is honest.** Null renders as `unknown` in the console
    (`fleet/console.py:172`) and the status-page feed cites both stamps as
    journaled metadata under the cite-your-source discipline
-   (`STATUS_PAGE_FEED_SPEC.md:155-156`). "Unknown" is never rendered as a
+   (`STATUS_PAGE_FEED_SPEC.md:155-158`). "Unknown" is never rendered as a
    name.
 4. **Cron/systemd guidance.** Where the environment is shared or unset (cron
    jobs, systemd units), the operator should set `USER` explicitly per job —
@@ -153,7 +153,7 @@ no endpoint needs to gate.
 - `fleet/events.py:1184-1214` — the #928 rule-4 re-fire gate keying on
   `acked_at`.
 - `fleet/console.py:172` — null `acked_by` renders `unknown`.
-- `docs/STATUS_PAGE_FEED_SPEC.md:155-156` — both stamps journaled, null never
+- `docs/STATUS_PAGE_FEED_SPEC.md:155-158` — both stamps journaled, null never
   fails the ack, cite-your-source covers ack attribution.
 - `docs/ALERT_ACK_ENTRY_TICKET_GAP_2026-10-18.md` — F-ACK-3 (re-ack
   refreshes), F-ACK-4 (provenance as the real gap), G-ACK-2, G-ACK-3, D-ACK-2
