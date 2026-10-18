@@ -186,9 +186,13 @@ class TestSentinelS2Doc(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         fields = _parse(lines[0])
         self.assertEqual(
-            set(fields), {"ts", "host", "refused", "reason", "ip", "flow"})
+            set(fields),
+            {"ts", "host", "refused", "reason", "ip", "tenant", "flow"})
         self.assertEqual(fields["refused"], "hsurr:github")
         self.assertEqual(fields["reason"], "unknown-credential")
+        # Issue #1655: the unverified tenant hint rides refused lines
+        # too — presence + sanitization pinned, not the value.
+        self.assertIn("tenant", fields)
 
     def test_audit_note_shape(self):
         addon = _addon()
@@ -199,9 +203,12 @@ class TestSentinelS2Doc(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         fields = _parse(lines[0])
         self.assertEqual(
-            set(fields), {"ts", "host", "refused", "reason", "ip", "flow"})
+            set(fields),
+            {"ts", "host", "refused", "reason", "ip", "tenant", "flow"})
         # _audit_note writes the token verbatim: no hsurr: prefix.
         self.assertEqual(fields["refused"], "json-swap")
+        # Issue #1655: tenant rides every refused writer.
+        self.assertIn("tenant", fields)
 
     def test_audit_authority_mismatch_shape(self):
         addon = _addon()
@@ -212,10 +219,12 @@ class TestSentinelS2Doc(unittest.TestCase):
         fields = _parse(lines[0])
         self.assertEqual(
             set(fields),
-            {"ts", "host", "refused", "authority", "ip", "flow"})
+            {"ts", "host", "refused", "authority", "ip", "tenant", "flow"})
         self.assertEqual(fields["refused"], "authority-mismatch")
         self.assertEqual(fields["authority"], "evil.example")
         self.assertNotIn("reason", fields)
+        # Issue #1655: tenant rides every refused writer.
+        self.assertIn("tenant", fields)
 
     def test_audit_ssrf_refused_shape(self):
         addon = _addon()
@@ -225,10 +234,14 @@ class TestSentinelS2Doc(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         fields = _parse(lines[0])
         self.assertEqual(
-            set(fields), {"ts", "host", "refused", "reason", "ip", "flow"})
+            set(fields),
+            {"ts", "host", "refused", "reason", "ip", "tenant", "flow"})
         self.assertEqual(fields["refused"], "egress")
         self.assertEqual(fields["reason"], "private-range")
         self.assertEqual(fields["flow"], "f1")
+        # Issue #1655: the highest-stakes forensic line (blocked
+        # exfiltration, finding 38) carries the tenant column too.
+        self.assertIn("tenant", fields)
 
     def test_flow_none_renders_dash(self):
         addon = _addon()

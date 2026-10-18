@@ -155,15 +155,19 @@ summons journal carries: SWAP_TENANT when the operator names the tenant,
 otherwise the box hostname — a compromised box can lie about it, so it is
 forensic context only, never an identity claim. H10/#339 enforcement fills
 an authenticated value into this column later; nothing downstream re-parses
-the format for the upgrade. `flow=` stays terminal: the #16 join convention
+the format for the upgrade. Every audit writer carries the column —
+including the refusal writers (issue #1655), where the threat model includes
+a compromised tenant and the hint is therefore least trustworthy exactly
+where forensic need is highest; the field is format-reservation, not
+attribution. `flow=` stays terminal: the #16 join convention
 (and naive `$`-anchored parsers) rely on it.
 The audit write is part of authorization: if the audit line cannot be
 durably recorded, the swap is refused — a secret is never released
 without a trail.
 Refused swaps are logged too:
-    ts=<utc> host=<host> refused=hsurr:<name> reason=<why> ip=<ip> flow=<id>
+    ts=<utc> host=<host> refused=hsurr:<name> reason=<why> ip=<ip> tenant=<hint> flow=<id>
 Refused egress is logged as:
-    ts=<utc> host=<host> refused=egress reason=private-range ip=<ip> flow=<id>
+    ts=<utc> host=<host> refused=egress reason=private-range ip=<ip> tenant=<hint> flow=<id>
 Issue #16: for a direct (non-CONNECT) request mitmproxy fires the
 `request` hook (where swaps are audited) BEFORE `server_connect`
 (where egress may be refused), so the log can hold `swapped=` lines
@@ -174,7 +178,7 @@ verdict, so an incident reviewer can join them: a `refused=egress`
 the earlier `swapped=` lines were phantom. `flow=-` marks lines
 written without a flow in scope.
 An authority mismatch (authorized host != egress authority) is logged as:
-    ts=<utc> host=<host> refused=authority-mismatch authority=<a> ip=<ip> flow=<id>
+    ts=<utc> host=<host> refused=authority-mismatch authority=<a> ip=<ip> tenant=<hint> flow=<id>
 Values are NEVER logged. A placeholder seen for a non-allowlisted host
 (including inside base64'd Basic-auth headers) is logged as a warning
 AND as a refused= audit line: it is the only signal that a
@@ -2634,18 +2638,31 @@ class SwapAddon:
 
         flow_id: the mitmproxy flow's id (issue #1441), so the refusal
         joins to the flow's other audit lines. None renders as "-".
+
+        Carries the same `tenant=` unverified-hint column as the
+        `swapped=` lines (issue #1655, audit A7): SWAP_TENANT-or-hostname,
+        forensic context only — on a refusal line the threat model
+        includes a compromised tenant, so the hint is at its least
+        trustworthy here and the field is format-reservation, not
+        attribution. `flow=` stays terminal.
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s "
-                        "flow=%s\n"
+                        "tenant=%s flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(name),
                            _sanitize_audit_field(reason),
                            _sanitize_audit_field(
                                getattr(self, "_current_egress_ip", None)
                                or "-"),
+                           # Same soundness as the #1653 `swapped=`
+                           # line: a whitespace-only SWAP_TENANT
+                           # sanitizes to nothing — fall back to "-" so
+                           # the token is never empty.
+                           _sanitize_audit_field(_summons_tenant_hint())
+                           or "-",
                            _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
@@ -2661,17 +2678,23 @@ class SwapAddon:
         every refusal line written in a hook where the flow is in scope,
         so a reviewer can join a refusal to the flow's `swapped=` lines.
         None renders as "-".
+
+        Carries the `tenant=` column like every other audit writer
+        (issue #1655, audit A7): same unverified hint, `flow=` terminal.
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
-                f.write("ts=%s host=%s refused=%s reason=%s ip=%s flow=%s\n"
+                f.write("ts=%s host=%s refused=%s reason=%s ip=%s "
+                        "tenant=%s flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(refused),
                            _sanitize_audit_field(reason),
                            _sanitize_audit_field(
                                getattr(self, "_current_egress_ip", None)
                                or "-"),
+                           _sanitize_audit_field(_summons_tenant_hint())
+                           or "-",
                            _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
@@ -2685,15 +2708,20 @@ class SwapAddon:
 
         flow_id: the mitmproxy flow's id (issue #1441), so the refusal
         joins to the flow's other audit lines. None renders as "-".
+
+        Carries the `tenant=` column like every other audit writer
+        (issue #1655, audit A7): same unverified hint, `flow=` terminal.
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=authority-mismatch "
-                        "authority=%s ip=%s flow=%s\n"
+                        "authority=%s ip=%s tenant=%s flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(authority or "-"),
                            _sanitize_audit_field(egress_ip or "-"),
+                           _sanitize_audit_field(_summons_tenant_hint())
+                           or "-",
                            _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
@@ -3157,15 +3185,24 @@ class SwapAddon:
         reviewer can join this line to the flow's earlier `swapped=`
         lines — a `refused=egress` with the same flow id means the
         swapped secret never left the box. None renders as "-".
+
+        Carries the `tenant=` column like every other audit writer
+        (issue #1655, audit A7): same unverified hint — this is the
+        highest-stakes forensic line (a blocked exfiltration), and the
+        hint is at its least trustworthy here (threat model includes a
+        compromised tenant), so the field stays format-reservation,
+        never attribution. `flow=` stays terminal.
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=egress reason=%s ip=%s "
-                        "flow=%s\n"
+                        "tenant=%s flow=%s\n"
                         % (ts, _sanitize_audit_field(host),
                            _sanitize_audit_field(reason),
                            _sanitize_audit_field(ip),
+                           _sanitize_audit_field(_summons_tenant_hint())
+                           or "-",
                            _sanitize_audit_field(flow_id)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
