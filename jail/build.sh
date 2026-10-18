@@ -222,16 +222,28 @@ say "jail firewall"
 # that never exists: `nft -f` applies cleanly, the semantic pin
 # matches, the watchdog stays green, and the agent's only SSH door is
 # dead with no loud error anywhere. Fail the build loudly BEFORE
-# writing the conf instead: the interface must exist on this host, and
-# its name must be a name an interface can actually have (a hostile or
-# garbled $JAIL_TAILNET_IF containing sed-replacement metacharacters
-# would otherwise silently corrupt the rule the sed render installs).
+# writing the conf instead. The checks after the name-shape guard run
+# on THIS host (tailscaled must be up before build.sh runs), and —
+# the security-relevant property, not just syntax — the variable must
+# name the TAILNET interface: existence alone would let
+# `JAIL_TAILNET_IF=eth0` (typo, stale exported env) silently bind the
+# jail's sshd to a public interface. Tailscale interfaces are always
+# TUN devices carrying a 100.64.0.0/10 address, whatever their name,
+# so both are asserted.
 if ! [[ "$JAIL_TAILNET_IF" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}$ ]]; then
     echo "ERROR: JAIL_TAILNET_IF='$JAIL_TAILNET_IF' is not a valid Linux interface name; refusing to install a DNAT rule against it (see #1666)" >&2
     exit 1
 fi
-if ! ip link show "$JAIL_TAILNET_IF" >/dev/null 2>&1; then
-    echo "ERROR: tailnet interface '$JAIL_TAILNET_IF' does not exist on this host; the tailnet->jail SSH DNAT rule would silently never match (nftables accepts rules naming nonexistent interfaces). Set JAIL_TAILNET_IF to this host's tailnet interface and re-run (see #1666)" >&2
+if ! /usr/sbin/ip link show "$JAIL_TAILNET_IF" >/dev/null 2>&1; then
+    echo "ERROR: tailnet interface '$JAIL_TAILNET_IF' does not exist on this host; the tailnet->jail SSH DNAT rule would silently never match (nftables accepts rules naming nonexistent interfaces). If tailscaled is not running, start it first; if Tailscale runs in userspace-networking mode there is no kernel interface to name, and this jail cannot bind its SSH door (see #1666)" >&2
+    exit 1
+fi
+if ! /usr/sbin/ip -details link show "$JAIL_TAILNET_IF" 2>/dev/null | grep -Eq '^[[:space:]]+(tun|wireguard)$'; then
+    echo "ERROR: '$JAIL_TAILNET_IF' exists but is not a tunnel interface; refusing to bind the jail SSH DNAT to it (the jail's SSH door lives on the tailnet interface only — see #1666)" >&2
+    exit 1
+fi
+if ! /usr/sbin/ip -o -4 addr show dev "$JAIL_TAILNET_IF" 2>/dev/null | grep -qE 'inet 100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.'; then
+    echo "ERROR: '$JAIL_TAILNET_IF' carries no 100.64.0.0/10 address; refusing to bind the jail SSH DNAT to a non-tailnet interface (see #1666)" >&2
     exit 1
 fi
 sed -e "s/@@JAIL_SSH_PORT@@/${JAIL_SSH_PORT}/g" -e "s/@@JAIL_TAILNET_IF@@/${JAIL_TAILNET_IF}/g" <<'NFT_EOF' | $SUDO tee /etc/nftables-jail.conf >/dev/null

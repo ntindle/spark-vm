@@ -39,6 +39,14 @@
 #   longer trips the watchdog (the live table still matches the pin).
 #   The conf is still the repair source: make table changes through
 #   build.sh, which regenerates the pin from the applied conf.
+# - Tailnet-interface rename/removal after the build is pin-invisible:
+#   the rules keep referencing the build-time interface name, so the
+#   SSH DNAT silently never matches again while the watchdog compares
+#   the unchanged table text and stays green (issue #1666's runtime
+#   half). build.sh validates the interface at build time only;
+#   re-running build.sh after a tailnet change re-validates and
+#   re-applies. A tick-time interface check in this script is the real
+#   fix (tracked separately).
 set -uo pipefail
 
 # Overridable for tests (functional tests stub `nft` via this variable,
