@@ -215,6 +215,35 @@ def test_list_foreign_box_404(db):
     assert r.body["ok"] is False
 
 
+def test_list_and_delete_are_owner_and_box_scoped(db):
+    # D-MT1 posture: two owners, two boxes. A neuter dropping the
+    # owner_principal/box_id filters from the list SELECT or the
+    # unsubscribe DELETE must be caught.
+    _run(psa.subscribe(db, **_sub_kwargs()))
+    _run(psa.subscribe(db, **_sub_kwargs(
+        owner_principal="owner-2", device="galaxy")))
+    _run(psa.subscribe(db, **_sub_kwargs(box_id="box-b", device="ipad")))
+
+    r = _run(psa.list_subscriptions(
+        db, owner_principal="owner-1", box_id="box-a", owns_box=_owns))
+    assert [s["device"] for s in r.body["subscriptions"]] == ["pixel-9"]
+
+    # owner-2 cannot touch owner-1's row: "pixel-9" exists only under
+    # owner-1, so the scoped DELETE finds nothing for owner-2.
+    r = _run(psa.unsubscribe(
+        db, owner_principal="owner-2", box_id="box-a",
+        device="pixel-9", owns_box=_owns))
+    assert r.status == 404
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM push_subscriptions "
+        "WHERE owner_principal = 'owner-1'").fetchone()[0] == 2
+
+    # box-b's row is invisible to the box-a listing.
+    r = _run(psa.list_subscriptions(
+        db, owner_principal="owner-1", box_id="box-b", owns_box=_owns))
+    assert [s["device"] for s in r.body["subscriptions"]] == ["ipad"]
+
+
 def test_list_dead_410_row_is_returned(db):
     _run(psa.subscribe(db, **_sub_kwargs()))
     db._conn.execute(
@@ -228,7 +257,84 @@ def test_list_dead_410_row_is_returned(db):
         "device", "status", "last_page_at", "created_at"}
 
 
-# --- D99 validation (all 400, loud, before any write) ----------------------
+# --- D98 column-set pin --------------------------------------------------------
+
+def test_display_columns_pin():
+    # The read path's column set is the second D98/D46 defense layer
+    # (the first is the dict projection). No secret column name may
+    # join this constant without tripping the suite.
+    assert set(psa._DISPLAY_COLUMNS.replace(" ", "").split(",")) == {
+        "device", "status", "last_page_at", "created_at"}
+    for secret in ("endpoint", "p256dh", "auth",
+                   "p256dh_nonce", "auth_nonce"):
+        assert secret not in psa._DISPLAY_COLUMNS
+
+
+def test_owns_box_shapes():
+    # The D2 seam may be sync, a coroutine, or a Future — all must be
+    # honored, and a Future must never fail-open (bool(Future()) is
+    # True, so it must be awaited).
+    async def _acoro(owner, box):
+        return True
+
+    async def _drive():
+        loop = asyncio.get_running_loop()
+        fut_true = loop.create_future()
+        fut_true.set_result(True)
+        fut_false = loop.create_future()
+        fut_false.set_result(False)
+        return (
+            await psa._owns(_owns, "o", "b"),
+            await psa._owns(_acoro, "o", "b"),
+            await psa._owns(lambda o, b: fut_true, "o", "b"),
+            await psa._owns(lambda o, b: fut_false, "o", "b"),
+        )
+
+    sync_, coro, fut_t, fut_f = _run(_drive())
+    assert (sync_, coro, fut_t, fut_f) == (True, True, True, False)
+
+
+class _AttrMeta:
+    def __init__(self, changes):
+        self.changes = changes
+
+
+class _AttrRunResult:
+    def __init__(self, changes):
+        self.success = True
+        self.meta = _AttrMeta(changes)
+
+
+class _AttrBound(_Bound):
+    async def run(self):
+        cur = self._conn.execute(self._sql, self._params)
+        return _AttrRunResult(cur.rowcount)
+
+
+class _AttrStmt(_Stmt):
+    def bind(self, *params):
+        return _AttrBound(self._conn, self._sql, params)
+
+
+class _AttrAsyncD1(_AsyncD1):
+    # Worker-faithful D1 shape: .run() reports meta.changes as an
+    # attribute, not a dict. The module must handle both.
+    def prepare(self, sql):
+        return _AttrStmt(self._conn, sql)
+
+
+def test_unsubscribe_attribute_meta_shape(db):
+    attr_db = _AttrAsyncD1(db._conn)
+    _run(psa.subscribe(attr_db, **_sub_kwargs()))
+    r = _run(psa.unsubscribe(
+        attr_db, owner_principal="owner-1", box_id="box-a",
+        device="pixel-9", owns_box=_owns))
+    assert r.status == 200
+    assert r.body == {"ok": True, "deleted": True}
+    r2 = _run(psa.unsubscribe(
+        attr_db, owner_principal="owner-1", box_id="box-a",
+        device="pixel-9", owns_box=_owns))
+    assert r2.status == 404
 
 def _count_rows(db):
     return db._conn.execute(
@@ -270,8 +376,9 @@ def _b64_nopad(raw: bytes) -> str:
 @pytest.mark.parametrize("p256dh", [
     _b64_nopad(b"\x04" + b"\x01" * 63),          # 64 bytes, not 65
     _b64_nopad(b"\x05" + b"\x01" * 64),          # wrong prefix
-    _b64_nopad(b"\x04" + b"\x01" + b"\x01"       # off-curve point (1, 1)
-                + b"\x00" * 62),
+    _b64_nopad(b"\x04" + (1).to_bytes(32, "big")  # (1, 1): satisfies the
+                + (1).to_bytes(32, "big")),      # 65B/0x04 gates but lies
+                                                 # off the P-256 curve
     "!!!not-base64url!!!",
 ])
 def test_subscribe_bad_p256dh_400_no_write(db, p256dh):
@@ -313,22 +420,41 @@ def test_subscribe_foreign_box_404_no_write(db):
 # --- D100 upsert ------------------------------------------------------------
 
 def test_subscribe_201_then_200_upsert_replaces(db):
-    kw = _sub_kwargs()
+    kw = _sub_kwargs(now=datetime(2026, 10, 18, 6, 5, tzinfo=timezone.utc))
     r1 = _run(psa.subscribe(db, **kw))
     assert r1.status == 201
 
-    kw2 = _sub_kwargs(endpoint="https://fcm.googleapis.com/fcm/send/NEW",
-                      added_by="owner-key-2")
+    def _row():
+        return db._conn.execute(
+            "SELECT endpoint, p256dh, p256dh_nonce, auth, auth_nonce, "
+            "added_by, status, created_at, last_page_at "
+            "FROM push_subscriptions WHERE device = 'pixel-9'").fetchone()
+
+    first = _row()
+    first_a = _test_decrypt("v1", bytes(first[4]), bytes(first[3]))
+
+    priv2, pub2 = generate_keypair()
+    kw2 = _sub_kwargs(
+        endpoint="https://fcm.googleapis.com/fcm/send/NEW",
+        added_by="owner-key-2",
+        now=datetime(2026, 10, 18, 7, 5, tzinfo=timezone.utc))
+    kw2["keys"] = {"p256dh": _b64url(pub2), "auth": _b64url(os.urandom(16))}
     r2 = _run(psa.subscribe(db, **kw2))
     assert r2.status == 200
     assert _count_rows(db) == 1
 
-    row = db._conn.execute(
-        "SELECT endpoint, added_by, status, created_at FROM "
-        "push_subscriptions WHERE device = 'pixel-9'").fetchone()
+    row = _row()
     assert row[0] == "https://fcm.googleapis.com/fcm/send/NEW"
-    assert row[1] == "owner-key-2"
-    assert row[2] == "live"
+    assert row[5] == "owner-key-2"
+    assert row[6] == "live"
+    assert row[7] == "2026-10-18T07:05:00Z"  # created_at refreshed
+    assert row[8] is None  # last_page_at cleared: fresh keys never paged
+    # D100: the upsert replaces the key material, not just the metadata.
+    second_p = _test_decrypt("v1", bytes(row[2]), bytes(row[1]))
+    second_a = _test_decrypt("v1", bytes(row[4]), bytes(row[3]))
+    assert second_p == pub2
+    assert second_a != first_a  # fresh auth each re-subscribe
+    assert bytes(row[1]) != bytes(first[1])  # ciphertext actually replaced
 
 
 def test_subscribe_resurrects_dead_410(db):
@@ -421,9 +547,11 @@ def test_d45_version_mismatch_fails_closed_no_write(db):
 
 
 def test_production_cipher_requirement_pinned():
-    # The plane holds the real data key; this module only pins the seam's
-    # production requirement in its contract docstring. A silent
-    # downgrade of that requirement must trip a test.
+    # Doc pin, not a production pin: the module cannot observe which
+    # algorithm the operator plugs into the encrypt_at_rest seam. This
+    # guards the contract wording (D45 = AES-256-GCM, fresh nonce per
+    # encryption) so a doc edit silently downgrading the production
+    # requirement trips the suite.
     assert "AES-256-GCM" in psa.__doc__
     assert "fresh" in psa.__doc__ and "nonce" in psa.__doc__
 
@@ -437,7 +565,7 @@ def test_sw_js_served_with_content_type():
     assert r.status == 200
     assert r.raw == sw
     assert r.content_type == "application/javascript"
-    assert r.headers["Cache-Control"] == "public, max-age=3600"
+    assert r.headers["Cache-Control"] == "public, max-age=600"
 
 
 def test_sw_js_empty_bytes_is_deploy_error():
@@ -450,12 +578,3 @@ def test_sw_js_pin_matches_repo_file():
         os.path.dirname(__file__), "dashboard", "sw.js"), "rb").read()
     assert psa.sw_js_pin_sha256(sw) == hashlib.sha256(sw).hexdigest()
     assert psa.SW_JS_REPO_PATH == "hosted/dashboard/sw.js"
-
-
-def test_http_result_json_shape(db):
-    r = _run(psa.subscribe(db, **_sub_kwargs()))
-    assert r.body["ok"] is True and r.status == 201
-    e = _run(psa.unsubscribe(
-        db, owner_principal="owner-1", box_id="box-a",
-        device="nope", owns_box=_owns))
-    assert e.body["ok"] is False and e.status == 404
