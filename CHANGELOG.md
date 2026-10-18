@@ -68,7 +68,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   blocks — a wrapped bullet's continuation lines stay with their bullet
   or are dropped with it — so a long release can no longer publish
   Frankenstein bullets stitched from two dropped entries.
-  (#TBD)
+  (#1686)
 
 - The jail firewall watchdog now also checks the tailnet interface on
   every tick, not just the firewall table. If the interface the SSH
