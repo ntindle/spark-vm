@@ -214,7 +214,7 @@ def test_boxes_conformance(store):
     cli_rows = []
     for line in data_lines:
         m = re.match(r"(\S+)\s+(\(no report\)|\S+)\s+(\S+)\s+"
-                     r"(\S+)\s+(.*)$", line)
+                     r"(\S+)\s+(\S+)\s+(.*)$", line)
         assert m, line
         cli_rows.append(m.groups())
 
@@ -241,10 +241,10 @@ def test_boxes_conformance(store):
              else "no" if r["frozen"] is False else "n/a",
              ",".join(r["flags"]) or "-") for r in body["boxes"]] == \
         [(bid, commit, tick, frozen, flags)
-         for bid, commit, tick, frozen, flags in cli_rows]
+         for bid, commit, tick, frozen, _gate_age, flags in cli_rows]
     assert [r["eligible"] for r in body["boxes"]] == \
         ["stale" not in flags.split(",")
-         for _, _, _, _, flags in cli_rows]
+         for _, _, _, _, _, flags in cli_rows]
     assert body["census"]["eligible"] == eligible
     assert body["census"]["total"] == total
     assert body["census"]["stale"] == stale
@@ -269,6 +269,61 @@ def test_boxes_conformance(store):
     box_c = next(r for r in body["boxes"] if r["box_id"] == "box-c")
     assert box_c["flags"] == ["stale"]
     assert box_c["eligible"] is False
+
+
+def test_boxes_gate_age_fields(tmp_path):
+    """#1632: /fleet/boxes carries the structured gate-age companions of
+    the table's gate_age column — recomputed seconds, plus whether the
+    emit-time answer_age_s was the source."""
+    store_dir = str(tmp_path / "store")
+    os.makedirs(store_dir)
+    now = datetime.now(timezone.utc)
+    gen = (now - timedelta(seconds=95)).isoformat()
+    journal = [
+        {"box_id": "box-age", "observed_at": now.isoformat(),
+         "versions": {"repo_commit": COMMIT_A},
+         "last_tick_at": {}, "arc": None, "wave": None,
+         "suspect": False, "suspect_reason": None, "attested": False,
+         "notes": [],
+         "gate": {"permitted_commit": None, "permitted_toolset_pin": None,
+                  "frozen": False, "answer_age_s": 5,
+                  "generated_at": gen}},
+        {"box_id": "box-fallback", "observed_at": now.isoformat(),
+         "versions": {"repo_commit": COMMIT_A},
+         "last_tick_at": {}, "arc": None, "wave": None,
+         "suspect": False, "suspect_reason": None, "attested": False,
+         "notes": [],
+         "gate": {"permitted_commit": None, "permitted_toolset_pin": None,
+                  "frozen": False, "answer_age_s": 42,
+                  "generated_at": None}},
+        {"box_id": "box-none", "observed_at": now.isoformat(),
+         "versions": {"repo_commit": COMMIT_A},
+         "last_tick_at": {}, "arc": None, "wave": None,
+         "suspect": False, "suspect_reason": None, "attested": False,
+         "notes": [],
+         "gate": {"permitted_commit": None, "permitted_toolset_pin": None,
+                  "frozen": None, "answer_age_s": None,
+                  "generated_at": None}},
+    ]
+    with open(os.path.join(store_dir, "journal.jsonl"), "w") as fh:
+        for record in journal:
+            fh.write(json.dumps(record) + "\n")
+    proc = run_cli("rebuild", "--store", store_dir)
+    assert proc.returncode == 0, proc.stderr
+    with api_server(store_dir) as base:
+        status, body, _ = get(base, "/fleet/boxes?staleness_hours=24")
+    assert status == 200
+    rows = {r["box_id"]: r for r in body["boxes"]}
+    age_row = rows["box-age"]
+    assert isinstance(age_row["gate_age_s"], int)
+    assert 80 <= age_row["gate_age_s"] <= 120, age_row
+    assert age_row["gate_age_emit_time"] is False
+    fallback_row = rows["box-fallback"]
+    assert fallback_row["gate_age_s"] == 42
+    assert fallback_row["gate_age_emit_time"] is True
+    none_row = rows["box-none"]
+    assert none_row["gate_age_s"] is None
+    assert none_row["gate_age_emit_time"] is False
 
 
 def test_box_history_conformance(store):

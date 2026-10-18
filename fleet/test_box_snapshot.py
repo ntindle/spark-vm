@@ -107,7 +107,7 @@ def test_parse_generated_at_missing_empty_unparseable():
 # ---------------------------------------------------------------------------
 
 def test_read_gate_status_missing_file(tmp_path):
-    frozen, age, note = box_snapshot._read_gate_status(
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(
         str(tmp_path / "nope.json"))
     assert (frozen, age) == (None, None)
     assert "not present" in note
@@ -116,7 +116,7 @@ def test_read_gate_status_missing_file(tmp_path):
 def test_read_gate_status_bad_json_never_raises(tmp_path):
     p = tmp_path / "status.json"
     p.write_text("{not json", encoding="utf-8")
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert (frozen, age) == (None, None)
     assert "unreadable" in note  # proves the except branch was taken
 
@@ -125,11 +125,11 @@ def test_read_gate_status_unreadable_variants(tmp_path):
     # Both hit the "unreadable" branch through different errnos:
     # a directory (IsADirectoryError ⊂ OSError) and undecodable bytes
     # (UnicodeDecodeError ⊂ ValueError).
-    directory_note = box_snapshot._read_gate_status(str(tmp_path))[2]
+    directory_note = box_snapshot._read_gate_status(str(tmp_path))[3]
     assert "unreadable" in directory_note
     p = tmp_path / "status.json"
     p.write_bytes(b"\xff\xfe{not utf-8")
-    _, _, bytes_note = box_snapshot._read_gate_status(str(p))
+    _, _, _, bytes_note = box_snapshot._read_gate_status(str(p))
     assert "unreadable" in bytes_note
 
 
@@ -142,7 +142,7 @@ def test_read_gate_status_deeply_nested_json_never_raises(tmp_path):
     # branch was taken rather than the answer-missing path.
     p = tmp_path / "status.json"
     p.write_text('{"a":' * 20000 + "1" + "}" * 20000, encoding="utf-8")
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert (frozen, age) == (None, None)
     assert "unreadable" in note
 
@@ -153,7 +153,7 @@ def test_read_gate_status_non_string_generated_at(tmp_path):
     p = tmp_path / "status.json"
     with open(p, "w", encoding="utf-8") as fh:
         json.dump({"generated_at": 123, "answer": {"state": "live"}}, fh)
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert frozen is False
     assert age is None
     assert isinstance(note, str) and note
@@ -162,7 +162,7 @@ def test_read_gate_status_non_string_generated_at(tmp_path):
 def test_read_gate_status_non_object_payload(tmp_path):
     p = tmp_path / "status.json"
     p.write_text("[1, 2]", encoding="utf-8")
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert (frozen, age) == (None, None)
     assert "not a JSON object" in note
 
@@ -172,7 +172,7 @@ def test_read_gate_status_frozen_and_live(tmp_path):
     for state, want in (("frozen", True), ("live", False)):
         p = tmp_path / ("s-%s.json" % state)
         write_gate_status(p, state=state, generated_at=now)
-        frozen, age, note = box_snapshot._read_gate_status(str(p))
+        frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
         assert frozen is want, state
         assert age is not None and 0 <= age < 300, state
         assert note is None, (state, note)
@@ -184,7 +184,7 @@ def test_read_gate_status_unknown_state_nulls_only_frozen(tmp_path):
     p = tmp_path / "status.json"
     write_gate_status(p, state="FROZEN",  # case-sensitive: unknown
                       generated_at=datetime.now(timezone.utc).isoformat())
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert frozen is None
     assert age is not None and 0 <= age < 300
     assert "not frozen/live" in note
@@ -195,7 +195,7 @@ def test_read_gate_status_bad_timestamp_nulls_only_age(tmp_path):
     # yields frozen.
     p = tmp_path / "status.json"
     write_gate_status(p, state="live", generated_at="yesterday-ish")
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert frozen is False
     assert age is None
     assert "unparseable" in note
@@ -205,7 +205,7 @@ def test_read_gate_status_future_timestamp_floors_zero_with_note(tmp_path):
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     p = tmp_path / "status.json"
     write_gate_status(p, state="frozen", generated_at=future)
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert frozen is True
     assert age == 0  # floored, not negative
     assert "in the future" in note and "floored at 0" in note
@@ -216,10 +216,51 @@ def test_read_gate_status_missing_answer_noted(tmp_path):
     with open(p, "w", encoding="utf-8") as fh:
         json.dump({"generated_at": datetime.now(timezone.utc).isoformat()},
                   fh)
-    frozen, age, note = box_snapshot._read_gate_status(str(p))
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
     assert frozen is None
     assert age is not None
     assert "answer missing" in note
+
+
+def test_read_gate_status_surfaces_generated_at_iso(tmp_path):
+    # D-SC-2 (#1660): the hook's timestamp is surfaced (normalized to
+    # ISO-8601, aware UTC), not discarded, so the collector can recompute
+    # the true gate age instead of trusting the emit-time age.
+    p = tmp_path / "status.json"
+    write_gate_status(p, state="live",
+                      generated_at="2026-10-18T12:00:00Z")
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
+    assert frozen is False
+    assert age is not None
+    parsed = datetime.fromisoformat(gen_at)
+    assert parsed == datetime(2026, 10, 18, 12, 0, 0,
+                              tzinfo=timezone.utc), gen_at
+
+
+def test_read_gate_status_unparseable_generated_at_nulls_only_age(tmp_path):
+    # A bad timestamp nulls the age AND the surfaced generated_at, but
+    # never the frozen field (per-field independence, #1660).
+    p = tmp_path / "status.json"
+    write_gate_status(p, state="frozen", generated_at="not-a-timestamp")
+    frozen, age, gen_at, note = box_snapshot._read_gate_status(str(p))
+    assert frozen is True
+    assert age is None
+    assert gen_at is None
+    assert "unparseable" in note
+
+
+def test_main_emits_gate_generated_at(tmp_path):
+    # End-to-end: the snapshot's gate.generated_at carries the hook's
+    # timestamp (#1660 acceptance).
+    p = tmp_path / "status.json"
+    write_gate_status(p, state="live",
+                      generated_at="2026-10-18T12:00:00Z")
+    proc = run_snapshot("--checkout", str(tmp_path / "nope"),
+                        "--gate-status", str(p))
+    snap = parse_stdout(proc)
+    assert snap["gate"]["generated_at"] == \
+        "2026-10-18T12:00:00+00:00", snap["gate"]
+    assert snap["gate"]["answer_age_s"] >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +308,9 @@ def test_main_stdout_schema(tmp_path):
     assert set(snap) == {"repo_commit", "gate", "arc_active",
                          "image_version", "note", "emitted_at"}
     assert snap["repo_commit"] is None
-    assert set(snap["gate"]) == {"frozen", "answer_age_s"}
-    assert snap["gate"] == {"frozen": None, "answer_age_s": None}
+    assert set(snap["gate"]) == {"frozen", "answer_age_s", "generated_at"}
+    assert snap["gate"] == {"frozen": None, "answer_age_s": None,
+                            "generated_at": None}
     assert snap["arc_active"] is None  # the G15 hook's slice, not S1's
     assert snap["image_version"] is None
     assert isinstance(snap["note"], str) and snap["note"]
@@ -361,7 +403,8 @@ def test_main_garbage_gate_file_never_raises(tmp_path):
     proc = run_snapshot("--checkout", str(tmp_path / "nope"),
                         "--gate-status", str(p))
     snap = parse_stdout(proc)
-    assert snap["gate"] == {"frozen": None, "answer_age_s": None}
+    assert snap["gate"] == {"frozen": None, "answer_age_s": None,
+                            "generated_at": None}
     assert isinstance(snap["note"], str) and snap["note"]
 
 

@@ -15,6 +15,7 @@ on the wall clock beyond "collect just ran".
 import json
 import os
 import hashlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -697,10 +698,172 @@ def test_record_schema_matches_design_section_4(env):
     assert set(record["last_tick_at"]) == {"deploy", "toolset", "image"}
     assert set(record["gate"]) == {"permitted_commit",
                                    "permitted_toolset_pin", "frozen",
-                                   "answer_age_s"}
+                                   "answer_age_s", "generated_at"}
     assert record["gate"]["permitted_commit"] is None  # S1: G15's slice
     assert record["gate"]["permitted_toolset_pin"] is None
     assert "arc" in record and "arc_active" not in record
+    # D-SC-1/D-SC-2 (#1660): the box's own emission timestamps ride the
+    # record so readers can interpret the box-local signals honestly.
+    assert "emitted_at" in record
+    assert "generated_at" in record["gate"]
+
+
+# --- D-SC-1/D-SC-2: box emission timestamps on the record (#1660) --------
+
+
+def test_collect_carries_gate_generated_at_and_emitted_at(env):
+    """End-to-end through the real box_snapshot.py: the record carries
+    gate.generated_at (the hook's timestamp) plus the snapshot's
+    emitted_at (box clock); observed_at stays the collector's receive
+    time, so transport delay is computable."""
+    estate, store = env
+    gen = datetime.now(timezone.utc) - timedelta(seconds=60)
+    gate_file = _gate_status_file(estate, state="live", generated_at=gen)
+    snap = _snapshot_gate(["--checkout", estate, "--gate-status", gate_file])
+    assert snap["gate"]["generated_at"] is not None  # box_snapshot half
+    _write_box(estate, "tower", status=_status_json(), snapshot=snap)
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    record = _journal(store)[0]
+    assert record["gate"]["generated_at"] == snap["gate"]["generated_at"]
+    parsed = datetime.fromisoformat(record["gate"]["generated_at"])
+    assert parsed.tzinfo is not None  # aware UTC: age recomputable
+    assert record["emitted_at"] == snap["emitted_at"]
+    observed = datetime.fromisoformat(record["observed_at"])
+    emitted = datetime.fromisoformat(record["emitted_at"])
+    assert observed >= emitted  # collector received after the box emitted
+    assert not any("emitted_at" in n for n in record["notes"])
+
+
+def test_collect_nulls_when_snapshot_lacks_timestamps(env):
+    """Pre-#1660 snapshots carry neither field: the record holds nulls,
+    not crashes, and no skew note fires on a missing emitted_at."""
+    snap = _snapshot_json(COMMIT_A)  # gate has no generated_at key
+    del snap["emitted_at"]
+    _collect(env, {"tower": {"status": _status_json(), "snapshot": snap}})
+    estate, store = env
+    record = _journal(store)[0]
+    assert record["gate"]["generated_at"] is None
+    assert record["emitted_at"] is None
+    assert not any("emitted_at" in n for n in record["notes"])
+
+
+def test_collect_future_emitted_at_flagged_not_dropped(env):
+    """A snapshot emitted_at beyond FUTURE_SKEW_TOLERANCE_S is clock
+    skew, not an error: flagged in notes, kept as-is (D-SC-1)."""
+    future = (datetime.now(timezone.utc)
+              + timedelta(seconds=400)).isoformat()
+    snap = _snapshot_json(COMMIT_A)
+    snap["emitted_at"] = future
+    _collect(env, {"tower": {"status": _status_json(), "snapshot": snap}})
+    estate, store = env
+    record = _journal(store)[0]
+    assert record["emitted_at"] == future
+    assert any("emitted_at is" in n and "in the future" in n
+               for n in record["notes"]), record["notes"]
+
+
+def test_collect_unparseable_emitted_at_noted_kept(env):
+    """An unparseable emitted_at is said loudly and kept verbatim —
+    the module never invents a timestamp (mirrors the status.json
+    generated_at convention)."""
+    snap = _snapshot_json(COMMIT_A)
+    snap["emitted_at"] = "not-a-timestamp"
+    _collect(env, {"tower": {"status": _status_json(), "snapshot": snap}})
+    estate, store = env
+    record = _journal(store)[0]
+    assert record["emitted_at"] == "not-a-timestamp"
+    assert any("no parseable emitted_at" in n
+               for n in record["notes"]), record["notes"]
+
+
+def test_doc_note_pins_answer_age_s_emit_time_convention():
+    """The design note readers need: answer_age_s is the emit-time
+    convenience; the true gate age is recomputed from generated_at."""
+    with open(INVENTORY, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "max(0, now - gate.generated_at)" in src
+    assert "never from answer_age_s" in src
+
+
+# --- #1632: per-box gate staleness on the fleet table -------------------
+
+
+def test_inventory_table_renders_gate_age_column(env):
+    """The fleet table's gate_age column (#1632, S1b slice): recomputed
+    from gate.generated_at; a trailing `~` marks the emit-time
+    answer_age_s fallback; n/a when uncomputable."""
+    gen = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+
+    def _snap(gate):
+        return {"repo_commit": COMMIT_A, "gate": gate, "arc_active": None,
+                "image_version": None, "note": None,
+                "emitted_at": NOW.isoformat()}
+
+    _collect(env, {
+        "box-age": {"status": _status_json(),
+                    "snapshot": _snap({"frozen": False, "answer_age_s": 5,
+                                       "generated_at": gen})},
+        "box-fallback": {"status": _status_json(),
+                         "snapshot": _snap({"frozen": False,
+                                            "answer_age_s": 42,
+                                            "generated_at": None})},
+        "box-none": {"status": _status_json(),
+                     "snapshot": _snap({"frozen": None,
+                                        "answer_age_s": None,
+                                        "generated_at": None})},
+    })
+    estate, store = env
+    proc = run_inventory("inventory", "--store", store,
+                         "--staleness-hours", "24")
+    assert proc.returncode == 0, proc.stderr
+    rows = {}
+    for line in proc.stdout.splitlines():
+        m = re.match(r"(\S+)\s+(\(no report\)|\S+)\s+(\S+)\s+"
+                     r"(\S+)\s+(\S+)\s+(.*)$", line)
+        if m and m.group(1).startswith("box-"):
+            rows[m.group(1)] = m.groups()
+    assert set(rows) == {"box-age", "box-fallback", "box-none"}, rows
+    age = rows["box-age"][4]
+    assert re.fullmatch(r"\d+s", age), age  # recomputed, no ~ marker
+    assert 35 <= int(age[:-1]) <= 60, age
+    assert rows["box-fallback"][4] == "42s~", rows["box-fallback"]
+    assert rows["box-none"][4] == "n/a", rows["box-none"]
+    # Product review B1: the `~` sigil's legend ships at the point of use.
+    legend = "~ = gate age is the box's emit-time answer_age_s"
+    assert any(legend in l for l in proc.stdout.splitlines()), \
+        proc.stdout
+
+
+def test_inventory_table_no_legend_without_emit_time_fallback(env):
+    """The legend only prints when a row actually used the fallback —
+    a table of fresh recomputations stays clean."""
+    gen = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    snap = {"repo_commit": COMMIT_A,
+            "gate": {"frozen": False, "answer_age_s": 5,
+                     "generated_at": gen},
+            "arc_active": None, "image_version": None,
+            "note": None, "emitted_at": NOW.isoformat()}
+    _collect(env, {"tower": {"status": _status_json(), "snapshot": snap}})
+    estate, store = env
+    proc = run_inventory("inventory", "--store", store,
+                         "--staleness-hours", "24")
+    assert proc.returncode == 0, proc.stderr
+    assert not any(l.startswith("~ =") for l in proc.stdout.splitlines()), \
+        proc.stdout
+
+
+def test_inventory_table_gate_age_header_present(env):
+    """The gate_age header is part of the table contract (the conformance
+    test in test_api.py pins the column count)."""
+    _collect(env, {"tower": {"status": _status_json(),
+                             "snapshot": _snapshot_json(COMMIT_A)}})
+    estate, store = env
+    proc = run_inventory("inventory", "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    header = next(l for l in proc.stdout.splitlines()
+                  if l.startswith("box "))
+    assert "gate_age" in header.split(), header
 
 
 def test_check_event_does_not_shadow_deploy_claim(env):

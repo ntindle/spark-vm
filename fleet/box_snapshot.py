@@ -54,26 +54,30 @@ def _parse_generated_at(value):
 def _read_gate_status(path):
     """Read the gate_hook status file (S1b, #1325).
 
-    Returns (frozen_or_none, answer_age_s_or_none, note_or_none).
+    Returns (frozen_or_none, answer_age_s_or_none, generated_at_iso_or_none,
+    note_or_none).
     frozen derives from answer.state ("frozen" -> True, "live" -> False);
-    answer_age_s is now - generated_at, floored at 0. The two fields are
-    independent: a bad timestamp nulls only the age, a bad state nulls
+    answer_age_s is now - generated_at, floored at 0; generated_at_iso is
+    the hook's own timestamp normalized to ISO-8601 (aware UTC), or None
+    when the box can't parse it (D-SC-2, #1660 — the collector needs it
+    to recompute the true gate age). The three fields are independent: a
+    bad timestamp nulls only the age and generated_at, a bad state nulls
     only frozen — per-field nulls with notes, never all-or-nothing
-    (Engineering review). Anything unreadable -> (None, None, note).
+    (Engineering review). Anything unreadable -> (None, None, None, note).
     Never raises.
     """
     try:
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
     except FileNotFoundError:
-        return None, None, "gate status file not present: %r" % (path,)
+        return None, None, None, "gate status file not present: %r" % (path,)
     except (OSError, ValueError, RecursionError) as exc:
         # RecursionError: deeply-nested JSON raises outside (OSError,
         # ValueError); the module contract is "never raises", so it is
         # caught here explicitly (Engineering review).
-        return None, None, "gate status file unreadable: %s" % (exc,)
+        return None, None, None, "gate status file unreadable: %s" % (exc,)
     if not isinstance(payload, dict):
-        return None, None, "gate status file is not a JSON object"
+        return None, None, None, "gate status file is not a JSON object"
     notes = []
     answer = payload.get("answer")
     if isinstance(answer, dict):
@@ -89,6 +93,8 @@ def _read_gate_status(path):
         frozen = None
         notes.append("gate status answer.state not frozen/live: %r" % (state,))
     generated_at, ts_note = _parse_generated_at(payload.get("generated_at"))
+    generated_at_iso = (generated_at.isoformat()
+                        if generated_at is not None else None)
     age_s = None
     if generated_at is None:
         notes.append(ts_note)
@@ -100,7 +106,7 @@ def _read_gate_status(path):
             notes.append("gate status generated_at is in the future; "
                          "answer_age_s floored at 0")
         age_s = int(max(0, delta_s))
-    return frozen, age_s, "; ".join(notes) or None
+    return frozen, age_s, generated_at_iso, "; ".join(notes) or None
 
 
 def _git_head(checkout):
@@ -155,6 +161,7 @@ def main(argv=None):
 
     frozen = None
     answer_age_s = None
+    gate_generated_at = None
     use_gate_file = True
     if args.frozen is not None:
         value = args.frozen.strip().lower()
@@ -174,13 +181,15 @@ def main(argv=None):
     if use_gate_file:
         # #1325: the S1b visibility loop — derive from the hook's own
         # status file instead of leaving gate.frozen operator-declared-only.
-        frozen, answer_age_s, gate_note = _read_gate_status(args.gate_status)
+        (frozen, answer_age_s, gate_generated_at,
+         gate_note) = _read_gate_status(args.gate_status)
         if gate_note:
             notes.append(gate_note)
 
     snapshot = {
         "repo_commit": commit,
-        "gate": {"frozen": frozen, "answer_age_s": answer_age_s},
+        "gate": {"frozen": frozen, "answer_age_s": answer_age_s,
+                 "generated_at": gate_generated_at},
         "arc_active": None,          # the G15 gate hook's slice (not S1)
         "image_version": args.image_version,  # null = not applicable
         "note": "; ".join(notes) or None,
