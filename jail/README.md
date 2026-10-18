@@ -190,7 +190,24 @@ states the construction, not a static pin.
   unbounded unenforced running: a table/ruleset loss can exist for up to
   ~1 minute before detection, and the re-apply resets the drop counters
   (silence on the `jail-*-drop:` prefixes right after a re-apply is
-  expected, not peace of mind). Operational rule: the live table is not
+  expected, not peace of mind). A deliberate asymmetry lives in the
+  **build-time** re-apply (issue #1667): `build.sh`'s validate→destroy→apply
+  runs with the jail *alive* — unlike the watchdog's damage repair, which
+  stops the jail first. Re-applying the table does not flush conntrack,
+  so any flow established through the jail before the build survives
+  under the *new* ruleset via the `established,related` accept rules —
+  even when the operator's change was a tightening. This is not a hole
+  (the flows were legitimate under the old rules), but the operator's
+  mental model ("the new conf is now enforced") is wrong for the
+  lifetime of those flows. `build.sh` therefore logs a conntrack snapshot
+  of the jail's open flows immediately after the re-apply, naming the
+  surviving flows (the first 20 lines of the listing) along with the
+  teardown commands (`conntrack -D --orig-src <jail-ip>` for outbound
+  traffic, `--orig-dst` for inbound; DNAT'd SSH shows the jail IP only
+  in the reply tuple — compare against the listing) if the tightening
+  must take effect at once. Stopping the jail on every
+  build was declined: a build is an operator-initiated event whose
+  downtime cost the operator should choose, not pay by default. Operational rule: the live table is not
   a debugging surface. Any rule the conf does not contain — including a
   temporary accept added while debugging — trips the pin: the watchdog
   stops the jail, destroys and re-applies the table, and goes red. Make

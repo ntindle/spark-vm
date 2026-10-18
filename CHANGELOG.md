@@ -51,6 +51,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Fixed
+- The jail build now logs the network flows still open through the jail right
+  after the firewall ruleset is re-applied: a re-apply does not flush
+  connection tracking, so pre-existing flows keep flowing under the new rules
+  even after a tightening, and the operator can tear them down explicitly.
+  The stated residual is documented in the jail's enforcement contract. (#1691)
 - The v0.9.0 golden-image build gate failed because the image recipe fetched
   the cua-driver release asset under the wrong filename (upstream names them
   `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses

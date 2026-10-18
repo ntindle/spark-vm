@@ -53,7 +53,9 @@ say() { echo "==> $*"; }
 
 # ---------------------------------------------------------------- host packages
 say "host packages"
-$SUDO apt-get install -y -q systemd-container debootstrap >/dev/null
+$SUDO apt-get install -y -q systemd-container debootstrap conntrack >/dev/null
+# (conntrack: build.sh logs a snapshot of the jail's open flows after the
+# firewall re-apply — issue #1667.)
 
 # ---------------------------------------------------------------- rootfs
 # Staging/prev paths for atomic rebuilds (#1370). machined registers the
@@ -355,6 +357,32 @@ $SUDO nft -f /etc/nftables-jail.conf
 say "firewall active:"
 # (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
 $SUDO nft list table inet jail | head -8 || true
+# Issue #1667: re-applying the table does NOT flush conntrack, so flows
+# established through the jail survive under the NEW ruleset via the
+# established,related accept rules — even when the operator's change was a
+# tightening. The watchdog stops the jail before its damage repairs; the
+# build-time re-apply deliberately does not (an operator-initiated build
+# should not pay downtime by default — see the README's contract). So the
+# build logs a conntrack snapshot of the jail's open flows at re-apply
+# time, naming exactly what survives. The grep filter matches the jail IP
+# in either direction tuple (orig-src, orig-dst, reply-src, reply-dst), so
+# outbound jail traffic is not missed. Fail-open: if the conntrack tool
+# or table read fails, the build continues — the residual is documented in
+# the README either way.
+if $SUDO conntrack -L 2>/dev/null | grep -qF "$GUEST_IP"; then
+    say "WARNING (issue #1667): established flows through the jail at firewall re-apply time:"
+    say "these flows were open under the OLD ruleset and SURVIVE under the new one"
+    say "(a re-apply does not flush conntrack; the established,related accepts keep them"
+    say "alive). Tear them down if the tightening must take effect immediately:"
+    say "  sudo conntrack -D --orig-src $GUEST_IP"
+    say "  sudo conntrack -D --orig-dst $GUEST_IP"
+    say "(DNAT'd SSH shows the jail IP in the reply tuple, not orig-dst — check the"
+    say "listing above.) Surviving flow list:"
+    # (|| true + head bound: a large table is truncated, not fatal.)
+    $SUDO conntrack -L 2>/dev/null | grep -F "$GUEST_IP" | head -20 || true
+else
+    say "conntrack snapshot: no open flows through the jail at re-apply time"
+fi
 # Semantic watchdog pin (issue #444): compile the applied conf to a
 # canonical JSON pin (apply -> capture). The runtime watchdog compares
 # the live table against this pin semantically — whitespace AND semantic
