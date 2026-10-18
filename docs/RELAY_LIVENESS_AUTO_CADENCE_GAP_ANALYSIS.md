@@ -59,8 +59,11 @@ resync only run when an operator remembers to tick.
   re-plans under the store's inter-process `fcntl` exclusive lock
   (`tenant_status.py:968`), so two concurrent ticks *converge* — the
   second re-plans on the already-transitioned record and emits nothing
-  (the recovery pair's guard and the boolean-flip idempotency make the
-  re-plan a no-op). The residual is not corruption but waste: two
+  observable (the re-plan reduces to an idempotent boolean flip —
+  `("relay-down", {})` on an already-suspended arc flips
+  `relay_reachable` to the `False` it already holds; the recovery
+  pair's guard and the boolean-flip idempotency make the re-plan a
+  no-op). The residual is not corruption but waste: two
   drivers (hosted cron + an operator's manual `--tick`, or overlapping
   cron firings) each do full probe-history + journal reads, contend on
   the instrument locks (up to 60s waits each), and emit duplicate
@@ -117,6 +120,16 @@ resync only run when an operator remembers to tick.
   F-AC-4) instead of probing itself. Revisit trigger: if drive-only
   proves operationally insufficient, the probe-and-drive fork re-opens
   as its own slice — it is not smuggled into the driver build.
+  D-AC-2 depends on a probe-loop driver that does not exist at
+  `94cd024a`: `maybe_probe`/`cadence_decision` is a decision function,
+  not a loop, and `--probe-now` is one-shot. The probe loop (something
+  calling `maybe_probe` with caller-supplied bundles on the
+  `RELAY_PROBE_CADENCE_S` cadence, honoring the D-RL2-2 stand-down) is
+  out of #1711's scope and is tracked on its own issue (#1725, S5);
+  until it ships, S1's steady state is loud-stale ticks by design (the
+  fail-visible forcing function), not a defect. S4's staleness rule
+  distinguishes "driver dead" from "probe loop missing" via the
+  watermark's stale-probe notes.
 - **D-AC-3 — Overlap-safe, not overlap-prevented.** Follow the D9
   sweep precedent (D66/D69): ticks are bounded and idempotent, and
   overlap is safe, not prevented (F-AC-3). No leader election, no
@@ -138,16 +151,27 @@ resync only run when an operator remembers to tick.
   entry (F-AC-6, F-PP-2). The self-hosted packaging (cron/systemd
   unit driving the existing `--tick` CLI) follows the same driver
   design — one design, two deployments, per the both-supported
-  default — but ships as its own slice (S3, gated on S1).
+  default — but ships as its own slice (S3, gated on S1). S1 must
+  parameterize `drive_tenant` over a store protocol (read +
+  read-modify-write, replacing the direct `store._mutate` private-method
+  call — `drive_tenant` today takes a concrete `ts.TenantStore` whose
+  `fcntl` file lock does not exist on Workers) so the S2 async port has
+  a defined boundary to implement against the worker's async D1; the
+  fcntl file lock stays the in-repo implementation of that boundary.
+  D-PP-2-style conformance fixtures must replay the apply-phase
+  convergence cases (concurrent-tick convergence, anchor-moved skip)
+  through the port. The in-repo module remains the test truth; it never
+  sees a Worker secret (D-PP-1).
 
 ## 4. Slices (filed)
 
 | Issue | Slice | Ship-gate |
 |---|---|---|
-| #1721 | S1: in-repo auto-driver module — tick-all-tenants loop on the probe cadence (D-AC-1), drive-only consumption with stale-probe loud notes (D-AC-2), watermark writes + journal tick notes (D-AC-4, F-AC-7), bounded + idempotent (D-AC-3); tests against the real wiring with a fake producer | — |
-| #1722 | S2: plane async port + `wrangler.toml` cron line + `verify_plane_cron.py` entry (D-AC-5, F-PP-2 seam); extends `deploy/plane-cron/CRON_TRIGGER_CONTRACT.md` | S1 |
+| #1721 | S1: in-repo auto-driver module — tick-all-tenants loop on the probe cadence (D-AC-1), drive-only consumption with stale-probe loud notes (D-AC-2), watermark writes + journal tick notes (D-AC-4, F-AC-7), bounded + idempotent (D-AC-3); `drive_tenant` parameterized over a store protocol (read + read-modify-write) so the S2 port has a defined boundary, fcntl file lock as the in-repo implementation; tests against the real wiring with a fake producer | — |
+| #1722 | S2: plane async port + `wrangler.toml` cron line + `verify_plane_cron.py` entry (D-AC-5, F-PP-2 seam); extends `deploy/plane-cron/CRON_TRIGGER_CONTRACT.md`; D-PP-2 conformance fixtures replay the apply-phase convergence cases through the port | S1 |
 | #1723 | S3: self-hosted packaging — cron/systemd unit driving the `--tick` CLI + operator docs (D-AC-5) | S1 |
-| #1724 | S4: staleness alert — G18 alert-stack rule on the watermark (> 2× cadence, no applied tick) + skip-storm signal (F-AC-5, F-AC-7) | S1 |
+| #1724 | S4: staleness alert — G18 alert-stack rule on the watermark (> 2× cadence, no applied tick) + skip-storm signal (F-AC-5, F-AC-7); distinguishes "driver dead" from "probe loop missing" via the stale-probe notes | S1 |
+| #1725 | S5: probe-loop driver — call `maybe_probe` with caller-supplied bundles on the `RELAY_PROBE_CADENCE_S` cadence, honoring the D-RL2-2 stand-down; pin the bundle source (D-RL2-3, no persisted bundle store) and the loop's own death-mode observability | — |
 
 All track:hosted-product (the tenant plane is the hosted unit;
 self-hosted gets the S3 packaging slice). #1711 stays open as the
