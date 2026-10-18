@@ -74,10 +74,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   pin-only semantics is now individually guarded. (#TBD)
 
 ### Fixed
-- A box whose release-gating files contained non-UTF-8 bytes crashed the
-  box-side gate query with a traceback instead of failing closed to frozen:
-  the gate-document loader and the box-identity reader now treat undecodable
-  input as no-signal, like every other unreadable input. (#TBD)
+- A box whose release-gating files were unreadable or malformed crashed
+  the box-side gate query with a traceback instead of failing closed to
+  frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII
+  gate signature, and malformed wave data are now all treated as
+  no-signal, like every other untrusted input. (#TBD)
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
   browser-encoded form bodies) is now prefix-case-sensitive like the plain
   form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase

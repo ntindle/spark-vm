@@ -363,6 +363,21 @@ def test_load_gate_garbage_bytes_is_no_signal(tmp_path):
         raise AssertionError("expected NoSignal")
 
 
+def test_load_gate_non_ascii_hmac_is_no_signal(tmp_path):
+    # compare_digest raises TypeError on non-ASCII str; a non-ASCII hmac
+    # must be no-signal, not a traceback (QA B1).
+    doc = _make_gate_doc()
+    doc["hmac"] = "é" * 64
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    try:
+        gate_query.load_gate(path)
+    except gate_query.NoSignal as exc:
+        assert "ASCII" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
 # ---------------------------------------------------------------------------
 # verify_gate
 
@@ -424,6 +439,18 @@ def test_verify_gate_tampered_body_is_no_signal(tmp_path):
         raise AssertionError("expected NoSignal")
 
 
+def test_verify_gate_future_within_skew_accepts(tmp_path):
+    # The 60s clock-skew tolerance is a real contract, pinned on the
+    # accept side too (a +30s-future doc verifies OK).
+    issued = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    doc = _make_gate_doc(issued_at=issued)
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    gate = gate_query.load_gate(path)
+    assert gate_query.verify_gate(gate, {"k1": KEY_A}) == "k1"
+
+
 def test_verify_gate_future_issued_beyond_skew_is_no_signal(tmp_path):
     issued = (datetime.now(timezone.utc) + timedelta(seconds=120)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
@@ -478,6 +505,16 @@ def test_box_wave_hash_default_is_not_constant():
     assert len(waves) > 1
 
 
+def test_box_wave_malformed_pin_is_no_signal():
+    # A non-integer pin is no-signal, not a ValueError traceback (QA B2).
+    try:
+        gate_query.box_wave("box-7", {"assignments": {"box-7": "abc"}})
+    except gate_query.NoSignal as exc:
+        assert "not a wave number" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
 def test_component_permitted_non_dict_wave_is_false():
     assert gate_query.component_permitted("box-1", "repo",
                                           {"repo": None}) is False
@@ -497,8 +534,39 @@ def test_component_permitted_canary_is_pin_only_wave_1():
                       "assignments": {"box-1": 1, "box-2": 2}}}
     assert gate_query.component_permitted("box-1", "repo", waves) is True
     assert gate_query.component_permitted("box-2", "repo", waves) is False
-    # An unassigned box hashes to 0..3 — never wave 1 by pin, so not in.
+    # An unassigned box has no pin (pin-only: `assignments.get(box_id, -1)`)
+    # so it is never in the canary.
     assert gate_query.component_permitted("box-9", "repo", waves) is False
+
+
+def test_component_permitted_malformed_live_is_no_signal():
+    # A non-integer live ceiling is no-signal (QA B2).
+    waves = {"repo": {"state": "wave-1", "live": "abc",
+                      "assignments": {"box-1": 0}}}
+    try:
+        gate_query.component_permitted("box-1", "repo", waves)
+    except gate_query.NoSignal as exc:
+        assert "malformed" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
+def test_component_permitted_malformed_canary_pin_is_no_signal():
+    waves = {"repo": {"state": "canary", "live": 4,
+                      "assignments": {"box-1": "abc"}}}
+    try:
+        gate_query.component_permitted("box-1", "repo", waves)
+    except gate_query.NoSignal as exc:
+        assert "malformed" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
+def test_component_permitted_null_assignments_does_not_crash():
+    # A present-but-null assignments field must not AttributeError (QA B2).
+    waves = {"repo": {"state": "canary", "live": 4, "assignments": None}}
+    assert gate_query.component_permitted("box-1", "repo",
+                                          waves) is False
 
 
 def test_component_permitted_live_ceiling():
@@ -574,3 +642,20 @@ def test_answer_live_doc_permits_and_names_wave(tmp_path):
     assert ans["toolset_permitted"] == "false"  # halted is never permitted
     assert ans["image_permitted"] == "false"   # missing wave entry
     assert ans["image_max"] == ""
+
+
+def test_answer_malformed_wave_entry_is_frozen(tmp_path):
+    # A MAC-valid doc whose wave entry is malformed must freeze the box,
+    # not crash the tick-time query (QA B2 — the _validate_manifest wall
+    # makes this unreachable via the real publisher, but the enforcement
+    # point must not depend on that).
+    waves = {"repo": {"state": "wave-1", "live": "abc",
+                      "assignments": {"box-1": 0}}}
+    doc = _make_gate_doc(freeze=False, waves=waves)
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    ans = gate_query.answer(path, "box-1", {"k1": KEY_A})
+    assert ans["state"] == "frozen"
+    assert ans["freeze"] == "true"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "malformed" in ans["reason"]

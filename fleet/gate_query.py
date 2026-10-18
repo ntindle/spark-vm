@@ -148,6 +148,10 @@ def load_gate(gate_path: str) -> dict:
     mac = doc.get("hmac")
     if not isinstance(mac, str) or not mac:
         raise NoSignal("gate document carries no hmac")
+    if not mac.isascii():
+        # hmac.compare_digest rejects non-ASCII str with TypeError; a
+        # non-ASCII hmac must be no-signal, not a traceback (QA B1).
+        raise NoSignal("gate document hmac is not ASCII")
     return {"doc": doc, "body": body, "mac": mac}
 
 
@@ -178,10 +182,18 @@ def verify_gate(gate: dict, keys: dict) -> str:
 
 
 def box_wave(box_id: str, wave: dict) -> int:
-    """This box's wave number: assignment pin, else hash_mod_4 default (§2)."""
+    """This box's wave number: assignment pin, else hash_mod_4 default (§2).
+
+    A malformed assignment pin (non-integer) is no-signal: the wave data
+    cannot be trusted, and a guessing box is a fail-open risk — so the box
+    freezes instead of evaluating a wave it cannot parse (QA B2)."""
     assignments = wave.get("assignments") or {}
     if box_id in assignments:
-        return int(assignments[box_id])
+        try:
+            return int(assignments[box_id])
+        except (TypeError, ValueError):
+            raise NoSignal(f"wave assignment for {box_id!r} is not a wave "
+                           f"number: {assignments[box_id]!r}")
     return int(hashlib.sha256(box_id.encode("utf-8")).hexdigest(), 16) % 4
 
 
@@ -194,41 +206,63 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
         return False
     if wave.get("state") == "canary":
         # Canary is pin-only: only boxes assigned wave 1 are in the canary.
-        return int(wave.get("assignments", {}).get(box_id, -1)) == 1
-    return box_wave(box_id, wave) <= int(wave.get("live", 0))
+        # A malformed pin is no-signal (same fail-closed reasoning as
+        # box_wave); (wave.get("assignments") or {}) because a present-but-
+        # null assignments field must not AttributeError here (QA B2).
+        try:
+            pin = int((wave.get("assignments") or {}).get(box_id, -1))
+        except (TypeError, ValueError):
+            raise NoSignal(f"canary assignment for {box_id!r} is malformed")
+        return pin == 1
+    try:
+        ceiling = int(wave.get("live", 0))
+    except (TypeError, ValueError):
+        # A malformed live ceiling names no real cohort — no-signal rather
+        # than a ValueError traceback (QA B2).
+        raise NoSignal(f"wave live ceiling for {comp!r} is malformed")
+    return box_wave(box_id, wave) <= ceiling
 
 
 def answer(gate_path: str, box_id: str, keys: dict) -> dict:
-    """Full self-evaluated answer. Never raises NoSignal: no-signal -> frozen."""
+    """Full self-evaluated answer. Never raises NoSignal: no-signal -> frozen.
+
+    The whole evaluation — load, MAC+TTL verify, and wave evaluation —
+    sits inside the no-signal net, so a malformed-but-signed document
+    freezes the box instead of raising (QA B2: int() on a non-integer wave
+    pin or live ceiling raises NoSignal from box_wave/component_permitted,
+    and it lands here)."""
     try:
         gate = load_gate(gate_path)
         key_id = verify_gate(gate, keys)
-    except NoSignal as exc:
-        return {"state": "frozen", "freeze": "true", "reason": f"no-signal: {exc}",
-                "key_id": "", "answer_age_s": "-1"}
-    doc = gate["doc"]
-    try:
+        doc = gate["doc"]
+        # The doc reached here through verify_gate, which parsed issued_at
+        # identically — the parse cannot fail (QA nit: the old try/except
+        # age=-1 fallback was uncoverable dead code).
         issued = datetime.strptime(doc["issued_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc)
         age = int((datetime.now(timezone.utc) - issued).total_seconds())
-    except (KeyError, ValueError):
-        age = -1
-    freeze = bool(doc.get("freeze"))
-    waves = doc.get("waves", {}) or {}
-    releases = doc.get("releases", {}) or {}
-    out = {"state": "frozen" if freeze else "live",
-           "freeze": "true" if freeze else "false",
-           "reason": "freeze flag set" if freeze else "gate ok",
-           "key_id": key_id, "answer_age_s": str(age)}
-    for comp in ("repo", "toolset", "image"):
-        permitted = (not freeze) and component_permitted(box_id, comp, waves)
-        out[f"{comp}_permitted"] = "true" if permitted else "false"
-        rel = releases.get(comp) or {}
-        out[f"{comp}_max"] = str(rel.get("max_permitted_commit")
-                                 or rel.get("max_permitted_pin")
-                                 or rel.get("max_permitted_image_version") or "")
-        out[f"{comp}_my_wave"] = str(box_wave(box_id, waves.get(comp, {})))
-    return out
+        freeze = bool(doc.get("freeze"))
+        waves = doc.get("waves", {}) or {}
+        releases = doc.get("releases", {}) or {}
+        out = {"state": "frozen" if freeze else "live",
+               "freeze": "true" if freeze else "false",
+               "reason": "freeze flag set" if freeze else "gate ok",
+               "key_id": key_id, "answer_age_s": str(age)}
+        for comp in ("repo", "toolset", "image"):
+            permitted = (not freeze) and component_permitted(box_id, comp,
+                                                             waves)
+            out[f"{comp}_permitted"] = "true" if permitted else "false"
+            rel = releases.get(comp) or {}
+            out[f"{comp}_max"] = str(rel.get("max_permitted_commit")
+                                     or rel.get("max_permitted_pin")
+                                     or rel.get("max_permitted_image_version")
+                                     or "")
+            out[f"{comp}_my_wave"] = str(box_wave(box_id, waves.get(comp, {})))
+        return out
+    except NoSignal as exc:
+        return {"state": "frozen", "freeze": "true",
+                "reason": f"no-signal: {exc}",
+                "key_id": "", "answer_age_s": "-1"}
 
 
 def _gate_path(args) -> str:
