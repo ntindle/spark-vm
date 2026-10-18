@@ -19,6 +19,7 @@ notes per test).
 
 import ast
 import contextlib
+import json
 import pathlib
 
 import pytest
@@ -862,3 +863,98 @@ def test_anchor_latchless_earliest_created_still_wins():
     healthy = _arc("box-b", created_at="2026-10-02T00:00:00Z")
     assert broken.latched is None  # corrupt suspension: no latch
     assert wiring.select_live_anchor([healthy, broken]) is broken
+
+
+# ---------------------------------------------------------------------------
+# CLI — the operator-driven tick (D-RL34-7, #1711 acceptance option 2).
+
+
+def _cli_store(tmp_path, boxes, tenant_id="tnt_test"):
+    store = ts.TenantStore(str(tmp_path / "tenants.json"))
+    store.create(_tenant_record(boxes, tenant_id=tenant_id))
+    return store
+
+
+def test_main_tick_returns_int_exit_code_in_process(tmp_path, capsys, monkeypatch):
+    # Structural pin (mirrors test_relay_path_state.py): the CLI is
+    # driven through wiring.main() in-process — never by re-executing
+    # the module via runpy/subprocess. Neuter check: deleting main()
+    # fails this with AttributeError, not a silent skip.
+    _cli_store(tmp_path, [_arc("box-a", created_at="2026-10-01T00:00:00Z")])
+    seen = {}
+
+    def fake_read(vm_id, journal_timeout_s=None):
+        seen["timeout"] = journal_timeout_s
+        return _down("relay")
+
+    monkeypatch.setattr(rps, "relay_path_state", fake_read)
+    code = wiring.main(
+        ["--store", str(tmp_path / "tenants.json"),
+         "--tick", "tnt_test", "--journal-timeout-s", "3.5"]
+    )
+    assert isinstance(code, int), "main() must return an int exit code"
+    assert code == 0
+    assert seen["timeout"] == 3.5
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    assert report["tenant_id"] == "tnt_test"
+    assert report["anchor_box_id"] == "box-a"
+    assert report["boxes"][0]["reading"]["state"] == "down"
+    assert report["boxes"][0]["reading"]["sub_code"] == "relay"
+    # The tick actually applied the wiring: the anchor entered the
+    # rule-6 suspension. Neuter check: if the CLI built the store but
+    # never called drive_tenant, the arc code stays "live".
+    rec = ts.TenantStore(str(tmp_path / "tenants.json")).get("tnt_test")
+    assert rec.boxes["box-a"].code == "connection-unreachable"
+
+
+def test_main_tick_ok_reading_reports_no_events(tmp_path, capsys, monkeypatch):
+    # A healthy reading is still a surfaced tick: exit 0 with the
+    # reading on the operator surface and no events applied.
+    _cli_store(tmp_path, [_arc("box-a", created_at="2026-10-01T00:00:00Z")])
+    monkeypatch.setattr(
+        rps, "relay_path_state", lambda vm_id, journal_timeout_s=None: _ok()
+    )
+    code = wiring.main(["--store", str(tmp_path / "tenants.json"),
+                        "--tick", "tnt_test"])
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["boxes"][0]["reading"]["state"] == "ok"
+    assert report["boxes"][0]["events"] == []
+    rec = ts.TenantStore(str(tmp_path / "tenants.json")).get("tnt_test")
+    assert rec.boxes["box-a"].code == "live"
+
+
+def test_main_tick_unknown_tenant_exits_1_loud(tmp_path, capsys):
+    # Missing record: exit 1 with the failure on stderr, nothing on
+    # stdout (no JSON report is printed on failure).
+    store_path = str(tmp_path / "tenants.json")
+    ts.TenantStore(store_path)  # store exists, no tenants
+    code = wiring.main(["--store", store_path, "--tick", "nope"])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "no tenant record" in captured.err
+    assert captured.out == ""
+
+
+def test_main_tick_broken_anchor_instrument_exits_1_record_untouched(
+    tmp_path, capsys, monkeypatch
+):
+    # A broken anchor instrument is loud, never darkness: exit 1 on
+    # stderr, and the tenant record is untouched because the apply
+    # phase never ran. Neuter check: catching the exception and
+    # returning 0 would fail the exit-code assertion.
+    _cli_store(tmp_path, [_arc("box-a", created_at="2026-10-01T00:00:00Z")])
+
+    def broken(vm_id, journal_timeout_s=None):
+        raise rps.HistoryLockError("history lock: probe-history.lock")
+
+    monkeypatch.setattr(rps, "relay_path_state", broken)
+    code = wiring.main(["--store", str(tmp_path / "tenants.json"),
+                        "--tick", "tnt_test"])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "broken relay instrument" in captured.err
+    assert captured.out == ""
+    rec = ts.TenantStore(str(tmp_path / "tenants.json")).get("tnt_test")
+    assert rec.boxes["box-a"].code == "live"

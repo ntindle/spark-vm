@@ -272,3 +272,21 @@ a p3 (filed this turn — §4).
 Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are
 separate lanes; the Q1 5-min-cadence product call stays open
 (explicitly not decided here).
+
+## Addendum (2026-10-18): the R3 wiring is operator/CLI-driven (#1711, acceptance option 2)
+
+#1711 found the R3 wiring inert in production: nothing ever called
+`drive_tenant`, and the cadence driver the module docstring promised
+as a "future caller" was nobody's slice. The wiring now ships its
+own operator-driven tick: a `--tick TENANT_ID` CLI on the wiring
+module that runs one tick per tenant (human run, cron entry, or
+supervisor loop) and prints the tick report as JSON. The drive
+posture is pinned in the module docstring as **D-RL34-7**: the wiring
+never self-drives; driving is an explicit operator action; the
+single-driver-per-box discipline (D-RL34-3a) binds any driver. The
+stale "fully built" lane-read is corrected: an auto cadence driver
+was explicitly NOT built, and #1711 stays open to track it.
+
+Out of scope (unchanged): G1's relay row is closed; H4/H13 rows are
+separate lanes; the Q1 5-min-cadence product call stays open
+(explicitly not decided here).
