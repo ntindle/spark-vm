@@ -1536,12 +1536,12 @@ def test_utcnow_accepts_finite_epoch():
 
 
 # ---------------------------------------------------------------------------
-# (D98) parked max-age expiry (#1185)
+# (D104) parked max-age expiry (#1185)
 # ---------------------------------------------------------------------------
 
 def _old_digest_tick(conn, owner, vapid, age_hours):
     # A digest parked `age_hours` ago with a valid digest-state row, no
-    # live subscriptions — the D98 shape. Returns (tick, old_window).
+    # live subscriptions — the D104 shape. Returns (tick, old_window).
     old = NOW - timedelta(hours=age_hours)
     old_window = push_enqueue.hour_bucket(old)
     _seed_digest_state(conn, owner, old_window)
@@ -1550,7 +1550,7 @@ def _old_digest_tick(conn, owner, vapid, age_hours):
 
 
 def test_parked_young_stays_parked(conn, owner, vapid):
-    # D98 must not fire for a young parked row: a 1h-old digest with no
+    # D104 must not fire for a young parked row: a 1h-old digest with no
     # live subscriptions parks exactly as D81 always did — the row and
     # its reservation stay, no dead-letter row, no anomaly.
     tick, old_window = _old_digest_tick(conn, owner, vapid, 1)
@@ -1592,7 +1592,7 @@ def test_parked_overage_digest_dead_letters(conn, owner, vapid):
 def test_parked_overage_approval_filed_dead_letters(conn, owner, vapid):
     # aid-keyed kinds park only when gate-2 sees a non-terminal record
     # (the approval is still pending at tick time) — the row is 2h old,
-    # past the 3600s TTL-clamp bound, so D98 expires it.
+    # past the 3600s TTL-clamp bound, so D104 expires it.
     seed_approval(conn, "box-1", "aid-1", owner)
     old = NOW - timedelta(hours=2)
     enqueue(conn, "approval_filed", owner, "box-1", "aid-1", at=old)
@@ -1643,7 +1643,7 @@ def test_parked_overage_per_kind_bounds(conn, owner, vapid):
 
 
 def test_parked_expiry_keeps_exact_key_reenqueueable(conn, owner, vapid):
-    # The D61/D77 pattern, applied to D98: the expiry audit row carries
+    # The D61/D77 pattern, applied to D104: the expiry audit row carries
     # the suffixed key, so a later re-enqueue of the SAME event is not
     # wedged "duplicate" by the boundary's outcome-blind D53 dedup
     # fast-path — the page was never delivered, so it must stay
@@ -1660,7 +1660,7 @@ def test_parked_expiry_keeps_exact_key_reenqueueable(conn, owner, vapid):
 
 
 def test_parked_late_still_expires_on_enqueue_age(conn, owner, vapid):
-    # The D98 conservative-direction pin: a row that parks LATE (the
+    # The D104 conservative-direction pin: a row that parks LATE (the
     # owner had a live subscription at enqueue time, then removed it)
     # still expires on the queued row's `at`, not on the park time.
     # The row is 2h old; the park happened just now.

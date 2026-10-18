@@ -141,7 +141,7 @@ New pins this slice (continuing the global D-series):
   days will eventually buzz for a stale window (the body drops the
   "this hour" when-clause once the window is past, per the D79 pin,
   so it never mislabels the hour), and a ``heartbeat_stale`` page
-  ages badly. D98 bounds parked age per kind: an over-age parked page
+  ages badly. D104 bounds parked age per kind: an over-age parked page
   expires through the audited dead-letter path (page-level audit row +
   reservation release + tick anomaly), never a silent DELETE.
   Gate-2 still suppresses decided/deleted approvals at send time, so
@@ -282,7 +282,7 @@ New pins this slice (continuing the global D-series):
   'suppressed_terminal')``, so error rows never collide with the
   queued row they count for.
 
-- **D98 — parked max-age expiry (#1185).** A parked page (D81: no live
+- **D104 — parked max-age expiry (#1185).** A parked page (D81: no live
   subscriptions) older than its kind's ``PARKED_MAX_AGE_S`` bound
   expires through the loop's own audited path — one page-level
   ``'dead-letter'`` audit row (``device=''``, the D56e boundary-extension
@@ -828,7 +828,7 @@ def _note_tick_error(conn, summary, at, owner_principal, box_col,
                  % (item, type(exc).__name__, exc_text))
 
 
-#: (D98) parked max-age per event kind, seconds (issue #1185). A parked
+#: (D104) parked max-age per event kind, seconds (issue #1185). A parked
 #: page (no live subscriptions) older than its kind's bound expires
 #: through the audited dead-letter path instead of parking forever.
 #: The bounds are physics or operator judgment, stated per kind —
@@ -846,7 +846,7 @@ PARKED_MAX_AGE_S = {
     "reminder": 3600,
 }
 
-#: (D98) the parked-expiry audit key suffix (page key + U+0000 +
+#: (D104) the parked-expiry audit key suffix (page key + U+0000 +
 #: "parked-expired"). The D61/D77 pattern: the audit row must not share
 #: the page's exact key, because the enqueue boundary's D53 dedup
 #: fast-path is outcome-blind — an expiry row on the exact key would
@@ -858,7 +858,7 @@ _PARKED_EXPIRED_SUFFIX = "parked-expired"
 def _maybe_expire_parked(conn, summary, moment, at, item, row_id,
                          owner_principal, box_col, box_id, event_kind,
                          event_key, row_at, window_start):
-    """D98 — parked max-age expiry (#1185).
+    """D104 — parked max-age expiry (#1185).
     Expire an over-age parked page through the audited path.
 
     Returns True when the page was expired (the caller parks nothing
@@ -1242,7 +1242,7 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             continue
         live.append(sub)
     if not live:
-        # D98 — parked max-age expiry (#1185).
+        # D104 — parked max-age expiry (#1185).
         # An over-age parked page expires through the audited
         # dead-letter path instead of parking forever.
         if _maybe_expire_parked(conn, summary, moment, at, item, row_id,
