@@ -202,7 +202,14 @@ behaviors, which the contract requires of any conforming client:
   is what a plane implementation must satisfy; the plane half is
   tracked as issue #1392 (conformance is a plane-side test task, not
   loop-executable against the private worker from the open repo).
-  #968 stays open for that half.
+  #968 stays open for that half. **Reference port:** the open repo
+  ships `hosted/push_subscriptions_async.py` — an async port of the
+  four endpoints plus the D102 serving rule against the #988 schema,
+  droppable into the plane's `worker.py` verbatim (the loop's async-port
+  convention); it is the conformance reference the private plane must
+  satisfy, not the plane itself. The real D45 AES-256-GCM cipher lives
+  in the private worker — the port's encrypt-at-rest seam is where it
+  plugs in.
 - No email/SMS fallback: the "go look" payload discipline (D4)
   stands, and #428's §4 retirement still keys on the plane's
   `outcome='accepted'` record.

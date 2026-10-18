@@ -137,6 +137,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The hosted push-subscription plane endpoints now have a conformance
+  reference the private control plane drops into its worker: an async
+  implementation of the four owner-authenticated subscription endpoints
+  (VAPID key delivery, subscription list with display fields only,
+  subscribe with validation + upsert, unsubscribe as a real delete) plus
+  the service-worker serving rule, all pinned to the subscription wire
+  contract and the subscription database schema. Browser keys are
+  encrypted under the plane's data key before every write, and the
+  read path can never return key material. (#TBD)
+
 - New doc: the agent-jail lane convergence pin — what the jail firewall
   lane's vision looks like against the code after the recent rebuild,
   tailnet-interface, and audit-line builds shipped, which earlier findings

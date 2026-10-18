@@ -210,3 +210,29 @@ fail-closed validation; worker-shaped async-generator derivations.
 
 Run the tests: `python3 -m pytest hosted/test_push_sweep_async.py`
 from the repo root.
+
+### Push-subscription endpoints (`push_subscriptions_async.py`)
+
+The async plane-port of the GP2 subscription endpoints (#1392): the four
+owner-authenticated endpoints pinned in
+`docs/PUSH_SUBSCRIPTION_WIRE_CONTRACT.md` (decisions D98–D102) against the
+#988 D1 `push_subscriptions` schema — VAPID key delivery, display-only
+subscription list (secrets never travel on the read path), subscribe with
+loud D99 validation and single-statement upsert on the D3 key, and
+unsubscribe as a real delete — plus the D102 `/sw.js` serving rule with
+its deploy-time byte pin. Browser key material is encrypted under the
+plane's D45 data key through an injected seam (fresh nonce per
+encryption, version mismatch fails closed) before every write; the
+module never reads plaintext back (D46 write-only-after-set by
+construction). Droppable into `worker.py` verbatim: stdlib-only, no
+sync-module imports, the DB seam as awaited `_D1` calls.
+
+Tested by `test_push_subscriptions_async.py` (25 tests, neutering-verified
+non-vacuous): the full D99 400 taxonomy (device, endpoint, p256dh
+length/prefix/curve, auth length), 201-vs-200 upsert, `dead_410`
+resurrection, real-delete 404s, ownership 404s, charset-before-lookup on
+unsubscribe, fresh-nonce-per-encryption with decrypt roundtrip, and the
+service-worker content-type + deploy pin.
+
+Run the tests: `python3 -m pytest hosted/test_push_subscriptions_async.py`
+from the repo root.
