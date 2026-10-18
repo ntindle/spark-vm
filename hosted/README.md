@@ -63,6 +63,19 @@ Run the tests: `python3 -m pytest hosted/` from the repo root.
 Query smoke test: `python3 hosted/relay_liveness.py --query <vm-id>
 [--journal /path/journal.jsonl]`.
 
+## relay_tenant_wiring.py — the operator-driven rule-6 tick (R3)
+
+The relay-liveness tenant wiring never self-drives: one explicit
+`--tick` run per tenant drives rule-6 suspensions, the recovery pair,
+anchor selection, and stale-reachability resync, and prints the tick
+report as JSON (exit 0; exit 1 with the error on stderr — a broken
+instrument is loud, never silent). At most one tick per box at a time
+(D-RL34-7 — the drive decision documented in the module docstring;
+no auto cadence driver exists, and #1711 tracks the future one).
+
+Drive one tick: `python3 -m hosted.relay_tenant_wiring --store
+/path/tenants.json --tick TENANT_ID`.
+
 ## push_crypto.py — Web Push content-encoding crypto (RFC 8291), stdlib-only
 
 The design-hypothesis validation for #967 S1 (the plane Web Push sender):
