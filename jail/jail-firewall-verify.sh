@@ -122,9 +122,16 @@ boot_seconds() {
 # grace (tailscaled may not be up yet; the next ticks re-check). A
 # conf with no iifname at all is out of scope here: the pin governs
 # table structure.
+#
+# Extraction anchors on the SSH DNAT specifically: the template's
+# FIRST iifname line is the proxy DNAT's "ve-jail"
+# (dnat ip to 127.0.0.1), so a bare "first iifname" grab watches the
+# wrong interface and would fail-closed on every healthy box (Security
+# round-1 blocker). The SSH DNAT is the dnat rule whose target is not
+# the proxy loopback.
 tailnet_interface_problem() {
     local ifname
-    ifname="$(sed -n 's/.*iifname "\([^"]*\)".*/\1/p' "$CONF" 2>/dev/null | head -n 1)"
+    ifname="$(sed -n '/dnat ip to 127\.0\.0\.1/!s/.*iifname "\([^"]*\)".*dnat ip to .*/\1/p' "$CONF" 2>/dev/null | head -n 1)"
     [ -z "$ifname" ] && return 0
     if ! "$IP" link show dev "$ifname" >/dev/null 2>&1; then
         if [ "$(boot_seconds)" -lt "$TAILNET_BOOT_GRACE_SECS" ]; then
