@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The jail build smoke suite now pins the three test gaps the #1666
+  review left behind: the interface-name shape guard is ordered before
+  the firewall conf render (a guard placed after the sed render would
+  pin nothing), the missing-interface error message is asserted to
+  name `$JAIL_TAILNET_IF` on the guard body alone (the old window
+  included the probe line that carries the variable, so the assertion
+  was vacuous), and the duplicated `NFT_EOF` heredoc helper is now one
+  module-level function. (#1675)
+
 - Push pages parked with no subscribed devices now expire on a per-type
   age bound instead of lingering forever. A parked digest older than 25
   hours, a token-expiry warning or box-revoked page older than 24 hours,

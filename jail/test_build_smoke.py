@@ -61,6 +61,16 @@ def active(src):
         if not line.lstrip().startswith("#"))
 
 
+def _heredoc_body(src):
+    """Extract the body of the quoted NFT_EOF nftables heredoc from
+    build.sh source (the DNAT/filter table render). Shared by the
+    SSH-port and tailnet-interface pin suites; a single definition so a
+    change to the heredoc shape updates every consumer (issue #1675)."""
+    m = re.search(r"<<'NFT_EOF'[^\n]*\n(.*?)\nNFT_EOF$", src, re.M | re.S)
+    assert m, "quoted NFT_EOF heredoc not found"
+    return m.group(1)
+
+
 class TestSyntax:
     def test_bash_syntax(self):
         p = subprocess.run(["bash", "-n", BUILD_SH],
@@ -297,14 +307,9 @@ class TestSshPortSingleSourced:
         assert m, "JAIL_SSH_PORT assignment not found"
         return m.group(1)
 
-    def _heredoc_body(self, src):
-        m = re.search(r"<<'NFT_EOF'[^\n]*\n(.*?)\nNFT_EOF$", src, re.M | re.S)
-        assert m, "quoted NFT_EOF heredoc not found"
-        return m.group(1)
-
     def test_dnat_rule_uses_placeholder(self, src, active):
         port = self._port(src)
-        body = self._heredoc_body(src)
+        body = _heredoc_body(src)
         assert body.count("@@JAIL_SSH_PORT@@") == 1
         assert ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
@@ -329,7 +334,7 @@ class TestSshPortSingleSourced:
             ["sh", "-c",
              f'sed -e "s/@@JAIL_SSH_PORT@@/{port}/g" '
              '-e "s/@@JAIL_TAILNET_IF@@/tailscale0/g"'],
-            input=self._heredoc_body(src), capture_output=True, text=True)
+            input=_heredoc_body(src), capture_output=True, text=True)
         assert p.returncode == 0, f"sed render failed:\n{p.stderr}"
         rendered = p.stdout
         assert "@@" not in rendered
@@ -349,18 +354,13 @@ class TestTailnetInterfaceSingleSourced:
     match), which used to leave the agent's only SSH door dead with no
     error anywhere."""
 
-    def _heredoc_body(self, src):
-        m = re.search(r"<<'NFT_EOF'[^\n]*\n(.*?)\nNFT_EOF$", src, re.M | re.S)
-        assert m, "quoted NFT_EOF heredoc not found"
-        return m.group(1)
-
     def test_interface_is_env_overridable_variable(self, src):
         # Single-sourced like JAIL_SSH_PORT, with the documented default.
         assert ('JAIL_TAILNET_IF="${JAIL_TAILNET_IF:-tailscale0}"'
                 ) in src
 
     def test_heredoc_uses_placeholder_on_both_rules(self, src, active):
-        body = self._heredoc_body(src)
+        body = _heredoc_body(src)
         assert body.count("@@JAIL_TAILNET_IF@@") == 2
         assert ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
@@ -382,7 +382,12 @@ class TestTailnetInterfaceSingleSourced:
         assert ('/usr/sbin/ip link show "$JAIL_TAILNET_IF" '
                 '>/dev/null 2>&1') in active
         probe = active.index('/usr/sbin/ip link show "$JAIL_TAILNET_IF"')
-        guard = "\n".join(active[probe:].splitlines()[:5])
+        # The window is the guard BODY only (the three lines after the
+        # probe: echo, exit 1, fi): the probe line itself carries
+        # $JAIL_TAILNET_IF and the next guard's condition line does too,
+        # so a window that touches either would make the error-message
+        # assertion vacuous (issue #1675).
+        guard = "\n".join(active[probe:].splitlines()[1:4])
         assert "exit 1" in guard, \
             "missing-interface guard must exit 1 loudly"
         assert "JAIL_TAILNET_IF" in guard, \
@@ -426,6 +431,13 @@ class TestTailnetInterfaceSingleSourced:
             r'\[\[ "\$JAIL_TAILNET_IF" =~ \^\[a-zA-Z0-9\]\[a-zA-Z0-9\._-\]'
             r'\{0,14\}\$ \]\]', active), \
             "interface-name shape guard not found"
+        # ... and the guard must RUN before the conf render: the shape
+        # check's job is to keep metacharacters out of the sed render, so
+        # a guard placed after the render would pin nothing (issue #1675).
+        shape = active.index('[[ "$JAIL_TAILNET_IF" =~ ^[a-zA-Z0-9]')
+        render = active.index("tee /etc/nftables-jail.conf")
+        assert shape < render, \
+            "shape guard must run before the conf render"
 
     def test_rendered_conf_carries_interface(self, src):
         # Prove the two-placeholder mechanism end to end: render the
@@ -436,7 +448,7 @@ class TestTailnetInterfaceSingleSourced:
             ["sh", "-c",
              'sed -e "s/@@JAIL_SSH_PORT@@/2222/g" '
              '-e "s/@@JAIL_TAILNET_IF@@/tailscale0/g"'],
-            input=self._heredoc_body(src), capture_output=True, text=True)
+            input=_heredoc_body(src), capture_output=True, text=True)
         assert p.returncode == 0, f"sed render failed:\n{p.stderr}"
         rendered = p.stdout
         assert "@@" not in rendered
