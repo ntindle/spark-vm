@@ -2243,8 +2243,11 @@ class SwapAddon:
         SELF-SERVICE (advisory) for the same-uid operator, who holds
         NOPASSWD cred-registry-set and can lift any of them unilaterally.
         The one scoping control the operator cannot lift is the
-        root-managed hosts.allow file, which the swap path checks
-        separately.
+        main proxy's root-managed hosts.allow file, which the swap path
+        checks separately. (The inference proxy's inference-hosts.allow
+        is operator-appendable via the narrow tee -a sudoers rule, so
+        the inference registry has no unilateral-lift-proof boundary --
+        its writer's advisory says so explicitly.)
 
         Issue #199: the verdict is cached per request. The verdict is a
         pure function of (registry, grants, name, host, method, path)

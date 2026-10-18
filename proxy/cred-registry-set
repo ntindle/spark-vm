@@ -28,11 +28,18 @@
 # The controls ARE enforced where it matters: against the proxied agent
 # processes (which cannot touch the registry at all) the addon enforces the
 # registry scoping on every swap, and the one control the operator cannot
-# lift unilaterally is the root-managed hosts.allow file in the swap path.
+# lift unilaterally is the main proxy's root-managed hosts.allow file.
 # Loosening verbs (clear-method-limit, clear-path-limit, set-scrub false)
 # print a one-line stderr advisory to keep this honest; tightening verbs
 # (add/remove-host, add/remove-method, add/remove-path, set-scrub true)
-# stay quiet.
+# stay quiet -- DELIBERATE (FOLLOW-adv1): add-* are the normal provisioning
+# verbs, so the advisory fires on REMOVING a limit, not on setting one up.
+# The advisory text names the right boundary for the registry being
+# written (FOLLOW-adv2/adv3): the inference registry's inference-hosts.allow
+# is operator-appendable via the narrow tee -a sudoers rule, so it has no
+# unilateral-lift-proof boundary and gets bleaker text; an unrecognized
+# registry gets a bleak generic fallback rather than borrowing the main
+# proxy's claim (fail-safe, not fail-open).
 set -euo pipefail
 
 # Issue #90: CRED_REGISTRY_FILE / CRED_REGISTRY_LOCK exist ONLY for tests.
@@ -130,13 +137,31 @@ def fail(msg):
 # constraint -- so every verb that LOOSENS it says so on stderr. The
 # advisory is informational only: exit code and registry behavior are
 # unchanged. The enforced boundary the operator cannot lift unilaterally
-# is the root-managed hosts.allow file in the swap path.
+# is the main proxy's root-managed hosts.allow file; the inference
+# registry has no such boundary (its inference-hosts.allow is
+# operator-appendable via the narrow tee -a sudoers rule), so it gets
+# bleaker text. A registry the selector does not recognize gets a
+# bleak generic fallback -- never the reassuring main text. Selected by
+# effective registry path (not the wrapper flag) so it stays correct
+# under the inference wrapper and is hermetic-testable via scratch
+# files named credentials.json / inference-registry.json.
 def advisory(msg):
     sys.stderr.write("cred-registry-set: advisory: %s\n" % msg)
 
-_ADVISORY_TEXT = ("registry scoping is self-service/advisory for this "
-                  "operator (#87); the enforced boundary is the "
+_ADVISORY_MAIN = ("registry scoping is self-service/advisory for this "
+                  "operator (#87); the enforced boundary the operator "
+                  "cannot lift unilaterally is the main proxy's "
                   "root-managed hosts.allow")
+_ADVISORY_INFERENCE = ("registry scoping is self-service/advisory for this "
+                       "operator (#87); on the inference registry there is "
+                       "no unilateral-lift-proof boundary -- the inference "
+                       "proxy's inference-hosts.allow is operator-appendable "
+                       "via the narrow tee -a sudoers rule")
+# A registry the selector does not know is not the main registry: assert
+# no boundary rather than borrow the main proxy's. Fail-safe, not fail-open.
+_ADVISORY_UNKNOWN = ("registry scoping is self-service/advisory for this "
+                     "operator (#87); no unilateral-lift-proof boundary is "
+                     "asserted for this registry")
 
 args = sys.argv[1:]
 ACTIONS = ("set", "set-with-hosts", "remove", "add-host", "remove-host",
@@ -238,6 +263,18 @@ else:
     reg_path = os.environ.get("CRED_REGISTRY_FILE",
                               "/home/swapd/credentials.json")
 reg_dir = os.path.dirname(reg_path) or "."
+
+# FOLLOW-adv3: the advisory text follows the registry being written.
+# Explicit match on known registries with a bleak generic fallback --
+# defaulting unknown registries to the main text would assert a boundary
+# that exists for exactly one registry (fail-open in the wrong direction).
+_reg_base = os.path.basename(reg_path)
+if _reg_base == "credentials.json":
+    _advisory_text = _ADVISORY_MAIN
+elif _reg_base == "inference-registry.json":
+    _advisory_text = _ADVISORY_INFERENCE
+else:
+    _advisory_text = _ADVISORY_UNKNOWN
 
 # All read-modify-write cycles run under an exclusive flock on a
 # dedicated lock file (never replaced), so two concurrent invocations
@@ -494,7 +531,7 @@ elif action == "clear-method-limit":
         fail("no such credential '%s'" % (name,))
     entry.pop("allowed_methods", None)
     print("cleared method limit for '%s'; now unrestricted" % (name,))
-    advisory(_ADVISORY_TEXT)
+    advisory(_advisory_text)
     save()
 elif action in ("add-path", "remove-path"):
     # Grant scoping, approved half: static per-credential path prefixes.
@@ -545,7 +582,7 @@ elif action == "clear-path-limit":
         fail("no such credential '%s'" % (name,))
     entry.pop("allowed_paths", None)
     print("cleared path limit for '%s'; now unrestricted" % (name,))
-    advisory(_ADVISORY_TEXT)
+    advisory(_advisory_text)
     save()
 elif action == "set-scrub":
     # Finding 36: opt an entry (usernames, emails) out of response
@@ -569,5 +606,5 @@ elif action == "set-scrub":
     save()
     print("set scrub=%s for '%s' entry '%s'" % (flag, name, entry))
     if flag == "false":
-        advisory(_ADVISORY_TEXT)
+        advisory(_advisory_text)
 PYEOF

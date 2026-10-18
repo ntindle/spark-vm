@@ -114,5 +114,98 @@ class AdvisoryTests(unittest.TestCase):
                 self.assertNotIn("gh", line)
 
 
+class InferenceAdvisoryTests(unittest.TestCase):
+    """FOLLOW-adv2/adv3: the advisory names the right boundary for the
+    registry being written.
+
+    The inference registry is exercised through the real
+    cred-registry-set-inference wrapper (CRED_REGISTRY_SET pinned to the
+    repo writer; CRED_REGISTRY_FILE at a scratch *inference-registry.json*
+    so the path-based text selection is exercised hermetically -- no
+    /home/swapd, no sudo, no swapd user).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.reg = os.path.join(self.tmp.name, "inference-registry.json")
+        self.lock = os.path.join(self.tmp.name, "inference-registry.json.lock")
+        self.writer_dir = str(Path(__file__).resolve().parent)
+        self.env = dict(os.environ,
+                        CRED_REGISTRY_FILE=self.reg,
+                        CRED_REGISTRY_LOCK=self.lock,
+                        CRED_REGISTRY_SET=os.path.join(self.writer_dir,
+                                                       "cred-registry-set"))
+        p = self.run_wrapper("set", "llm-api", "access_token",
+                             '"bearer_header"')
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_wrapper(self, *argv):
+        wrapper = os.path.join(self.writer_dir, "cred-registry-set-inference")
+        return subprocess.run(["bash", wrapper] + list(argv), env=self.env,
+                              capture_output=True, text=True, timeout=30)
+
+    def read_reg(self):
+        with open(self.reg, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_inference_loosening_verb_advises_inference_text(self):
+        p = self.run_wrapper("clear-method-limit", "llm-api")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(ADVISORY_MARKER, p.stderr)
+        # The inference text -- not the main-proxy text.
+        self.assertIn("inference-hosts.allow", p.stderr)
+        self.assertNotIn("main proxy's", p.stderr)
+        # Behavior unchanged: limit gone, normal stdout confirmation.
+        self.assertNotIn("allowed_methods", self.read_reg()["llm-api"])
+        self.assertIn("now unrestricted", p.stdout)
+
+    def test_inference_advisory_never_leaks_values(self):
+        p = self.run_wrapper("clear-method-limit", "llm-api")
+        for line in p.stderr.splitlines():
+            if ADVISORY_MARKER in line:
+                self.assertNotIn("llm-api", line)
+
+    def test_main_registry_keeps_main_text(self):
+        # Same verbs against the main registry name keep the main text.
+        reg = os.path.join(self.tmp.name, "credentials.json")
+        env = dict(self.env, CRED_REGISTRY_FILE=reg,
+                   CRED_REGISTRY_LOCK=reg + ".lock")
+        writer = os.path.join(self.writer_dir, "cred-registry-set")
+        p0 = subprocess.run([writer, "set", "gh", "access_token",
+                             '"bearer_header"'], env=env, capture_output=True,
+                            text=True, timeout=30)
+        self.assertEqual(p0.returncode, 0, p0.stderr)
+        p = subprocess.run([writer, "clear-method-limit", "gh"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(ADVISORY_MARKER, p.stderr)
+        self.assertIn("main proxy's", p.stderr)
+        self.assertNotIn("inference-hosts.allow", p.stderr)
+
+    def test_unknown_registry_gets_bleak_generic_text(self):
+        # Architecture review (round 1): an unrecognized registry must not
+        # borrow the main proxy's reassuring boundary claim -- fail-safe,
+        # not fail-open.
+        reg = os.path.join(self.tmp.name, "other-registry.json")
+        env = dict(self.env, CRED_REGISTRY_FILE=reg,
+                   CRED_REGISTRY_LOCK=reg + ".lock")
+        writer = os.path.join(self.writer_dir, "cred-registry-set")
+        p0 = subprocess.run([writer, "set", "gh", "access_token",
+                             '"bearer_header"'], env=env, capture_output=True,
+                            text=True, timeout=30)
+        self.assertEqual(p0.returncode, 0, p0.stderr)
+        p = subprocess.run([writer, "clear-method-limit", "gh"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(ADVISORY_MARKER, p.stderr)
+        self.assertIn("no unilateral-lift-proof boundary is asserted",
+                      p.stderr)
+        self.assertNotIn("main proxy's", p.stderr)
+        self.assertNotIn("inference-hosts.allow", p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

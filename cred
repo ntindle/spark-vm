@@ -24,7 +24,7 @@ This CLI reaches that store ONLY through narrow sudo helpers:
                       scrub flags) are self-service for this operator --
                       advisory, not constraints -- since the operator runs
                       this CLI with the same uid that may lift them. The
-                      root-managed hosts.allow file is the boundary the
+                      main proxy's root-managed hosts.allow file is the boundary the
                       operator cannot lift unilaterally.
   cred unregister <name> [--entry <entry>]
                       remove a credential's registry entry
@@ -246,7 +246,7 @@ USAGE = """usage: cred <command> [args]
                                and scrub flags are self-service controls for
                                this operator -- advisory, not constraints
                                (the operator may lift them via sudo); the
-                               root-managed hosts.allow is the boundary that
+                               main proxy's root-managed hosts.allow is the boundary that
                                cannot be lifted unilaterally.
   cred unregister <name> [--entry <entry>]
                                remove a credential's registry entry

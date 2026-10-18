@@ -149,9 +149,18 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   but the operator holds NOPASSWD `cred-registry-set` and can lift any of
   them unilaterally (e.g. `set-scrub github access_token false` re-exposes
   echoed secrets) — no confirmation, no second control. The one scoping
-  control the operator cannot lift is the root-managed `hosts.allow` file,
-  which the swap path checks separately. Loosening registry verbs now print
-  a one-line stderr advisory to keep this honest.
+  control the operator cannot lift is the main proxy's root-managed
+  `hosts.allow` file, which the swap path checks separately. Loosening
+  registry verbs (clearing a limit, `set-scrub false`) print a one-line
+  stderr advisory to keep this honest; provisioning verbs (`add-host`,
+  `add-method`, `add-path`) stay quiet by design — the advisory fires on
+  *removing* a limit, not on setting one up. The advisory is
+  registry-aware: the inference registry's `inference-hosts.allow` is
+  operator-appendable via the narrow `tee -a` sudoers rule, so the
+  inference path has no unilateral-lift-proof boundary and its advisory
+  says so explicitly; a registry the writer does not recognize gets a
+  generic fallback that asserts no boundary rather than borrowing the
+  main proxy's claim.
 
 ## The human-context boundary on direct secret reads (#671)
 
