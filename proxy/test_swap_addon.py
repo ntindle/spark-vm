@@ -2732,6 +2732,58 @@ class AuditFieldSanitizationTests(unittest.TestCase):
         self.assertIn("tenant=-", lines[0])
         self.assertNotIn("tenant= ", lines[0])
 
+    def test_refused_writers_carry_tenant(self):
+        """Issue #1655: all four refusal writers carry the `tenant=`
+        column between `ip=` and `flow=` — the #1653 unverified hint —
+        and `flow=` stays terminal on every shape."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": "acme"}):
+                lines = self._audit_in_tmp(d, lambda a: (
+                    a._audit_refused("api.example.com", "github",
+                                     "unknown-credential", flow_id="f1"),
+                    a._audit_note("api.example.com", "json-swap",
+                                  "invalid-json-after-swap", flow_id="f2"),
+                    a._audit_authority_mismatch(
+                        "api.example.com", "evil.example", "203.0.113.9",
+                        flow_id="f3"),
+                    a._audit_ssrf_refused("api.example.com", "203.0.113.9",
+                                          "private-range", flow_id="f4"),
+                ))
+        self.assertEqual(len(lines), 4, lines)
+        for line, flow in zip(lines, ("f1", "f2", "f3", "f4")):
+            self.assertRegex(line,
+                             r" ip=\S+ tenant=acme flow=%s$" % flow)
+
+    def test_refused_tenant_hint_cannot_forge_lines(self):
+        """Issue #1655: a hostile SWAP_TENANT cannot forge extra lines or
+        tokens on the highest-stakes forensic line (`refused=egress`,
+        finding 38) — it runs through the same sanitizer as every other
+        audit field."""
+        with tempfile.TemporaryDirectory() as d:
+            hostile = "acme\nts=1970-01-01T00:00:00 host=fake swapped=yes"
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": hostile}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit_ssrf_refused(
+                        "api.example.com", "203.0.113.9", "private-range"))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertNotIn("\\n", lines[0])
+        self.assertIn("tenant=acmets=1970-01-01T00:00:00host=fakeswapped=yes",
+                      lines[0])
+        self.assertTrue(lines[0].endswith("flow=-"), lines)
+
+    def test_refused_tenant_whitespace_only_renders_dash(self):
+        """Issue #1655: a whitespace-only SWAP_TENANT renders `tenant=-`
+        on refused lines too, so the S2 strict token parser never sees an
+        empty `tenant=` token."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"SWAP_TENANT": "   "}):
+                lines = self._audit_in_tmp(
+                    d, lambda a: a._audit_note(
+                        "api.example.com", "json-swap", "invalid-json"))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("tenant=-", lines[0])
+        self.assertNotIn("tenant= ", lines[0])
+
     def test_audit_batch_lines_carry_tenant(self):
         """Issue #199 batch writer: `_audit_batch` lines carry the
         same `tenant=` field as `_audit` (both go through

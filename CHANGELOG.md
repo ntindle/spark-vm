@@ -118,6 +118,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   not an identity claim, and enforcement still belongs to the
   multi-tenancy work. (#1653)
 
+- The swap proxy's audit trail now records the `tenant` field on every
+  `refused=` line (the unbound-host, note, authority-mismatch, and egress
+  refusal writers), so a future multi-tenant host can attribute blocked
+  exfiltration attempts and other refusals to a tenant without changing
+  the log format later. The value is the same unverified operator hint
+  as on `swapped=` lines — `SWAP_TENANT` when set, otherwise the box
+  hostname — forensic context only, never an identity claim, and at its
+  least trustworthy on refusal lines (the threat model there includes a
+  compromised tenant). (#TBD)
+
 - Pinned down what the release-gating channel's remaining fleet
   alerts need: per-box gate staleness will surface on the alert board
   (no new command), and the fleet-wide stale-gate rule's signal source
