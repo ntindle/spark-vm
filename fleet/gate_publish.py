@@ -51,6 +51,7 @@ Stdlib only. Never prints key material (not even a prefix).
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -106,13 +107,25 @@ def canonical_body(body: dict) -> bytes:
 
 
 def _load_key(key_file: str) -> bytes:
-    """Load the controller MAC key. Refuses keys readable by group/other."""
-    st = os.stat(key_file)
-    if st.st_mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP |
-                     stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
-        sys.exit(f"ERROR: key file {key_file} is readable by group/other — "
-                 "controller keys must be mode 0600 (see design §5).")
-    with open(key_file, "rb") as fh:
+    """Load the controller MAC key. Refuses keys readable by group/other.
+
+    The open is O_NOFOLLOW and the permission check runs on the opened fd
+    (fstat), so a pre-planted symlink at the key path fails loud instead
+    of redirecting the read, and the check cannot be raced between stat
+    and open (the MSP FOLLOW-msp6/msp7 discipline)."""
+    try:
+        fd = os.open(key_file, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            sys.exit(f"ERROR: controller key {key_file} is a symlink — "
+                     "refusing (key files must be real files, mode 0600).")
+        sys.exit(f"ERROR: cannot open controller key {key_file}: {exc}")
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if st.st_mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP |
+                         stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
+            sys.exit(f"ERROR: key file {key_file} is readable by group/other — "
+                     "controller keys must be mode 0600 (see design §5).")
         # Exact bytes are the key; trailing CR/LF bytes are stripped so an
         # operator's `echo $KEY > file` doesn't silently change the MAC.
         key = fh.read().rstrip(b"\r\n")
@@ -418,6 +431,37 @@ def _rotation_age_days(opened_at: str) -> int:
             - _parse_ledger_ts(opened_at)).days
 
 
+class _LedgerLock:
+    """Advisory exclusive lock for the rotation ledger, held on the ledger's
+    dedicated lockfile (never the ledger itself — the atomic rename replaces
+    the ledger's inode). The lock is acquired EAGERLY in __init__ (blocking
+    LOCK_EX), so a lock-open failure raises at construction — inside the
+    caller's try — and the advertised loud handlers actually fire (a
+    @contextlib.contextmanager would defer the open to __enter__, leaving
+    those handlers dead code). The fd dies with the process, so a killed run
+    can never wedge future runs. Both the publish path (process_rotation)
+    and the manual path (close_rotation) take this lock, so a cron publish
+    and a --rotation-complete can never interleave their load->modify->save
+    and silently lose each other's update. Any future writer of the ledger
+    must take the same lock (see fleet/README.md "Key rotation &
+    retirement")."""
+
+    def __init__(self, log_path: str):
+        self._lf = open(log_path + ".lock", "w")
+        try:
+            fcntl.flock(self._lf.fileno(), fcntl.LOCK_EX)
+        except BaseException:
+            self._lf.close()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._lf.close()
+        return False
+
+
 def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
     """Update the rotation ledger for a publish signed with key_id and emit
     reminders. A key change opens a rotation window (loud once, naming the
@@ -428,22 +472,20 @@ def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
     signing key.
 
     The whole load->modify->save runs under an advisory exclusive lock so
-    concurrent publishers cannot silently drop each other's rotation events
-    (B2); the lock lives on a dedicated lockfile, never the ledger itself,
+    concurrent publishers cannot silently drop each other's rotation events;
+    the lock lives on a dedicated lockfile, never the ledger itself,
     because the atomic rename replaces the ledger's inode. A lock that
     cannot be taken skips the reminders loudly but never blocks the
     document; a save failure propagates to main's wrapper, which does the
     same (B1)."""
-    lock_path = log_path + ".lock"
     try:
-        lf = open(lock_path, "w")
+        lock = _LedgerLock(log_path)
     except OSError as exc:
         print(f"WARNING: cannot lock rotation ledger ({exc}); rotation "
               "reminders unavailable, but the gate document publishes "
               "normally.", file=sys.stderr)
         return
-    with lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    with lock:
         log = _load_rotation_log(log_path)
         last = _last_key_id(log)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -496,29 +538,38 @@ def close_rotation(old_key_id: str, log_path: str) -> None:
     Exits non-zero if no such window is open — the operator typed the wrong
     key, or nothing was open to close. Reports any still-open windows
     honestly instead of claiming sole-key status while other keys remain
-    valid (B3)."""
-    log = _load_rotation_log(log_path)
-    for ev in reversed(log["rotations"]):
-        if (ev.get("from_key_id") == old_key_id
-                and ev.get("closed_at") is None):
-            ev["closed_at"] = datetime.now(timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ")
-            _save_rotation_log(log_path, log)
-            remaining = _open_rotations(log)
-            if remaining:
-                pairs = ", ".join(
-                    f"{e['from_key_id']}->{e['to_key_id']}"
-                    for e in remaining)
-                print(f"rotation window closed: {old_key_id} retired; "
-                      f"{len(remaining)} other window(s) STILL OPEN: "
-                      f"{pairs} — those keys remain valid until retired "
-                      "and --rotation-complete'd.")
-            else:
-                print(f"rotation window closed: {old_key_id} retired; "
-                      f"{ev['to_key_id']} is the sole signing key.")
-            return
-    sys.exit(f"ERROR: no open rotation window retiring {old_key_id} "
-             f"(ledger: {log_path}).")
+    valid (B3). Takes the same ledger lock as process_rotation: a manual
+    close racing a cron publish must serialize, not silently lose the
+    close (the lost update would keep a retired key "open")."""
+    try:
+        lock = _LedgerLock(log_path)
+    except OSError as exc:
+        sys.exit(f"ERROR: cannot lock rotation ledger {log_path} ({exc}); "
+                 "rotation close refused rather than racing a concurrent "
+                 "publisher — retry once the publish finishes.")
+    with lock:
+        log = _load_rotation_log(log_path)
+        for ev in reversed(log["rotations"]):
+            if (ev.get("from_key_id") == old_key_id
+                    and ev.get("closed_at") is None):
+                ev["closed_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+                _save_rotation_log(log_path, log)
+                remaining = _open_rotations(log)
+                if remaining:
+                    pairs = ", ".join(
+                        f"{e['from_key_id']}->{e['to_key_id']}"
+                        for e in remaining)
+                    print(f"rotation window closed: {old_key_id} retired; "
+                          f"{len(remaining)} other window(s) STILL OPEN: "
+                          f"{pairs} — those keys remain valid until retired "
+                          "and --rotation-complete'd.")
+                else:
+                    print(f"rotation window closed: {old_key_id} retired; "
+                          f"{ev['to_key_id']} is the sole signing key.")
+                return
+        sys.exit(f"ERROR: no open rotation window retiring {old_key_id} "
+                 f"(ledger: {log_path}).")
 
 
 def main(argv=None) -> int:
@@ -595,15 +646,33 @@ def main(argv=None) -> int:
         print(f"WARNING: {prev_warn}", file=sys.stderr)
 
     tmp = args.out + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # 0600 from the first byte: the tmp is created O_EXCL so a pre-planted
+    # symlink at the tmp path fails loud instead of redirecting the write,
+    # and there is no window between replace and chmod where the document
+    # is group/other-readable. A stale tmp from a crashed earlier publish
+    # is unlinked and retried once; a second failure is real contention or
+    # a plant and fails loud (a plant can only DoS the publish, never
+    # redirect it — the open refuses to follow it).
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            os.unlink(tmp)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            sys.exit(f"ERROR: cannot create publish temp file {tmp}: {exc}")
+    except OSError as exc:
+        sys.exit(f"ERROR: cannot create publish temp file {tmp}: {exc}")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, sort_keys=True, indent=2, ensure_ascii=False)
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, args.out)
-    # The published document is never world-readable: it transits the
-    # operator's sync path only (§4), and carries no secrets — but the
-    # hmac field is keyed material's output, so 0600 is the honest default.
+    # The published document is 0600 from its first byte: it transits the
+    # operator's sync path only (§4), and the hmac field is keyed
+    # material's output, so 0600 is the honest default. The chmod also
+    # tightens a pre-existing gate.json an older tool version left looser.
     os.chmod(args.out, 0o600)
     if prev_freeze is not None and prev_freeze != bool(args.freeze):
         received_at = datetime.now(timezone.utc).strftime(
