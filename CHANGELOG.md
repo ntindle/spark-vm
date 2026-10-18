@@ -55,7 +55,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the cua-driver release asset under the wrong filename (upstream names them
   `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses
   the correct name, and a pin test keeps the recipe's asset name identical to
-  the self-update tool's. (#TBD)
+  the self-update tool's. (#1689)
 
 ## [0.9.0] - 2026-10-18
 
