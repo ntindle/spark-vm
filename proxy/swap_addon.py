@@ -795,9 +795,15 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ENTRY_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+)=(.*)$", re.DOTALL)
 PLACEHOLDER_RE = re.compile(r"hsurr:([A-Za-z0-9_-]+)(?::([A-Za-z0-9_-]+))?")
 # Percent-encoded form, as sent in application/x-www-form-urlencoded bodies
-# (browsers encode ':' as %3A). Case-insensitive on the hex digits.
+# (browsers encode ':' as %3A or %3a). The prefix is case-SENSITIVE by design,
+# matching PLACEHOLDER_RE: an uppercase `HSURR%3A` prefix is never treated as
+# a placeholder (decided 2026-10-18, O2 security-sweep follow-up). The
+# direction matters: swapping MORE means inserting real secrets where the
+# writer may not have expected a placeholder; not swapping leaks nothing —
+# the literal text passes through unchanged. Only the percent-hex digits are
+# case-insensitive, because %3a vs %3A both occur on the wire.
 ENCODED_PLACEHOLDER_RE = re.compile(
-    r"hsurr%3A([A-Za-z0-9_-]+)(?:%3A([A-Za-z0-9_-]+))?", re.IGNORECASE)
+    r"hsurr%3[aA]([A-Za-z0-9_-]+)(?:%3[aA]([A-Za-z0-9_-]+))?")
 # Headers that must never be swapped: a substituted Referer/Origin would
 # hand the real value to the server's logs on every later request.
 NEVER_SWAP_HEADERS = frozenset({"referer", "origin"})
@@ -2994,10 +3000,11 @@ class SwapAddon:
         never resolves (e.g. wire `hsurr:GitHub` audited as `hsurr:github`),
         and an uppercase `HSURR:` literal prefix — which the swap engine
         never treats as a placeholder — would audit a phantom credential.
-        Note the percent-encoded form (ENCODED_PLACEHOLDER_RE) is
-        case-insensitive by design (re.IGNORECASE, for the hex digits): both
-        the warn and swap paths share the same regexes, so the audited name
-        is exactly what the engine would have resolved.
+        The percent-encoded form (ENCODED_PLACEHOLDER_RE) is likewise
+        prefix-case-sensitive — only the %3A/%3a hex digits are
+        case-insensitive (decided 2026-10-18, O2 security-sweep follow-up) —
+        so both the warn and swap paths share the same regexes, and the
+        audited name is exactly what the engine would have resolved.
         """
         hay = b"hsurr:"
         hay_enc = b"hsurr%3a"  # urlencoded forms percent-encode the colon
