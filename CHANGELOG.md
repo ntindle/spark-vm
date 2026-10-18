@@ -50,6 +50,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+- Documented the hosted push lane's async enqueue boundary and async
+  endpoint-driven push mappings in the hosted component README — two
+  shipped reference modules that had no coverage; their test-suite sizes
+  are pinned so the docs can't drift. (#1692)
+
 ### Fixed
 - The jail build now logs the network flows still open through the jail right
   after the firewall ruleset is re-applied: a re-apply does not flush
