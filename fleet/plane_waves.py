@@ -124,7 +124,8 @@ Store files (beyond the S1/S3 stores):
                               leaves the advance unrecorded; re-running
                               promote absorbs the advance (the rollout
                               identity check passes and the gate evaluates
-                              the next wave) without regenerating the
+                              the advanced live wave) without regenerating
+                              the
                               missing record — the missing record stays
                               missing, and the operator reads the gap from
                               the wave file's own updated_at. The mirror
@@ -756,6 +757,8 @@ def cmd_promote(args):
             fresh["notes"] = (f"{prev_notes} {args.notes}".strip()
                               if prev_notes else args.notes)
         _atomic_write_json(store_dir, WAVES_NAME, fresh)
+        # #1636: the record goes AFTER the waves.json advance (see the
+        # waves_journal.jsonl store-file entry) — do not flip this order.
         _audit_locked(
             store_dir, "promote", template_version=template,
             from_wave=live_wave, to_wave=new_live,
@@ -795,6 +798,8 @@ def cmd_halt(args):
         }
         waves["updated_at"] = plane_inventory.now_iso()
         _atomic_write_json(store_dir, WAVES_NAME, waves)
+        # #1636: the record goes AFTER the waves.json advance (see the
+        # waves_journal.jsonl store-file entry) — do not flip this order.
         _audit_locked(
             store_dir, "halt", template_version=waves["template_version"],
             wave=wave, reason=reason, notes=args.notes or "",

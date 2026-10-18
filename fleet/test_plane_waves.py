@@ -1007,6 +1007,7 @@ def test_promote_crash_window_absorbed_not_regenerated(store):
     assert len(promoted) == 1
     assert promoted[0]["from_wave"] == first_next
     assert promoted[0]["to_wave"] == _json(p)["to_wave"]
+    assert _waves_json(store)["live_wave"] == promoted[0]["to_wave"]
 
 
 def test_promote_audit_records_stale_hours(store):
