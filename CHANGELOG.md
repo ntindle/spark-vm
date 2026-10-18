@@ -71,14 +71,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (identity and key resolution, gate MAC + TTL verification, wave
   assignment, and the no-signal-to-frozen contract) — previously exercised
   only end-to-end, so edge behavior like TTL skew windows and canary
-  pin-only semantics is now individually guarded. (#TBD)
+  pin-only semantics is now individually guarded. (#1707)
 
 ### Fixed
 - A box whose release-gating files were unreadable or malformed crashed
   the box-side gate query with a traceback instead of failing closed to
   frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII
   gate signature, and malformed wave data are now all treated as
-  no-signal, like every other untrusted input. (#TBD)
+  no-signal, like every other untrusted input. (#1707)
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
   browser-encoded form bodies) is now prefix-case-sensitive like the plain
   form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase
