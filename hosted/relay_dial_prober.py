@@ -68,6 +68,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import math
 import os
 import re
 import socket
@@ -120,6 +121,19 @@ _KEX_ALGO = b"diffie-hellman-group-exchange-sha256"
 _MAX_PACKET_LEN = 35000  # sanity bound on one SSH binary packet
 _MAX_BANNER_LINE = 512  # banner lines longer than this are hostile
 _MAX_PRE_BANNER_LINES = 5  # RFC 4253 §4.2 tolerance for pre-version lines
+
+# Input-contract bound on probe timeout magnitudes (#1695): the absolute
+# deadline (start + connect_timeout_s + io_timeout_s) is the prober's
+# anti-tarpit property, and it is only as real as the parameters feeding
+# it. A caller passing connect_timeout_s=1e9 would turn the deadline into
+# a ~63-year bound — effectively no deadline at all. Each phase is capped
+# at the R2b cadence default (relay_path_state.DEFAULT_CADENCE_S): a
+# single probe phase longer than one full cadence interval is never sane,
+# while 30x headroom above the 10s io default keeps every legitimate
+# caller (R2b uses the 5s/10s signature defaults) far inside. NaN is
+# rejected too — it slips both the positivity and the magnitude check
+# (nan comparisons are False) and would silently neuter the deadline.
+_MAX_TIMEOUT_S = 300.0
 
 ProbeResult = namedtuple("ProbeResult", ["outcome", "detail"])
 # outcome ∈ OUTCOMES. detail always carries vm_id, elapsed_ms,
@@ -375,7 +389,10 @@ def probe(
 
     Raise contract: ``ValueError`` on bad arguments (before any network);
     a raising ``provider_state_fn`` propagates as a caller bug. Callers
-    (R2b) must wrap the call if the driver can fail.
+    (R2b) must wrap the call if the driver can fail. ``connect_timeout_s``
+    and ``io_timeout_s`` must be positive finite numbers not exceeding
+    ``_MAX_TIMEOUT_S`` (300 s) — a probe phase longer than one cadence
+    interval is never sane (#1695).
 
     Teardown contract: once the host key is read and the outcome decided,
     the closing DISCONNECT is best-effort — a post-handshake I/O failure
@@ -388,6 +405,13 @@ def probe(
         raise ValueError("relay_port must be an int in 1..65535")
     if connect_timeout_s <= 0 or io_timeout_s <= 0:
         raise ValueError("connect_timeout_s and io_timeout_s must be positive")
+    for _name, _value in (("connect_timeout_s", connect_timeout_s),
+                          ("io_timeout_s", io_timeout_s)):
+        if not isinstance(_value, (int, float)) or not math.isfinite(_value):
+            raise ValueError("%s must be a finite number" % _name)
+        if _value > _MAX_TIMEOUT_S:
+            raise ValueError(
+                "%s must not exceed %g seconds" % (_name, _MAX_TIMEOUT_S))
     pin_digest = _normalize_fingerprint(pinned_fingerprint)
 
     state = provider_state_fn()

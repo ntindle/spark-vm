@@ -554,6 +554,46 @@ def test_nonpositive_timeouts_rejected(fake_relay, kw):
     assert fake_relay.connections == 0
 
 
+# ---------------------------------------------------------------------------
+# Timeout magnitude ceiling (#1695)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kw", [{"connect_timeout_s": 1e9},
+                                 {"io_timeout_s": 1e9},
+                                 {"connect_timeout_s": 1e308},
+                                 {"io_timeout_s": 1e308}])
+def test_timeout_magnitudes_capped(fake_relay, kw):
+    # An astronomically large timeout would turn the absolute deadline
+    # into a ~63-year bound — effectively no deadline. Rejected before
+    # any network.
+    with pytest.raises(ValueError, match="must not exceed"):
+        prober.probe(**_probe_kwargs(fake_relay, **kw))
+    assert fake_relay.connections == 0
+
+
+@pytest.mark.parametrize("kw", [{"connect_timeout_s": float("nan")},
+                                 {"io_timeout_s": float("nan")},
+                                 {"connect_timeout_s": float("inf")},
+                                 {"io_timeout_s": float("inf")}])
+def test_nonfinite_timeouts_rejected(fake_relay, kw):
+    # NaN slips both the positivity and the magnitude checks (NaN
+    # comparisons are False) and would silently neuter the deadline.
+    with pytest.raises(ValueError, match="must be a finite number"):
+        prober.probe(**_probe_kwargs(fake_relay, **kw))
+    assert fake_relay.connections == 0
+
+
+def test_timeout_ceiling_boundary_accepted(fake_relay):
+    # Exactly at the ceiling is still a sane magnitude: validation must
+    # pass and the probe must reach the network (the fake relay answers).
+    r = prober.probe(**_probe_kwargs(fake_relay,
+                                     connect_timeout_s=prober._MAX_TIMEOUT_S,
+                                     io_timeout_s=prober._MAX_TIMEOUT_S))
+    assert fake_relay.connections == 1
+    assert r.outcome == "path_ok"
+
+
 @pytest.mark.parametrize("bad", ["", "abc", "MD5:aa:bb:cc", "SHA256:!!!",
                                  "SHA256:" + "A" * 43 + " ",
                                  "sha256:" + "A" * 43,
