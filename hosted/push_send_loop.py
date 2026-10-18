@@ -308,9 +308,14 @@ New pins this slice (continuing the global D-series):
   terminal, so this is the safety net for parked rows whose record
   reader still reports non-terminal). Age is the queued row's ``at`` —
   a row that parks late (owner unsubscribes mid-retry) expires on the
-  earlier bound, which is the conservative direction. Fail closed: an
-  unparseable ``at`` or a kind with no bound parks as before (D81) —
-  today's behavior. A parked-expiry does not touch
+  earlier bound, which is the conservative direction. A kind with no
+  bound parks as before (D81). An unparseable ``at`` never reaches
+  the expiry branch via ``_process_one``: ``_window_start_of`` raises
+  ``ValueError`` first and the item takes the pre-existing D97
+  loud-error path (per-tick ``error`` anomaly, queued row quarantined
+  with its reservation held) — the ``_row_at_comparable`` guard inside
+  ``_maybe_expire_parked`` is defense-in-depth for direct callers,
+  not the fail-closed mechanism. A parked-expiry does not touch
   ``push_digest_state``: the D79 pin (parked path never resets the
   digest count) stands — the state row ages out under the 90-day GC,
   and the sweep's pending scan only fires ``count > 0 AND
@@ -860,8 +865,11 @@ def _maybe_expire_parked(conn, summary, moment, at, item, row_id,
     row (D56e shape: ``device=''``, send columns NULL), the queued-row
     DELETE, the D10 reservation release (the page never buzzed, so it
     never consumed the unit), and a ``parked_expired`` tick anomaly —
-    never a silent DELETE. Fail closed: an unparseable ``at`` or a
-    kind with no bound parks as before (D81) — today's behavior.
+    never a silent DELETE. A kind with no bound parks as before
+    (D81). An unparseable ``at`` never reaches here via
+    ``_process_one`` (``_window_start_of`` raises ``ValueError`` first
+    → the D97 loud-error path); the ``_row_at_comparable`` guard is
+    defense-in-depth for direct callers.
     """
     max_age = PARKED_MAX_AGE_S.get(event_kind)
     if max_age is None or not _row_at_comparable(row_at):
@@ -880,7 +888,11 @@ def _maybe_expire_parked(conn, summary, moment, at, item, row_id,
                           owner_principal=owner_principal,
                           window_start=window_start)
     summary.note("parked_expired",
-                 "%s (%s parked %.0fs > max-age %ds; dead-lettered, "
+                 # %r on the item: the event key may carry newlines from a
+                 # plane bug — the #1359 log-injection posture; event_kind
+                 # is PAGING_EVENT_KINDS-allowlisted and age_s/max_age are
+                 # numeric, so they stay %s.
+                 "%r (%s parked %.0fs > max-age %ds; dead-lettered, "
                  "reservation released)" % (item, event_kind, age_s,
                                             max_age))
     return True
@@ -1237,7 +1249,9 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
                                 window_start):
             return
         # D81 — parked, not dropped: the row and its reservation stay.
-        summary.note("parked", "%s (no live subscriptions)" % item)
+        # %r on the item: same #1359 log-injection posture as above —
+        # the event key may carry newlines from a plane bug.
+        summary.note("parked", "%r (no live subscriptions)" % item)
         return
 
     # -- per-device attempts --

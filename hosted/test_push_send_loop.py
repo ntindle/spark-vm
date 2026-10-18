@@ -1601,7 +1601,10 @@ def test_parked_overage_approval_filed_dead_letters(conn, owner, vapid):
 
     assert summary.dispositions["parked_expired"] == 1
     assert outcomes(conn) == ["dead-letter"]
+    # Box kinds reserve in both scopes (D52); the expiry releases both.
     assert budget(conn, "box", "box-1",
+                  push_enqueue.hour_bucket(old)) == 0
+    assert budget(conn, "owner", owner,
                   push_enqueue.hour_bucket(old)) == 0
 
 
@@ -1641,14 +1644,38 @@ def test_parked_overage_per_kind_bounds(conn, owner, vapid):
 
 def test_parked_expiry_keeps_exact_key_reenqueueable(conn, owner, vapid):
     # The D61/D77 pattern, applied to D98: the expiry audit row carries
-    # the suffixed key, so a later re-enqueue of the same event is not
+    # the suffixed key, so a later re-enqueue of the SAME event is not
     # wedged "duplicate" by the boundary's outcome-blind D53 dedup
     # fast-path — the page was never delivered, so it must stay
-    # re-pageable once the owner subscribes.
-    tick, _ = _old_digest_tick(conn, owner, vapid, 26)
+    # re-pageable once the owner subscribes. Re-enqueueing a different
+    # window would prove nothing (the fast-path is exact-key), so the
+    # fixture's own window is reused.
+    tick, old_window = _old_digest_tick(conn, owner, vapid, 26)
     assert tick().dispositions["parked_expired"] == 1
 
     r = push_enqueue.enqueue_page(
         conn, event_kind="digest", owner_principal=owner, box_id=None,
-        key_material=push_enqueue.hour_bucket(NOW), now=NOW)
+        key_material=old_window, now=NOW)
     assert r.disposition == "queued", r  # not "duplicate"
+
+
+def test_parked_late_still_expires_on_enqueue_age(conn, owner, vapid):
+    # The D98 conservative-direction pin: a row that parks LATE (the
+    # owner had a live subscription at enqueue time, then removed it)
+    # still expires on the queued row's `at`, not on the park time.
+    # The row is 2h old; the park happened just now.
+    seed_approval(conn, "box-1", "aid-1", owner)
+    old = NOW - timedelta(hours=2)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1", at=old)
+    seed_subscription(conn, owner, "box-1", "phone")
+    # The owner had a subscription; it is removed before the tick, so
+    # this tick is the row's first parked pass — 2h after enqueue.
+    conn.execute("DELETE FROM push_subscriptions")
+    conn.commit()
+
+    tick = make_tick(conn, owner, vapid)
+    summary = tick()
+
+    assert summary.dispositions["parked_expired"] == 1
+    assert outcomes(conn) == ["dead-letter"]
+    assert tick.service.calls == []  # expired, never sent
