@@ -1001,6 +1001,42 @@ class TestFirewallWatchdogStatic:
         assert "staying green this tick" in verify_src
         assert "999999999" in verify_src
 
+    def test_extraction_selects_sshd_dnat_not_proxy_dnat(
+            self, verify_src, tmp_path):
+        # Regression for the Security round-1 blocker: build.sh's
+        # template lists the proxy DNAT (iifname "ve-jail") BEFORE the
+        # SSH DNAT, so a bare "first iifname" extraction watches the
+        # wrong interface — ve-jail never carries a 100.64.0.0/10
+        # address, which would fail-closed every healthy box past the
+        # boot grace. Render the REAL template from build.sh and run
+        # the script's own extraction line against it.
+        with open(os.path.join(JAIL_DIR, "build.sh"),
+                  encoding="utf-8") as f:
+            build = f.read()
+        start = build.index("<<'NFT_EOF'")
+        end = build.index("\nNFT_EOF", start)
+        template = build[start:end].replace("@@JAIL_TAILNET_IF@@",
+                                            "tailscale0")
+        template = template.replace("@@JAIL_SSH_PORT@@", "2222")
+        assert 'iifname "ve-jail"' in template, \
+            "the trap must really be in the template"
+        assert template.index('iifname "ve-jail"') < \
+            template.index('iifname "tailscale0"'), \
+            "proxy DNAT must precede the SSH DNAT in the template"
+        conf = tmp_path / "rendered.conf"
+        conf.write_text(template)
+        line = next(
+            l for l in verify_src.splitlines()
+            if l.strip().startswith('ifname="$(sed -n'))
+        r = subprocess.run(
+            ["bash", "-c", line + '; printf "%s" "$ifname"'],
+            capture_output=True, text=True,
+            env={**os.environ, "CONF": str(conf)})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "tailscale0", \
+            "extraction must select the SSH DNAT's interface, got %r" \
+            % r.stdout
+
     def test_canon_script_installed_from_repo_file(self, active):
         # The canonicalizer is a first-class repo file, not an inline
         # python -c: directly testable, reviewable, and installed to the
@@ -1471,12 +1507,17 @@ exit 0
         assert calls.count("nft --json list table") == 2
 
     # Issue #1672 (the #1666 runtime half): the tick-time
-    # tailnet-interface check. A conf with a realistic DNAT line so the
-    # check has an iifname to extract.
+    # tailnet-interface check. A conf mirroring build.sh's template
+    # rule order — the proxy DNAT's ve-jail comes FIRST (Security
+    # round-1 blocker: a bare "first iifname" extraction watches the
+    # wrong interface and fail-closes every healthy box).
     _CONF_WITH_TAILNET = (
         "table inet jail {\n"
         "    chain prerouting {\n"
-        '        iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22\n'
+        '        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport '
+        "{ 18080, 18081 } dnat ip to 127.0.0.1\n"
+        '        iifname "tailscale0" tcp dport 2222 '
+        "dnat ip to 10.99.0.2:22\n"
         "    }\n"
         "}\n"
     )
