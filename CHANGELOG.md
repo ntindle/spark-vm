@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   changed freeze flag appends one standard-shape `freeze-hold` event to
   the fleet journal (direction in the note), so freeze flips and clears
   show up in the journal — and on the status-page feed — without anyone
-  deriving them from document diffs. (#TBD)
+  deriving them from document diffs. (#1702)
 
 ### Fixed
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
