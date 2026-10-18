@@ -20,7 +20,7 @@ shape; where a finding doesn't apply there, the row says so.
 "Blast radius" = what one compromised or malicious tenant can reach,
 assuming the other tenants are honest. Rows marked `[EXISTS]` have an
 open GitHub issue; the two rows without a pre-existing issue (A1, and
-the §6 open verifications) were filed this turn — linked in §7.
+the §6 verifications) were filed this turn — linked in §7.
 
 **Row refresh:** rows A3 and A8 were updated 2026-09-29 (#711) after
 their sandboxing issues shipped (#115/#95); the audit baseline remains
@@ -266,7 +266,7 @@ noted here for consistency only.
   as the per-tenant implementation — it is the decision record, not the
   build.
 
-## 6. Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified + vendor KB 1091 first-party-confirmed 2026-10-17, #1646 closed — #340 stays open)
+## 6. Verifications (all closed 2026-10-17: nested-KVM verified; Tailscale behaviorally verified + vendor KB 1091 first-party-confirmed, #1646 closed; #340 closed)
 
 - Nested-KVM availability on the hosted product's target hosts —
   **VERIFIED: not available on the decided provider (Fly Sprites).**
@@ -289,7 +289,7 @@ noted here for consistency only.
   notes: a `tailscaled` restart during an outage drops the node unless
   netmap caching is enabled; a restarted node enforces its cached packet
   filter, not newer rules.
-- Vendor root semantics remain publicly undocumented — assert nothing.
+- Vendor root semantics remain publicly undocumented — assert nothing (standing unknown, not a verification owed).
 
 ## 7. Issues filed this turn
 

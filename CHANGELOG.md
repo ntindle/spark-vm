@@ -90,6 +90,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   warning noise and the per-test argument-vector patching are gone.
   (#1663)
 
+- The multi-tenancy audit no longer lists open verifications that are
+  all closed. Every verification from issue #340 is now recorded as
+  closed 2026-10-17, and the one remaining unknown — vendor root
+  semantics — is explicitly marked as a standing unknown rather than a
+  pending verification. (#1678)
+
 ### Security
 
 - Rebuilding the agent jail now fails the build loudly when the tailnet
