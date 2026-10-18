@@ -4,7 +4,7 @@ Vision-vs-state of the self-hosted agent jail's firewall lane, pinned to main
 `69b9e348`, after the three builds that landed since the 2026-10-17 arch
 deep-read (slot 20261017-2129): #1668 (the #1665 re-apply fix), #1673 (the
 #1666 tailnet-interface validation), and #1671 (the #1655 `tenant=` on
-`refused=` audit lines, from the 2329 security turn). Builds on the
+`refused=` audit lines, from the slot-20261017-2329 security turn). Builds on the
 2026-10-12 lane (#1369 stop-before-rebuild, #1371/#1370 atomic rebuilds).
 
 **Vision (from the two deep-reads):** the self-host jail is a secure cell
@@ -67,7 +67,7 @@ under it. The closure was evidence-backed, not a Closes-keyword accident.
 The #1665 fix (F-JC-1) makes the *ruleset* converge on every rebuild, but the
 re-apply runs with the jail up and flushes nothing: build.sh L353–354 has no
 conntrack flush, and the codebase states the premise explicitly
-(`jail/build.sh` L387, `jail/jail-firewall-verify.sh` L100 — "a table
+(`jail/build.sh` L387; `jail-firewall-verify.sh` L10 and L100 — "a table
 re-apply does not flush conntrack"). Established flows therefore still
 survive a tightening re-apply through the `established,related` accepts.
 #1667 stays open; it needs the jail-owner design decision (document / flush
