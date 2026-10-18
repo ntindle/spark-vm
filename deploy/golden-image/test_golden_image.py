@@ -154,6 +154,75 @@ def test_recipe_pins_match_pins_conf():
     assert f'"playwright=={pins["playwright"]}"' in text
 
 
+def _rendered_cua_driver_assets():
+    """Render the cua-driver asset filename the Dockerfile and
+    deploy/toolset-update.sh each produce, for both supported host arches.
+
+    The two producers must agree byte-for-byte (the v0.9.0 golden-image gate
+    died on a 404 because the recipe dropped the `linux-` platform infix that
+    toolset-update.sh — and upstream trycua/cua — use)."""
+    pins = _pins_conf()
+    pin = pins["cua-driver"]
+    text = _dockerfile_text()
+    case_m = re.search(
+        r'case "\$arch" in\s+x86_64\)\s*a=(\S+)\s*;;\s*aarch64\)\s*a=(\S+)\s*;;',
+        text,
+    )
+    assert case_m, "Dockerfile cua-driver arch case not found"
+    tmpl_m = re.search(
+        r'asset="cua-driver-rs-\$\{CUA_DRIVER_VERSION\}-(.*?)\$\{a\}(.*?)"',
+        text,
+    )
+    assert tmpl_m, "Dockerfile cua-driver asset template not found"
+    docker_assets = {
+        host: f"cua-driver-rs-{pin}-{tmpl_m.group(1)}{tag}{tmpl_m.group(2)}"
+        for host, tag in (("x86_64", case_m.group(1)), ("aarch64", case_m.group(2)))
+    }
+    with open(
+        os.path.join(REPO_ROOT, "deploy", "toolset-update.sh"), encoding="utf-8"
+    ) as f:
+        updater = f.read()
+    arch_m = re.search(
+        r"_cua_driver_arch\(\)\s*\{\s*#.*\n\s*case.*\n\s*x86_64\)\s*printf\s+'([^']+)'",
+        updater,
+    )
+    arm_m = re.search(
+        r"aarch64\|arm64\)\s*printf\s+'([^']+)'", updater
+    )
+    assert arch_m and arm_m, "toolset-update.sh _cua_driver_arch mapping not found"
+    upd_tmpl_m = re.search(
+        r'asset="cua-driver-rs-\$\{pin\}-(.*?)\$\{arch\}(.*?)"', updater
+    )
+    assert upd_tmpl_m, "toolset-update.sh cua-driver asset template not found"
+    updater_assets = {
+        host: f"cua-driver-rs-{pin}-{upd_tmpl_m.group(1)}{tag}{upd_tmpl_m.group(2)}"
+        for host, tag in (("x86_64", arch_m.group(1)), ("aarch64", arm_m.group(1)))
+    }
+    return docker_assets, updater_assets
+
+
+def test_cua_driver_asset_names_agree_across_producers():
+    """The Dockerfile's cua-driver asset filename must equal
+    toolset-update.sh's for every host arch — the v0.9.0 golden-image gate
+    failed with a 404 because the recipe's template had drifted (missing
+    `linux-` platform infix, and `aarch64` where upstream ships `arm64`).
+
+    The rendered names must also carry upstream's platform infix: without
+    `linux-` in the middle, the template cannot match a real trycua/cua
+    release asset."""
+    docker_assets, updater_assets = _rendered_cua_driver_assets()
+    for host in ("x86_64", "aarch64"):
+        assert docker_assets[host] == updater_assets[host], (
+            host,
+            docker_assets[host],
+            updater_assets[host],
+        )
+        assert re.match(
+            r"^cua-driver-rs-[0-9.]+-linux-(x86_64|arm64)-binary\.tar\.gz$",
+            docker_assets[host],
+        ), docker_assets[host]
+
+
 def test_build_image_stages_context_manifest(tmp_path):
     """The driver stages the manifest into the build context before docker
     runs (the recipe COPYs it in) and arranges its removal so the tree stays

@@ -50,6 +50,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Fixed
+- The v0.9.0 golden-image build gate failed because the image recipe fetched
+  the cua-driver release asset under the wrong filename (upstream names them
+  `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses
+  the correct name, and a pin test keeps the recipe's asset name identical to
+  the self-update tool's. (#TBD)
+
 ## [0.9.0] - 2026-10-18
 
 ### Security
