@@ -62,6 +62,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The release-notes trimmer no longer splices fragments of different
+  bullets together when the Highlights section exceeds GitHub's
+  125,000-character body limit. It now trims in whole-bullet prefix
+  blocks — a wrapped bullet's continuation lines stay with their bullet
+  or are dropped with it — so a long release can no longer publish
+  Frankenstein bullets stitched from two dropped entries.
+  (#1686)
+
 - The jail firewall watchdog now also checks the tailnet interface on
   every tick, not just the firewall table. If the interface the SSH
   DNAT binds to is renamed or removed after the build — or loses its

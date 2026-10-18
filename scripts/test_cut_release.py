@@ -1021,7 +1021,10 @@ def test_oversized_highlights_trimmed_with_default_cap(workrepo, tmp_path):
 
 def test_cap_never_splits_a_single_long_bullet(workrepo, tmp_path):
     # A bullet longer than the remaining budget is dropped entire — its
-    # prefix must not leak into the notes.
+    # prefix must not leak into the notes. The trim is a PREFIX trim: the
+    # first block that does not fit ends the section, so later bullets are
+    # dropped too — cherry-picking later short lines is exactly what used
+    # to orphan continuation lines into Frankenstein bullets.
     giant = "- GIANT-" + "x" * 5000 + "-END"
     section = "### Added\n- short one\n%s\n- short two\n" % giant
     write_section_changelog(workrepo, "0.2.0", section)
@@ -1031,7 +1034,38 @@ def test_cap_never_splits_a_single_long_bullet(workrepo, tmp_path):
     assert len(body) <= 3000
     assert "GIANT-" not in body  # absent entire, not truncated
     assert "- short one" in body
-    assert "- short two" in body  # later bullets that fit are still kept
+    assert "- short two" not in body  # prefix discipline: dropped with the break
+
+
+def test_trim_keeps_wrapped_bullets_whole(workrepo, tmp_path):
+    # Wrapped multi-line bullets of mixed lengths (the v0.9.0 defect):
+    # a continuation line must never survive without its bullet's start
+    # line, and a kept bullet must keep every continuation line. The
+    # fixture is built so the old greedy line-keep would orphan the short
+    # tails of the long-headed bullets.
+    def bullet(n, head_pad, tail_pad):
+        return ("- head-%03d %s\n  tail-%03d %s"
+                % (n, "x" * head_pad, n, "y" * tail_pad))
+    short = [bullet(n, 20, 20) for n in range(40)]
+    long_head = [bullet(n, 400, 10) for n in range(40, 80)]
+    section = "### Added\n" + "\n".join(short + long_head) + "\n"
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, _ = dry_run_notes(workrepo, tmp_path, "notes.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "8000"})
+    assert len(body) <= 8000
+    assert "trimmed to fit" in body
+    region = highlights_region(body)
+    lines = region.splitlines()
+    heads = [l for l in lines if l.startswith("- head-")]
+    tails = [l for l in lines if l.startswith("  tail-")]
+    assert heads  # some bullets survive
+    head_nums = {l.split()[1].split("-")[1] for l in heads}
+    tail_nums = {l.strip().split()[0].split("-")[1] for l in tails}
+    assert tail_nums <= head_nums, \
+        "orphan continuation lines: %s" % (tail_nums - head_nums)
+    assert head_nums <= tail_nums, \
+        "bullets missing continuations: %s" % (head_nums - tail_nums)
 
 
 def test_dangling_subsection_header_dropped(workrepo, tmp_path):
