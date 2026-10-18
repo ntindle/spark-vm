@@ -53,8 +53,10 @@ module's).
 D98 note: the SELECTs below name their columns explicitly — ``device,
 status, last_page_at, created_at`` — so secrets can never leak onto the
 read path by column-order drift; the ``_DISPLAY_COLUMNS`` constant is
-the single source, and the pin test asserts the endpoint SQL never
-names ``endpoint``, ``p256dh``, ``auth``, or any ``*_nonce`` column.
+the single source (feeding both the SELECT and the dict projection),
+and the pin test asserts its exact column set — no secret column name
+(``endpoint``, ``p256dh``, ``auth``, any ``*_nonce``) can join it
+without tripping the suite.
 
 D99 validation is all-400, loud, before any write; the ownership 404
 comes *after* validation (a malformed request is the client's bug even
@@ -73,9 +75,9 @@ reads the repo file (droppable-verbatim constraint).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
+import inspect
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -212,8 +214,12 @@ _DISPLAY_COLUMNS = "device, status, last_page_at, created_at"
 
 
 async def _owns(owns_box, owner_principal: str, box_id: str) -> bool:
+    # inspect.isawaitable covers coroutines, asyncio.Futures, and
+    # __await__ objects — asyncio.iscoroutine alone would fail-OPEN on a
+    # Future (bool(Future()) is True) and silently grant ownership. On
+    # the D2 trust seam the failure direction must be fail-closed.
     owns = owns_box(owner_principal, box_id)
-    if asyncio.iscoroutine(owns):
+    if inspect.isawaitable(owns):
         owns = await owns
     return bool(owns)
 
@@ -236,7 +242,11 @@ async def get_vapid_pubkey(*, vapid_pubkey_b64url: str) -> HttpResult:
     ``PushManager.subscribe()``. A public key is public; the private half
     never leaves the plane (D3 custody). ``vapid_key_id`` rides the send
     path's D48c discriminator — the UI does not need it and does not
-    receive it.
+    receive it. The key is validated as a 65-byte ``0x04``-prefixed point
+    but deliberately NOT on-curve checked (unlike ``validate_p256dh``):
+    this is operator key material, the browser re-validates at
+    ``PushManager.subscribe()``, and the deploy-time byte pin catches
+    rotation.
     """
     try:
         validate_vapid_pubkey(vapid_pubkey_b64url)
@@ -300,10 +310,15 @@ async def subscribe(
     D100: upsert on the D3 key ``(owner_principal, box_id, device)`` —
     one ``INSERT ... ON CONFLICT ... DO UPDATE`` statement: fresh
     endpoint, fresh key material, ``status`` reset to ``'live'``,
-    ``added_by`` = the owner-key id that made the call, ``created_at``
-    refreshed. This is also the 410 recovery path: a dead row's device
-    re-registers and comes back live. Returns 201 when the triple did
-    not exist, 200 when it replaced an existing row.
+    ``added_by`` = the owner-key id that made the call (forensics, per
+    the schema), ``last_page_at`` cleared (the resurrected row's fresh
+    key material has never been paged), ``created_at`` refreshed. This
+    is also the 410 recovery path: a dead row's device re-registers and
+    comes back live. Returns 201 when the triple did not exist, 200 when
+    it replaced an existing row. (Race note: two concurrent subscribes
+    can both pre-read "not exists" and both return 201 — cosmetic only;
+    the upsert itself is one atomic statement, so the final row is
+    correct and last-write-wins.)
 
     D45: plaintext exists only for the duration of the write — both key
     blobs are encrypted through the injected ``encrypt_at_rest``
@@ -368,6 +383,9 @@ async def subscribe(
         "data_key_version = excluded.data_key_version, "
         "vapid_key_id = excluded.vapid_key_id, "
         "added_by = excluded.added_by, status = 'live', "
+        "last_page_at = NULL, "  # the resurrected row's fresh key material
+                                 # has never been paged; "last paged"
+                                 # belongs to the retired keys
         "created_at = excluded.created_at"
     ).bind(
         owner_principal, box_id, device, endpoint,
@@ -423,10 +441,10 @@ SW_JS_CONTENT_TYPE = "application/javascript"
 
 def sw_js_pin_sha256(sw_js_bytes: bytes) -> str:
     """D102 deploy-time pin: sha256 of the ``/sw.js`` bytes the plane
-    serves. The deploy script asserts this equals the sha256 of the repo
-    file at ``SW_JS_REPO_PATH`` — the #1476 byte-pin enforcement, moved
-    to deploy time because the loop cannot verify what the private plane
-    serves at runtime."""
+    serves. The plane's deploy script MUST assert this equals the sha256
+    of the repo file at ``SW_JS_REPO_PATH`` — the #1476 byte-pin
+    enforcement, moved to deploy time because the loop cannot verify
+    what the private plane serves at runtime."""
     return hashlib.sha256(sw_js_bytes).hexdigest()
 
 
@@ -446,5 +464,5 @@ def serve_sw_js(*, sw_js_bytes: bytes) -> HttpResult:
         status=200,
         raw=sw_js_bytes,
         content_type=SW_JS_CONTENT_TYPE,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=600"},
     )
