@@ -664,6 +664,62 @@ class TestFailClosedOrdering:
         assert "bounded downtime" in readme
 
 
+class TestReapplyConntrackSurvivors:
+    # Issue #1667: a table re-apply does not flush conntrack, so flows
+    # established through the jail survive under the NEW ruleset via the
+    # established,related accepts. The build-time re-apply deliberately
+    # runs with the jail alive (unlike the watchdog's stop-first repair),
+    # so the build must log the surviving flows and the README must state
+    # the residual.
+    def test_snapshot_runs_after_reapply(self, active):
+        apply = active.index("$SUDO nft -f /etc/nftables-jail.conf")
+        snapshot = active.index("$SUDO conntrack -L")
+        assert apply < snapshot, (
+            "the conntrack survivor snapshot must run after the re-apply")
+        # The snapshot is fail-open: a failed table read must not abort the
+        # build (set -e is on). Pin the guard that absorbs it.
+        assert "| head -20 || true" in active
+
+    def test_snapshot_filters_on_jail_ip_not_just_direction(self, active):
+        # `conntrack -L -d <ip>` would match only original-direction
+        # destinations and miss outbound jail traffic (whose orig-dst is
+        # the remote host). The filter must see the jail IP in either
+        # direction tuple, so it greps the full listing.
+        assert 'grep -qF "$GUEST_IP"' in active
+        assert "conntrack -L -d " not in active
+
+    def test_operator_message_names_survival_contract(self, src):
+        # The whole point is operator visibility: the SNAPSHOT BLOCK's own
+        # log lines must say the flows SURVIVE and name the mechanism
+        # (established,related). Scanning the whole file would be
+        # vacuous — the words appear in unrelated comments and rules —
+        # so the pin is scoped to the snapshot block (src: the block's
+        # header is a full-line comment, stripped from `active`).
+        block_start = src.index("# Issue #1667:")
+        block_end = src.index("fi\n", block_start)
+        block = src[block_start:block_end]
+        lower = block.lower()
+        assert "survive" in lower
+        assert "established,related" in block
+        assert "#1667" in block
+
+    def test_conntrack_tool_installed(self, src):
+        # The snapshot is only as good as the tool being present: the
+        # host-packages install must include conntrack.
+        m = re.search(r"apt-get install -y -q ([^\n>]+)", src)
+        assert m is not None
+        assert "conntrack" in m.group(1).split()
+
+    def test_build_time_residual_documented(self, src):
+        # The residual is a stated contract in the README, not an
+        # accidental asymmetry with the watchdog's stop-first repair.
+        readme = open(os.path.join(JAIL_DIR, "README.md"),
+                      encoding="utf-8").read()
+        assert "#1667" in readme
+        assert "deliberate asymmetry" in readme
+        assert "declined" in readme
+
+
 class TestIsolation:
     def test_no_host_bind_mounts(self, src, active):
         for pat in ("--bind", "Bind=", "--bind-ro", "bindfs"):
