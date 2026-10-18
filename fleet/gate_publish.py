@@ -113,7 +113,7 @@ def _load_key(key_file: str) -> bytes:
         sys.exit(f"ERROR: key file {key_file} is readable by group/other — "
                  "controller keys must be mode 0600 (see design §5).")
     with open(key_file, "rb") as fh:
-        # Exact bytes are the key; one trailing newline is tolerated so an
+        # Exact bytes are the key; trailing CR/LF bytes are stripped so an
         # operator's `echo $KEY > file` doesn't silently change the MAC.
         key = fh.read().rstrip(b"\r\n")
     if len(key) < 32:

@@ -68,7 +68,11 @@ def _read_file(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return fh.read().strip()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError sibling, not an OSError: a
+        # non-UTF-8 identity file must be no-signal, not a traceback (the
+        # same decode-hole class the publisher's _read_previous_freeze
+        # closed in #1543's Engineering B1).
         raise NoSignal(f"cannot read {path}: {exc}")
 
 
@@ -113,7 +117,7 @@ def resolve_keys(args) -> dict:
                            "group/other — gate keys must be mode 0600")
         try:
             with open(path, "rb") as fh:
-                # Exact bytes are the key; one trailing newline is tolerated
+                # Exact bytes are the key; trailing CR/LF bytes are stripped
                 # (matches gate_publish.py's _load_key — same key bytes both
                 # sides, or the MACs will never agree).
                 key = fh.read().rstrip(b"\r\n")
@@ -130,7 +134,11 @@ def load_gate(gate_path: str) -> dict:
     try:
         with open(gate_path, "r", encoding="utf-8") as fh:
             doc = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers JSON syntax errors (JSONDecodeError) AND
+        # non-UTF-8 bytes (UnicodeDecodeError is a ValueError sibling, not
+        # an OSError — the #1543 Engineering-B1 class): a non-UTF-8
+        # gate document must be no-signal, not a traceback.
         raise NoSignal(f"gate document unreadable: {exc}")
     if not isinstance(doc, dict):
         raise NoSignal("gate document is not a JSON object")
@@ -140,6 +148,10 @@ def load_gate(gate_path: str) -> dict:
     mac = doc.get("hmac")
     if not isinstance(mac, str) or not mac:
         raise NoSignal("gate document carries no hmac")
+    if not mac.isascii():
+        # hmac.compare_digest rejects non-ASCII str with TypeError; a
+        # non-ASCII hmac must be no-signal, not a traceback (QA B1).
+        raise NoSignal("gate document hmac is not ASCII")
     return {"doc": doc, "body": body, "mac": mac}
 
 
@@ -159,7 +171,9 @@ def verify_gate(gate: dict, keys: dict) -> str:
         issued = datetime.strptime(doc["issued_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc)
         ttl = int(doc["ttl_seconds"])
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        # OverflowError: json accepts Infinity as an extension; int(inf)
+        # raises OverflowError, not ValueError (Engineering round-3 note).
         raise NoSignal(f"gate document has bad issued_at/ttl_seconds: {exc}")
     age = (datetime.now(timezone.utc) - issued).total_seconds()
     if age < -60:
@@ -170,10 +184,36 @@ def verify_gate(gate: dict, keys: dict) -> str:
 
 
 def box_wave(box_id: str, wave: dict) -> int:
-    """This box's wave number: assignment pin, else hash_mod_4 default (§2)."""
+    """This box's wave number: assignment pin, else hash_mod_4 default (§2).
+
+    A malformed assignment pin (non-integer) is no-signal: the wave data
+    cannot be trusted, and a guessing box is a fail-open risk — so the box
+    freezes instead of evaluating a wave it cannot parse (QA B2)."""
+    if not isinstance(wave, dict):
+        # The _my_wave display path in answer() hands us the raw per-
+        # component entry, which may be null — a non-object wave is not a
+        # wave we can evaluate (Engineering delta nit, same class).
+        raise NoSignal("wave entry is not an object")
     assignments = wave.get("assignments") or {}
+    if not isinstance(assignments, dict):
+        # A truthy non-dict assignments field (True, 5, a list) is not a
+        # pin map; the `in` membership test below would TypeError on it
+        # (Security round-3 note). No honest pin can be read — no-signal.
+        # Deliberate asymmetry with the canary path (Engineering round-4):
+        # canary is pin-only, so an unreadable pin map means "no pins" and
+        # the component is simply denied; here a wave NUMBER must be
+        # returned and none can be computed honestly, so the box freezes
+        # instead of guessing. Both directions are fail-closed.
+        raise NoSignal("wave assignments is not an object")
     if box_id in assignments:
-        return int(assignments[box_id])
+        try:
+            return int(assignments[box_id])
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: json accepts Infinity/NaN as extensions; a
+            # non-finite pin is as malformed as a non-integer one (Security
+            # delta note).
+            raise NoSignal(f"wave assignment for {box_id!r} is not a wave "
+                           f"number: {assignments[box_id]!r}")
     return int(hashlib.sha256(box_id.encode("utf-8")).hexdigest(), 16) % 4
 
 
@@ -182,45 +222,88 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
     wave = waves.get(comp)
     if not isinstance(wave, dict):
         return False
-    if wave.get("state") not in LIVE_STATES:
+    state = wave.get("state")
+    if not isinstance(state, str) or state not in LIVE_STATES:
+        # A non-string state (e.g. a list) is unhashable — `in` on the
+        # LIVE_STATES set would TypeError. "Not a live state" is already
+        # the fail-closed outcome, so no freeze is needed (Security
+        # round-3 note).
         return False
-    if wave.get("state") == "canary":
+    if state == "canary":
         # Canary is pin-only: only boxes assigned wave 1 are in the canary.
-        return int(wave.get("assignments", {}).get(box_id, -1)) == 1
-    return box_wave(box_id, wave) <= int(wave.get("live", 0))
+        # A malformed pin is no-signal (same fail-closed reasoning as
+        # box_wave). A truthy non-dict assignments field (e.g. a list) is
+        # not a pin map at all — treat it as no pins, so nobody is admitted
+        # (the fail-closed direction for canary; QA round-2 note).
+        assign = wave.get("assignments")
+        pin_src = assign if isinstance(assign, dict) else {}
+        try:
+            pin = int(pin_src.get(box_id, -1))
+        except (TypeError, ValueError, OverflowError):
+            raise NoSignal(f"canary assignment for {box_id!r} is malformed")
+        return pin == 1
+    try:
+        ceiling = int(wave.get("live", 0))
+    except (TypeError, ValueError, OverflowError):
+        # A malformed live ceiling names no real cohort — no-signal rather
+        # than a ValueError traceback (QA B2).
+        raise NoSignal(f"wave live ceiling for {comp!r} is malformed")
+    return box_wave(box_id, wave) <= ceiling
 
 
 def answer(gate_path: str, box_id: str, keys: dict) -> dict:
-    """Full self-evaluated answer. Never raises NoSignal: no-signal -> frozen."""
+    """Full self-evaluated answer. Never raises NoSignal: no-signal -> frozen.
+
+    The whole evaluation — load, MAC+TTL verify, and wave evaluation —
+    sits inside the no-signal net, so a malformed-but-signed document
+    freezes the box instead of raising (QA B2: int() on a non-integer wave
+    pin or live ceiling raises NoSignal from box_wave/component_permitted,
+    and it lands here)."""
     try:
         gate = load_gate(gate_path)
         key_id = verify_gate(gate, keys)
-    except NoSignal as exc:
-        return {"state": "frozen", "freeze": "true", "reason": f"no-signal: {exc}",
-                "key_id": "", "answer_age_s": "-1"}
-    doc = gate["doc"]
-    try:
+        doc = gate["doc"]
+        # The doc reached here through verify_gate, which parsed issued_at
+        # identically — the parse cannot fail (QA nit: the old try/except
+        # age=-1 fallback was uncoverable dead code).
         issued = datetime.strptime(doc["issued_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc)
         age = int((datetime.now(timezone.utc) - issued).total_seconds())
-    except (KeyError, ValueError):
-        age = -1
-    freeze = bool(doc.get("freeze"))
-    waves = doc.get("waves", {}) or {}
-    releases = doc.get("releases", {}) or {}
-    out = {"state": "frozen" if freeze else "live",
-           "freeze": "true" if freeze else "false",
-           "reason": "freeze flag set" if freeze else "gate ok",
-           "key_id": key_id, "answer_age_s": str(age)}
-    for comp in ("repo", "toolset", "image"):
-        permitted = (not freeze) and component_permitted(box_id, comp, waves)
-        out[f"{comp}_permitted"] = "true" if permitted else "false"
-        rel = releases.get(comp) or {}
-        out[f"{comp}_max"] = str(rel.get("max_permitted_commit")
-                                 or rel.get("max_permitted_pin")
-                                 or rel.get("max_permitted_image_version") or "")
-        out[f"{comp}_my_wave"] = str(box_wave(box_id, waves.get(comp, {})))
-    return out
+        freeze = bool(doc.get("freeze"))
+        waves = doc.get("waves", {})
+        if waves and not isinstance(waves, dict):
+            # A truthy non-dict waves section is corrupt — the per-component
+            # lookups below cannot evaluate it honestly (QA round-2 note).
+            raise NoSignal("gate document waves is not an object")
+        waves = waves or {}
+        releases = doc.get("releases", {})
+        if releases and not isinstance(releases, dict):
+            raise NoSignal("gate document releases is not an object")
+        releases = releases or {}
+        out = {"state": "frozen" if freeze else "live",
+               "freeze": "true" if freeze else "false",
+               "reason": "freeze flag set" if freeze else "gate ok",
+               "key_id": key_id, "answer_age_s": str(age)}
+        for comp in ("repo", "toolset", "image"):
+            permitted = (not freeze) and component_permitted(box_id, comp,
+                                                             waves)
+            out[f"{comp}_permitted"] = "true" if permitted else "false"
+            rel = releases.get(comp) or {}
+            if not isinstance(rel, dict):
+                # A truthy non-dict per-component release entry cannot be
+                # read honestly (Security round-3 note) — no-signal.
+                raise NoSignal(
+                    f"release entry for {comp!r} is not an object")
+            out[f"{comp}_max"] = str(rel.get("max_permitted_commit")
+                                     or rel.get("max_permitted_pin")
+                                     or rel.get("max_permitted_image_version")
+                                     or "")
+            out[f"{comp}_my_wave"] = str(box_wave(box_id, waves.get(comp, {})))
+        return out
+    except NoSignal as exc:
+        return {"state": "frozen", "freeze": "true",
+                "reason": f"no-signal: {exc}",
+                "key_id": "", "answer_age_s": "-1"}
 
 
 def _gate_path(args) -> str:
