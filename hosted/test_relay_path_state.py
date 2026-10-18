@@ -547,16 +547,45 @@ def test_cadence_rejects_infinite_env_value(monkeypatch):
 
 def _run_cli(argv, monkeypatch, capsys, stdin=""):
     import io
-    import runpy
-    monkeypatch.setattr("sys.argv", ["relay_path_state"] + argv)
+
+    # Drives the CLI in-process through rps.main() — the module entry
+    # point returns an int exit code (no SystemExit, no runpy module
+    # re-execution, so no sys.modules RuntimeWarning noise).
     if isinstance(stdin, str):
         stdin = io.StringIO(stdin)
     monkeypatch.setattr("sys.stdin", stdin)
-    try:
-        runpy.run_module("hosted.relay_path_state", run_name="__main__")
-    except SystemExit as exc:
-        return exc.code, capsys.readouterr()
-    return None, capsys.readouterr()
+    code = rps.main(argv)
+    assert isinstance(code, int), "main() must return an int exit code"
+    return code, capsys.readouterr()
+
+
+def test_cli_entry_uses_main_not_runpy():
+    # Structural pin: the CLI is driven through rps.main(), never by
+    # re-executing the module with runpy (which re-ran module source
+    # in-process and emitted 25 RuntimeWarnings per suite run).
+    import pathlib
+    import re
+
+    text = pathlib.Path(__file__).read_text()
+    uses = [
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"\b(?:import|from)\s+runpy\b|\brunpy\.", line)
+    ]
+    assert not uses, "test must drive the CLI via rps.main(), not re-execution: %r" % uses[:3]
+
+
+def test_cli_main_returns_int_exit_code(capsys):
+    # The entry-point contract: no SystemExit from main()'s own exit
+    # paths (argparse usage errors still raise, as before), an int exit
+    # code, and the bare-CLI path still prints help and exits 0.
+    code = rps.main([])
+    assert code == 0
+    assert "usage:" in capsys.readouterr().out
+    code = rps.main(["--probe-now"])
+    assert code == 2
+    assert "--query" in capsys.readouterr().err
 
 
 def test_cli_probe_now_without_query_exits_2(monkeypatch, capsys):
@@ -665,7 +694,7 @@ def test_cli_probe_now_plain_digit_port_strings_accepted(
         )
     finally:
         real.probe = real_probe
-    assert code is None  # no SystemExit on success
+    assert code == 0  # success returns int exit code
     assert seen["relay_port"] == 8443
 
 
@@ -820,7 +849,7 @@ def test_cli_probe_now_reads_bundle_from_stdin(
         )
     finally:
         real.probe = real_probe
-    assert code is None  # no SystemExit on success
+    assert code == 0  # success returns int exit code
     body = json.loads(out.out)
     assert body["probed"] is True
     assert seen == {
@@ -862,7 +891,7 @@ def test_cli_query_journal_wedge_exits_1(history, journal, monkeypatch, capsys):
 def test_cli_query_prints_reading(history, journal, monkeypatch, capsys):
     _record(history, [prober.PATH_OK])
     code, out = _run_cli(["--query", VM], monkeypatch, capsys)
-    assert code is None or True  # no SystemExit on success
+    assert code == 0  # success returns int exit code
     reading = json.loads(out.out)
     assert reading["vm_id"] == VM
     assert reading["state"] == "degraded"  # no journal frame written
@@ -1025,7 +1054,7 @@ def test_history_write_waits_for_exclusive_holder(history):
 
 
 def test_cli_query_history_wedge_exits_1(history, journal, monkeypatch, capsys):
-    # _run_cli re-executes the module via runpy, so wedge at the
+    # _run_cli drives the module in-process via rps.main(), so wedge at the
     # shared fcntl layer (the first flock in a --query is the history
     # shared lock, taken by latest_probe before the journal read).
     import fcntl
