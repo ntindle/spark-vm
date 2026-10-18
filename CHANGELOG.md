@@ -77,14 +77,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   install.sh's #964 ui-token preflight no longer aborts the image build. The
   variable is build-time only (never baked into the unit) and the guard
   itself is unchanged, so real deploys via proxy/deploy.sh keep the #964
-  intent; a pin test keeps the variable in the recipe. (#TBD)
+  intent; a pin test keeps the variable in the recipe. (#1698)
 - `vapid_sign` no longer mints VAPID JWTs whose `exp` is not in the future:
   an already-expired `expires_at` is a caller error that could previously
   only surface as a push-service 4xx far from the misconfiguration, so it
   now raises `ValueError` fail-closed (the RFC 8292 24h upper bound is
   deliberately not enforced — it needs the request time only the caller
   has). The in-repo sender threads its own send clock through so its
-  frozen test clocks compare consistently. (#TBD)
+  frozen test clocks compare consistently. (#1698)
 
 ## [0.9.0] - 2026-10-18
 
