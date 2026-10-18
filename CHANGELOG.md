@@ -126,7 +126,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   as on `swapped=` lines — `SWAP_TENANT` when set, otherwise the box
   hostname — forensic context only, never an identity claim, and at its
   least trustworthy on refusal lines (the threat model there includes a
-  compromised tenant). (#TBD)
+  compromised tenant). (#1655)
 
 - Pinned down what the release-gating channel's remaining fleet
   alerts need: per-box gate staleness will surface on the alert board
