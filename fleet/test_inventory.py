@@ -829,6 +829,28 @@ def test_inventory_table_renders_gate_age_column(env):
     assert 35 <= int(age[:-1]) <= 60, age
     assert rows["box-fallback"][4] == "42s~", rows["box-fallback"]
     assert rows["box-none"][4] == "n/a", rows["box-none"]
+    # Product review B1: the `~` sigil's legend ships at the point of use.
+    legend = "~ = gate age is the box's emit-time answer_age_s"
+    assert any(legend in l for l in proc.stdout.splitlines()), \
+        proc.stdout
+
+
+def test_inventory_table_no_legend_without_emit_time_fallback(env):
+    """The legend only prints when a row actually used the fallback —
+    a table of fresh recomputations stays clean."""
+    gen = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    snap = {"repo_commit": COMMIT_A,
+            "gate": {"frozen": False, "answer_age_s": 5,
+                     "generated_at": gen},
+            "arc_active": None, "image_version": None,
+            "note": None, "emitted_at": NOW.isoformat()}
+    _collect(env, {"tower": {"status": _status_json(), "snapshot": snap}})
+    estate, store = env
+    proc = run_inventory("inventory", "--store", store,
+                         "--staleness-hours", "24")
+    assert proc.returncode == 0, proc.stderr
+    assert not any(l.startswith("~ =") for l in proc.stdout.splitlines()), \
+        proc.stdout
 
 
 def test_inventory_table_gate_age_header_present(env):

@@ -742,7 +742,8 @@ def _gate_age_s(gate, now):
     if generated is not None:
         return max(0, int((now - generated).total_seconds())), False
     age = gate.get("answer_age_s")
-    if isinstance(age, bool) or not isinstance(age, (int, float)):
+    if isinstance(age, bool) or not isinstance(age, (int, float)) \
+            or not math.isfinite(age):
         return None, False
     return max(0, int(age)), True
 
@@ -795,6 +796,7 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
     lines.append(row_fmt % ("box", "repo_commit", "toolset_tick", "frozen",
                             "gate_age", "flags"))
     now = datetime.now(timezone.utc)
+    any_emit_fallback = False
     for bid, record in sorted(boxes.items(), key=_box_sort_key):
         ver = record.get("versions", {}) or {}
         tick = record.get("last_tick_at", {}) or {}
@@ -809,6 +811,7 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
         # gate.generated_at (#1660); a trailing `~` marks the emit-time
         # answer_age_s fallback.
         age_s, emit_fallback = _gate_age_s(gate, now)
+        any_emit_fallback = any_emit_fallback or emit_fallback
         lines.append(row_fmt % (
             bid,
             _short_commit(ver.get("repo_commit")),
@@ -817,6 +820,16 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
             _format_gate_age(age_s, emit_fallback),
             ",".join(flags) or "-",
         ))
+    if any_emit_fallback:
+        # The `~` sigil needs its legend at the point of use (Product
+        # review B1): an operator must not have to read the docstring to
+        # learn what it means. The blank line keeps the CLI↔API
+        # conformance parser (which stops at the first blank) from
+        # reading the legend as a data row.
+        lines.append("")
+        lines.append("~ = gate age is the box's emit-time answer_age_s "
+                     "(gate.generated_at unavailable; the value froze at "
+                     "snapshot emission, it does not update)")
 
     # Census: % of eligible boxes per repo_commit, with the denominator
     # and exclusions printed so the percentage is honest.
