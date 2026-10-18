@@ -55,8 +55,9 @@ nothing here re-opens the shipped read-only posture.
   (`fleet/events.py:111`) reads `$USER`/`$LOGNAME`, `_clean_text`-processed
   against control-byte injection, and "MUST NOT fail the ack — provenance is
   metadata, never a gate"; unknown → null `acked_by`, rendered "unknown" in
-  the console (`fleet/console.py:172`) and on the status-page feed
-  (`STATUS_PAGE_FEED_SPEC.md` §4.3). §3's worry — "any local process
+  the console (`fleet/console.py:172`); the status-page feed carries the
+  journaled `acked_by`, null when unknown (`STATUS_PAGE_FEED_SPEC.md` §4,
+  item 3). §3's worry — "any local process
   silences alerts" — applies to the CLI today: local access IS ack authority.
   So the console-write-endpoint debate is not about local processes (they
   already hold the CLI); it is only about remote reachability, which the
@@ -89,8 +90,10 @@ nothing here re-opens the shipped read-only posture.
   loopback write endpoint would widen the local-process surface (F-ACK-4:
   it would not — the CLI already gives every local process the same
   authority), but because the provenance story is the real gap: a console
-  write endpoint without a principal would just mint null-`acked_by` rows
-  faster. The auth story is the prerequisite, not the transport. The
+  write endpoint without an auth story would stamp the API server
+  process's identity (false provenance) or accept a forgeable
+  client-supplied principal — never a real principal. The auth story is
+  the prerequisite, not the transport. The
   composed console→CLI flow (F-ACK-5) is the shipped answer in the
   meantime; it costs one shell step and preserves F-ACK-6.
 - **D-ACK-2 — the three filed issues own the remainders, not this doc.**
