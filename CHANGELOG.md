@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The relay-path dial prober no longer misreports a completed, host-key-verified
   probe as a box-leg failure when the connection's closing handshake hits a
   reset: once the host key is read and the outcome is decided, the closing
-  DISCONNECT is best-effort and can't change it. (#TBD)
+  DISCONNECT is best-effort and can't change it. (#1696)
 - The jail build now logs the network flows still open through the jail right
   after the firewall ruleset is re-applied: a re-apply does not flush
   connection tracking, so pre-existing flows keep flowing under the new rules
