@@ -154,8 +154,20 @@ RUN set -e; \
 # cred-ui runtime installs outside the checkout (cred-ui/install.sh):
 # install to the skeleton agent home; first boot instantiates tenant users
 # from /etc/skel (see below).
+#
+# Issue #1690: the image build installs cred-ui as the skeleton `agent`
+# user with no swapd backend, so install.sh's #964 preflight would fire
+# on `sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token` (the pinned
+# sudoers entry exists only for the box-owner user) and abort the build.
+# The recipe takes the documented local-file contract: CRED_UI_TOKEN_FILE
+# skips the preflight for dev/CI installs without swapd (see
+# cred-ui/install.sh and docs/CRED_UI_SECURITY_CONTRACT.md). This is a
+# build-time variable on this RUN line only — it is never baked into the
+# installed unit, so provisioned machines keep the swapd-backed token and
+# the #964 guard is not weakened for real deploys (proxy/deploy.sh path).
 RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
     SYSTEMD_USER_DIR=/tmp/cred-ui-systemd-unused \
+    CRED_UI_TOKEN_FILE=/home/agent/.local/share/spark-vm/cred-ui/ui-token \
     su agent -s /bin/bash -c 'bash /opt/sparkvm/cred-ui/install.sh' \
  && rm -rf /tmp/cred-ui-systemd-unused
 

@@ -464,7 +464,11 @@ def send_push(*, subscription, plaintext: bytes,
         vapid_public_key=vapid_public_key,
         audience=origin,
         expires_at=int(moment) + VAPID_EXPIRY_S,
-        subject=vapid_subject)
+        subject=vapid_subject,
+        # Issue #1680: the fail-closed expiry comparison compares against
+        # the sender's own moment, so a frozen test clock compares
+        # consistently instead of tripping on the real wall clock.
+        now=moment)
     headers = {
         "Authorization": authz,
         "TTL": str(ttl_s),
