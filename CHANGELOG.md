@@ -150,7 +150,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   two leaves the advance unrecorded — and re-promoting absorbs the
   advance without re-creating the missing record. This ordering is
   deliberate: a journal record for a promotion that never happened
-  would mislead an operator more than a missing record. (#TBD)
+  would mislead an operator more than a missing record. (#1674)
 
 - The "secrets the agent never sees" demo GIF now shows the swap
   proxy's current audit journal shape, including the `tenant` field on
