@@ -227,12 +227,15 @@ module never reads plaintext back (D46 write-only-after-set by
 construction). Droppable into `worker.py` verbatim: stdlib-only, no
 sync-module imports, the DB seam as awaited `_D1` calls.
 
-Tested by `test_push_subscriptions_async.py` (25 tests, neutering-verified
+Tested by `test_push_subscriptions_async.py` (28 tests, neutering-verified
 non-vacuous): the full D99 400 taxonomy (device, endpoint, p256dh
-length/prefix/curve, auth length), 201-vs-200 upsert, `dead_410`
-resurrection, real-delete 404s, ownership 404s, charset-before-lookup on
-unsubscribe, fresh-nonce-per-encryption with decrypt roundtrip, and the
-service-worker content-type + deploy pin.
+length/prefix/curve, auth length), 201-vs-200 upsert with key-material
+replacement + `last_page_at` clearing, `dead_410` resurrection,
+real-delete 404s, multi-owner/box read+delete isolation, ownership 404s,
+charset-before-lookup on unsubscribe, fresh-nonce-per-encryption with
+decrypt roundtrip, the `_DISPLAY_COLUMNS` pin, the sync/coroutine/Future
+ownership seam, both `.meta` shapes, and the service-worker
+content-type + deploy pin.
 
 Run the tests: `python3 -m pytest hosted/test_push_subscriptions_async.py`
 from the repo root.
