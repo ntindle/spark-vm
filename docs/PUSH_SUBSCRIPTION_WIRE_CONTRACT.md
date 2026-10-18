@@ -101,7 +101,13 @@ Body (JSON):
             "auth": "<base64url 16B secret>" } }
 ```
 
-**D99. Validation (all 400, loud, before any write).**
+**D99. Validation (all 400, loud, before any write).** Order is part of
+the contract: the request body is validated **first** (400s), and the
+ownership check runs **after** (404 for an unowned box). A malformed
+request is the client's bug even for a foreign box id; reporting 400
+first leaks nothing an authenticated owner couldn't learn from the 404
+path, and it keeps the plane's re-implementations from diverging on
+ordering.
 - `box_id` owned by the caller (else 404).
 - `device`: 1–64 chars, `[A-Za-z0-9._-]` — the aid charset precedent
   the #988 schema pins (so device names are URL-path-safe and
@@ -202,7 +208,14 @@ behaviors, which the contract requires of any conforming client:
   is what a plane implementation must satisfy; the plane half is
   tracked as issue #1392 (conformance is a plane-side test task, not
   loop-executable against the private worker from the open repo).
-  #968 stays open for that half.
+  #968 stays open for that half. **Reference port:** the open repo
+  ships `hosted/push_subscriptions_async.py` — an async port of the
+  four endpoints plus the D102 serving rule against the #988 schema,
+  droppable into the plane's `worker.py` verbatim (the loop's async-port
+  convention); it is the conformance reference the private plane must
+  satisfy, not the plane itself. The real D45 AES-256-GCM cipher lives
+  in the private worker — the port's encrypt-at-rest seam is where it
+  plugs in.
 - No email/SMS fallback: the "go look" payload discipline (D4)
   stands, and #428's §4 retirement still keys on the plane's
   `outcome='accepted'` record.
