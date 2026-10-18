@@ -308,13 +308,16 @@ $SUDO systemctl enable jail-firewall.service
 # applied — while the pin below is regenerated from the still-old live
 # table, leaving the watchdog's repair source (the new conf) diverged from
 # the pin it compares against (sticky fail-closed storm on the next damage
-# event). `restart` re-runs ExecStart's destroy-then-apply whether the unit
-# is active or not; the watchdog's 10s transient re-check absorbs the
-# millisecond window. Validate first, mirroring the watchdog repair path's
-# validate-before-destroy discipline: a bad conf fails the build instead of
-# destroying the live table.
+# event). Re-apply inline: do NOT `systemctl restart` the unit here —
+# deactivating it trips the Requires= edge on systemd-nspawn@jail.service
+# (the C22 fail-closed edge) and stops the running jail container. The unit
+# stays enabled for the boot-time apply path, and Requires= still pulls it
+# in when the machine starts. Validate first, mirroring the watchdog repair
+# path's validate-before-destroy discipline: a conf that fails validation
+# aborts the build before the live table is touched.
 $SUDO nft -c -f /etc/nftables-jail.conf
-$SUDO systemctl restart jail-firewall.service
+$SUDO nft destroy table inet jail || true  # no table on first build; the unit's ExecStart=- does the same
+$SUDO nft -f /etc/nftables-jail.conf
 say "firewall active:"
 # (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
 $SUDO nft list table inet jail | head -8 || true

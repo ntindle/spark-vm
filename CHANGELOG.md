@@ -53,13 +53,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Fixed
 
 - Rebuilding the agent jail now actually re-applies the jail firewall.
-  The build restarted the firewall service with a start command that is
-  a no-op on re-runs, so an edited firewall configuration was written
-  to disk but never applied — while the watchdog's repair reference
-  was regenerated from the still-old live rules, a divergence that
-  would have turned the next real firewall damage into a fail-closed
-  loop the jail could not recover from without another rebuild. The
-  build now validates the configuration and restarts the service, so
+  The build applied the firewall with a start command that is a no-op
+  on re-runs, so an edited firewall configuration was written to disk
+  but never applied — while the watchdog's repair reference was
+  regenerated from the still-old live rules, a divergence that would
+  have turned the next real firewall damage into a fail-closed loop
+  the jail could not recover from without another rebuild. The build
+  now validates the configuration and re-applies it inline (without
+  restarting the firewall unit, which would stop the running jail), so
   re-running the build converges the box to the repository state.
   (#TBD)
 
