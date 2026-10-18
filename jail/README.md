@@ -156,7 +156,19 @@ states the construction, not a static pin.
   re-running build.sh no longer trips the watchdog (the live table
   still matches the pin). The pin hardcodes nothing about the rules —
   it is captured from the applied conf — so it cannot drift from the
-  table it guards. build.sh also runs the verify
+  table it guards. Separate from the pin, the watchdog also checks the
+  tailnet interface on every tick (#1672, the #1666 runtime half): it
+  extracts the `iifname` the conf binds the jail's SSH DNAT to and
+  requires the interface to exist *and* carry a 100.64.0.0/10 address —
+  a post-build rename or removal leaves the nft rules referencing a
+  stale name that silently never matches while the pin compares
+  unchanged table text. Divergence fails closed exactly like table
+  damage (jail stopped, table re-applied, red unit), with the operator
+  hint to fix the tailnet and re-run `build.sh`, which re-validates the
+  interface and regenerates the pin. A fresh-boot grace (10 minutes)
+  keeps a not-yet-up tailscaled from red-uniting the box — an absent
+  interface inside the grace is transient, and the next ticks re-check.
+  build.sh also runs the verify
   service once at build time: a pin-vs-live-table mismatch fails the
   build loudly instead of surfacing as a fail-closed storm on the first
   watchdog tick. On confirmed damage (a
