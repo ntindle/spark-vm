@@ -24,7 +24,7 @@ inline destroy/`nft -f` re-apply, no unit restart. Verified in
 L352 `$SUDO nft -c -f /etc/nftables-jail.conf`, L353 `$SUDO nft destroy table
 inet jail || true`, L354 `$SUDO nft -f /etc/nftables-jail.conf`, with the
 comment block naming the C22 `Requires=` edge as the reason a restart is
-forbidden. The README contract bullet (`jail/README.md` L105–110) matches.
+forbidden. The README contract bullet (`jail/README.md` L104–108) matches.
 `jail/test_build_smoke.py` + `test_nft_pin_canon.py`: 123 passed, 1 skipped
 in this worktree at `69b9e348` — the pin suite is green on the exact base.
 
@@ -47,9 +47,10 @@ The #1671 ship record said: every swap-audit writer carries the `tenant=`
 column, including the `refused=` family. Verified in
 `proxy/swap_addon.py`: the audit-line shape doc (L168/170/181) shows
 `tenant=<hint>` on `refused=hsurr:<name>`, `refused=egress`, and
-`refused=authority-mismatch`, and the four audit writers (L2682/2696/2712/
-3204) each carry the tenant column with the same unverified-hint caveat the
-#1653 design records. Issue #1653 stays open as the design tracker; the
+`refused=authority-mismatch`, and each audit writer's format string
+(e.g. L2579/2653/2689/2719/3200) carries the tenant column — five writers
+(defs at L2567/2635/2670/2702/3180) — with the same unverified-hint caveat
+the #1653 design records. Issue #1653 stays open as the design tracker; the
 shipped half is the audit-line shape.
 
 ### F-JC-4 — the atomic-rebuild lane is closed for real (CLOSED)
@@ -71,14 +72,18 @@ conntrack flush, and the codebase states the premise explicitly
 re-apply does not flush conntrack"). Established flows therefore still
 survive a tightening re-apply through the `established,related` accepts.
 #1667 stays open; it needs the jail-owner design decision (document / flush
-/ stop-on-reapply) — this pin takes no position.
+/ stop-on-reapply) — this pin takes no position. Scope note for that
+decision: the re-apply is not atomic either — between `nft destroy table
+inet jail` (build.sh L353) and `nft -f` (L354) the table briefly does not
+exist, so flows established *during* the destroy→re-apply window create
+conntrack entries that survive the re-apply just like pre-existing flows.
 
 ### F-JC-6 — #1672 (#1666's runtime half) is still open
 
 #1666's build-time validation cannot see a tailnet rename/removal *after*
 the build: the rules keep naming the stale interface, never match, and the
 watchdog compares the unchanged table text against the pin and stays green.
-The residual is stated verbatim in `jail/jail-firewall-verify.sh` L42–48,
+The residual is stated verbatim in `jail/jail-firewall-verify.sh` L42–49,
 and #1672 (filed from the #1673 review, p3) is the tracker with the fix
 shape: a tick-time interface check extracting the `iifname` from the
 pin/conf. #1672 stays open.
