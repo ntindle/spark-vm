@@ -297,6 +297,10 @@ def _sh(cmd, cwd, env=None):
 
 def generate_secrets(repo_root, work_dir, frames_dir):
     """Build the asset-2 transcript from real fixture + real audit path."""
+    # Absolute: the swap path jail (#1609) refuses a relative
+    # SWAP_BASE_DIR, so a relative --work-dir is resolved here before the
+    # env table hands it to the subprocess.
+    work_dir = os.path.abspath(work_dir)
     os.makedirs(work_dir, exist_ok=True)
     os.makedirs(frames_dir, exist_ok=True)
     fixture = os.path.join(work_dir, "demo-agent-config.json")

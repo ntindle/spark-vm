@@ -97,19 +97,25 @@ current final.
 
 ## Provenance of `demo-secrets-never-seen.gif`
 
-Recorded 2026-09-19 by running the asset's own recipe on this box (no
+Re-recorded 2026-10-17 by running the asset's own recipe on this box (no
 live services, no browser — the asset renders terminal frames with PIL):
 
 - The config is a demo fixture (`demo-agent-config.json` in the scratch
   work dir): every credential value the agent would touch is a
   `demo-`-named placeholder (`hsurr:demo-gh-ro`, `demo-agent`). No real
-  secrets appear. The only real-world string anywhere in the asset is
+  secrets appear. The real-world strings anywhere in the asset are
   `api.github.com` — the public example host used throughout the
-  spark-vm docs.
+  spark-vm docs — and the generating box's hostname, rendered as the
+  unverified `tenant=` hint in the journal line (no identifying data;
+  see the bullet below).
 - The journal line is **byte-for-byte the output of the real
   `proxy/swap_addon.py` `SwapAddon._audit()` code path**, called from the
   generator with `SWAP_LOG_FILE` pointed at a scratch journal:
-  `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=- flow=-`
+  `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=- tenant=<hint> flow=-`
+  (`ts=<utc>` abstracts the generation timestamp; `tenant=` is the
+  unverified tenant hint — `SWAP_TENANT` or the generating box's hostname,
+  per `_summons_tenant_hint()` — so it is recorded as `<hint>`, not a
+  literal value)
 - The three frames are genuine command transcripts: the generator runs
   `cat demo-agent-config.json`, `tail -1 demo-swap.log`, and
   `grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || echo '...'` for real
@@ -126,9 +132,12 @@ Needs Pillow only (no Playwright, no Chromium, no live services):
 
 ```sh
 # scratch dir lives in the working tree, not /tmp (/tmp gets wiped
-# mid-run on this box); its contents are git-ignored, safe to delete
+# mid-run on this box); its contents are git-ignored, safe to delete.
+# The script resolves --work-dir to an absolute path itself — the swap
+# path jail (#1609) rejects a relative SWAP_BASE_DIR, so "$PWD/..." is
+# the safe spelling, but the script's own relative recipe works too.
 python3 scripts/generate_demo_assets.py \
-  --asset secrets --work-dir ./demo-asset2-work \
+  --asset secrets --work-dir "$PWD/demo-asset2-work" \
   --out assets/demo-secrets-never-seen.gif
 ```
 

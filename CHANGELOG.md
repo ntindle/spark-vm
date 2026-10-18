@@ -123,6 +123,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (no new command), and the fleet-wide stale-gate rule's signal source
   already exists, so both are unblocked builds. (#1650)
 
+### Changed
+
+- The "secrets the agent never sees" demo GIF now shows the swap
+  proxy's current audit journal shape, including the `tenant` field on
+  the `swapped=` line, and the assets guide records the byte-for-byte
+  provenance claim for the new shape. The regeneration recipe is fixed
+  too: the generator resolves the scratch directory to an absolute
+  path itself, because the swap path jail refuses to start with a
+  relative one and the old relative recipe stopped running. (#1670)
+
 - Pinned the fleet collector's signal contract for the alert rules:
   the inventory record will carry the box's own emission time and the
   gate answer's own timestamp (so a stale-gate rule can recompute age
