@@ -57,6 +57,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   are pinned so the docs can't drift. (#1692)
 
 ### Fixed
+- The relay-path dial prober now caps its per-phase timeouts at 300 seconds
+  (and requires finite numbers): a misconfigured caller can no longer pass
+  an astronomically large timeout that would turn the probe's absolute
+  anti-tarpit deadline into an effectively unbounded wait. Non-finite
+  timeouts (NaN/inf) are rejected fail-closed too. ([#TBD])
 - The relay-path dial prober no longer misreports a completed, host-key-verified
   probe as a box-leg failure when the connection's closing handshake hits a
   reset: once the host key is read and the outcome is decided, the closing
