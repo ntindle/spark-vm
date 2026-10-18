@@ -89,7 +89,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   there — nftables applies such rules cleanly but they never match — so
   the jail's SSH login could be unreachable with no error anywhere. The
   interface is now a single configurable value the build validates before
-  installing the firewall. (#TBD)
+  installing the firewall. (#1673)
 
 - Fixed the swap proxy's placeholder warning so the refused-credential
   audit line names the credential exactly as it appeared on the wire.
