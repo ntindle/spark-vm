@@ -50,6 +50,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Security
+
+- The credential-registry looseness warning now tells the truth for both
+  registries. The main registry's warning still names the main proxy's
+  allowlist file as the one control the operator can't lift alone; the
+  inference registry's warning says plainly that no such control exists
+  there — the inference proxy's allowlist is operator-appendable — so
+  removing a limit on the inference registry is now flagged honestly.
+  (#TBD)
+
 ### Fixed
 
 - The jail firewall watchdog now also checks the tailnet interface on
