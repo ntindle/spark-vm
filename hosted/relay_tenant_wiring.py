@@ -47,8 +47,9 @@ Delivery semantics (D-RL34-3, one resolution per pair, no dangling
 cases):
 
 (a) Single ordered emitter per box, atomic at the persistence layer:
-    the cadence loop must run at most one tick per box at a time
-    (single-driver assumption — documented, not locked), and the tick's
+    the cadence loop — not yet built in production, see issue #1711 —
+    must run at most one tick per box at a time (single-driver
+    assumption — documented, not locked), and the tick's
     apply phase runs the pair through the store's exclusive lock
     (``TenantStore._mutate``), so no concurrent endpoint or producer
     write can interleave between ``relay-reachable`` and
@@ -86,7 +87,8 @@ recovery time the boolean is always fresh-producer state (restored by
 the pair's first event, or by the resync rule), never a stale input
 the tenant layer must second-guess.
 
-This module never probes: probing is the cadence driver's job
+This module never probes: probing is a production cadence driver's
+job — not yet built, see issue #1711
 (``relay_path_state.maybe_probe`` with caller-supplied bundles —
 D-RL2-3, bundles never persisted). The wiring only *reads*
 ``relay_path_state`` and emits tenant-status events.
@@ -374,16 +376,17 @@ def drive_box(
 ) -> dict:
     """Run one wiring tick for a single (anchor) box: read, plan, emit.
 
-    The box's single ordered emitter (D-RL34-3a): the cadence loop must
-    not run two ticks for the same box concurrently. Returns a report
+    The box's single ordered emitter (D-RL34-3a): the future cadence
+    loop — not yet built in production, see issue #1711 — must not run
+    two ticks for the same box concurrently. Returns a report
     dict ``{box_id, vm_id, reading, events, notes}``. A broken
     instrument (``JournalLockError`` / ``HistoryLockError`` from the
     read) propagates — a broken instrument is loud, never darkness.
 
     ``drive_box`` is the per-box single ordered emitter ONLY when
     invoked for the anchor — the anchor-only constraint lives in
-    ``drive_tenant``; future callers (R4, the cadence driver) must not
-    drive non-anchor boxes through it.
+    ``drive_tenant``. No production cadence driver exists yet (issue
+    #1711): future callers must not drive non-anchor boxes through it.
 
     ``read_fn`` overrides the producer read (tests): it is called as
     ``read_fn(vm_id)`` — a caller-supplied ``read_fn`` silently ignores
