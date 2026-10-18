@@ -71,6 +71,20 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses
   the correct name, and a pin test keeps the recipe's asset name identical to
   the self-update tool's. (#1689)
+- The golden-image build gate is no longer red at the cred-ui layer: the
+  recipe's cred-ui RUN step sets `CRED_UI_TOKEN_FILE` to a local path, taking
+  the documented local-file contract for installs without swapd, so
+  install.sh's #964 ui-token preflight no longer aborts the image build. The
+  variable is build-time only (never baked into the unit) and the guard
+  itself is unchanged, so real deploys via proxy/deploy.sh keep the #964
+  intent; a pin test keeps the variable in the recipe. (#TBD)
+- `vapid_sign` no longer mints VAPID JWTs whose `exp` is not in the future:
+  an already-expired `expires_at` is a caller error that could previously
+  only surface as a push-service 4xx far from the misconfiguration, so it
+  now raises `ValueError` fail-closed (the RFC 8292 24h upper bound is
+  deliberately not enforced — it needs the request time only the caller
+  has). The in-repo sender threads its own send clock through so its
+  frozen test clocks compare consistently. (#TBD)
 
 ## [0.9.0] - 2026-10-18
 

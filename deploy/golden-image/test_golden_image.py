@@ -130,6 +130,25 @@ def test_dockerfile_copies_host_generated_manifest():
     assert "check-image-manifest.sh" in text
 
 
+def test_dockerfile_cred_ui_layer_takes_token_file_contract():
+    """The cred-ui RUN layer must set CRED_UI_TOKEN_FILE (issue #1690). The
+    golden-image build installs cred-ui as the skeleton `agent` user with no
+    swapd backend, so install.sh's #964 ui-token preflight would fire on
+    `sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token` and abort the
+    build. The recipe takes the documented local-file contract (a
+    dev/CI install without swapd — see cred-ui/install.sh and
+    docs/CRED_UI_SECURITY_CONTRACT.md); the variable is set only on this
+    RUN line and is never baked into the unit, so provisioned machines
+    keep the swapd-backed token and the #964 guard is not weakened. A
+    future layer edit must not silently drop the variable."""
+    blocks = [b for b in _dockerfile_run_blocks() if "cred-ui/install.sh" in b]
+    assert len(blocks) == 1, (
+        f"expected exactly one cred-ui install RUN block, found {len(blocks)}")
+    assert re.search(r"\bCRED_UI_TOKEN_FILE=\S+", blocks[0]), (
+        "cred-ui install RUN block must set CRED_UI_TOKEN_FILE per the #1690 "
+        "local-file contract")
+
+
 def _pins_conf():
     pins = {}
     with open(os.path.join(REPO_ROOT, "scripts", "self_update_pins.conf"), encoding="utf-8") as f:

@@ -66,6 +66,7 @@ import hmac
 import json
 import secrets
 import struct
+import time
 
 
 # ---------------------------------------------------------------------------
@@ -542,12 +543,27 @@ def _b64url(data: bytes) -> str:
 
 
 def vapid_sign(*, vapid_private_key: bytes, audience: str, expires_at: int,
-               subject: str | None = None) -> str:
+               subject: str | None = None,
+               now: float | None = None) -> str:
     """Build a VAPID JWT (RFC 8292 section 2): ES256 over
     ``b64(header) + "." + b64(claims)``.  ``audience`` is the push service
     origin (scheme + host); ``expires_at`` is a unix timestamp.  RFC 8292
     asks that ``exp`` be at most 24h in the future — the caller sets it;
-    this function does not second-guess the clock."""
+    this function does not second-guess the clock.
+
+    Issue #1680: an ``exp`` that is not in the future is unambiguously a
+    caller error — such a JWT can never succeed, and the push service would
+    reject it with a 4xx far from the misconfiguration that caused it — so
+    this function fails closed and raises ``ValueError`` instead of minting
+    it.  (The RFC's 24h upper bound is deliberately NOT enforced here: it
+    needs the request time, which only the caller has.)  ``now`` is the
+    reference clock for the fail-closed comparison — ``time.time()`` when
+    unset; the in-repo sender threads its own ``moment`` through so a
+    caller with a frozen clock compares consistently."""
+    if expires_at <= int(time.time() if now is None else now):
+        raise ValueError(
+            "vapid_sign: expires_at is not in the future — refusing to "
+            "mint an already-expired VAPID JWT")
     header = {"typ": "JWT", "alg": "ES256"}
     claims: dict = {"aud": audience, "exp": expires_at}
     if subject is not None:
@@ -562,10 +578,13 @@ def vapid_sign(*, vapid_private_key: bytes, audience: str, expires_at: int,
 
 def vapid_authorization_header(*, vapid_private_key: bytes, vapid_public_key: bytes,
                                audience: str, expires_at: int,
-                               subject: str | None = None) -> str:
+                               subject: str | None = None,
+                               now: float | None = None) -> str:
     """The ``Authorization`` header value for a push request:
-    ``vapid t=<jwt>, k=<uncompressed VAPID public key, base64url>``."""
+    ``vapid t=<jwt>, k=<uncompressed VAPID public key, base64url>``.
+    ``now`` threads the caller's reference clock into vapid_sign's
+    fail-closed expiry comparison (see vapid_sign)."""
     _decode_uncompressed_point(vapid_public_key)  # fail fast on a bad key
     jwt = vapid_sign(vapid_private_key=vapid_private_key, audience=audience,
-                     expires_at=expires_at, subject=subject)
+                     expires_at=expires_at, subject=subject, now=now)
     return f"vapid t={jwt}, k={_b64url(vapid_public_key)}"

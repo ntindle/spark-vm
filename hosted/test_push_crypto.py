@@ -249,6 +249,48 @@ def test_vapid_jwt_roundtrip():
     assert ecdsa_verify(pub, signing_input, sig)
 
 
+def test_vapid_sign_rejects_expired():
+    """Issue #1680: an already-expired ``expires_at`` is a caller error — a
+    minted JWT could never succeed, so vapid_sign fails closed instead of
+    signing it. Both a past timestamp and the exact current second count
+    as not-in-the-future."""
+    priv, _pub = generate_keypair()
+    with pytest.raises(ValueError):
+        vapid_sign(vapid_private_key=priv,
+                   audience="https://push.example.net",
+                   expires_at=int(time.time()) - 1)
+    with pytest.raises(ValueError):
+        vapid_sign(vapid_private_key=priv,
+                   audience="https://push.example.net",
+                   expires_at=int(time.time()))
+    # Frozen-clock variant (the in-repo sender threads its own moment):
+    # expires_at at/before the caller's reference clock also fails closed,
+    # and a frozen-future expires_at still signs.
+    with pytest.raises(ValueError):
+        vapid_sign(vapid_private_key=priv,
+                   audience="https://push.example.net",
+                   expires_at=1_700_000_000, now=1_700_000_000.0)
+    frozen_ok = vapid_sign(vapid_private_key=priv,
+                           audience="https://push.example.net",
+                           expires_at=1_700_000_000 + 12 * 3600,
+                           now=1_700_000_000.0)
+    _h, c, _s = frozen_ok.split(".")
+    assert json.loads(b64url_decode_nopad(c))["exp"] == 1_700_000_000 + 43200
+
+
+def test_vapid_sign_accepts_future():
+    """A future ``expires_at`` still signs — the in-repo caller
+    (push_sender) passes now + 12h, so this is the live path."""
+    priv, _pub = generate_keypair()
+    jwt = vapid_sign(vapid_private_key=priv,
+                     audience="https://push.example.net",
+                     expires_at=int(time.time()) + 12 * 3600)
+    _header_b64, claims_b64, _sig_b64 = jwt.split(".")
+    claims = json.loads(b64url_decode_nopad(claims_b64))
+    assert claims["aud"] == "https://push.example.net"
+    assert claims["exp"] > int(time.time())
+
+
 def test_vapid_tamper_rejected():
     priv, pub = generate_keypair()
     jwt = vapid_sign(vapid_private_key=priv, audience="https://push.example.net",
