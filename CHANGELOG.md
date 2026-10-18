@@ -143,6 +143,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Changed
 
+- The fleet rollout controller's audit journal now documents its
+  crash-completeness contract: it is an operator audit trail, not a
+  crash-proof record. A wave promotion is advanced in the rollout state
+  first and its journal record is written after, so a crash between the
+  two leaves the advance unrecorded — and re-promoting absorbs the
+  advance without re-creating the missing record. This ordering is
+  deliberate: a journal record for a promotion that never happened
+  would mislead an operator more than a missing record. (#TBD)
+
 - The "secrets the agent never sees" demo GIF now shows the swap
   proxy's current audit journal shape, including the `tenant` field on
   the `swapped=` line, and the assets guide records the byte-for-byte

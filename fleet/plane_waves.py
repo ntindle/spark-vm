@@ -118,6 +118,23 @@ Store files (beyond the S1/S3 stores):
                               divergence check — the S4 driver never reads
                               it, and the wave file carries its own
                               fail-closed validation on every read.
+                              Crash-completeness decision (#1636): the
+                              promote/halt records are appended AFTER the
+                              waves.json advance, so a crash in between
+                              leaves the advance unrecorded; re-running
+                              promote absorbs the advance (the rollout
+                              identity check passes and the gate evaluates
+                              the next wave) without regenerating the
+                              missing record — the missing record stays
+                              missing, and the operator reads the gap from
+                              the wave file's own updated_at. The mirror
+                              ordering (record before advance) is
+                              deliberately NOT used: a record for a
+                              promote that never happened misleads an
+                              operator audit more than a missing record.
+                              No two-phase pending/complete record — that
+                              is reserved for a future where the trail is
+                              promoted toward trust-root use.
 
 Exit 0 on a printed result, 2 on bad input / refusal / internal error
 (one-line message, never a bare traceback). Stdlib only.
