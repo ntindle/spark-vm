@@ -145,7 +145,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the service-worker serving rule, all pinned to the subscription wire
   contract and the subscription database schema. Browser keys are
   encrypted under the plane's data key before every write, and the
-  read path can never return key material. (#TBD)
+  read path can never return key material. (#1684)
 
 - New doc: the agent-jail lane convergence pin — what the jail firewall
   lane's vision looks like against the code after the recent rebuild,
