@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   recovery pair, anchor selection, and stale-reachability resync, and
   prints the tick report as JSON — the wiring no longer waits on a
   production cadence driver that was never built, and the single-tick
-  discipline is documented for whatever drives it next. (#1711, #TBD)
+  discipline is documented for whatever drives it next. (#1711, #1717)
 - Settled the fleet console's alert-acknowledgment auth question: acking
   stays a command-line action permanently — the fleet read API is
   loopback-only by design with no remote binding possible, so no operator
