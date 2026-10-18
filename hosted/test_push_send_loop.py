@@ -1533,3 +1533,122 @@ def test_utcnow_accepts_finite_epoch():
     assert push_send_loop._utcnow(0.0) == datetime(1970, 1, 1,
                                                   tzinfo=timezone.utc)
     assert push_send_loop._utcnow(1700000000).year == 2023
+
+
+# ---------------------------------------------------------------------------
+# (D98) parked max-age expiry (#1185)
+# ---------------------------------------------------------------------------
+
+def _old_digest_tick(conn, owner, vapid, age_hours):
+    # A digest parked `age_hours` ago with a valid digest-state row, no
+    # live subscriptions — the D98 shape. Returns (tick, old_window).
+    old = NOW - timedelta(hours=age_hours)
+    old_window = push_enqueue.hour_bucket(old)
+    _seed_digest_state(conn, owner, old_window)
+    enqueue(conn, "digest", owner, None, old_window, at=old)
+    return make_tick(conn, owner, vapid), old_window
+
+
+def test_parked_young_stays_parked(conn, owner, vapid):
+    # D98 must not fire for a young parked row: a 1h-old digest with no
+    # live subscriptions parks exactly as D81 always did — the row and
+    # its reservation stay, no dead-letter row, no anomaly.
+    tick, old_window = _old_digest_tick(conn, owner, vapid, 1)
+
+    summary = tick()
+
+    assert summary.dispositions["parked"] == 1
+    assert "parked_expired" not in summary.dispositions
+    assert outcomes(conn) == ["queued"]
+    assert budget(conn, "owner", owner, old_window) == 1
+    assert tick.service.calls == []
+
+
+def test_parked_overage_digest_dead_letters(conn, owner, vapid):
+    # #1185: a 26h-old parked digest exceeds the 25h bound — it expires
+    # through the audited path: one page-level dead-letter audit row
+    # (device=''), the queued row deleted, the D10 reservation
+    # released, and a parked_expired tick anomaly. The digest state
+    # row is untouched (the D79 pin: the parked path never resets the
+    # count — the state row ages out under the 90-day GC, and the
+    # sweep never refires a window whose enqueued_at is set).
+    tick, old_window = _old_digest_tick(conn, owner, vapid, 26)
+
+    summary = tick()
+
+    assert summary.dispositions["parked_expired"] == 1
+    assert "parked" not in summary.dispositions
+    assert tick.service.calls == []
+    got = outcomes(conn)
+    assert got == ["dead-letter"], got
+    row = rows(conn)[0]
+    assert row[3] == ""  # device='' — the D56e page-level shape
+    assert row[5].endswith("\x00parked-expired")  # the D61/D77 key
+    assert budget(conn, "owner", owner, old_window) == 0
+    drow = _digest_state_row(conn, owner, old_window)
+    assert drow is not None and drow[0] == 3  # count not reset
+
+
+def test_parked_overage_approval_filed_dead_letters(conn, owner, vapid):
+    # aid-keyed kinds park only when gate-2 sees a non-terminal record
+    # (the approval is still pending at tick time) — the row is 2h old,
+    # past the 3600s TTL-clamp bound, so D98 expires it.
+    seed_approval(conn, "box-1", "aid-1", owner)
+    old = NOW - timedelta(hours=2)
+    enqueue(conn, "approval_filed", owner, "box-1", "aid-1", at=old)
+
+    summary = make_tick(conn, owner, vapid)()
+
+    assert summary.dispositions["parked_expired"] == 1
+    assert outcomes(conn) == ["dead-letter"]
+    assert budget(conn, "box", "box-1",
+                  push_enqueue.hour_bucket(old)) == 0
+
+
+def test_parked_overage_per_kind_bounds(conn, owner, vapid):
+    # Every PAGING_EVENT_KINDS kind has a bound, and the boundary is
+    # respected in both directions: just-under parks, just-over
+    # expires. heartbeat_stale/box_revoked/token_expiry_warning are
+    # not aid-keyed, so no approval record is needed.
+    bounds = push_send_loop.PARKED_MAX_AGE_S
+    assert set(bounds) == set(push_enqueue.PAGING_EVENT_KINDS), \
+        "every paging kind needs a parked max-age (fail closed, not open)"
+    cases = [
+        ("heartbeat_stale", "box-1", "hs-1"),
+        ("box_revoked", "box-1", "rev-1"),
+        ("token_expiry_warning", "box-1", "tok-1"),
+        ("reminder", "box-1", "aid-1"),
+    ]
+    for kind, box, key_material in cases:
+        if kind == "reminder":
+            seed_approval(conn, box, key_material, owner)
+        bound_s = bounds[kind]
+        under = NOW - timedelta(seconds=bound_s - 60)
+        enqueue(conn, kind, owner, box, key_material, at=under)
+        summary = make_tick(conn, owner, vapid)(now=NOW)
+        assert summary.dispositions["parked"] == 1, kind
+        assert outcomes(conn) == ["queued"], kind
+        conn.execute("DELETE FROM push_send_results")
+        conn.commit()
+        over = NOW - timedelta(seconds=bound_s + 60)
+        enqueue(conn, kind, owner, box, key_material, at=over)
+        summary = make_tick(conn, owner, vapid)(now=NOW)
+        assert summary.dispositions["parked_expired"] == 1, kind
+        assert outcomes(conn) == ["dead-letter"], kind
+        conn.execute("DELETE FROM push_send_results")
+        conn.commit()
+
+
+def test_parked_expiry_keeps_exact_key_reenqueueable(conn, owner, vapid):
+    # The D61/D77 pattern, applied to D98: the expiry audit row carries
+    # the suffixed key, so a later re-enqueue of the same event is not
+    # wedged "duplicate" by the boundary's outcome-blind D53 dedup
+    # fast-path — the page was never delivered, so it must stay
+    # re-pageable once the owner subscribes.
+    tick, _ = _old_digest_tick(conn, owner, vapid, 26)
+    assert tick().dispositions["parked_expired"] == 1
+
+    r = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal=owner, box_id=None,
+        key_material=push_enqueue.hour_bucket(NOW), now=NOW)
+    assert r.disposition == "queued", r  # not "duplicate"
