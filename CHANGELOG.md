@@ -51,6 +51,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Pinned the design for the relay-liveness auto cadence driver: a
+  vision-vs-state analysis of #1711's remainder — one clock (drive
+  cadence = probe cadence), drive-only consumption with loud stale-probe
+  notes, overlap-safe ticks, per-tenant last-tick watermarks with a
+  staleness alert, and placement on the plane-cron template — decomposed
+  into four build slices. (#TBD)
 - Relay-liveness wiring is now operator-driven from the command line:
   one `--tick` run per tenant drives rule-6 relay suspensions, the
   recovery pair, anchor selection, and stale-reachability resync, and
