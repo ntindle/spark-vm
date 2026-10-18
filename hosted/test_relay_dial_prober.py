@@ -450,6 +450,66 @@ def test_box_leg_defect_server_disconnect(fake_relay):
 
 
 # ---------------------------------------------------------------------------
+# Teardown (post-handshake I/O failure must not change the outcome)
+# ---------------------------------------------------------------------------
+
+
+class _TeardownBoomSocket:
+    """Real socket whose 5th sendall (the DISCONNECT teardown) raises.
+
+    The prober's sends are: (1) ident line, (2) KEXINIT, (3) GEX_REQUEST,
+    (4) GEX_INIT, (5) DISCONNECT — so the 5th sendall is always the
+    post-handshake teardown, which a peer that RSTs after the host-key
+    reply makes fail.
+    """
+
+    def __init__(self, sock):
+        self._sock = sock
+        self._sends = 0
+
+    def sendall(self, data):
+        self._sends += 1
+        if self._sends == 5:
+            raise ConnectionResetError("simulated teardown RST")
+        return self._sock.sendall(data)
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+@pytest.mark.parametrize(
+    "pin_of, expected",
+    [
+        (lambda blob: _pin_of(blob), "path_ok"),
+        (lambda blob: _pin_of(_rsa_blob(b"r2a-other-key")), "cert_defect"),
+    ],
+)
+def test_completed_handshake_survives_teardown_send_failure(
+    fake_relay, monkeypatch, pin_of, expected
+):
+    # A peer that RSTs the connection right after the host-key reply: the
+    # handshake is complete and the key is verified, so the outcome must
+    # stay path_ok/cert_defect — teardown I/O failure must not demote it
+    # to box_leg_defect.
+    real_create = prober.socket.create_connection
+
+    def _boom_create(*a, **k):
+        return _TeardownBoomSocket(real_create(*a, **k))
+
+    monkeypatch.setattr(prober.socket, "create_connection", _boom_create)
+    r = prober.probe(
+        **_probe_kwargs(
+            fake_relay, pinned_fingerprint=pin_of(fake_relay.host_key_blob)
+        )
+    )
+    assert r.outcome == expected
+    assert r.detail["observed_fingerprint"] == _pin_of(
+        fake_relay.host_key_blob
+    )
+    assert r.detail["host_key_algo"] == "ssh-rsa"
+
+
+# ---------------------------------------------------------------------------
 # Provider-state stand-down (D-RL2-4; fake driver)
 # ---------------------------------------------------------------------------
 

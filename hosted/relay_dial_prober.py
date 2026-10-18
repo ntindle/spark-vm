@@ -376,6 +376,10 @@ def probe(
     Raise contract: ``ValueError`` on bad arguments (before any network);
     a raising ``provider_state_fn`` propagates as a caller bug. Callers
     (R2b) must wrap the call if the driver can fail.
+
+    Teardown contract: once the host key is read and the outcome decided,
+    the closing DISCONNECT is best-effort — a post-handshake I/O failure
+    (e.g. the peer RSTs after the reply) never changes the outcome.
     """
     start = time.monotonic()
     _require_key_material("vm_id", vm_id)
@@ -530,24 +534,12 @@ def _dial(
             else CERT_DEFECT
         )
 
-        # --- close cleanly before authentication: DISCONNECT, then TCP ---
-        disc = struct.pack("B", _SSH_MSG_DISCONNECT)
-        disc += struct.pack(">I", 11)  # SSH_DISCONNECT_BY_APPLICATION
-        disc += _string(b"probe complete")
-        disc += _string(b"")
-        try:
-            sock.sendall(_build_packet(disc))
-        finally:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-        return ProbeResult(
+        # The handshake is complete here: the outcome is decided from the
+        # verified host key, and nothing after this point can change it. A
+        # peer that RSTs the connection after the host-key reply must not
+        # demote a path_ok/cert_defect to box_leg_defect — the §3 taxonomy
+        # describes the handshake, and the handshake is done.
+        result = ProbeResult(
             outcome,
             _detail(
                 vm_id,
@@ -557,6 +549,28 @@ def _dial(
                 host_key_algo=_host_key_algo(host_key_blob),
             ),
         )
+
+        # --- close cleanly before authentication: DISCONNECT, then TCP ---
+        # Best-effort only: the outcome above is already decided, so a
+        # teardown I/O failure must not re-enter the error classification.
+        disc = struct.pack("B", _SSH_MSG_DISCONNECT)
+        disc += struct.pack(">I", 11)  # SSH_DISCONNECT_BY_APPLICATION
+        disc += _string(b"probe complete")
+        disc += _string(b"")
+        try:
+            sock.sendall(_build_packet(disc))
+        except OSError:
+            pass
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+        return result
     except _ProbeError as e:
         e.banner = banner
         raise
