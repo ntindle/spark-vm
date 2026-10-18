@@ -115,21 +115,30 @@ the console refuses non-loopback `--api` targets fail-fast
 **Why not the OQ3 candidates** (recorded so a future turn does not
 re-litigate them):
 
-1. **Operator token (bearer).** On a loopback-only surface a token is
-   theater: any local process that could call the endpoint can equally read
-   the operator's token store or run the CLI, which already holds the same
-   authority (F-ACK-4). It would need its own storage/rotation story and
-   buys nothing against the actual threat. If a remote tenant console ever
-   ships, it reuses the plane's owner principal (the #843/#844 model), not
-   a new fleet-local token.
+1. **Operator token (bearer).** On a loopback-only surface inside this
+   surface's single-operator-box trust boundary ("the operator's own box
+   is the trust boundary, same as the CLI" — `fleet/api.py:35`), a token
+   is theater: any local process that could call the endpoint can equally
+   read the operator's token store or run the CLI, which already holds the
+   same authority (F-ACK-4). It would need its own storage/rotation story
+   and buys nothing against the actual threat. If a remote tenant console
+   ever ships, it reuses the plane's owner principal (the #843/#844
+   model), not a new fleet-local token.
 2. **SSH-certificate-bound.** The loopback HTTP surface has no TLS and no
    SSH handshake; there is nothing to bind a certificate to. A
    signed-challenge dance over loopback would prove only what the CLI
    already grants.
-3. **The confirmd trust model.** Confirmd authenticates *agent* actions
-   (grant minting, single writer) — it supplies no operator principal. It
-   is a category error for this question (F-ACK-7: candidate, not
-   dependency).
+3. **The confirmd trust model.** Confirmd *does* authenticate a human
+   operator — every request is checked by Tailscale identity against
+   `CONFIRM_OWNER` (`confirm/README.md:132-134`, "Security properties"). But that
+   principal is bound to confirmd's tailnet HTTPS surface (Tailscale
+   identity + machine certificates). The fleet surface is loopback-only
+   with no network identity by construction, so there is nothing here to
+   authenticate *against*: porting confirmd's model would mean standing up
+   tailnet identity on a loopback socket — the same theater rejected in
+   (1) — or conflating two principal namespaces (a tailnet login vs. the
+   local login identity that runs the CLI). Rejected as a surface mismatch
+   (F-ACK-7: candidate, not dependency), not for lack of a principal.
 
 **Consequence for D-ACK-5.** Its supersession clause ("when #1703's auth
 story lands, the ack stamps the real principal") resolves to never: #1703
@@ -140,7 +149,9 @@ meaning, unchanged.
 
 **Revisit trigger and owner.** Owner: the improvement loop. Re-open this
 decision only when (a) a slice binds the fleet read API non-loopback, or
-(b) a hosted tenant console needs ack. Until then, D-ACK-1's prerequisite
+(b) a hosted tenant console needs ack. This decision is scoped to the
+fleet/console surface — the plane's approval records are a separate trust
+plane (D-ACK-3), untouched. Until then, D-ACK-1's prerequisite
 stands: a console write endpoint without a chosen principal is out of
 scope — and the principal is now chosen as "the operator's own box," which
 no endpoint needs to gate.
@@ -173,4 +184,5 @@ D-ACK-6 verification points (main `abb03984`):
   the permanent CLI path).
 
 **Track:** open-source (operator tooling every self-host operator uses).
-Issues #1703, #1704, and #1705 close on this doc's merge.
+#1704/#1705 closed on PR #1708's merge (`55cd9d17`); #1703 closes on this
+doc's merge.
