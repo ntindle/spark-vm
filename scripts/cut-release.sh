@@ -327,11 +327,11 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
 # --publish-only recovery (the recovery regenerates the same unbounded
 # body), so the cap is enforced here, on the shared assembly path, before
 # --notes-file is written and before any publish attempt. Only the curated
-# Highlights section is trimmed — at whole-line (whole-bullet) boundaries,
-# with an explicit note pointing at the full CHANGELOG.md section; the
-# merged-PR list and the footer are never trimmed. If the body still
-# exceeds the cap with Highlights fully trimmed, the script dies with an
-# operator diagnostic. CUT_RELEASE_MAX_BODY_CHARS exists only so tests can
+# Highlights section is trimmed — at whole-block (whole-bullet) prefix
+# boundaries, with an explicit note pointing at the full CHANGELOG.md
+# section; the merged-PR list and the footer are never trimmed. If the body
+# still exceeds the cap with Highlights fully trimmed, the script dies with
+# an operator diagnostic. CUT_RELEASE_MAX_BODY_CHARS exists only so tests can
 # exercise the trim; production always uses GitHub's real limit. Lengths
 # are counted in Unicode code points, matching how the API measures the
 # JSON body.
@@ -347,6 +347,7 @@ TRIM_MSG="$(MAX_BODY_CHARS="$MAX_BODY_CHARS" TRIM_MODE="$MODE" TRIM_TAG="$TAG" \
     TRIM_SHA="$RELEASE_SHA" TRIM_REMOTE="$REMOTE" PRE_FLAG="$PRE_FLAG" \
     python3 - "$NOTES" <<'PYEOF' 2>&1
 import os
+import re
 import sys
 
 notes_path = sys.argv[1]
@@ -435,30 +436,54 @@ if floor_len > cap:
 
 kept = []
 kept_len = floor_len
-dropped = 0
+# Prefix trim in whole blocks. A block is one bullet (its start line plus
+# any wrapped continuation lines), one "### " subsection header, or the
+# blank lines between them. Blocks are kept whole while they fit; the
+# first block that does not fit ends the trim. This replaces the old
+# greedy line-keep, which could keep a dropped bullet's short
+# continuation lines while skipping its long start line — orphaning
+# fragments of two different bullets into one Frankenstein bullet in the
+# published notes (v0.9.0's Highlights were the first to exceed the cap).
+blocks = []
+cur = []
 for ln in content:
-    # Whole lines only: a bullet is kept entire or dropped entire, never
-    # split mid-line.
-    if kept_len + len(ln) + 1 <= cap:
-        kept.append(ln)
-        kept_len += len(ln) + 1
+    if re.match(r"^([-*] |### )", ln) and cur:
+        blocks.append(cur)
+        cur = [ln]
     else:
-        dropped += 1
+        cur.append(ln)
+if cur:
+    blocks.append(cur)
+for b in blocks:
+    n = sum(len(l) + 1 for l in b)
+    if kept_len + n <= cap:
+        kept.extend(b)
+        kept_len += n
+    else:
+        break
+dropped = len(content) - len(kept)
 # A subsection header ("### Added") with no surviving bullets underneath
-# would dangle at the end of the trimmed section; drop it. Popped headers
-# are counted separately from dropped content lines (E2).
+# would dangle at the end of the trimmed section; drop it (with any blank
+# lines after it). Popped headers are counted separately from dropped
+# content lines (E2).
 dropped_headers = 0
-while kept and kept[-1].startswith("### "):
-    kept_len -= len(kept.pop()) + 1
-    dropped_headers += 1
+while True:
+    i = len(kept) - 1
+    while i >= 0 and not kept[i].strip():
+        i -= 1
+    if i >= 0 and kept[i].startswith("### "):
+        dropped_headers += 1
+        kept = kept[:i]
+    else:
+        break
 
 new_text = HEADER_PREFIX
 if kept:
     new_text += "\n".join(kept) + "\n"
 new_text += ("\n" if kept else "") + trim_note + "\n" + pr_block + footer
-# Invariant by construction: kept_len tracked every addition (the floor
-# folded in the note-framing blanks), and the header-pop only shrinks it;
-# floor_len <= cap was checked above.
+# Invariant by construction: kept_len tracked every block addition (the
+# floor folded in the note-framing blanks), and the header-pop only
+# shrinks it; floor_len <= cap was checked above.
 with open(notes_path, "w", encoding="utf-8") as f:
     f.write(new_text)
 print("cut-release.sh: release notes trimmed to %s characters (cap %s); "
