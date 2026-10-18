@@ -271,7 +271,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   technical write-up (Part 1 published, Part 2 promised) into the
   Vercel KVM zero-day row as its third advancement; the Vercel
   changelog dated sitemap moves 1430 → 1431 (one AI Gateway entry,
-  non-sandbox). (#TBD)
+  non-sandbox). (#1697)
 
 - Competitor watch, 2026-10-17 morning: the Vercel KVM zero-day now
   has a formal CVE — CVE-2026-99999 (Critical, CVSS 9.3,
