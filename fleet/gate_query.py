@@ -187,11 +187,19 @@ def box_wave(box_id: str, wave: dict) -> int:
     A malformed assignment pin (non-integer) is no-signal: the wave data
     cannot be trusted, and a guessing box is a fail-open risk — so the box
     freezes instead of evaluating a wave it cannot parse (QA B2)."""
+    if not isinstance(wave, dict):
+        # The _my_wave display path in answer() hands us the raw per-
+        # component entry, which may be null — a non-object wave is not a
+        # wave we can evaluate (Engineering delta nit, same class).
+        raise NoSignal("wave entry is not an object")
     assignments = wave.get("assignments") or {}
     if box_id in assignments:
         try:
             return int(assignments[box_id])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: json accepts Infinity/NaN as extensions; a
+            # non-finite pin is as malformed as a non-integer one (Security
+            # delta note).
             raise NoSignal(f"wave assignment for {box_id!r} is not a wave "
                            f"number: {assignments[box_id]!r}")
     return int(hashlib.sha256(box_id.encode("utf-8")).hexdigest(), 16) % 4
@@ -211,12 +219,12 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
         # null assignments field must not AttributeError here (QA B2).
         try:
             pin = int((wave.get("assignments") or {}).get(box_id, -1))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise NoSignal(f"canary assignment for {box_id!r} is malformed")
         return pin == 1
     try:
         ceiling = int(wave.get("live", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         # A malformed live ceiling names no real cohort — no-signal rather
         # than a ValueError traceback (QA B2).
         raise NoSignal(f"wave live ceiling for {comp!r} is malformed")

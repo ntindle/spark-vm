@@ -515,6 +515,30 @@ def test_box_wave_malformed_pin_is_no_signal():
         raise AssertionError("expected NoSignal")
 
 
+def test_box_wave_non_dict_wave_is_no_signal():
+    # A null per-component wave entry (the _my_wave display path in
+    # answer()) must be no-signal, not an AttributeError (Engineering
+    # delta note).
+    try:
+        gate_query.box_wave("box-7", None)
+    except gate_query.NoSignal as exc:
+        assert "not an object" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
+def test_box_wave_non_finite_pin_is_no_signal():
+    # json accepts Infinity/NaN as extensions; a non-finite pin is
+    # malformed (Security delta note).
+    for bad in (float("inf"), float("nan")):
+        try:
+            gate_query.box_wave("box-7", {"assignments": {"box-7": bad}})
+        except gate_query.NoSignal as exc:
+            assert "not a wave number" in str(exc)
+        else:
+            raise AssertionError(f"expected NoSignal for {bad!r}")
+
+
 def test_component_permitted_non_dict_wave_is_false():
     assert gate_query.component_permitted("box-1", "repo",
                                           {"repo": None}) is False
@@ -567,6 +591,17 @@ def test_component_permitted_null_assignments_does_not_crash():
     waves = {"repo": {"state": "canary", "live": 4, "assignments": None}}
     assert gate_query.component_permitted("box-1", "repo",
                                           waves) is False
+
+
+def test_component_permitted_non_finite_live_is_no_signal():
+    waves = {"repo": {"state": "wave-1", "live": float("inf"),
+                      "assignments": {"box-1": 0}}}
+    try:
+        gate_query.component_permitted("box-1", "repo", waves)
+    except gate_query.NoSignal as exc:
+        assert "malformed" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
 
 
 def test_component_permitted_live_ceiling():
@@ -659,3 +694,18 @@ def test_answer_malformed_wave_entry_is_frozen(tmp_path):
     assert ans["freeze"] == "true"
     assert ans["reason"].startswith("no-signal: ")
     assert "malformed" in ans["reason"]
+
+
+def test_answer_null_wave_entry_is_frozen(tmp_path):
+    # A null per-component wave entry in a MAC-valid doc must freeze the
+    # box, not AttributeError on the _my_wave display path (Engineering
+    # delta note).
+    waves = {"repo": None}
+    doc = _make_gate_doc(freeze=False, waves=waves)
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    ans = gate_query.answer(path, "box-1", {"k1": KEY_A})
+    assert ans["state"] == "frozen"
+    assert ans["freeze"] == "true"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "not an object" in ans["reason"]
