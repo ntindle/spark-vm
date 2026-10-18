@@ -280,6 +280,34 @@ class SwapAddonTests(unittest.TestCase):
         self.assertEqual(fields["password"], [SECRETS["pw"]])
         self.assertEqual(fields["user"], ["x"])
 
+    def test_holds_encoded_placeholder_uppercase_prefix_not_swapped(self):
+        """O2 security-sweep follow-up (decided 2026-10-18): the encoded
+        placeholder regex is prefix-case-sensitive — an uppercase `HSURR%3A`
+        prefix in a form body never swaps, so no real secret is inserted
+        even on an allowlisted host. Symmetric with the literal form
+        (`HSURR:`), which never swaps either."""
+        a = make_addon()
+        req = Request("github.com", "/login",
+                      [("Content-Type", "application/x-www-form-urlencoded")],
+                      b"tok=HSURR%3Agithub")
+        a.request(Flow(req))
+        body = req.content.decode()
+        self.assertNotIn(SECRETS["github"], body)
+        self.assertIn("HSURR", body)
+
+    def test_holds_encoded_placeholder_hex_digits_case_insensitive(self):
+        """Only the percent-hex digits are case-insensitive: `hsurr%3a`
+        and `hsurr%3A` (lowercase prefix) both swap on an allowlisted host —
+        %3a vs %3A both occur on the wire."""
+        a = make_addon()
+        for wire in (b"tok=hsurr%3agithub", b"tok=hsurr%3Agithub"):
+            req = Request("github.com", "/login",
+                          [("Content-Type", "application/x-www-form-urlencoded")],
+                          wire)
+            a.request(Flow(req))
+            fields = urllib.parse.parse_qs(req.content.decode())
+            self.assertEqual(fields.get("tok"), [SECRETS["github"]], wire)
+
     def test_holds_bearer_header(self):
         a = make_addon()
         req = Request("api.github.com", "/user",
@@ -1058,16 +1086,17 @@ class SwapAddonTests(unittest.TestCase):
         a.request(Flow(req))
         self.assertEqual(a.refused, [])
 
-    def test_warn_placeholder_encoded_uppercase_prefix_audits(self):
-        """The percent-encoded placeholder regex is case-insensitive by
-        design (re.IGNORECASE), so an uppercase `HSURR%3A` prefix IS a
-        real placeholder to the swap engine — and the warn path audits
-        it in wire case, exactly the name the engine would resolve."""
+    def test_warn_placeholder_encoded_uppercase_prefix_not_a_phantom(self):
+        """`HSURR%3Agithub` (uppercase prefix, encoded form) never swaps —
+        ENCODED_PLACEHOLDER_RE is prefix-case-sensitive by design (only the
+        %3A/%3a hex digits are case-insensitive; decided 2026-10-18, O2
+        security-sweep follow-up) — so the warn path must not audit it as a
+        refused placeholder, mirroring
+        test_warn_placeholder_uppercase_prefix_not_a_phantom."""
         a = make_addon()
         req = Request("evil.example", "/", content=b"key=HSURR%3Agithub")
         a.request(Flow(req))
-        self.assertIn(("evil.example", "github", "host-not-allowlisted"),
-                      a.refused)
+        self.assertEqual(a.refused, [])
 
     def test_nit_multi_entry_bad_line_warns(self):
         """REVIEW item 40b: a non-k=v line in a multi file is dropped with

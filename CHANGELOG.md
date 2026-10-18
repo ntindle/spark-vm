@@ -57,11 +57,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
   are pinned so the docs can't drift. (#1692)
 
 ### Fixed
+- The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
+  browser-encoded form bodies) is now prefix-case-sensitive like the plain
+  form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase
+  `HSURR%3A` prefix no longer triggers a real-secret swap — the fail-closed
+  direction, since inserting more secrets is riskier than inserting fewer —
+  and no longer produces a refused-credential audit line. Supersedes the
+  #1658 note in 0.9.0, which described the old case-insensitive behavior.
+  (#1700)
 - The relay-path dial prober now caps its per-phase timeouts at 300 seconds
   (and requires finite numbers): a misconfigured caller can no longer pass
   an astronomically large timeout that would turn the probe's absolute
   anti-tarpit deadline into an effectively unbounded wait. Non-finite
-  timeouts (NaN/inf) are rejected fail-closed too. ([#TBD])
+  timeouts (NaN/inf) are rejected fail-closed too. (#1699)
 - The relay-path dial prober no longer misreports a completed, host-key-verified
   probe as a box-leg failure when the connection's closing handshake hits a
   reset: once the host key is read and the outcome is decided, the closing
@@ -194,7 +202,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
   review. An uppercase `HSURR:` prefix in the plain form (which never
   triggers a swap) no longer produces a phantom refused line; the
   percent-encoded form was already case-insensitive and still audits
-  in wire case. (#1658)
+  in wire case (at the time; narrowed to prefix-case-sensitive by the
+  Unreleased entry above, so an uppercase `HSURR%3A` prefix no longer swaps
+  or audits). (#1658)
 
 ### Added
 
