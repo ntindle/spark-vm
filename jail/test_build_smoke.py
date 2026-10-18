@@ -688,19 +688,26 @@ class TestReapplyConntrackSurvivors:
         assert 'grep -qF "$GUEST_IP"' in active
         assert "conntrack -L -d " not in active
 
-    def test_operator_message_names_survival_contract(self, src):
+    def test_operator_message_names_survival_contract(self, src, active):
         # The whole point is operator visibility: the SNAPSHOT BLOCK's own
-        # log lines must say the flows SURVIVE and name the mechanism
-        # (established,related). Scanning the whole file would be
-        # vacuous — the words appear in unrelated comments and rules —
-        # so the pin is scoped to the snapshot block (src: the block's
-        # header is a full-line comment, stripped from `active`).
-        block_start = src.index("# Issue #1667:")
-        block_end = src.index("fi\n", block_start)
-        block = src[block_start:block_end]
+        # ACTIVE log lines must say the flows SURVIVE, name the mechanism
+        # (established,related), and give the bidirectional teardown
+        # (orig-src for outbound, orig-dst for inbound). Scoped to the
+        # block: scanning the whole file would be vacuous, since the
+        # words appear in unrelated comments and rules. (Pinned against
+        # `active`, per the fixture's own convention — a security
+        # property must be an active line, not a commented-out remnant —
+        # anchored on the block's `if` line, which survives comment
+        # stripping.)
+        anchor = 'if $SUDO conntrack -L 2>/dev/null | grep -qF "$GUEST_IP"; then'
+        block_start = active.index(anchor)
+        block_end = active.index("fi\n", block_start)
+        block = active[block_start:block_end]
         lower = block.lower()
         assert "survive" in lower
         assert "established,related" in block
+        assert "--orig-src" in block
+        assert "--orig-dst" in block
         assert "#1667" in block
 
     def test_conntrack_tool_installed(self, src):

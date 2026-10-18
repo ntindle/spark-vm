@@ -200,9 +200,12 @@ states the construction, not a static pin.
   (the flows were legitimate under the old rules), but the operator's
   mental model ("the new conf is now enforced") is wrong for the
   lifetime of those flows. `build.sh` therefore logs a conntrack snapshot
-  of the jail's open flows immediately after the re-apply, naming every
-  surviving flow; tear them down (`conntrack -D --orig-dst <jail-ip>`)
-  if the tightening must take effect at once. Stopping the jail on every
+  of the jail's open flows immediately after the re-apply, naming the
+  surviving flows (the first 20 lines of the listing) along with the
+  teardown commands (`conntrack -D --orig-src <jail-ip>` for outbound
+  traffic, `--orig-dst` for inbound; DNAT'd SSH shows the jail IP only
+  in the reply tuple — compare against the listing) if the tightening
+  must take effect at once. Stopping the jail on every
   build was declined: a build is an operator-initiated event whose
   downtime cost the operator should choose, not pay by default. Operational rule: the live table is not
   a debugging surface. Any rule the conf does not contain — including a

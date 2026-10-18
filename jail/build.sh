@@ -373,8 +373,11 @@ if $SUDO conntrack -L 2>/dev/null | grep -qF "$GUEST_IP"; then
     say "WARNING (issue #1667): established flows through the jail at firewall re-apply time:"
     say "these flows were open under the OLD ruleset and SURVIVE under the new one"
     say "(a re-apply does not flush conntrack; the established,related accepts keep them"
-    say "alive). Tear them down (sudo conntrack -D --orig-dst $GUEST_IP) if the"
-    say "tightening must take effect immediately. Surviving flow list:"
+    say "alive). Tear them down if the tightening must take effect immediately:"
+    say "  sudo conntrack -D --orig-src $GUEST_IP"
+    say "  sudo conntrack -D --orig-dst $GUEST_IP"
+    say "(DNAT'd SSH shows the jail IP in the reply tuple, not orig-dst — check the"
+    say "listing above.) Surviving flow list:"
     # (|| true + head bound: a large table is truncated, not fatal.)
     $SUDO conntrack -L 2>/dev/null | grep -F "$GUEST_IP" | head -20 || true
 else
