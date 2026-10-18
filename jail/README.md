@@ -101,7 +101,11 @@ rest on are pinned by the nftables drop-rule tests; the proxy-down clause
 states the construction, not a static pin.
 
 - **Build time: fail closed.** `build.sh` runs under `set -euo pipefail`
-  and applies the firewall (`systemctl enable --now jail-firewall.service`)
+  and applies the firewall (`systemctl restart jail-firewall.service` —
+  a restart, not `enable --now`: the oneshot is `RemainAfterExit`, so a
+  start is a no-op on re-runs and a changed conf would never be applied,
+  issue #1665; the conf is validated with `nft -c -f` before the
+  restart)
   *before* the machine is ever started. If `nft -f` fails — nftables
   unavailable, bad rule, anything — the build aborts with no jail running.
   The firewall section structurally precedes the machine-start section.

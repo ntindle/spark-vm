@@ -372,11 +372,20 @@ class TestFailClosedOrdering:
     def test_firewall_applied_before_machine_start(self, active):
         # set -e aborts the build if the firewall apply fails, so no jail
         # ever starts without its table. Pin the structural ordering:
-        # the enable --now must precede any machinectl start.
-        fw = active.index("systemctl enable --now jail-firewall.service")
+        # the restart (which re-runs the oneshot's destroy-then-apply on
+        # every build, not just the first — issue #1665) must precede any
+        # machinectl start.
+        fw = active.index("systemctl restart jail-firewall.service")
         start = active.index("machinectl start $MACHINE")
         assert fw < start, (
             "firewall apply must precede the machine start")
+        # Issue #1665: a changed conf is validated before the re-apply
+        # (mirroring the watchdog repair path's validate-before-destroy),
+        # so a bad conf fails the build instead of destroying the live
+        # table.
+        validate = active.index("nft -c -f /etc/nftables-jail.conf")
+        assert validate < fw, (
+            "conf validation must precede the firewall re-apply")
 
     def test_firewall_watchdog_mechanism_documented(self, active):
         # C25 closed the "no runtime re-apply" residual fail-closed: the
@@ -676,8 +685,11 @@ class TestFirewallWatchdogStatic:
         # Issue #444: build.sh compiles the applied conf to the canonical
         # JSON pin (apply -> capture), regenerated on every build, so the
         # pin can never drift from the installed table. Position pinned:
-        # the capture must follow the firewall apply.
-        apply = active.index("systemctl enable --now jail-firewall.service")
+        # the capture must follow the firewall apply. The apply is the
+        # restart (issue #1665: `enable --now` is a no-op on the
+        # already-active RemainAfterExit oneshot, so re-runs never
+        # re-applied the conf).
+        apply = active.index("systemctl restart jail-firewall.service")
         tail = active[apply:]
         assert "nft --json list table inet jail" in tail, \
             "pin capture never runs after the firewall apply"
