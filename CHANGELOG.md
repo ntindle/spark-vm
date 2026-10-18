@@ -58,13 +58,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tailnet address — the watchdog stops the jail and goes red, instead
   of staying green while the rules reference a stale name that silently
   never matches. A ten-minute fresh-boot grace keeps a not-yet-up
-  tailscaled from tripping the alarm. (#TBD)
+  tailscaled from tripping the alarm. (#1683)
 
 - The waitlist operations doc now states the forget flow's exact scope:
   the forget link works for pending, confirmed, and invited rows only.
   Dropped rows sit out the 30-day retention window (erasure lands at the
   day-44 auto-purge), and claimed rows are terminal — documented as a
-  deliberate scope, not a silent gap. (#TBD)
+  deliberate scope, not a silent gap. (#1683)
 
 - The deterministic signing-nonce derivation now reduces the message
   hash exactly when it reaches the curve order, matching RFC 6979 to
