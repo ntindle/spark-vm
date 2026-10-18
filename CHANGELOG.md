@@ -102,6 +102,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- New doc: the agent-jail lane convergence pin — what the jail firewall
+  lane's vision looks like against the code after the recent rebuild,
+  tailnet-interface, and audit-line builds shipped, which earlier findings
+  each build actually closed, and which gaps stay open (the conntrack
+  question, the tailnet interface disappearing after the build, and the
+  review's leftover test pins — now filed as their own issue). (#TBD)
+
 - The fleet rollout status now reports `bad_signal` on every wave: the
   planes carrying an unresolved deploy-failed event from the current
   rollout window — the same journal signal the promotion gate already
