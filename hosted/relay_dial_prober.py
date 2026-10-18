@@ -127,12 +127,12 @@ _MAX_PRE_BANNER_LINES = 5  # RFC 4253 §4.2 tolerance for pre-version lines
 # anti-tarpit property, and it is only as real as the parameters feeding
 # it. A caller passing connect_timeout_s=1e9 would turn the deadline into
 # a ~63-year bound — effectively no deadline at all. Each phase is capped
-# at the R2b cadence default (relay_path_state.DEFAULT_CADENCE_S): a
-# single probe phase longer than one full cadence interval is never sane,
-# while 30x headroom above the 10s io default keeps every legitimate
-# caller (R2b uses the 5s/10s signature defaults) far inside. NaN is
-# rejected too — it slips both the positivity and the magnitude check
-# (nan comparisons are False) and would silently neuter the deadline.
+# at the R2b cadence default (relay_path_state.DEFAULT_CADENCE_S = 300):
+# a probe phase beyond this bound is never sane, while 30x headroom above
+# the 10s io default keeps every legitimate caller (R2b uses the 5s/10s
+# signature defaults) far inside. NaN is rejected too — it slips both the
+# positivity and the magnitude check (nan comparisons are False) and
+# would silently neuter the deadline.
 _MAX_TIMEOUT_S = 300.0
 
 ProbeResult = namedtuple("ProbeResult", ["outcome", "detail"])
@@ -407,7 +407,9 @@ def probe(
         raise ValueError("connect_timeout_s and io_timeout_s must be positive")
     for _name, _value in (("connect_timeout_s", connect_timeout_s),
                           ("io_timeout_s", io_timeout_s)):
-        if not isinstance(_value, (int, float)) or not math.isfinite(_value):
+        if not isinstance(_value, (int, float)):
+            raise ValueError("%s must be a number" % _name)
+        if isinstance(_value, float) and not math.isfinite(_value):
             raise ValueError("%s must be a finite number" % _name)
         if _value > _MAX_TIMEOUT_S:
             raise ValueError(

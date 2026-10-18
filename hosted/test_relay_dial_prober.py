@@ -562,11 +562,15 @@ def test_nonpositive_timeouts_rejected(fake_relay, kw):
 @pytest.mark.parametrize("kw", [{"connect_timeout_s": 1e9},
                                  {"io_timeout_s": 1e9},
                                  {"connect_timeout_s": 1e308},
-                                 {"io_timeout_s": 1e308}])
+                                 {"io_timeout_s": 1e308},
+                                 {"connect_timeout_s": 10**1000},
+                                 {"io_timeout_s": 10**1000}])
 def test_timeout_magnitudes_capped(fake_relay, kw):
     # An astronomically large timeout would turn the absolute deadline
     # into a ~63-year bound — effectively no deadline. Rejected before
-    # any network.
+    # any network. (The 10**1000 cases pin the ValueError contract:
+    # math.isfinite() on a huge int raises OverflowError, not ValueError,
+    # so ints skip the finite gate and hit the exact magnitude compare.)
     with pytest.raises(ValueError, match="must not exceed"):
         prober.probe(**_probe_kwargs(fake_relay, **kw))
     assert fake_relay.connections == 0
@@ -587,6 +591,9 @@ def test_nonfinite_timeouts_rejected(fake_relay, kw):
 def test_timeout_ceiling_boundary_accepted(fake_relay):
     # Exactly at the ceiling is still a sane magnitude: validation must
     # pass and the probe must reach the network (the fake relay answers).
+    # The literal 300.0 is pinned, not just the module attribute — a
+    # future constant bump must not slip past this test silently.
+    assert prober._MAX_TIMEOUT_S == 300.0
     r = prober.probe(**_probe_kwargs(fake_relay,
                                      connect_timeout_s=prober._MAX_TIMEOUT_S,
                                      io_timeout_s=prober._MAX_TIMEOUT_S))
