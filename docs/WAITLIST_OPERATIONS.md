@@ -268,6 +268,23 @@ address. Funnel events carry only the pseudonymous `entry_id`, never
 the address — nothing to scrub. `consumed_tokens.txt` holds HMAC tokens,
 not PII.
 
+**Forget-flow scope — which rows a forget link works for (#399):** the
+forget token/link validates only for `pending`, `confirmed`, and
+`invited` rows. It is *invalid* for `dropped` rows: once a row drops
+(unconfirmed at day 14), the footer forget link in its old emails
+returns "invalid", and a reply saying "forget me" triages to `no_row`
+and is stored silently. This is the documented resolution of the
+erasure-right vs retention-window tension, not a silent gap: the §5
+retention promise keeps dropped rows for 30 days after the drop, and
+the code sides with retention during that window. Erasure for a
+dropped address happens at the day-44 auto-purge (14d drop + 30d
+retention), or by the operator's hand when a dropped row has no
+recorded drop date (never auto-purged — see **Retention**). Post-claim
+rows (`signed_up`, `expired`) are likewise outside the forget flow —
+the link dies with the claim. In short: the forget flow covers live
+funnel rows only; dropped rows wait out the retention window; claimed
+rows are terminal.
+
 **Matching scope (honest residual):** the triage/sidecar scrubs match the
 canonical address (lowercased, plus-tag-stripped — the form every writer
 records) case-insensitively, *plus* plus-tagged variants

@@ -906,16 +906,33 @@ class TestFirewallWatchdogStatic:
         # Structural, not string-presence (Engineering round-1 blocker 3:
         # asserting '"exit 1" in script' is theater — a flipped failure
         # branch would still pass). Both CRITICAL failure paths must be
-        # immediately followed by exit 1, and the repaired-and-stopped
-        # path must end exit 1 — the operator has to see that the jail
-        # was stopped, even when the repair succeeded.
+        # immediately followed by exit 1, and the script's last
+        # statement must be the fail-closed funnel call — the funnel
+        # itself ends exit 1, so the unit goes red on every fail-closed
+        # event, even when the repair succeeded.
         crit_exits = re.findall(r'CRITICAL[^\n]*\n\s*exit 1', verify_src)
         assert len(crit_exits) == 2, \
             "each CRITICAL failure path must exit nonzero: %r" % crit_exits
         non_empty = [l for l in verify_src.splitlines()
                      if l.strip() and not l.lstrip().startswith("#")]
-        assert non_empty[-1].strip() == "exit 1", \
-            "script must end exit 1 (red unit on repair)"
+        last = non_empty[-1].strip()
+        assert last.startswith("fail_closed"), \
+            "script must end in the fail-closed funnel: %r" % last
+        # ...and the funnel itself must end exit 1, not merely be
+        # invoked — an exit 0 at the funnel's end would green-light a
+        # fail-closed event while this test stayed green (mutant-verified
+        # 20261018-0429: flipping the funnel's final exit to 0 must fail
+        # this test).
+        funnel = verify_src[verify_src.index("fail_closed() {"):]
+        body = []
+        for line in funnel.splitlines()[1:]:
+            if line.strip() == "}":
+                break
+            if line.strip() and not line.lstrip().startswith("#"):
+                body.append(line.strip())
+        assert body, "fail_closed body must not be empty"
+        assert body[-1] == "exit 1", \
+            "the fail-closed funnel must end exit 1 (red unit): %r" % body[-1]
 
     def test_repair_scoped_to_jail_table(self, verify_src):
         assert 'destroy table "$TABLE"' in verify_src
@@ -935,6 +952,90 @@ class TestFirewallWatchdogStatic:
         # millisecond-scale hole; one re-check before treating it as
         # damage avoids fail-closed false positives.
         assert "sleep 10" in verify_src
+
+    def test_tick_time_interface_check_pinned(self, verify_src):
+        # Issue #1672 (the #1666 runtime half): a post-build
+        # tailnet-interface rename/removal is pin-invisible (the pin
+        # compares unchanged table text), so the watchdog extracts the
+        # iifname the conf binds the SSH DNAT to and checks it on every
+        # tick, failing closed like table damage.
+        assert "tailnet_interface_problem" in verify_src
+        assert "iifname" in verify_src
+        assert "TAILNET_ADDR_RE" in verify_src
+        # The old residual ("tracked separately") is closed — the check
+        # is the real fix now.
+        assert "tracked separately" not in verify_src
+
+    def test_interface_check_address_regex_twins_build_guard(
+            self, verify_src):
+        # The tick-time 100.64.0.0/10 regex must stay byte-identical to
+        # build.sh's #1666 guard — a drift would let a non-tailnet
+        # interface pass (or the real tailnet fail) at tick time while
+        # build time disagrees.
+        m = re.search(r"^TAILNET_ADDR_RE='(.*)'$", verify_src, re.M)
+        assert m, "TAILNET_ADDR_RE must be a single-quoted assignment"
+        with open(os.path.join(JAIL_DIR, "build.sh"),
+                  encoding="utf-8") as f:
+            build = f.read()
+        assert m.group(1) in build, \
+            "tick-time address regex drifted from build.sh's guard"
+
+    def test_interface_divergence_uses_fail_closed_funnel(self, verify_src):
+        # Divergence must ride the same funnel as table damage: stop
+        # first, validate-then-repair, red unit — and the divergence
+        # log line must tell the operator the real next step (re-run
+        # build.sh, which re-validates the interface), not just
+        # "restart". (The funnel's terminal exit 1 is pinned by
+        # test_red_unit_on_every_fail_closed_event.)
+        assert "tailnet interface divergence" in verify_src
+        assert "re-run jail/build.sh" in verify_src
+        assert verify_src.count("fail_closed") >= 3  # def + 2 call sites
+
+    def test_interface_check_boot_grace_pinned(self, verify_src):
+        # Fresh-boot grace: tailscaled may come up after the firewall
+        # unit, so an absent interface inside the grace is transient,
+        # not divergence. The grace must be a named constant (not a
+        # magic number) and the unreadable-clock case must assume a
+        # long-up box (no grace — fail-closed bias).
+        assert "TAILNET_BOOT_GRACE_SECS=600" in verify_src
+        assert "staying green this tick" in verify_src
+        assert "999999999" in verify_src
+
+    def test_extraction_selects_sshd_dnat_not_proxy_dnat(
+            self, verify_src, tmp_path):
+        # Regression for the Security round-1 blocker: build.sh's
+        # template lists the proxy DNAT (iifname "ve-jail") BEFORE the
+        # SSH DNAT, so a bare "first iifname" extraction watches the
+        # wrong interface — ve-jail never carries a 100.64.0.0/10
+        # address, which would fail-closed every healthy box past the
+        # boot grace. Render the REAL template from build.sh and run
+        # the script's own extraction line against it.
+        with open(os.path.join(JAIL_DIR, "build.sh"),
+                  encoding="utf-8") as f:
+            build = f.read()
+        start = build.index("<<'NFT_EOF'")
+        end = build.index("\nNFT_EOF", start)
+        template = build[start:end].replace("@@JAIL_TAILNET_IF@@",
+                                            "tailscale0")
+        template = template.replace("@@JAIL_SSH_PORT@@", "2222")
+        assert 'iifname "ve-jail"' in template, \
+            "the trap must really be in the template"
+        assert template.index('iifname "ve-jail"') < \
+            template.index('iifname "tailscale0"'), \
+            "proxy DNAT must precede the SSH DNAT in the template"
+        conf = tmp_path / "rendered.conf"
+        conf.write_text(template)
+        line = next(
+            l for l in verify_src.splitlines()
+            if l.strip().startswith('ifname="$(sed -n'))
+        r = subprocess.run(
+            ["bash", "-c", line + '; printf "%s" "$ifname"'],
+            capture_output=True, text=True,
+            env={**os.environ, "CONF": str(conf)})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "tailscale0", \
+            "extraction must select the SSH DNAT's interface, got %r" \
+            % r.stdout
 
     def test_canon_script_installed_from_repo_file(self, active):
         # The canonicalizer is a first-class repo file, not an inline
@@ -1140,6 +1241,7 @@ LIVE_FLUSHED = _render_capture([], version="1.1.0", handle_base=900,
 def watchdog_stubs(tmp_path, monkeypatch):
     """PATH stub dir: nft (canned JSON capture via $NFT_JSON_FIXTURE,
     rc via $NFT_LIST_RC / $NFT_CHECK_RC, invocation log at $CALLS_LOG),
+    ip (link/addr behavior via $IP_LINK_RC / $IP_LINK_SEQ / $IP_ADDR_OUT),
     systemctl, logger, sleep (no-op). Returns the log path."""
     bindir = tmp_path / "stubs"
     bindir.mkdir()
@@ -1164,10 +1266,31 @@ echo "logger $*" >> "$CALLS_LOG"
 exit 0
 """)
     (bindir / "sleep").write_text("#!/bin/bash\nexit 0\n")
-    for f in ("nft", "systemctl", "logger", "sleep"):
+    (bindir / "ip").write_text("""\
+#!/bin/bash
+echo "ip $*" >> "$CALLS_LOG"
+if [ "$1 $2" = "link show" ]; then
+    # Stateful sequence for the re-check test: $IP_LINK_SEQ names a
+    # file holding one rc per line, consumed per `link show` call;
+    # otherwise $IP_LINK_RC decides.
+    if [ -n "${IP_LINK_SEQ:-}" ] && [ -s "$IP_LINK_SEQ" ]; then
+        rc=$(head -n 1 "$IP_LINK_SEQ")
+        tail -n +2 "$IP_LINK_SEQ" > "$IP_LINK_SEQ.tmp" \
+            && mv "$IP_LINK_SEQ.tmp" "$IP_LINK_SEQ"
+        exit "$rc"
+    fi
+    exit "${IP_LINK_RC:-0}"
+fi
+if [ "$1 $2 $3 $4" = "-o -4 addr show" ]; then
+    printf '%s' "${IP_ADDR_OUT:-}"; exit 0
+fi
+exit 0
+""")
+    for f in ("nft", "systemctl", "logger", "sleep", "ip"):
         (bindir / f).chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
     monkeypatch.setenv("NFT", str(bindir / "nft"))
+    monkeypatch.setenv("IP", str(bindir / "ip"))
     monkeypatch.setenv("CALLS_LOG", str(log))
     monkeypatch.delenv("NFT_JSON_FIXTURE", raising=False)
     return log
@@ -1183,11 +1306,13 @@ def _canonicalize(raw):
 def _run_watchdog(live_capture=None, *, list_rc="0", check_rc="0",
                   pin_capture=PIN_CAPTURE, unreadable_pin=False,
                   raw_pin=False, canon_path=CANON_SCRIPT,
+                  conf_text="# repair source; content is irrelevant to the pin",
+                  ip_link_rc="0", ip_addr_out="", boot_secs="3600",
                   tmp_path=None, monkeypatch=None):
     live = tmp_path / "live.json"
     live.write_text(live_capture if live_capture is not None else "")
     conf = tmp_path / "nftables-jail.conf"
-    conf.write_text("# repair source; content is irrelevant to the pin")
+    conf.write_text(conf_text)
     monkeypatch.setenv("NFT_JSON_FIXTURE", str(live))
     if unreadable_pin:
         monkeypatch.setenv("PIN", str(tmp_path / "does-not-exist.pin.json"))
@@ -1201,6 +1326,12 @@ def _run_watchdog(live_capture=None, *, list_rc="0", check_rc="0",
     monkeypatch.setenv("CANON", str(canon_path))
     monkeypatch.setenv("NFT_LIST_RC", list_rc)
     monkeypatch.setenv("NFT_CHECK_RC", check_rc)
+    # Tailnet-interface check inputs (#1672): the ip stub's link/addr
+    # behavior and the boot-grace clock. boot_secs defaults beyond the
+    # grace so the divergence tests are deterministic.
+    monkeypatch.setenv("IP_LINK_RC", ip_link_rc)
+    monkeypatch.setenv("IP_ADDR_OUT", ip_addr_out)
+    monkeypatch.setenv("BOOT_SECS", boot_secs)
     return subprocess.run(
         ["bash", VERIFY_SCRIPT], capture_output=True, text=True)
 
@@ -1374,6 +1505,97 @@ exit 0
         # the "damaged" fixture were accidentally healthy.
         assert (tmp_path / "n").read_text().strip() == "2"
         assert calls.count("nft --json list table") == 2
+
+    # Issue #1672 (the #1666 runtime half): the tick-time
+    # tailnet-interface check. A conf mirroring build.sh's template
+    # rule order — the proxy DNAT's ve-jail comes FIRST (Security
+    # round-1 blocker: a bare "first iifname" extraction watches the
+    # wrong interface and fail-closes every healthy box).
+    _CONF_WITH_TAILNET = (
+        "table inet jail {\n"
+        "    chain prerouting {\n"
+        '        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport '
+        "{ 18080, 18081 } dnat ip to 127.0.0.1\n"
+        '        iifname "tailscale0" tcp dport 2222 '
+        "dnat ip to 10.99.0.2:22\n"
+        "    }\n"
+        "}\n"
+    )
+    _TAILNET_ADDR = (
+        "2: tailscale0    inet 100.89.12.34/32 scope global tailscale0\n"
+    )
+
+    def test_tailnet_interface_healthy_stays_green(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        r = _run_watchdog(
+            LIVE_SAME_TABLE, conf_text=self._CONF_WITH_TAILNET,
+            ip_addr_out=self._TAILNET_ADDR,
+            tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 0, r.stderr
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        # Prove the check actually ran — a green exit with the check
+        # skipped would also pass the two lines above.
+        assert "ip link show dev tailscale0" in calls
+
+    def test_tailnet_interface_missing_fails_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Interface renamed/removed after the build: the pin still
+        # matches, but the SSH DNAT silently never matches again.
+        r = _run_watchdog(
+            LIVE_SAME_TABLE, conf_text=self._CONF_WITH_TAILNET,
+            ip_link_rc="1",
+            tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "tailnet interface" in calls
+        assert "ALERT" in calls
+
+    def test_tailnet_interface_missing_during_boot_grace_stays_green(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Fresh boot: tailscaled may not be up yet — an absent interface
+        # inside the grace is transient, not divergence.
+        r = _run_watchdog(
+            LIVE_SAME_TABLE, conf_text=self._CONF_WITH_TAILNET,
+            ip_link_rc="1", boot_secs="120",
+            tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 0, r.stderr
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "staying green this tick" in calls
+
+    def test_tailnet_interface_without_tailnet_addr_fails_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Interface exists but lost its tailnet address (e.g. logout):
+        # the DNAT binds an interface that is not the tailnet.
+        r = _run_watchdog(
+            LIVE_SAME_TABLE, conf_text=self._CONF_WITH_TAILNET,
+            ip_addr_out="2: tailscale0    inet 10.0.0.5/24 scope global "
+                        "tailscale0\n",
+            tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "no 100.64.0.0/10 address" in calls
+
+    def test_tailnet_interface_gap_heals_on_recheck(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # A tailscaled restart is a seconds-scale gap: first `link show`
+        # fails, the re-check after the sleep sees the interface again.
+        seq = tmp_path / "link.seq"
+        seq.write_text("1\n0\n")
+        monkeypatch.setenv("IP_LINK_SEQ", str(seq))
+        r = _run_watchdog(
+            LIVE_SAME_TABLE, conf_text=self._CONF_WITH_TAILNET,
+            ip_addr_out=self._TAILNET_ADDR,
+            tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 0, r.stderr
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "healed without repair" in calls
+        assert calls.count("ip link show dev tailscale0") == 2
 
 
 def _with_proxy_heredoc_body(src):
