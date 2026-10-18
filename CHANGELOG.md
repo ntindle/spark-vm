@@ -51,6 +51,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Settled the fleet console's alert-acknowledgment auth question: acking
+  stays a command-line action permanently — the fleet read API is
+  loopback-only by design with no remote binding possible, so no operator
+  token or certificate story is needed; the console keeps its read-only
+  posture and ships copy-pasteable ack commands instead. Closes #1703. (#1716)
 - The fleet version table now records when each box emitted its snapshot and
   when its gate answer was generated, and shows per-box gate staleness
   recomputed from the true generation time instead of the box's emit-time
