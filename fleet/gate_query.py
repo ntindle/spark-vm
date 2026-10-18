@@ -199,6 +199,11 @@ def box_wave(box_id: str, wave: dict) -> int:
         # A truthy non-dict assignments field (True, 5, a list) is not a
         # pin map; the `in` membership test below would TypeError on it
         # (Security round-3 note). No honest pin can be read — no-signal.
+        # Deliberate asymmetry with the canary path (Engineering round-4):
+        # canary is pin-only, so an unreadable pin map means "no pins" and
+        # the component is simply denied; here a wave NUMBER must be
+        # returned and none can be computed honestly, so the box freezes
+        # instead of guessing. Both directions are fail-closed.
         raise NoSignal("wave assignments is not an object")
     if box_id in assignments:
         try:
