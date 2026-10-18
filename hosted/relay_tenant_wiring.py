@@ -87,7 +87,8 @@ recovery time the boolean is always fresh-producer state (restored by
 the pair's first event, or by the resync rule), never a stale input
 the tenant layer must second-guess.
 
-This module never probes: probing is the cadence driver's job
+This module never probes: probing is a production cadence driver's
+job — not yet built, see issue #1711
 (``relay_path_state.maybe_probe`` with caller-supplied bundles —
 D-RL2-3, bundles never persisted). The wiring only *reads*
 ``relay_path_state`` and emits tenant-status events.
@@ -375,8 +376,9 @@ def drive_box(
 ) -> dict:
     """Run one wiring tick for a single (anchor) box: read, plan, emit.
 
-    The box's single ordered emitter (D-RL34-3a): the cadence loop must
-    not run two ticks for the same box concurrently. Returns a report
+    The box's single ordered emitter (D-RL34-3a): the future cadence
+    loop — not yet built in production, see issue #1711 — must not run
+    two ticks for the same box concurrently. Returns a report
     dict ``{box_id, vm_id, reading, events, notes}``. A broken
     instrument (``JournalLockError`` / ``HistoryLockError`` from the
     read) propagates — a broken instrument is loud, never darkness.
