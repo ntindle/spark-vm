@@ -79,6 +79,16 @@ _CLAIMS = [
         r"`test_push_subscriptions_async\.py` \((\d+) tests",
     ),
     (
+        "hosted/README.md",
+        "hosted/test_push_events_async.py",
+        r"`test_push_events_async\.py` \((\d+) tests",
+    ),
+    (
+        "hosted/README.md",
+        "hosted/test_push_enqueue_async.py",
+        r"`test_push_enqueue_async\.py` \((\d+) tests",
+    ),
+    (
         "harness/README.md",
         "harness/test_key_registry.py",
         r"`test_key_registry\.py` \((\d+) tests",

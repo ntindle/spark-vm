@@ -239,3 +239,92 @@ content-type + deploy pin.
 
 Run the tests: `python3 -m pytest hosted/test_push_subscriptions_async.py`
 from the repo root.
+
+## push_events_async.py — the endpoint-driven push mappings' async plane port (#1492)
+
+The async port of the two endpoint-driven push mappings from
+`push_events.py` (the #969/#1062 paging policy). Four of the six
+mappings are sweep-driven (reminders, digests, heartbeat-stale,
+token-expiry-warning — the D9 sweep drives them). These two —
+`on_approval_filed` and `on_box_revoked` — must be called from the
+plane worker's HTTP request path: the filing endpoint after the
+approvals record write, the revoke endpoint after the revocation
+stamp. The sync modules can't be called from the worker because the
+plane worker's D1 is async-only (`await db.prepare(...).bind(...).run()`;
+no synchronous D1 exists), so like `push_sweep_async.py` this file is
+droppable into `worker.py` verbatim: stdlib-only, no imports from the
+sync modules, pure-compute validators inlined with source citations.
+
+The async `enqueue_page` contract is injected, not imported: `await
+enqueue_page(db, *, event_kind, owner_principal, box_id, key_material,
+now=None)` — `db` is the worker's async `_D1`, `now` an aware UTC
+datetime or None (the boundary defaults it, exactly like the sync
+version). The result's `.disposition` (`queued`, `duplicate`,
+`suppressed_budget`, ...) passes straight through — the D10 budget,
+D57 page-once dedup, and D54 digest coalescing all live at the
+boundary by construction.
+
+Caller obligations (restated from the sync mappings, because the call
+sites are what obey them): the filing endpoint must never emit a
+filing event for an approvals record that's already terminal — there
+is no gate-1 re-read on this path by design, so a terminal record
+filed here would page spuriously; and revocation paging fires only
+for real revocations, never for the keyless-grandfathered path.
+
+Tested by `test_push_events_async.py` (11 tests, neutering-verified
+non-vacuous): exact-argument delegation for both mappings,
+disposition passthrough verbatim, loud rejection of bad owner / box /
+aid shapes, non-timestamp revoked-at rejection, naive timestamps read
+as UTC, a non-callable boundary raising loud, and boundary exceptions
+propagating.
+
+Run the tests: `python3 -m pytest hosted/test_push_events_async.py`
+from the repo root.
+
+## push_enqueue_async.py — the D10 enqueue boundary's async plane port (#1614)
+
+The async counterpart of `push_enqueue.py`'s enqueue boundary against
+the plane worker's async `_D1`. The sync module stays the harness and
+test truth; the boundary reuses the sync decision table verbatim —
+D10 budget, D57 page-once dedup, D54 digest coalescing. Policy is not
+re-decided, only the DB-API boundary is ported. Like the other async
+ports this file is droppable into `worker.py` verbatim: stdlib-only, no
+sync-module imports, pure-compute helpers inlined with source
+citations, and the DB seam as awaited `_D1` calls.
+
+Entry point (the contract the #1492 mappings inject):
+`await enqueue_page_async(db, *, event_kind, owner_principal, box_id,
+key_material, now=None) -> EnqueueResult` — the `_async` suffix is the
+in-repo naming convention (the `push_sweep_async` precedent); in the
+worker's marked section it is the contract's `enqueue_page`.
+
+D1 durability model: the `_D1` contract exposes no interactive
+transaction across awaits, so every `.run()` is individually durable
+and the port orders statements so every crash window is either
+idempotent under retry or a documented under-count — the D52 guarded
+UPDATE stays the single atomic gate; ensure-INSERTs are `INSERT OR
+IGNORE`; the filing path's audit INSERT is idempotent under retry via
+the D57 page-once index; the lost-dedup-race rule is
+exception-type-agnostic but outcome-gated (a same-key row carrying a
+D57-covered outcome declares `duplicate` and releases any taken
+reservation; any other failure re-raises loud).
+
+Trust posture: the boundary never accepts a box-asserted owner — the
+caller resolves `box_id → owner_principal` from the plane's enrollment
+registry and passes the resolved principal in. The obligation travels
+with this file because it drops into `worker.py` verbatim, ahead of
+the endpoint wiring.
+
+Tested by `test_push_enqueue_async.py` (19 tests, neutering-verified
+non-vacuous): happy-path parity with the sync version (UTC ISO shape),
+the duplicate fast path consuming no budget, budget exhaustion
+coalescing into the digest, digest-suppression never touching the
+digest count, owner-only digest reservations, floor-at-zero release,
+the lost-dedup race returning `duplicate` with the reservation
+released, uncovered-outcome failures re-raising, no-page kinds as
+value errors, sync-conformance on dispositions and DB state under
+budget overflow, and the async mappings composing with the async
+boundary end to end.
+
+Run the tests: `python3 -m pytest hosted/test_push_enqueue_async.py`
+from the repo root.
