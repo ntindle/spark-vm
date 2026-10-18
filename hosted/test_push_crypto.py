@@ -18,6 +18,7 @@ from hosted.push_crypto import (
     _on_curve,
     _aes_gcm_decrypt,
     _aes_gcm_encrypt,
+    _rfc6979_nonce,
     derive_push_keys,
     ecdh_shared_secret,
     ecdsa_sign,
@@ -316,6 +317,19 @@ def test_rfc6979_a25_kat():
     for malformed in (b"", b"\x00" * 63, b"\x00" * 65, b"\x00" * 64):
         assert not ecdsa_verify(pub, b"sample", malformed)
     assert not ecdsa_verify(b"\x04" + b"\x00" * 64, b"sample", sig)
+
+
+def test_rfc6979_bits2octets_boundary():
+    # RFC 6979 section 2.3.3 bits2octets reduces the hashed message when
+    # z1 >= q -- not just z1 > q.  The only input that distinguishes the
+    # two spellings is a message hash exactly equal to the group order N
+    # (probability 2^-256 in the wild, but this module pins RFC behavior
+    # verbatim, so the boundary gets its own pin).  With `>=`, z == N
+    # reduces to 0 and the nonce matches the all-zero-hash nonce; with
+    # `>`, the reduction is skipped and the nonce diverges.
+    priv, _ = generate_keypair()
+    d = int.from_bytes(priv, "big")
+    assert _rfc6979_nonce(d, _N.to_bytes(32, "big")) == _rfc6979_nonce(d, b"\x00" * 32)
 
 
 def test_golden_ephemeral_vector():
