@@ -66,7 +66,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   journal rewrite with best-effort operator attribution until the auth
   story is chosen — the console's copy-pasteable ack hints are the composed
   flow in the meantime; files the auth-story choice plus the
-  `acked_by` identity contract and re-ack timestamp semantics. (#TBD)
+  `acked_by` identity contract and re-ack timestamp semantics. (#1706)
 
 ### Fixed
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
