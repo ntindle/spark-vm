@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Push pages parked with no subscribed devices now expire on a per-type
+  age bound instead of lingering forever. A parked digest older than 25
+  hours, a token-expiry warning or box-revoked page older than 24 hours,
+  a heartbeat-stale page older than 12 hours, or an approval/reminder
+  page older than the approval TTL ceiling is expired through the
+  audited dead-letter path — a dead-letter record, the page's delivery
+  budget released, and a visible tick anomaly — rather than buzzing for
+  a stale window or piling up silently once the owner finally
+  subscribes. Pages that expire can be re-queued later; only the
+  expired page is dropped, never silently. (#1669)
+
 - Rebuilding the agent jail now actually re-applies the jail firewall.
   The build applied the firewall with a start command that is a no-op
   on re-runs, so an edited firewall configuration was written to disk

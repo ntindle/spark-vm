@@ -141,10 +141,11 @@ New pins this slice (continuing the global D-series):
   days will eventually buzz for a stale window (the body drops the
   "this hour" when-clause once the window is past, per the D79 pin,
   so it never mislabels the hour), and a ``heartbeat_stale`` page
-  ages badly. There is no
-  parked max-age in this slice (follow-up: bound or expire parked
-  pages); gate-2 still suppresses decided/deleted approvals at send
-  time, so the aged page that does go out is never a decided one.
+  ages badly. D104 bounds parked age per kind: an over-age parked page
+  expires through the audited dead-letter path (page-level audit row +
+  reservation release + tick anomaly), never a silent DELETE.
+  Gate-2 still suppresses decided/deleted approvals at send time, so
+  the aged page that does go out is never a decided one.
 - **D82 — retry pacing.** Tick-shaped loop; a (work item x device) pair is
   re-attempted only when ``now >= sent_at(latest 'retry' row) +
   backoff_s(retry_count)``, ``retry_count`` = COUNT of its ``'retry'``
@@ -280,6 +281,45 @@ New pins this slice (continuing the global D-series):
   covers only ``('queued', 'suppressed_budget',
   'suppressed_terminal')``, so error rows never collide with the
   queued row they count for.
+
+- **D104 — parked max-age expiry (#1185).** A parked page (D81: no live
+  subscriptions) older than its kind's ``PARKED_MAX_AGE_S`` bound
+  expires through the loop's own audited path — one page-level
+  ``'dead-letter'`` audit row (``device=''``, the D56e boundary-extension
+  shape, under the suffixed audit key ``event_key + U+0000 +
+  "parked-expired"`` — the D61/D77 pattern, because the enqueue
+  boundary's D53 dedup fast-path is outcome-blind and an expiry row on
+  the exact key would wedge a later re-enqueue of the same event as
+  "duplicate"), the queued-row DELETE, the D10 reservation release
+  (the page never buzzed, so it never consumed the unit), and a
+  ``parked_expired`` tick anomaly (the operator signal) — never a
+  silent DELETE (the #1184 posture: parked rows are immortal under the
+  90-day GC, D92, so expiry belongs here, not to retention). Bounds:
+  ``digest`` 25h (#1185's explicit pin — a stale window never buzzes);
+  ``token_expiry_warning`` 24h (the token generation's own TTL, #846 —
+  past that the warning's token has expired or rotated, and a rotation
+  resets the warning key by construction, D13); ``box_revoked`` 24h
+  (operator judgment — revocation is a durable fact, not a perishable
+  signal, but an unbounded parked page is still a leak);
+  ``heartbeat_stale`` 12h (operator judgment — F7's 4h quiet period
+  makes this a slow signal; 12h is past any useful re-buzz);
+  ``approval_filed`` / ``reminder`` 3600s (the #872 TTL-clamp ceiling —
+  gate-2 normally suppresses these first when the record goes
+  terminal, so this is the safety net for parked rows whose record
+  reader still reports non-terminal). Age is the queued row's ``at`` —
+  a row that parks late (owner unsubscribes mid-retry) expires on the
+  earlier bound, which is the conservative direction. A kind with no
+  bound parks as before (D81). An unparseable ``at`` never reaches
+  the expiry branch via ``_process_one``: ``_window_start_of`` raises
+  ``ValueError`` first and the item takes the pre-existing D97
+  loud-error path (per-tick ``error`` anomaly, queued row quarantined
+  with its reservation held) — the ``_row_at_comparable`` guard inside
+  ``_maybe_expire_parked`` is defense-in-depth for direct callers,
+  not the fail-closed mechanism. A parked-expiry does not touch
+  ``push_digest_state``: the D79 pin (parked path never resets the
+  digest count) stands — the state row ages out under the 90-day GC,
+  and the sweep's pending scan only fires ``count > 0 AND
+  enqueued_at IS NULL``, so the dead-lettered window is never refired.
 
 Plane seams (injected — the module never sees a Worker secret, a data
 key, or a box token):
@@ -788,6 +828,77 @@ def _note_tick_error(conn, summary, at, owner_principal, box_col,
                  % (item, type(exc).__name__, exc_text))
 
 
+#: (D104) parked max-age per event kind, seconds (issue #1185). A parked
+#: page (no live subscriptions) older than its kind's bound expires
+#: through the audited dead-letter path instead of parking forever.
+#: The bounds are physics or operator judgment, stated per kind —
+#: digest 25h is #1185's explicit pin; token_expiry_warning 24h is the
+#: token generation's own TTL (#846); box_revoked 24h and
+#: heartbeat_stale 12h are operator judgment; approval_filed/reminder
+#: 3600s is the #872 TTL-clamp ceiling (gate-2 normally suppresses
+#: these first, so this is the safety net).
+PARKED_MAX_AGE_S = {
+    "digest": 25 * 3600,
+    "token_expiry_warning": 24 * 3600,
+    "box_revoked": 24 * 3600,
+    "heartbeat_stale": 12 * 3600,
+    "approval_filed": 3600,
+    "reminder": 3600,
+}
+
+#: (D104) the parked-expiry audit key suffix (page key + U+0000 +
+#: "parked-expired"). The D61/D77 pattern: the audit row must not share
+#: the page's exact key, because the enqueue boundary's D53 dedup
+#: fast-path is outcome-blind — an expiry row on the exact key would
+#: report a later re-enqueue of the same event as "duplicate" even
+#: though no page ever went out (the same wedge the D77 fix closed).
+_PARKED_EXPIRED_SUFFIX = "parked-expired"
+
+
+def _maybe_expire_parked(conn, summary, moment, at, item, row_id,
+                         owner_principal, box_col, box_id, event_kind,
+                         event_key, row_at, window_start):
+    """D104 — parked max-age expiry (#1185).
+    Expire an over-age parked page through the audited path.
+
+    Returns True when the page was expired (the caller parks nothing
+    and returns). The expiry is one page-level ``'dead-letter'`` audit
+    row (D56e shape: ``device=''``, send columns NULL), the queued-row
+    DELETE, the D10 reservation release (the page never buzzed, so it
+    never consumed the unit), and a ``parked_expired`` tick anomaly —
+    never a silent DELETE. A kind with no bound parks as before
+    (D81). An unparseable ``at`` never reaches here via
+    ``_process_one`` (``_window_start_of`` raises ``ValueError`` first
+    → the D97 loud-error path); the ``_row_at_comparable`` guard is
+    defense-in-depth for direct callers.
+    """
+    max_age = PARKED_MAX_AGE_S.get(event_kind)
+    if max_age is None or not _row_at_comparable(row_at):
+        return False
+    row_moment = datetime.fromisoformat(row_at)
+    if row_moment.tzinfo is None:
+        row_moment = row_moment.replace(tzinfo=timezone.utc)
+    age_s = (moment - row_moment).total_seconds()
+    if age_s <= max_age:
+        return False
+    audit_key = event_key + "\x00" + _PARKED_EXPIRED_SUFFIX
+    _insert_audit_row(conn, at, owner_principal, box_col, event_kind,
+                      audit_key, "dead-letter")
+    _delete_queued(conn, row_id)
+    _terminal_transaction(conn, release=True, box_id=box_id,
+                          owner_principal=owner_principal,
+                          window_start=window_start)
+    summary.note("parked_expired",
+                 # %r on the item: the event key may carry newlines from a
+                 # plane bug — the #1359 log-injection posture; event_kind
+                 # is PAGING_EVENT_KINDS-allowlisted and age_s/max_age are
+                 # numeric, so they stay %s.
+                 "%r (%s parked %.0fs > max-age %ds; dead-lettered, "
+                 "reservation released)" % (item, event_kind, age_s,
+                                            max_age))
+    return True
+
+
 def _release_reservation_statements(conn, box_id, owner_principal,
                                     window_start):
     """Inline the two D52 release UPDATEs (D56b — no commit here; the
@@ -1131,8 +1242,18 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             continue
         live.append(sub)
     if not live:
+        # D104 — parked max-age expiry (#1185).
+        # An over-age parked page expires through the audited
+        # dead-letter path instead of parking forever.
+        if _maybe_expire_parked(conn, summary, moment, at, item, row_id,
+                                owner_principal, box_col, box_id,
+                                event_kind, event_key, row_at,
+                                window_start):
+            return
         # D81 — parked, not dropped: the row and its reservation stay.
-        summary.note("parked", "%s (no live subscriptions)" % item)
+        # %r on the item: same #1359 log-injection posture as above —
+        # the event key may carry newlines from a plane bug.
+        summary.note("parked", "%r (no live subscriptions)" % item)
         return
 
     # -- per-device attempts --
