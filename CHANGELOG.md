@@ -90,11 +90,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   warning noise and the per-test argument-vector patching are gone.
   (#1663)
 
-- The multi-tenancy audit's "Open verifications" section no longer claims
-  open verifications that are all closed. With issue #340 closed, the
-  section is now "Verifications" with every #340/#1646 verification
-  recorded as closed 2026-10-17; the vendor-root-semantics "assert
-  nothing" line stays as an explicitly-marked unresolved unknown. (#TBD)
+- The multi-tenancy audit no longer lists open verifications that are
+  all closed. Every verification from issue #340 is now recorded as
+  closed 2026-10-17, and the one remaining unknown — vendor root
+  semantics — is explicitly marked as a standing unknown rather than a
+  pending verification. (#TBD)
 
 ### Security
 

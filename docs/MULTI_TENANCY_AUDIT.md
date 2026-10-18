@@ -20,7 +20,7 @@ shape; where a finding doesn't apply there, the row says so.
 "Blast radius" = what one compromised or malicious tenant can reach,
 assuming the other tenants are honest. Rows marked `[EXISTS]` have an
 open GitHub issue; the two rows without a pre-existing issue (A1, and
-the §6 open verifications) were filed this turn — linked in §7.
+the §6 verifications) were filed this turn — linked in §7.
 
 **Row refresh:** rows A3 and A8 were updated 2026-09-29 (#711) after
 their sandboxing issues shipped (#115/#95); the audit baseline remains
