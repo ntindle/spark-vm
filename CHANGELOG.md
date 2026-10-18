@@ -51,6 +51,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Pinned the alert-ack provenance contract (#1704, #1705): re-acking an alert
+  refreshes its acknowledgment timestamp — each ack is a fresh operator
+  declaration, and the stuck-alert re-fire gate keys on the latest ack, so a
+  re-ack re-extends the suppression window; operator attribution stays
+  best-effort metadata (rendered as "unknown" when unknowable) until the
+  fleet console's auth story lands. Closes #1704 and #1705. (#1708)
 - Documented the hosted push lane's async enqueue boundary and async
   endpoint-driven push mappings in the hosted component README — two
   shipped reference modules that had no coverage; their test-suite sizes
