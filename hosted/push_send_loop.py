@@ -858,7 +858,8 @@ _PARKED_EXPIRED_SUFFIX = "parked-expired"
 def _maybe_expire_parked(conn, summary, moment, at, item, row_id,
                          owner_principal, box_col, box_id, event_kind,
                          event_key, row_at, window_start):
-    """D98 — expire an over-age parked page through the audited path.
+    """D98 — parked max-age expiry (#1185).
+    Expire an over-age parked page through the audited path.
 
     Returns True when the page was expired (the caller parks nothing
     and returns). The expiry is one page-level ``'dead-letter'`` audit
@@ -1241,8 +1242,9 @@ def _process_one(conn, summary, moment, at, sent_at, item, row_id,
             continue
         live.append(sub)
     if not live:
-        # D98 — an over-age parked page expires through the audited
-        # dead-letter path instead of parking forever (#1185).
+        # D98 — parked max-age expiry (#1185).
+        # An over-age parked page expires through the audited
+        # dead-letter path instead of parking forever.
         if _maybe_expire_parked(conn, summary, moment, at, item, row_id,
                                 owner_principal, box_col, box_id,
                                 event_kind, event_key, row_at,
