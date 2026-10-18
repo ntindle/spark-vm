@@ -280,6 +280,10 @@ enrolled, with a warning when a gate document is present but no keys are
    `python3 fleet/gate_publish.py --rotation-complete ctl-2026-09 --rotation-log <registry-dir>/gate_rotation_log.json`
    (an open window reaching the stale threshold — 14 days, tunable with
    `--rotation-stale-days` — makes every later publish warn loudly).
+   The publisher's two ledger writers (the publish path and
+   `--rotation-complete`) serialize on `<ledger>.lock` (advisory flock):
+   any future writer of the ledger must take the same lock, or a
+   concurrent close will be silently lost.
 
 ## Quick start (operator estate)
 

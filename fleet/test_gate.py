@@ -10,6 +10,7 @@ Run from the repo root: python3 -m pytest fleet/test_gate.py -q
 """
 
 import binascii
+import fcntl
 import hashlib
 import hmac
 import json
@@ -17,6 +18,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -1477,3 +1479,106 @@ def test_event_schema_matches_collector():
         assert gate_publish.EVENT_SCHEMA == mod.EVENT_SCHEMA
     finally:
         sys.path.remove(REPO)
+
+
+# --- key-file open discipline (security sweep 20261018-1559) ----------------
+# O_NOFOLLOW + fstat-on-fd for key reads (the MSP FOLLOW-msp6/msp7
+# discipline); the rotation ledger lock taken by close_rotation too; the
+# published gate.json 0600 from its first byte.
+
+def test_publish_refuses_symlinked_key(tmp_path, keyfile, registry, manifest):
+    link = tmp_path / "link.key"
+    os.symlink(keyfile, link)
+    out = str(tmp_path / "gate.json")
+    r = run(sys.executable, PUBLISH, "--registry", registry,
+            "--manifest", manifest,
+            "--key-id", KEY_ID, "--key-file", str(link), "--out", out)
+    assert r.returncode != 0
+    assert "symlink" in r.stderr
+
+
+def test_query_symlinked_key_is_frozen(tmp_path, keyfile, registry, manifest):
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    link = tmp_path / "link.key"
+    os.symlink(keyfile, link)
+    ans = query_state(gate, "box-07", keys_spec(str(link)))
+    assert ans["state"] == "frozen"
+    assert "symlink" in ans["reason"]
+
+
+def test_publish_gate_json_created_0600(tmp_path, keyfile, registry, manifest):
+    out = publish(tmp_path, keyfile, registry, manifest)
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    assert not os.path.exists(out + ".tmp")  # no publish litter left behind
+
+
+def test_close_rotation_serializes_on_ledger_lock(tmp_path):
+    # close_rotation must take the same ledger lock as process_rotation: a
+    # manual close racing a cron publish serializes instead of silently
+    # losing the close (the lost update would keep a retired key "open").
+    sys.path.insert(0, REPO)
+    try:
+        from fleet import gate_publish as gp
+    finally:
+        sys.path.remove(REPO)
+    log = str(tmp_path / "gate_rotation_log.json")
+    gp.process_rotation("ctl-a", log, 14)  # baseline
+    gp.process_rotation("ctl-b", log, 14)  # opens window ctl-a -> ctl-b
+    lock_path = log + ".lock"
+    assert os.path.exists(lock_path)  # the publish path created the lockfile
+    lf = open(lock_path, "w")
+    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)  # hold the lock in this thread
+    done = []
+
+    def closer():
+        t0 = time.monotonic()
+        gp.close_rotation("ctl-a", log)
+        done.append(time.monotonic() - t0)
+
+    th = threading.Thread(target=closer)
+    th.start()
+    time.sleep(0.4)
+    try:
+        assert not done, "close_rotation proceeded without the ledger lock"
+    finally:
+        # Release; the close may proceed.
+        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        lf.close()
+    th.join(timeout=10)
+    assert done, "close_rotation never completed after lock release"
+    assert done[0] >= 0.35, "close_rotation did not wait for the lock"
+    data = json.loads(open(log).read())
+    closed = [e for e in data["rotations"]
+              if e.get("from_key_id") == "ctl-a" and e.get("closed_at")]
+    assert len(closed) == 1, "the close must land exactly once"
+
+
+def test_close_rotation_lock_open_failure_is_loud(tmp_path):
+    # A ledger path whose lockfile cannot be created (a path component is
+    # a regular file — ENOTDIR, fails even as root) refuses LOUDLY: no
+    # traceback, non-zero exit, the advertised refusal message.
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    log = str(blocker / "gate_rotation_log.json")
+    r = run(sys.executable, PUBLISH, "--rotation-complete", "ctl-old",
+            "--rotation-log", log)
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr
+    assert "cannot lock rotation ledger" in r.stderr
+
+
+def test_publish_lock_open_failure_warns_but_publishes(tmp_path, keyfile,
+                                                       registry, manifest):
+    # The ledger is advisory (B1): a lock the publisher cannot take skips
+    # the reminders loudly but never blocks the gate document.
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    log = str(blocker / "gate_rotation_log.json")
+    out = str(tmp_path / "gate.json")
+    r = run(sys.executable, PUBLISH, "--registry", registry,
+            "--manifest", manifest,
+            "--key-id", KEY_ID, "--key-file", keyfile, "--out", out,
+            "--rotation-log", log)
+    assert r.returncode == 0, r.stderr
+    assert "cannot lock rotation ledger" in r.stderr
+    assert os.path.exists(out)

@@ -44,6 +44,7 @@ Stdlib only. Never prints key material.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import hmac
 import json
@@ -104,25 +105,33 @@ def resolve_keys(args) -> dict:
             raise NoSignal(f"bad --keys entry (want key_id=/path): {item!r}")
         key_id, path = item.split("=", 1)
         key_id, path = key_id.strip(), path.strip()
+        # O_NOFOLLOW + fstat-on-fd (the gate_publish._load_key discipline):
+        # a pre-planted symlink at the key path fails loud as no-signal
+        # instead of redirecting the read, and the group/other check cannot
+        # be raced between stat and open.
         try:
-            st = os.stat(path)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise NoSignal(f"key for {key_id} is a symlink — refusing "
+                               "(key files must be real files, mode 0600)")
             raise NoSignal(f"cannot read key for {key_id}: {exc}")
-        if st.st_mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP |
-                         stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
-            # Same refusal as gate_publish._load_key: the MAC is symmetric,
-            # so every box holds the fleet *signing* key — a group/other-
-            # readable key file hands minting power to any local user.
-            raise NoSignal(f"key file for {key_id} is readable by "
-                           "group/other — gate keys must be mode 0600")
-        try:
-            with open(path, "rb") as fh:
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if st.st_mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP |
+                             stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
+                # Same refusal as gate_publish._load_key: the MAC is symmetric,
+                # so every box holds the fleet *signing* key — a group/other-
+                # readable key file hands minting power to any local user.
+                raise NoSignal(f"key file for {key_id} is readable by "
+                               "group/other — gate keys must be mode 0600")
+            try:
                 # Exact bytes are the key; trailing CR/LF bytes are stripped
                 # (matches gate_publish.py's _load_key — same key bytes both
                 # sides, or the MACs will never agree).
                 key = fh.read().rstrip(b"\r\n")
-        except OSError as exc:
-            raise NoSignal(f"cannot read key for {key_id}: {exc}")
+            except OSError as exc:
+                raise NoSignal(f"cannot read key for {key_id}: {exc}")
         if len(key) < 32:
             raise NoSignal(f"key for {key_id} is shorter than 32 bytes")
         keys[key_id] = key

@@ -148,6 +148,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The release-gating channel's controller key files are now opened
+  symlink-proof: a key path that is a symlink is refused loudly instead of
+  being followed, and the mode-0600 check runs against the file that is
+  actually read, on both the publishing side and every box's verify side.
+  The rotation ledger's close ceremony now takes the same lock as the
+  publish path, so a key-retirement can no longer be silently lost to a
+  concurrent publish. (#TBD)
 - The credential-registry looseness warning now tells the truth for both
   registries. The main registry's warning still names the main proxy's
   allowlist file as the one control the operator can't lift alone; the
