@@ -593,6 +593,15 @@ def test_component_permitted_null_assignments_does_not_crash():
                                           waves) is False
 
 
+def test_component_permitted_list_assignments_admits_nobody():
+    # A truthy non-dict assignments field is not a pin map — canary
+    # pin-only semantics mean nobody is admitted (QA round-2 note).
+    waves = {"repo": {"state": "canary", "live": 4,
+                      "assignments": ["box-1"]}}
+    assert gate_query.component_permitted("box-1", "repo",
+                                          waves) is False
+
+
 def test_component_permitted_non_finite_live_is_no_signal():
     waves = {"repo": {"state": "wave-1", "live": float("inf"),
                       "assignments": {"box-1": 0}}}
@@ -709,3 +718,28 @@ def test_answer_null_wave_entry_is_frozen(tmp_path):
     assert ans["freeze"] == "true"
     assert ans["reason"].startswith("no-signal: ")
     assert "not an object" in ans["reason"]
+
+
+def test_answer_list_waves_section_is_frozen(tmp_path):
+    # A truthy non-dict waves section cannot be evaluated honestly —
+    # no-signal, not an AttributeError (QA round-2 note).
+    doc = _make_gate_doc(freeze=False, waves=["repo"])
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    ans = gate_query.answer(path, "box-1", {"k1": KEY_A})
+    assert ans["state"] == "frozen"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "waves is not an object" in ans["reason"]
+
+
+def test_answer_list_releases_section_is_frozen(tmp_path):
+    doc = _make_gate_doc(freeze=False,
+                         waves={"repo": {"state": "complete", "live": 4,
+                                         "assignments": {}}},
+                         extra={"releases": ["repo"]})
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    ans = gate_query.answer(path, "box-1", {"k1": KEY_A})
+    assert ans["state"] == "frozen"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "releases is not an object" in ans["reason"]

@@ -215,10 +215,13 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
     if wave.get("state") == "canary":
         # Canary is pin-only: only boxes assigned wave 1 are in the canary.
         # A malformed pin is no-signal (same fail-closed reasoning as
-        # box_wave); (wave.get("assignments") or {}) because a present-but-
-        # null assignments field must not AttributeError here (QA B2).
+        # box_wave). A truthy non-dict assignments field (e.g. a list) is
+        # not a pin map at all — treat it as no pins, so nobody is admitted
+        # (the fail-closed direction for canary; QA round-2 note).
+        assign = wave.get("assignments")
+        pin_src = assign if isinstance(assign, dict) else {}
         try:
-            pin = int((wave.get("assignments") or {}).get(box_id, -1))
+            pin = int(pin_src.get(box_id, -1))
         except (TypeError, ValueError, OverflowError):
             raise NoSignal(f"canary assignment for {box_id!r} is malformed")
         return pin == 1
@@ -250,8 +253,16 @@ def answer(gate_path: str, box_id: str, keys: dict) -> dict:
             tzinfo=timezone.utc)
         age = int((datetime.now(timezone.utc) - issued).total_seconds())
         freeze = bool(doc.get("freeze"))
-        waves = doc.get("waves", {}) or {}
-        releases = doc.get("releases", {}) or {}
+        waves = doc.get("waves", {})
+        if waves and not isinstance(waves, dict):
+            # A truthy non-dict waves section is corrupt — the per-component
+            # lookups below cannot evaluate it honestly (QA round-2 note).
+            raise NoSignal("gate document waves is not an object")
+        waves = waves or {}
+        releases = doc.get("releases", {})
+        if releases and not isinstance(releases, dict):
+            raise NoSignal("gate document releases is not an object")
+        releases = releases or {}
         out = {"state": "frozen" if freeze else "live",
                "freeze": "true" if freeze else "false",
                "reason": "freeze flag set" if freeze else "gate ok",
