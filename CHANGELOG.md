@@ -107,7 +107,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tailnet-interface, and audit-line builds shipped, which earlier findings
   each build actually closed, and which gaps stay open (the conntrack
   question, the tailnet interface disappearing after the build, and the
-  review's leftover test pins — now filed as their own issue). (#TBD)
+  review's leftover test pins — now filed as their own issue). (#1676)
 
 - The fleet rollout status now reports `bad_signal` on every wave: the
   planes carrying an unresolved deploy-failed event from the current
