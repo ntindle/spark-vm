@@ -169,6 +169,11 @@ def _box_row(bid, record, eligible_ids):
     commit_full = ver.get("repo_commit")
     tick_full = tick.get("toolset")
     frozen = gate.get("frozen")
+    # #1632: the table's gate_age column, structured — the recomputed
+    # age in seconds (null when uncomputable) plus whether it fell back
+    # to the box's emit-time answer_age_s.
+    gate_age_s, gate_age_emit_time = inventory._gate_age_s(
+        gate, datetime.now(timezone.utc))
     flags = []
     if bid not in eligible_ids:
         flags.append("stale")
@@ -183,6 +188,8 @@ def _box_row(bid, record, eligible_ids):
         "toolset_tick_full": tick_full if isinstance(tick_full, str)
         else None,
         "frozen": True if frozen else (False if frozen is False else None),
+        "gate_age_s": gate_age_s,
+        "gate_age_emit_time": gate_age_emit_time,
         "flags": flags,
         "eligible": bid in eligible_ids,
     }

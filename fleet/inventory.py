@@ -59,16 +59,29 @@ Store layout:
   <store>/snapshot.json    derived: latest record per box + census inputs
 
 Record schema (S1 subset of the design's section 4):
-  {schema, box_id, observed_at, reporter, versions{repo_commit,
+  {schema, box_id, observed_at, emitted_at, reporter, versions{repo_commit,
    toolset_pins, image_version}, last_tick_at{deploy, toolset, image},
-   gate{permitted_commit, permitted_toolset_pin, frozen, answer_age_s},
-   arc, wave, suspect, suspect_reason, attested, notes}
+   gate{permitted_commit, permitted_toolset_pin, frozen, answer_age_s,
+   generated_at}, arc, wave, suspect, suspect_reason, attested, notes}
 
 Rules the code follows (from the design, summarized here so the behavior
 is auditable at the call site):
   - observed_at is collector-side; box-side generated_at is kept in the
     payload but never trusted for ordering. A generated_at more than 5
     min in the future is flagged in notes, not dropped.
+  - emitted_at is the box clock's snapshot-emission time (carried from
+    the box snapshot verbatim); observed_at is the collector's receive
+    time. observed_at - emitted_at is the transport/collection delay and
+    a negative value is clock skew, not an error. A snapshot emitted_at
+    more than 5 min in the future (FUTURE_SKEW_TOLERANCE_S) is flagged
+    in notes, not dropped — the same flag-don't-drop convention as the
+    status generated_at above.
+  - answer_age_s is the box-local emit-time convenience: the box froze
+    it when the snapshot was emitted, so it only ever grows stale after
+    that. Readers recompute the true gate age as
+    max(0, now - gate.generated_at) (aware UTC), never from answer_age_s.
+    gate.generated_at null means the box couldn't parse the hook's
+    timestamp — the age is then uncomputable, not zero.
   - On audit-vs-snapshot disagreement about repo_commit, the box-side
     snapshot is authoritative; the box is marked suspect (flagged, not
     convicted) with the audit's claim kept in suspect_reason.
@@ -302,7 +315,7 @@ def collect_box(box_dir, box_id, observed_at):
                 "image_version": None}
     last_tick = {"deploy": None, "toolset": None, "image": None}
     gate = {"permitted_commit": None, "permitted_toolset_pin": None,
-            "frozen": None, "answer_age_s": None}
+            "frozen": None, "answer_age_s": None, "generated_at": None}
     arc = None
     suspect = False
     suspect_reason = None
@@ -352,6 +365,7 @@ def collect_box(box_dir, box_id, observed_at):
     # history of claims) and the box is marked suspect — flagged, not
     # convicted (design section 7).
     snapshot_commit = None
+    emitted_at = None
     if isinstance(snapshot, dict):
         snapshot_commit = snapshot.get("repo_commit")
         versions["image_version"] = snapshot.get("image_version")
@@ -359,6 +373,15 @@ def collect_box(box_dir, box_id, observed_at):
         if isinstance(gate_state, dict):
             gate["frozen"] = gate_state.get("frozen")
             gate["answer_age_s"] = gate_state.get("answer_age_s")
+            # D-SC-2 (#1660): the hook's own timestamp, carried verbatim
+            # (the box already nulled it when unparseable) so readers can
+            # recompute the true gate age instead of trusting the
+            # emit-time-frozen answer_age_s.
+            gate["generated_at"] = gate_state.get("generated_at")
+        # D-SC-1 (#1660): the box's snapshot-emission time (box clock),
+        # carried verbatim; observed_at stays the collector's receive
+        # time so transport/collection delay is computable.
+        emitted_at = snapshot.get("emitted_at")
         # The box-side snapshot sketch (design section 5) calls this
         # field arc_active; the record schema (section 4) calls it arc.
         arc = snapshot.get("arc_active")
@@ -367,6 +390,22 @@ def collect_box(box_dir, box_id, observed_at):
             notes.append("box snapshot note: %s" % snap_note)
     elif snapshot is not None:
         notes.append("snapshot.json is not an object; ignored")
+
+    # D-SC-1 skew discipline (#1660): emitted_at - observed_at inherits
+    # the FUTURE_SKEW_TOLERANCE_S flag-don't-drop convention. A negative
+    # observed_at - emitted_at is clock skew (the box clock runs ahead of
+    # the collector), not an error — the record keeps the value as-is.
+    emitted_dt = _parse_ts(emitted_at)
+    if isinstance(snapshot, dict) and emitted_at is not None \
+            and emitted_dt is None:
+        notes.append("snapshot has no parseable emitted_at; kept as-is")
+    observed_dt = _parse_ts(observed_at)
+    if emitted_dt is not None and observed_dt is not None and (
+            emitted_dt - observed_dt).total_seconds() > (
+            FUTURE_SKEW_TOLERANCE_S):
+        notes.append(
+            "snapshot emitted_at is %.0fs in the future; kept as-is"
+            % (emitted_dt - observed_dt).total_seconds())
 
     if snapshot_commit:
         versions["repo_commit"] = snapshot_commit
@@ -394,6 +433,7 @@ def collect_box(box_dir, box_id, observed_at):
         "schema": RECORD_SCHEMA,
         "box_id": box_id,
         "observed_at": observed_at,
+        "emitted_at": emitted_at,
         # S1 value; design section 4's enum predates the pull collector —
         # the design doc's S1 note documents the deviation.
         "reporter": "estate-collector-s1",
@@ -687,6 +727,41 @@ def _short_commit(commit):
     return str(commit)[:12]
 
 
+def _gate_age_s(gate, now):
+    """Recomputed gate-answer age in seconds (D-SC-4, #1632).
+
+    Returns (age_s_or_none, emit_time_fallback_bool). Prefers the true
+    age recomputed from gate.generated_at (aware UTC, floored at 0 —
+    the #1660 fields make this possible); falls back to the box's
+    emit-time answer_age_s when generated_at is null or unparseable,
+    flagged so the reader knows that number froze at snapshot emission
+    and only grows stale afterwards. Uncomputable -> (None, False).
+    Never raises.
+    """
+    generated = _parse_ts(gate.get("generated_at"))
+    if generated is not None:
+        return max(0, int((now - generated).total_seconds())), False
+    age = gate.get("answer_age_s")
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return None, False
+    return max(0, int(age)), True
+
+
+def _format_gate_age(age_s, emit_time_fallback):
+    """Render a gate age for the inventory table. A trailing `~` marks
+    the emit-time fallback (the box's frozen answer_age_s, not a live
+    recomputation) — see the module docstring's answer_age_s rule."""
+    if age_s is None:
+        return "n/a"
+    if age_s < 60:
+        text = "%ds" % age_s
+    elif age_s < 3600:
+        text = "%dm" % (age_s // 60)
+    else:
+        text = "%dh" % (age_s // 3600)
+    return text + "~" if emit_time_fallback else text
+
+
 def cmd_inventory(store_dir, staleness_hours, box_id):
     snapshot, err = load_snapshot(store_dir)
     if err:
@@ -714,11 +789,12 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
     # than the old fixed 24-char column used to push the rest of the row
     # out of alignment.
     box_w = max(24, max((len(str(bid)) for bid in boxes), default=0))
-    row_fmt = "%%-%ds %%-14s %%-12s %%-8s %%s" % box_w
+    row_fmt = "%%-%ds %%-14s %%-12s %%-8s %%-10s %%s" % box_w
 
     # Per-box rows.
     lines.append(row_fmt % ("box", "repo_commit", "toolset_tick", "frozen",
-                            "flags"))
+                            "gate_age", "flags"))
+    now = datetime.now(timezone.utc)
     for bid, record in sorted(boxes.items(), key=_box_sort_key):
         ver = record.get("versions", {}) or {}
         tick = record.get("last_tick_at", {}) or {}
@@ -729,11 +805,16 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
         if record.get("suspect"):
             flags.append("suspect")
         frozen = gate.get("frozen")
+        # #1632: per-box gate staleness, recomputed from
+        # gate.generated_at (#1660); a trailing `~` marks the emit-time
+        # answer_age_s fallback.
+        age_s, emit_fallback = _gate_age_s(gate, now)
         lines.append(row_fmt % (
             bid,
             _short_commit(ver.get("repo_commit")),
             (tick.get("toolset") or "n/a")[:10],
             "yes" if frozen else ("no" if frozen is False else "n/a"),
+            _format_gate_age(age_s, emit_fallback),
             ",".join(flags) or "-",
         ))
 

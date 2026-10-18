@@ -51,6 +51,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- The fleet version table now records when each box emitted its snapshot and
+  when its gate answer was generated, and shows per-box gate staleness
+  recomputed from the true generation time instead of the box-local frozen
+  age — a trailing tilde marks rows still on the older emit-time figure;
+  `observed_at` stays the collector's receive time. (#TBD)
 - Pinned the alert-ack provenance contract (#1704, #1705): re-acking an alert
   refreshes its acknowledgment timestamp — each ack is a fresh operator
   declaration, and the stuck-alert re-fire gate keys on the latest ack, so a
