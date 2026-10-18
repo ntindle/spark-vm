@@ -50,6 +50,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Fixed
+
+- The relay path-state test suite no longer emits 25 warnings per run.
+  The command-line tests now drive the CLI's entry point in-process —
+  returning an exit code instead of re-executing the module — so the
+  warning noise and the per-test argument-vector patching are gone.
+  (#1663)
+
 ### Security
 
 - Fixed the swap proxy's placeholder warning so the refused-credential

@@ -861,7 +861,17 @@ def _read_bundle_stdin():
         "pinned_fingerprint": bundle["pinned_fingerprint"],
     }
 
-if __name__ == "__main__":
+
+def main(argv=None):
+    """CLI entry point for the relay path-state producer (R2b, #1415).
+
+    ``argv`` is the argument vector WITHOUT the program name (``None``
+    reads ``sys.argv[1:]``, as before). Returns the process exit code
+    instead of raising ``SystemExit`` so tests can drive the CLI
+    in-process without re-executing the module via ``runpy``. (argparse
+    usage errors still raise ``SystemExit``, as before — the contract
+    covers main()'s own exit paths.)
+    """
     ap = argparse.ArgumentParser(
         description="relay path-state producer (R2b, #1415): "
         "ok | degraded | down + sub-code per vm_id"
@@ -881,7 +891,7 @@ if __name__ == "__main__":
         default="running",
         help="H4 provider state string (default: running)",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.history:
         os.environ["RELAY_PROBE_HISTORY"] = args.history
     if args.journal:
@@ -893,12 +903,12 @@ if __name__ == "__main__":
                 "bundle on stdin as JSON",
                 file=sys.stderr,
             )
-            raise SystemExit(2)
+            return 2
         try:
             bundle = _read_bundle_stdin()
         except _BundleError as exc:
             print("error: %s" % exc, file=sys.stderr)
-            raise SystemExit(2)
+            return 2
         out = maybe_probe(
             args.query,
             provider_state_fn=lambda: args.provider_state,
@@ -911,7 +921,12 @@ if __name__ == "__main__":
             reading = relay_path_state(args.query)
         except (relay_liveness.JournalLockError, HistoryLockError) as exc:
             print("error: %s" % exc, file=sys.stderr)
-            raise SystemExit(1)
+            return 1
         print(json.dumps(reading, indent=2))
     else:
         ap.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
