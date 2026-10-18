@@ -185,6 +185,27 @@ class InferenceAdvisoryTests(unittest.TestCase):
         self.assertIn("main proxy's", p.stderr)
         self.assertNotIn("inference-hosts.allow", p.stderr)
 
+    def test_unknown_registry_gets_bleak_generic_text(self):
+        # Architecture review (round 1): an unrecognized registry must not
+        # borrow the main proxy's reassuring boundary claim -- fail-safe,
+        # not fail-open.
+        reg = os.path.join(self.tmp.name, "other-registry.json")
+        env = dict(self.env, CRED_REGISTRY_FILE=reg,
+                   CRED_REGISTRY_LOCK=reg + ".lock")
+        writer = os.path.join(self.writer_dir, "cred-registry-set")
+        p0 = subprocess.run([writer, "set", "gh", "access_token",
+                             '"bearer_header"'], env=env, capture_output=True,
+                            text=True, timeout=30)
+        self.assertEqual(p0.returncode, 0, p0.stderr)
+        p = subprocess.run([writer, "clear-method-limit", "gh"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(ADVISORY_MARKER, p.stderr)
+        self.assertIn("no unilateral-lift-proof boundary is asserted",
+                      p.stderr)
+        self.assertNotIn("main proxy's", p.stderr)
+        self.assertNotIn("inference-hosts.allow", p.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

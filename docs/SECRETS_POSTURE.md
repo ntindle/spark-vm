@@ -158,7 +158,9 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   registry-aware: the inference registry's `inference-hosts.allow` is
   operator-appendable via the narrow `tee -a` sudoers rule, so the
   inference path has no unilateral-lift-proof boundary and its advisory
-  says so explicitly.
+  says so explicitly; a registry the writer does not recognize gets a
+  generic fallback that asserts no boundary rather than borrowing the
+  main proxy's claim.
 
 ## The human-context boundary on direct secret reads (#671)
 
