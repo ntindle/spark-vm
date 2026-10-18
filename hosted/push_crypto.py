@@ -46,6 +46,16 @@ Security posture (read before reusing):
   7 requirement -- an unvalidated peer key is an invalid-curve attack.
 - ``auth_secret`` values are ``bytes`` in and out; this module never logs
   key material.
+
+Performance posture (measured 2026-10-18 on the loop dev VM):
+
+- One send's crypto costs ~83 ms wall clock: ``encrypt_push_message``
+  ~69 ms for a 200 B payload (one P-256 ECDH scalar mult plus HKDF and
+  AES-GCM) and ``vapid_sign`` ~14 ms (one ECDSA sign).  The sync send
+  loop calls ``send_push`` serially, so a burst of N queued pushes is
+  N x ~83 ms of uninterrupted worker CPU with no budget, concurrency,
+  or backpressure signal.  The S1 in-worker-vs-separate-service decision
+  (issue #967) still needs a burst budget: see issue #1679.
 """
 
 from __future__ import annotations
@@ -468,7 +478,7 @@ def _rfc6979_nonce(private_int: int, hashed: bytes) -> int:
     reduction)."""
     x = private_int.to_bytes(32, "big")
     z = int.from_bytes(hashed, "big")
-    if z > _N:
+    if z >= _N:  # RFC 6979 section 2.3.3 bits2octets: reduce when z1 >= q
         z -= _N
     bx = z.to_bytes(32, "big")
     v = b"\x01" * 32

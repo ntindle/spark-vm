@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The deterministic signing-nonce derivation now reduces the message
+  hash exactly when it reaches the curve order, matching RFC 6979 to
+  the letter; previously the boundary case (a hash equal to the order)
+  skipped the reduction. No signed output changes for any real input.
+  (#1682)
+
 - The jail build smoke suite now pins the three test gaps the #1666
   review left behind: the interface-name shape guard is ordered before
   the firewall conf render (a guard placed after the sed render would
