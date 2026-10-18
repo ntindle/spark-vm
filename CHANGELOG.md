@@ -85,7 +85,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `landed`/`bad_signal` halves mirror the promotion gate's two reads,
   the `updated_at`-bounded journal window and its fail-closed edges,
   and how a signal clears. Every behavior claim exercised against the
-  shipped module. (#TBD)
+  shipped module. (#1664)
 
 - The swap proxy's audit trail now records a `tenant` field on every
   `swapped=` line, so a future multi-tenant host can attribute each
