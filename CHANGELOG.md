@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   recomputed from the true generation time instead of the box's emit-time
   `answer_age_s` — a trailing `~` means the age is the box's own number from
   snapshot emission, not a fresh recomputation; `observed_at` stays the
-  collector's receive time. (#1660, #1632)
+  collector's receive time. (#1660, #1632, #1714)
 - Pinned the alert-ack provenance contract (#1704, #1705): re-acking an alert
   refreshes its acknowledgment timestamp — each ack is a fresh operator
   declaration, and the stuck-alert re-fire gate keys on the latest ack, so a
