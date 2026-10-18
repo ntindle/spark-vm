@@ -266,7 +266,7 @@ noted here for consistency only.
   as the per-tenant implementation — it is the decision record, not the
   build.
 
-## 6. Open verifications (nested-KVM verified 2026-10-17; Tailscale behaviorally verified + vendor KB 1091 first-party-confirmed 2026-10-17, #1646 closed — #340 stays open)
+## 6. Verifications (all closed 2026-10-17: nested-KVM verified; Tailscale behaviorally verified + vendor KB 1091 first-party-confirmed, #1646 closed; #340 closed)
 
 - Nested-KVM availability on the hosted product's target hosts —
   **VERIFIED: not available on the decided provider (Fly Sprites).**
@@ -289,7 +289,7 @@ noted here for consistency only.
   notes: a `tailscaled` restart during an outage drops the node unless
   netmap caching is enabled; a restarted node enforces its cached packet
   filter, not newer rules.
-- Vendor root semantics remain publicly undocumented — assert nothing.
+- Vendor root semantics remain publicly undocumented — assert nothing (standing unknown, not a verification owed).
 
 ## 7. Issues filed this turn
 
