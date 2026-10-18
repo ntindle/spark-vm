@@ -60,6 +60,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the fleet journal (direction in the note), so freeze flips and clears
   show up in the journal — and on the status-page feed — without anyone
   deriving them from document diffs. (#1702)
+- A gap analysis of the alert-ack entry ticket (FLEET_READ_API_SPEC §3's
+  promise that ack lands with the S2 console, OQ3): the S2 console shipped
+  read-only by design with no auth story, so ack stays CLI-only as a
+  journal rewrite with best-effort operator attribution until the auth
+  story is chosen — the console's copy-pasteable ack hints are the composed
+  flow in the meantime; files the auth-story choice plus the
+  `acked_by` identity contract and re-ack timestamp semantics. (#TBD)
 
 ### Fixed
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
