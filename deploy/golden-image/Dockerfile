@@ -132,9 +132,9 @@ RUN mkdir -p /home/agent/cua \
 # tree must never clobber the checksum-verified binary.
 RUN set -e; \
     arch="$(uname -m)"; \
-    case "$arch" in x86_64) a=x86_64 ;; aarch64) a=aarch64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
+    case "$arch" in x86_64) a=x86_64 ;; aarch64) a=arm64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
     tag="cua-driver-rs-v${CUA_DRIVER_VERSION}"; \
-    asset="cua-driver-rs-${CUA_DRIVER_VERSION}-${a}-binary.tar.gz"; \
+    asset="cua-driver-rs-${CUA_DRIVER_VERSION}-linux-${a}-binary.tar.gz"; \
     base="https://github.com/trycua/cua/releases/download"; \
     work="$(mktemp -d)"; \
     curl -fsSL --max-time 300 -o "$work/checksums.txt" "$base/$tag/checksums.txt"; \
