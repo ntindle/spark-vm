@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   now validates the configuration and re-applies it inline (without
   restarting the firewall unit, which would stop the running jail), so
   re-running the build converges the box to the repository state.
-  (#TBD)
+  (#1668)
 
 - The relay path-state test suite no longer emits 25 warnings per run.
   The command-line tests now drive the CLI's entry point in-process —
