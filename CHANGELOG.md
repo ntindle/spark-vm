@@ -78,6 +78,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   it; the new field makes that disagreement visible at a glance, so
   the 2am operator sees why promotion is blocked. (#1659)
 
+- New doc: the fleet rollout `status` output schema — the reference for
+  the JSON `fleet/plane_waves.py --store DIR status` prints: the
+  top-level `frozen`/`canary_tenants`/`rollout` fields, the per-wave
+  fields (`planes`, `landed`, `bad_signal`, `live`), why the
+  `landed`/`bad_signal` halves mirror the promotion gate's two reads,
+  the `updated_at`-bounded journal window and its fail-closed edges,
+  and how a signal clears. Every behavior claim exercised against the
+  shipped module. (#TBD)
+
 - The swap proxy's audit trail now records a `tenant` field on every
   `swapped=` line, so a future multi-tenant host can attribute each
   swapped credential to a tenant without changing the log format
