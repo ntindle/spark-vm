@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   inference registry's warning says plainly that no such control exists
   there — the inference proxy's allowlist is operator-appendable — so
   removing a limit on the inference registry is now flagged honestly.
-  (#TBD)
+  (#1685)
 
 ### Fixed
 
