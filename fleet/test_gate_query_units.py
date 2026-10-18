@@ -481,6 +481,26 @@ def test_verify_gate_expired_is_no_signal(tmp_path):
         raise AssertionError("expected NoSignal")
 
 
+def test_verify_gate_inf_ttl_is_no_signal(tmp_path):
+    # int(Infinity) raises OverflowError, not ValueError (Engineering
+    # round-3 note) — a non-finite ttl must be no-signal, not a traceback.
+    doc = _make_gate_doc()
+    doc["ttl_seconds"] = float("inf")
+    # Re-sign: the ttl change must be covered by the MAC for this test to
+    # exercise the ttl parse rather than the MAC check.
+    body = {k: v for k, v in doc.items() if k != "hmac"}
+    doc["hmac"] = _sign(body, KEY_A)
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    gate = gate_query.load_gate(path)
+    try:
+        gate_query.verify_gate(gate, {"k1": KEY_A})
+    except gate_query.NoSignal as exc:
+        assert "ttl_seconds" in str(exc)
+    else:
+        raise AssertionError("expected NoSignal")
+
+
 # ---------------------------------------------------------------------------
 # box_wave / component_permitted
 
@@ -539,6 +559,19 @@ def test_box_wave_non_finite_pin_is_no_signal():
             raise AssertionError(f"expected NoSignal for {bad!r}")
 
 
+def test_box_wave_non_dict_assignments_is_no_signal():
+    # A truthy non-dict assignments field (True, 5, a list) would TypeError
+    # on the `in` membership test — no honest pin can be read (Security
+    # round-3 note).
+    for bad in (True, 5, ["box-7"]):
+        try:
+            gate_query.box_wave("box-7", {"assignments": bad})
+        except gate_query.NoSignal as exc:
+            assert "not an object" in str(exc)
+        else:
+            raise AssertionError(f"expected NoSignal for {bad!r}")
+
+
 def test_component_permitted_non_dict_wave_is_false():
     assert gate_query.component_permitted("box-1", "repo",
                                           {"repo": None}) is False
@@ -551,6 +584,16 @@ def test_component_permitted_never_states_are_false():
                           "assignments": {"box-1": 0}}}
         assert gate_query.component_permitted("box-1", "repo",
                                               waves) is False, state
+
+
+def test_component_permitted_unhashable_state_is_false():
+    # A non-string state (e.g. a list) is unhashable — `in` on the
+    # LIVE_STATES set would TypeError. "Not a live state" is already the
+    # fail-closed outcome (Security round-3 note).
+    waves = {"repo": {"state": ["wave-1"], "live": 4,
+                      "assignments": {"box-1": 0}}}
+    assert gate_query.component_permitted("box-1", "repo",
+                                          waves) is False
 
 
 def test_component_permitted_canary_is_pin_only_wave_1():
@@ -743,3 +786,18 @@ def test_answer_list_releases_section_is_frozen(tmp_path):
     assert ans["state"] == "frozen"
     assert ans["reason"].startswith("no-signal: ")
     assert "releases is not an object" in ans["reason"]
+
+
+def test_answer_list_release_entry_is_frozen(tmp_path):
+    # A truthy non-dict per-component release entry cannot be read honestly
+    # (Security round-3 note) — no-signal, not an AttributeError.
+    doc = _make_gate_doc(freeze=False,
+                         waves={"repo": {"state": "complete", "live": 4,
+                                         "assignments": {}}},
+                         extra={"releases": {"repo": ["deadbeef"]}})
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, doc)
+    ans = gate_query.answer(path, "box-1", {"k1": KEY_A})
+    assert ans["state"] == "frozen"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "release entry for 'repo' is not an object" in ans["reason"]

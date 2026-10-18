@@ -171,7 +171,9 @@ def verify_gate(gate: dict, keys: dict) -> str:
         issued = datetime.strptime(doc["issued_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc)
         ttl = int(doc["ttl_seconds"])
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        # OverflowError: json accepts Infinity as an extension; int(inf)
+        # raises OverflowError, not ValueError (Engineering round-3 note).
         raise NoSignal(f"gate document has bad issued_at/ttl_seconds: {exc}")
     age = (datetime.now(timezone.utc) - issued).total_seconds()
     if age < -60:
@@ -193,6 +195,11 @@ def box_wave(box_id: str, wave: dict) -> int:
         # wave we can evaluate (Engineering delta nit, same class).
         raise NoSignal("wave entry is not an object")
     assignments = wave.get("assignments") or {}
+    if not isinstance(assignments, dict):
+        # A truthy non-dict assignments field (True, 5, a list) is not a
+        # pin map; the `in` membership test below would TypeError on it
+        # (Security round-3 note). No honest pin can be read — no-signal.
+        raise NoSignal("wave assignments is not an object")
     if box_id in assignments:
         try:
             return int(assignments[box_id])
@@ -210,9 +217,14 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
     wave = waves.get(comp)
     if not isinstance(wave, dict):
         return False
-    if wave.get("state") not in LIVE_STATES:
+    state = wave.get("state")
+    if not isinstance(state, str) or state not in LIVE_STATES:
+        # A non-string state (e.g. a list) is unhashable — `in` on the
+        # LIVE_STATES set would TypeError. "Not a live state" is already
+        # the fail-closed outcome, so no freeze is needed (Security
+        # round-3 note).
         return False
-    if wave.get("state") == "canary":
+    if state == "canary":
         # Canary is pin-only: only boxes assigned wave 1 are in the canary.
         # A malformed pin is no-signal (same fail-closed reasoning as
         # box_wave). A truthy non-dict assignments field (e.g. a list) is
@@ -272,6 +284,11 @@ def answer(gate_path: str, box_id: str, keys: dict) -> dict:
                                                              waves)
             out[f"{comp}_permitted"] = "true" if permitted else "false"
             rel = releases.get(comp) or {}
+            if not isinstance(rel, dict):
+                # A truthy non-dict per-component release entry cannot be
+                # read honestly (Security round-3 note) — no-signal.
+                raise NoSignal(
+                    f"release entry for {comp!r} is not an object")
             out[f"{comp}_max"] = str(rel.get("max_permitted_commit")
                                      or rel.get("max_permitted_pin")
                                      or rel.get("max_permitted_image_version")
