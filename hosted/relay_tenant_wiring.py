@@ -47,9 +47,9 @@ Delivery semantics (D-RL34-3, one resolution per pair, no dangling
 cases):
 
 (a) Single ordered emitter per box, atomic at the persistence layer:
-    the cadence loop — not yet built in production, see issue #1711 —
-    must run at most one tick per box at a time (single-driver
-    assumption — documented, not locked), and the tick's
+    the driver — today the ``--tick`` CLI, see the Drive decision
+    (D-RL34-7) below — must run at most one tick per box at a time
+    (single-driver assumption — documented, not locked), and the tick's
     apply phase runs the pair through the store's exclusive lock
     (``TenantStore._mutate``), so no concurrent endpoint or producer
     write can interleave between ``relay-reachable`` and
@@ -87,17 +87,34 @@ recovery time the boolean is always fresh-producer state (restored by
 the pair's first event, or by the resync rule), never a stale input
 the tenant layer must second-guess.
 
-This module never probes: probing is a production cadence driver's
-job — not yet built, see issue #1711
+This module never probes: probing is the driver's job
 (``relay_path_state.maybe_probe`` with caller-supplied bundles —
 D-RL2-3, bundles never persisted). The wiring only *reads*
 ``relay_path_state`` and emits tenant-status events.
+
+Drive decision (D-RL34-7, issue #1711 acceptance option 2):
+
+The wiring never self-drives. Rule-6 suspensions, the recovery pair,
+anchor selection, and the stale-``False`` resync run ONLY when
+something ticks ``drive_tenant`` — today that is the operator, via
+this module's ``--tick`` CLI (``main()``). No auto cadence driver
+exists in production; driving is an explicit operator action (a human
+run, a cron entry, or a supervisor loop) rather than a silent gap.
+The single-driver-per-box discipline (D-RL34-3a) binds ANY driver —
+at most one tick per box at a time, whoever starts it. Direct
+``drive_box`` calls remain anchor-only (see its docstring); a future
+auto cadence driver, if built, inherits this section's discipline,
+and #1711 stays open to track it.
 
 Stdlib only — runs on the control plane like the rest of the lane.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import sys
 from typing import Callable, List, Optional, Tuple
 
 from hosted import relay_path_state as rps
@@ -376,17 +393,17 @@ def drive_box(
 ) -> dict:
     """Run one wiring tick for a single (anchor) box: read, plan, emit.
 
-    The box's single ordered emitter (D-RL34-3a): the future cadence
-    loop — not yet built in production, see issue #1711 — must not run
-    two ticks for the same box concurrently. Returns a report
-    dict ``{box_id, vm_id, reading, events, notes}``. A broken
+    The box's single ordered emitter (D-RL34-3a): the driver — today
+    the ``--tick`` CLI, see the module Drive decision (D-RL34-7) —
+    must not run two ticks for the same box concurrently. Returns a
+    report dict ``{box_id, vm_id, reading, events, notes}``. A broken
     instrument (``JournalLockError`` / ``HistoryLockError`` from the
     read) propagates — a broken instrument is loud, never darkness.
 
     ``drive_box`` is the per-box single ordered emitter ONLY when
     invoked for the anchor — the anchor-only constraint lives in
-    ``drive_tenant``. No production cadence driver exists yet (issue
-    #1711): future callers must not drive non-anchor boxes through it.
+    ``drive_tenant``. No auto cadence driver exists (issue #1711):
+    future callers must not drive non-anchor boxes through it.
 
     ``read_fn`` overrides the producer read (tests): it is called as
     ``read_fn(vm_id)`` — a caller-supplied ``read_fn`` silently ignores
@@ -576,3 +593,68 @@ def drive_tenant(
         "anchor_box_id": read_anchor_id,
         "boxes": [r for r in reports if r is not None],
     }
+
+
+# ---------------------------------------------------------------------------
+# CLI — the operator-driven tick (D-RL34-7, #1711 acceptance option 2).
+
+
+def main(argv=None):
+    """CLI entry point for the R3 tenant-status wiring (#1416, #1711).
+
+    The wiring never self-drives: this is the supported production
+    driver — one ``--tick`` per tenant, run by a human, a cron entry,
+    or a supervisor loop. Prints the ``drive_tenant`` report as JSON
+    on stdout.
+
+    ``argv`` is the argument vector WITHOUT the program name (``None``
+    reads ``sys.argv[1:]``, as before). Returns the process exit code
+    instead of raising ``SystemExit`` so tests can drive the CLI
+    in-process without re-executing the module via ``runpy``. (argparse
+    usage errors still raise ``SystemExit``, as before — the contract
+    covers main()'s own exit paths.)
+    """
+    ap = argparse.ArgumentParser(
+        description="relay-liveness tenant-status wiring tick (#1711): "
+        "run one drive_tenant tick for a tenant and print the report"
+    )
+    ap.add_argument("--store", required=True, help="tenant-record JSON store path")
+    ap.add_argument(
+        "--tick",
+        metavar="TENANT_ID",
+        required=True,
+        help="run one wiring tick for TENANT_ID and print the report as JSON",
+    )
+    ap.add_argument("--history", default=None, help="probe-history path override")
+    ap.add_argument("--journal", default=None, help="session-journal path override")
+    ap.add_argument(
+        "--journal-timeout-s",
+        type=float,
+        default=None,
+        help="journal-lock wait seconds for the producer read",
+    )
+    args = ap.parse_args(argv)
+    if args.history:
+        os.environ["RELAY_PROBE_HISTORY"] = args.history
+    if args.journal:
+        os.environ["RELAY_SESSION_JOURNAL"] = args.journal
+    store = ts.TenantStore(args.store)
+    try:
+        report = drive_tenant(
+            store, args.tick, journal_timeout_s=args.journal_timeout_s
+        )
+    except ts.TenantStatusError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    except (rps.HistoryLockError, rps.relay_liveness.JournalLockError) as exc:
+        # A broken anchor instrument is loud, never darkness: the tick
+        # fails loudly and the tenant record is untouched (the apply
+        # phase never ran — drive_tenant propagates before applying).
+        print("error: broken relay instrument: %s" % exc, file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
