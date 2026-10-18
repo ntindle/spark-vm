@@ -220,7 +220,14 @@ drop-in; enables and starts the machine; configures the guest
 proxy, openssh-server, `muse` user with the agent's SSH key,
 passwordless sudo inside the jail, swapd CA, jail `with-proxy`).
 The agent's public key is validated up front and fails the build
-loudly — see "Agent SSH key validation" below.
+loudly — see "Agent SSH key validation" below. The tailnet interface the
+SSH DNAT rule binds to is single-sourced as `JAIL_TAILNET_IF` (default
+`tailscale0`) and validated up front too: the build refuses to install a
+firewall rule that could never match, and refuses to bind the jail's SSH
+door to anything that is not the tailnet interface (it must be a tunnel
+device carrying a 100.64.0.0/10 address). tailscaled must be running
+before `build.sh` runs — the checks inspect the live host interfaces
+(issue #1666).
 
 ### Agent SSH key validation (fail loud at build, not at login)
 

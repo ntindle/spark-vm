@@ -9,6 +9,16 @@ run in CI, so this pins what a smoke check CAN verify without executing it:
     above the help branch)
   - the tailnet->jail DNAT port is single-sourced from $JAIL_SSH_PORT
     (quoted heredoc + sed placeholder substitution, render-verified)
+  - the tailnet interface the DNAT binds to is single-sourced from
+    $JAIL_TAILNET_IF (default tailscale0) and validated by a four-guard
+    chain before the conf is written: valid interface-name shape,
+    existence on this host, tunnel device kind (tun/wireguard), and a
+    100.64.0.0/10 tailnet address (issue #1666 — nftables silently
+    accepts rules referencing nonexistent interfaces, so an unvalidated
+    name meant a dead SSH door with no error; and existence alone would
+    let JAIL_TAILNET_IF=eth0 silently expose the jail's sshd — the
+    guards assert tailnet identity, not just syntax). The guards are
+    pinned statically AND exercised functionally against a stubbed `ip`
   - idempotency guards (re-runs must not re-bootstrap a good rootfs)
   - the jail's documented isolation properties (no bind mounts, no DNS,
     proxy-only nftables egress, explicit UID range, sshd hardening)
@@ -296,7 +306,7 @@ class TestSshPortSingleSourced:
         port = self._port(src)
         body = self._heredoc_body(src)
         assert body.count("@@JAIL_SSH_PORT@@") == 1
-        assert ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
+        assert ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
         # No literal port anywhere: a second hardcoded copy would drift.
         assert f"dport {port} dnat" not in active
@@ -306,7 +316,8 @@ class TestSshPortSingleSourced:
     def test_substitution_mechanism_pinned(self, src):
         # Quoted heredoc (no expansion) piped through the placeholder
         # substitution into tee: change the shape and this fails loudly.
-        assert ('sed "s/@@JAIL_SSH_PORT@@/${JAIL_SSH_PORT}/g" '
+        assert ('sed -e "s/@@JAIL_SSH_PORT@@/${JAIL_SSH_PORT}/g" '
+                '-e "s/@@JAIL_TAILNET_IF@@/${JAIL_TAILNET_IF}/g" '
                 "<<'NFT_EOF' | $SUDO tee /etc/nftables-jail.conf >/dev/null") in src
 
     def test_rendered_conf_carries_port(self, src):
@@ -315,7 +326,9 @@ class TestSshPortSingleSourced:
         # reimplementation — and check the applied line.
         port = self._port(src)
         p = subprocess.run(
-            ["sed", f"s/@@JAIL_SSH_PORT@@/{port}/g"],
+            ["sh", "-c",
+             f'sed -e "s/@@JAIL_SSH_PORT@@/{port}/g" '
+             '-e "s/@@JAIL_TAILNET_IF@@/tailscale0/g"'],
             input=self._heredoc_body(src), capture_output=True, text=True)
         assert p.returncode == 0, f"sed render failed:\n{p.stderr}"
         rendered = p.stdout
@@ -325,6 +338,244 @@ class TestSshPortSingleSourced:
 
     def test_verify_line_uses_variable(self, active):
         assert 'ssh -p $JAIL_SSH_PORT $JAIL_USER@<tailnet-ip>' in active
+
+
+class TestTailnetInterfaceSingleSourced:
+    """Issue #1666: the tailnet interface the jail's SSH DNAT binds to
+    is single-sourced from $JAIL_TAILNET_IF (default tailscale0), and
+    the build FAILS LOUDLY before writing the firewall conf when the
+    interface does not exist on the host — because nftables silently
+    accepts rules referencing nonexistent interfaces (they just never
+    match), which used to leave the agent's only SSH door dead with no
+    error anywhere."""
+
+    def _heredoc_body(self, src):
+        m = re.search(r"<<'NFT_EOF'[^\n]*\n(.*?)\nNFT_EOF$", src, re.M | re.S)
+        assert m, "quoted NFT_EOF heredoc not found"
+        return m.group(1)
+
+    def test_interface_is_env_overridable_variable(self, src):
+        # Single-sourced like JAIL_SSH_PORT, with the documented default.
+        assert ('JAIL_TAILNET_IF="${JAIL_TAILNET_IF:-tailscale0}"'
+                ) in src
+
+    def test_heredoc_uses_placeholder_on_both_rules(self, src, active):
+        body = self._heredoc_body(src)
+        assert body.count("@@JAIL_TAILNET_IF@@") == 2
+        assert ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
+                'dnat ip to 10.99.0.2:22') in active
+        assert ('iifname "@@JAIL_TAILNET_IF@@" oifname "ve-jail" '
+                'ip daddr 10.99.0.2 tcp dport 22 '
+                'ct state established,new accept') in active
+
+    def test_no_second_hardcoded_interface(self, src, active):
+        # The default is the ONLY literal "tailscale0" left: a second
+        # hardcoded copy would drift when the operator overrides the
+        # variable. (The sed substitution and the error message below
+        # carry the variable, not the literal.)
+        assert active.count("tailscale0") == 1
+
+    def test_build_validates_interface_before_conf_write(self, active):
+        # Fail-closed, before the conf lands on disk: the interface must
+        # exist on THIS host (`/usr/sbin/ip link show` succeeds), else
+        # the build aborts with a message naming the variable to set.
+        assert ('/usr/sbin/ip link show "$JAIL_TAILNET_IF" '
+                '>/dev/null 2>&1') in active
+        probe = active.index('/usr/sbin/ip link show "$JAIL_TAILNET_IF"')
+        guard = "\n".join(active[probe:].splitlines()[:5])
+        assert "exit 1" in guard, \
+            "missing-interface guard must exit 1 loudly"
+        assert "JAIL_TAILNET_IF" in guard, \
+            "error message must name the variable to set"
+        # The conf write is the sed|tee render into /etc/nftables-jail.conf;
+        # the validation must precede it.
+        render = active.index("tee /etc/nftables-jail.conf")
+        assert probe < render, \
+            "interface validation must precede the conf write"
+
+    def test_tailnet_membership_checks_pinned(self, active):
+        # B1 (Security + Architecture): existence is not identity —
+        # `JAIL_TAILNET_IF=eth0` would otherwise bind the jail's sshd to a
+        # public interface. After the existence check, the build asserts
+        # the interface is a TUN/WireGuard device AND carries a
+        # 100.64.0.0/10 (Tailscale CGNAT) address, whatever its name.
+        kind = ('/usr/sbin/ip -details link show "$JAIL_TAILNET_IF" '
+                '2>/dev/null | grep -Eq \'^[[:space:]]+(tun|wireguard)$\'')
+        addr = ('/usr/sbin/ip -o -4 addr show dev "$JAIL_TAILNET_IF" '
+                '2>/dev/null | grep -qE '
+                "'inet 100\\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\\.'")
+        assert kind in active, "tunnel-kind guard not found"
+        assert addr in active, "tailnet-address guard not found"
+        existence = active.index('/usr/sbin/ip link show "$JAIL_TAILNET_IF"')
+        kind_idx = active.index(kind)
+        addr_idx = active.index(addr)
+        render = active.index("tee /etc/nftables-jail.conf")
+        assert existence < kind_idx < addr_idx < render, \
+            "guards must run existence -> kind -> address, before the conf write"
+        for idx, what in ((kind_idx, "kind"), (addr_idx, "address")):
+            tail = "\n".join(active[idx:].splitlines()[:4])
+            assert "exit 1" in tail, f"{what} guard must exit 1 loudly"
+            assert "#1666" in tail, f"{what} error must cite the issue"
+
+    def test_interface_name_shape_validated(self, active):
+        # A hostile or garbled $JAIL_TAILNET_IF (e.g. sed-replacement
+        # metacharacters like &) would silently corrupt the rendered rule,
+        # so the name is validated against the interface-name shape before
+        # it ever reaches the sed render.
+        assert re.search(
+            r'\[\[ "\$JAIL_TAILNET_IF" =~ \^\[a-zA-Z0-9\]\[a-zA-Z0-9\._-\]'
+            r'\{0,14\}\$ \]\]', active), \
+            "interface-name shape guard not found"
+
+    def test_rendered_conf_carries_interface(self, src):
+        # Prove the two-placeholder mechanism end to end: render the
+        # heredoc exactly the way build.sh does — through the real sed
+        # pipeline — with the default interface, and check both applied
+        # lines (DNAT and its return-path accept).
+        p = subprocess.run(
+            ["sh", "-c",
+             'sed -e "s/@@JAIL_SSH_PORT@@/2222/g" '
+             '-e "s/@@JAIL_TAILNET_IF@@/tailscale0/g"'],
+            input=self._heredoc_body(src), capture_output=True, text=True)
+        assert p.returncode == 0, f"sed render failed:\n{p.stderr}"
+        rendered = p.stdout
+        assert "@@" not in rendered
+        assert ('iifname "tailscale0" tcp dport 2222 '
+                'dnat ip to 10.99.0.2:22') in rendered
+        assert ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+                'tcp dport 22 ct state established,new accept') in rendered
+
+
+# Realistic `ip` outputs for the guard-block functional test: this box
+# has no tailscale interface (tailnet via the tunnel proxy), so the
+# shapes are canned from a real tailscaled host's renderings.
+_TAILSCALE_DETAILS = (
+    "2: tailscale0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1280 "
+    "qdisc fq_codel state UNKNOWN mode DEFAULT group default qlen 500\n"
+    "    link/none \n"
+    "    tun\n"
+)
+_TAILSCALE_ADDR = (
+    "2: tailscale0    inet 100.65.241.20/32 scope global tailscale0\\"
+    "       valid_lft forever preferred_lft forever\n"
+)
+_ETH_DETAILS = (
+    "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel "
+    "state UP mode DEFAULT group default qlen 1000\n"
+    "    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff\n"
+)
+_ETH_ADDR = (
+    "2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0\\"
+    "       valid_lft forever preferred_lft forever\n"
+)
+# A TUN device that is NOT the tailnet (corporate VPN): kind passes,
+# the 100.64.0.0/10 check must still refuse it.
+_CORP_TUN_DETAILS = (
+    "5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 "
+    "qdisc fq_codel state UNKNOWN mode DEFAULT group default qlen 500\n"
+    "    link/none \n"
+    "    tun\n"
+)
+_CORP_TUN_ADDR = (
+    "5: tun0    inet 10.8.0.2/24 scope global tun0\\"
+    "       valid_lft forever preferred_lft forever\n"
+)
+
+
+class TestTailnetInterfaceFunctional:
+    """The four-guard chain (shape → existence → tunnel-kind →
+    tailnet-address) exercised functionally: the real guard block is
+    extracted from build.sh and run in bash with a stub `ip` on PATH.
+    The block's `/usr/sbin/ip` is rewritten to the stub — the seam is
+    documented here and the real path is pinned by the static tests."""
+
+    @pytest.fixture()
+    def guard_block(self, src):
+        # Anchored on exact strings the static tests pin, so a shape
+        # change fails the static tests before this extraction drifts.
+        start = src.index('if ! [[ "$JAIL_TAILNET_IF" =~')
+        idx = start
+        for _ in range(4):
+            idx = src.index("\nfi", idx) + len("\nfi")
+        block = src[start:idx]
+        assert block.count("exit 1") == 4, "guard extraction incomplete"
+        return block.replace("/usr/sbin/ip", "ip")
+
+    @pytest.fixture()
+    def ip_stub(self, tmp_path, monkeypatch):
+        bindir = tmp_path / "stubs"
+        bindir.mkdir()
+        (bindir / "ip").write_text("""\
+#!/bin/bash
+# Stub ip(8): behavior driven by env — IP_LINK_RC (rc of `ip link
+# show`), IP_DETAILS_OUT and IP_ADDR_OUT (stdout of the -details /
+# -o -4 addr listings).
+if [ "$1 $2" = "link show" ]; then exit "${IP_LINK_RC:-0}"; fi
+if [ "$1 $2 $3" = "-details link show" ]; then
+    printf '%s' "$IP_DETAILS_OUT"; exit 0
+fi
+if [ "$1 $2 $3 $4" = "-o -4 addr show" ]; then
+    printf '%s' "$IP_ADDR_OUT"; exit 0
+fi
+exit 0
+""")
+        (bindir / "ip").chmod(0o755)
+        monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
+        return bindir
+
+    def _run_guard(self, guard_block, tmp_path, monkeypatch, *,
+                   iface, link_rc="0", details="", addr=""):
+        script = tmp_path / "guard.sh"
+        script.write_text(guard_block)
+        monkeypatch.setenv("JAIL_TAILNET_IF", iface)
+        monkeypatch.setenv("IP_LINK_RC", link_rc)
+        monkeypatch.setenv("IP_DETAILS_OUT", details)
+        monkeypatch.setenv("IP_ADDR_OUT", addr)
+        return subprocess.run(["bash", str(script)],
+                              capture_output=True, text=True)
+
+    def test_tailscale_interface_passes(self, guard_block, ip_stub,
+                                        tmp_path, monkeypatch):
+        r = self._run_guard(guard_block, tmp_path, monkeypatch,
+                            iface="tailscale0",
+                            details=_TAILSCALE_DETAILS,
+                            addr=_TAILSCALE_ADDR)
+        assert r.returncode == 0, r.stderr
+
+    def test_public_interface_rejected_at_kind_check(
+            self, guard_block, ip_stub, tmp_path, monkeypatch):
+        # B1: existence is not identity — eth0 must not bind the jail's
+        # sshd, even though it exists.
+        r = self._run_guard(guard_block, tmp_path, monkeypatch,
+                            iface="eth0",
+                            details=_ETH_DETAILS, addr=_ETH_ADDR)
+        assert r.returncode == 1
+        assert "not a tunnel interface" in r.stderr
+
+    def test_non_tailnet_tunnel_rejected_at_address_check(
+            self, guard_block, ip_stub, tmp_path, monkeypatch):
+        # A TUN device that is not the tailnet: kind passes, the
+        # 100.64.0.0/10 check refuses it.
+        r = self._run_guard(guard_block, tmp_path, monkeypatch,
+                            iface="tun0",
+                            details=_CORP_TUN_DETAILS,
+                            addr=_CORP_TUN_ADDR)
+        assert r.returncode == 1
+        assert "no 100.64.0.0/10 address" in r.stderr
+
+    def test_missing_interface_rejected(self, guard_block, ip_stub,
+                                        tmp_path, monkeypatch):
+        r = self._run_guard(guard_block, tmp_path, monkeypatch,
+                            iface="zz-nope0", link_rc="1")
+        assert r.returncode == 1
+        assert "does not exist" in r.stderr
+
+    def test_metachar_name_rejected(self, guard_block, ip_stub,
+                                    tmp_path, monkeypatch):
+        r = self._run_guard(guard_block, tmp_path, monkeypatch,
+                            iface="eth0&x")
+        assert r.returncode == 1
+        assert "not a valid Linux interface name" in r.stderr
 
 
 class TestFailClosedOrdering:
@@ -461,24 +712,26 @@ class TestIsolation:
         # loudly instead of hiding behind the passing drop pins.
         assert 'iifname "ve-jail" tcp dport { 18080, 18081 } accept' in active
         assert 'iifname "ve-jail" ct state established,related accept' in active
-        assert ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+        assert ('iifname "@@JAIL_TAILNET_IF@@" oifname "ve-jail" '
+                'ip daddr 10.99.0.2 '
                 'tcp dport 22 ct state established,new accept') in active
         assert 'oifname "ve-jail" ct state established,related accept' in active
         assert ('iifname "ve-jail" ip daddr 10.99.0.1 '
                 'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1') in active
-        assert ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
+        assert ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
         # No broader jail-side accept: every `iifname "ve-jail" … accept`
         # line must be one of the pinned narrow rules above.
         pinned = {
             'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
             'iifname "ve-jail" ct state established,related accept',
-            ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
-             'tcp dport 22 ct state established,new accept'),
+            ('iifname "@@JAIL_TAILNET_IF@@" oifname "ve-jail" '
+             'ip daddr 10.99.0.2 tcp dport 22 ct state established,new '
+             'accept'),
             'oifname "ve-jail" ct state established,related accept',
             ('iifname "ve-jail" ip daddr 10.99.0.1 '
              'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1'),
-            ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
+            ('iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ '
              'dnat ip to 10.99.0.2:22'),
         }
         # (A5 hardening) No extra verdicts anywhere: every accept or dnat

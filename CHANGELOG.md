@@ -83,6 +83,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Rebuilding the agent jail now fails the build loudly when the tailnet
+  interface the jail's SSH DNAT rule binds to does not exist on the host.
+  The firewall silently accepted a rule naming an interface that isn't
+  there — nftables applies such rules cleanly but they never match — so
+  the jail's SSH login could be unreachable with no error anywhere. The
+  interface is now a single configurable value the build validates before
+  installing the firewall. (#1673)
+
 - Fixed the swap proxy's placeholder warning so the refused-credential
   audit line names the credential exactly as it appeared on the wire.
   A mixed-case placeholder used to be audited in lowercase, naming a

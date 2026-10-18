@@ -25,6 +25,7 @@ HOST_VETH_IP=10.99.0.1
 GUEST_IP=10.99.0.2
 CIDR=30
 JAIL_SSH_PORT=2222          # on the tailnet interface only (single source for the nftables DNAT rule below)
+JAIL_TAILNET_IF="${JAIL_TAILNET_IF:-tailscale0}"  # tailnet interface the jail's SSH DNAT binds to (single source for the nftables rule below; override on hosts with a differently-named interface)
 REBUILD_ROOTFS=0
 SHOW_HELP=0
 for a in "$@"; do [ "$a" = "--rebuild-rootfs" ] && REBUILD_ROOTFS=1; done
@@ -208,11 +209,44 @@ $SUDO systemctl daemon-reload
 say "jail firewall"
 # (route_localnet is set per-interface on ve-jail from the veth
 # drop-in above, not globally.)
-# The heredoc stays QUOTED (no accidental expansion): the single-sourced
-# port is substituted by sed on the way in, so the conf the firewall
-# applies always carries $JAIL_SSH_PORT's value and nothing else in the
-# conf can expand.
-sed "s/@@JAIL_SSH_PORT@@/${JAIL_SSH_PORT}/g" <<'NFT_EOF' | $SUDO tee /etc/nftables-jail.conf >/dev/null
+# The heredoc stays QUOTED (no accidental expansion): the
+# single-sourced port and interface are substituted by sed on the way
+# in, so the conf the firewall applies always carries $JAIL_SSH_PORT's
+# and $JAIL_TAILNET_IF's values and nothing else in the conf can
+# expand.
+#
+# Issue #1666: nftables silently accepts rules referencing nonexistent
+# interfaces — they just never match. A tailnet interface with a
+# different name (custom --tun-interface, userspace networking with no
+# interface at all) would build the SSH DNAT rule against an interface
+# that never exists: `nft -f` applies cleanly, the semantic pin
+# matches, the watchdog stays green, and the agent's only SSH door is
+# dead with no loud error anywhere. Fail the build loudly BEFORE
+# writing the conf instead. The checks after the name-shape guard run
+# on THIS host (tailscaled must be up before build.sh runs), and —
+# the security-relevant property, not just syntax — the variable must
+# name the TAILNET interface: existence alone would let
+# `JAIL_TAILNET_IF=eth0` (typo, stale exported env) silently bind the
+# jail's sshd to a public interface. Tailscale interfaces are always
+# TUN devices carrying a 100.64.0.0/10 address, whatever their name,
+# so both are asserted.
+if ! [[ "$JAIL_TAILNET_IF" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}$ ]]; then
+    echo "ERROR: JAIL_TAILNET_IF='$JAIL_TAILNET_IF' is not a valid Linux interface name; refusing to install a DNAT rule against it (see #1666)" >&2
+    exit 1
+fi
+if ! /usr/sbin/ip link show "$JAIL_TAILNET_IF" >/dev/null 2>&1; then
+    echo "ERROR: tailnet interface '$JAIL_TAILNET_IF' does not exist on this host; the tailnet->jail SSH DNAT rule would silently never match (nftables accepts rules naming nonexistent interfaces). If tailscaled is not running, start it first; if Tailscale runs in userspace-networking mode there is no kernel interface to name, and this jail cannot bind its SSH door (see #1666)" >&2
+    exit 1
+fi
+if ! /usr/sbin/ip -details link show "$JAIL_TAILNET_IF" 2>/dev/null | grep -Eq '^[[:space:]]+(tun|wireguard)$'; then
+    echo "ERROR: '$JAIL_TAILNET_IF' exists but is not a tunnel interface; refusing to bind the jail SSH DNAT to it (the jail's SSH door lives on the tailnet interface only — see #1666)" >&2
+    exit 1
+fi
+if ! /usr/sbin/ip -o -4 addr show dev "$JAIL_TAILNET_IF" 2>/dev/null | grep -qE 'inet 100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.'; then
+    echo "ERROR: '$JAIL_TAILNET_IF' carries no 100.64.0.0/10 address; refusing to bind the jail SSH DNAT to a non-tailnet interface (see #1666)" >&2
+    exit 1
+fi
+sed -e "s/@@JAIL_SSH_PORT@@/${JAIL_SSH_PORT}/g" -e "s/@@JAIL_TAILNET_IF@@/${JAIL_TAILNET_IF}/g" <<'NFT_EOF' | $SUDO tee /etc/nftables-jail.conf >/dev/null
 # Proxy-only egress for the jail's veth (ve-jail). Evaluated before the
 # base filter chains (priority -10 < filter 0), so nothing later can
 # re-allow what this drops. Lives in its own table; Docker/Tailscale
@@ -226,7 +260,7 @@ table inet jail {
         iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
         # Tailnet -> jail sshd (the agent login). Tailnet interface only.
         # (dnat ip: inet-family tables need the address family explicit.)
-        iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ dnat ip to 10.99.0.2:22
+        iifname "@@JAIL_TAILNET_IF@@" tcp dport @@JAIL_SSH_PORT@@ dnat ip to 10.99.0.2:22
     }
     chain input {
         type filter hook input priority -10; policy accept;
@@ -256,7 +290,7 @@ table inet jail {
     chain forward {
         type filter hook forward priority -10; policy accept;
         # Tailnet -> jail sshd, after DNAT.
-        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
+        iifname "@@JAIL_TAILNET_IF@@" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
         iifname "ve-jail" ct state established,related accept
         oifname "ve-jail" ct state established,related accept
         # No other egress for the jail: no direct internet, no tailnet,

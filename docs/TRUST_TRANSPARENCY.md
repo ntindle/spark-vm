@@ -170,7 +170,8 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      handling — e.g. #92 (SSE bodies bypass response scrubbing) and
      #94 (open-redirect on an allowlisted host) are proxy bugs,
      tracked as proxy bugs, not relay bugs.
-   - **SSH relay (tailnet → jail sshd).** `iifname "tailscale0" tcp
+   - **SSH relay (tailnet → jail sshd).** `iifname "$JAIL_TAILNET_IF"`
+     (default `tailscale0`, single-sourced in `jail/build.sh`) `tcp
      dport 2222 dnat ip to 10.99.0.2:22`, and the `forward` chain
      accepts new/established traffic only to `10.99.0.2:22`. Again
      static: no dynamic path, nothing for a client to race — the
