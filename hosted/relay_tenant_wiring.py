@@ -47,8 +47,9 @@ Delivery semantics (D-RL34-3, one resolution per pair, no dangling
 cases):
 
 (a) Single ordered emitter per box, atomic at the persistence layer:
-    the cadence loop must run at most one tick per box at a time
-    (single-driver assumption — documented, not locked), and the tick's
+    the cadence loop — not yet built in production, see issue #1711 —
+    must run at most one tick per box at a time (single-driver
+    assumption — documented, not locked), and the tick's
     apply phase runs the pair through the store's exclusive lock
     (``TenantStore._mutate``), so no concurrent endpoint or producer
     write can interleave between ``relay-reachable`` and
@@ -382,8 +383,8 @@ def drive_box(
 
     ``drive_box`` is the per-box single ordered emitter ONLY when
     invoked for the anchor — the anchor-only constraint lives in
-    ``drive_tenant``; future callers (R4, the cadence driver) must not
-    drive non-anchor boxes through it.
+    ``drive_tenant``. No production cadence driver exists yet (issue
+    #1711): future callers must not drive non-anchor boxes through it.
 
     ``read_fn`` overrides the producer read (tests): it is called as
     ``read_fn(vm_id)`` — a caller-supplied ``read_fn`` silently ignores
