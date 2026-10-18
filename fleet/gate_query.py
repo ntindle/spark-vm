@@ -68,7 +68,11 @@ def _read_file(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return fh.read().strip()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError sibling, not an OSError: a
+        # non-UTF-8 identity file must be no-signal, not a traceback (the
+        # same decode-hole class the publisher's _read_previous_freeze
+        # closed in #1543's Engineering B1).
         raise NoSignal(f"cannot read {path}: {exc}")
 
 
@@ -113,7 +117,7 @@ def resolve_keys(args) -> dict:
                            "group/other — gate keys must be mode 0600")
         try:
             with open(path, "rb") as fh:
-                # Exact bytes are the key; one trailing newline is tolerated
+                # Exact bytes are the key; trailing CR/LF bytes are stripped
                 # (matches gate_publish.py's _load_key — same key bytes both
                 # sides, or the MACs will never agree).
                 key = fh.read().rstrip(b"\r\n")
@@ -130,7 +134,11 @@ def load_gate(gate_path: str) -> dict:
     try:
         with open(gate_path, "r", encoding="utf-8") as fh:
             doc = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers JSON syntax errors (JSONDecodeError) AND
+        # non-UTF-8 bytes (UnicodeDecodeError is a ValueError sibling, not
+        # an OSError — the #1543 Engineering-B1 class): a non-UTF-8
+        # gate document must be no-signal, not a traceback.
         raise NoSignal(f"gate document unreadable: {exc}")
     if not isinstance(doc, dict):
         raise NoSignal("gate document is not a JSON object")

@@ -67,8 +67,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
   story is chosen — the console's copy-pasteable ack hints are the composed
   flow in the meantime; files the auth-story choice plus the
   `acked_by` identity contract and re-ack timestamp semantics. (#1706)
+- Unit-test pins for the box-side release-gating self-evaluation
+  (identity and key resolution, gate MAC + TTL verification, wave
+  assignment, and the no-signal-to-frozen contract) — previously exercised
+  only end-to-end, so edge behavior like TTL skew windows and canary
+  pin-only semantics is now individually guarded. (#TBD)
 
 ### Fixed
+- A box whose release-gating files contained non-UTF-8 bytes crashed the
+  box-side gate query with a traceback instead of failing closed to frozen:
+  the gate-document loader and the box-identity reader now treat undecodable
+  input as no-signal, like every other unreadable input. (#TBD)
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
   browser-encoded form bodies) is now prefix-case-sensitive like the plain
   form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase
