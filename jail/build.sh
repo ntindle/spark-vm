@@ -301,7 +301,23 @@ Requires=jail-firewall.service
 After=jail-firewall.service
 EOF
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now jail-firewall.service
+$SUDO systemctl enable jail-firewall.service
+# Re-apply the conf on every build, not just the first (issue #1665):
+# `enable --now` is a no-op on the already-active RemainAfterExit oneshot,
+# so a changed conf would be written to /etc/nftables-jail.conf but never
+# applied — while the pin below is regenerated from the still-old live
+# table, leaving the watchdog's repair source (the new conf) diverged from
+# the pin it compares against (sticky fail-closed storm on the next damage
+# event). Re-apply inline: do NOT `systemctl restart` the unit here —
+# deactivating it trips the Requires= edge on systemd-nspawn@jail.service
+# (the C22 fail-closed edge) and stops the running jail container. The unit
+# stays enabled for the boot-time apply path, and Requires= still pulls it
+# in when the machine starts. Validate first, mirroring the watchdog repair
+# path's validate-before-destroy discipline: a conf that fails validation
+# aborts the build before the live table is touched.
+$SUDO nft -c -f /etc/nftables-jail.conf
+$SUDO nft destroy table inet jail || true  # no table on first build; the unit's ExecStart=- does the same
+$SUDO nft -f /etc/nftables-jail.conf
 say "firewall active:"
 # (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
 $SUDO nft list table inet jail | head -8 || true
