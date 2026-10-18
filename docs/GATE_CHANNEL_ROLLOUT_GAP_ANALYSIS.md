@@ -27,8 +27,9 @@ Box rollout and tenant-plane rollout share vocabulary, not machinery.
 - #1557 — the in-issue remainder enumeration this analysis pins to a
   tree. Every remainder below was re-verified against `ff2ece42`; where
   #1557's enumeration stands verbatim it is cited, not re-argued.
-- #1543 — the G15 S3 freeze-hold event producer; the separate, open
-  tracker for that one emitter.
+- #1543 — the G15 S3 freeze-hold event producer; the separate tracker
+  for that one emitter. **LANDED 2026-10-18** — `fleet/gate_publish.py`
+  emits `kind: freeze-hold` on freeze flip/clear.
 - The 20261017-0659 distribution turn's #1627 honesty fix + E2E —
   same fleet lane, plane layer; does not move any box-layer remainder.
 
@@ -52,7 +53,8 @@ version and fails closed (no signal = frozen). Build slices:
   computing-assignment half of the controller (waves; G15 S1's
   "controller wave assignment (canary → waves)" lives in code as
   reserved-to-S2).
-- **S3** — hosted remainders: freeze-hold emitter (#1543 owns it),
+- **S3** — hosted remainders: freeze-hold emitter (#1543 owned it;
+  landed 2026-10-18),
   per-tenant gate documents, per-tenant waves (H11), hot-standby
   publisher, no-consent-gate (G13 §1/T4).
 
@@ -71,7 +73,7 @@ has no implementation and — until this analysis — no per-slice tracker.
 | The operator sees gate staleness in `fleet status` | **UNBUILT.** `fleet/README.md:141` names it a remaining S1b slice; `fleet/console.py` contains no gate rendering at all. (Finding F-GR-4, filed as #1632.) |
 | The operator drives releases through `fleet freeze`/`unfreeze`/`promote`/`halt` | **UNBUILT.** `gate_publish.py` carries the S1a document fields (`--freeze`, `key_id` dual-accept); the operator-tooling slice has no open tracker. (Finding F-GR-5, filed as #1633.) |
 | The controller assigns waves (canary → waves) | **UNBUILT.** `fleet/events.py:340` (`"rollout": None,  # G15 S2 assigns waves`), `fleet/api.py`'s `/fleet/waves` "unavailable until G15 S2". Operator-estate wave assignment folded into #1633; the hosted per-tenant waves live on #1634 (F-GR-6). |
-| Freeze flips emit `kind: freeze-hold` into the fleet journal | **UNBUILT — tracked.** #1543 owns this emitter; both consuming docs already re-point at it. Not re-filed. |
+| Freeze flips emit `kind: freeze-hold` into the fleet journal | **LANDED 2026-10-18.** `fleet/gate_publish.py` emits `kind: freeze-hold` on freeze flip/clear into the fleet journal (`--journal`, default `events.jsonl` next to the gate document); the rows feed the status-page feed's §3.2 rollout rows (issue #1543). |
 | Per-tenant gate documents, per-tenant waves, hot-standby publisher, no-consent-gate | **UNBUILT.** The S3 hosted remainders beyond the freeze-hold emitter; per-tenant waves cross-reference H11. #1634 owns the hosted per-tenant instantiation only — operator-estate wave assignment + tooling is #1633 (F-GR-5). (Finding F-GR-6, filed as #1634.) |
 
 ## 3. Findings
@@ -110,7 +112,8 @@ has no implementation and — until this analysis — no per-slice tracker.
   per-tenant waves (H11), hot-standby publisher, no-consent-gate — is
   S3 and lives on #1634 (see F-GR-6), not here. Filed as #1633.
 - **F-GR-6 — G15 S3 hosted remainders beyond the emitter have no
-  tracker.** #1543 owns only the freeze-hold emitter. Per-tenant gate
+  tracker.** #1543 owned only the freeze-hold emitter (landed
+  2026-10-18). Per-tenant gate
   documents, per-tenant waves (H11), the hot-standby publisher (G18 §8
   reserves it to S3 — the controller is a single point of *update*
   failure by design), and the no-consent-gate (G13 §1/T4) are unowned.
@@ -119,7 +122,7 @@ has no implementation and — until this analysis — no per-slice tracker.
 ## 4. Decisions pinned
 
 - **D-GR-1:** each unowned remainder above gets exactly one tracker
-  (#1629–#1634; the freeze-hold emitter stays #1543). The S2/S3
+  (#1629–#1634; the freeze-hold emitter was #1543, landed 2026-10-18). The S2/S3
   split is pinned: #1633 owns operator-estate wave assignment +
   tooling; #1634 owns the hosted per-tenant instantiation (per-tenant
   gate documents, per-tenant waves under H11, hot-standby publisher,

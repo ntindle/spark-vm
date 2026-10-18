@@ -24,6 +24,7 @@ Usage:
         --key-id ctl-2026-09 \
         --key-file /path/to/controller.key \
         --out gate.json \
+        [--journal PATH] \
         [--ttl-seconds 600] \
         [--rotation-log PATH] [--rotation-stale-days 14]
 
@@ -56,8 +57,10 @@ import hmac
 import json
 import os
 import re
+import secrets
 import stat
 import sys
+import uuid
 from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
@@ -81,6 +84,19 @@ ROTATION_LOG_NAME = "gate_rotation_log.json"
 # of the still-open one, warning loudly once it exceeds --rotation-stale-days.
 DEFAULT_ROTATION_STALE_DAYS = 14
 ROTATION_LEDGER_VERSION = 1
+# The fleet journal's event-dedup namespace for freeze-hold events
+# (issue #1543, G15 S3): the event_id is UUIDv5 over
+# "freeze-hold|<old>|<new>|<received_at>|<nonce>" under this namespace.
+# The nonce makes every emitted event unique — set→clear→set inside one
+# second must not share an id (a future deduping consumer would drop a
+# genuine re-freeze). Exactly-once across retries comes from the
+# prev-state gate in main(), not from the id.
+FREEZE_HOLD_EVENT_NS = uuid.uuid5(uuid.NAMESPACE_DNS,
+                                  "spark-vm.fleet.freeze-hold")
+FREEZE_HOLD_JOURNAL_NAME = "events.jsonl"
+# Must match fleet/events.py's EVENT_SCHEMA: the journal row is read by the
+# same consumers (fleet events, the status-page feed) as box-emitted rows.
+EVENT_SCHEMA = "fleet-event/1"
 
 
 def canonical_body(body: dict) -> bytes:
@@ -226,6 +242,103 @@ def _rotation_log_path(args) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(args.registry)),
                             ROTATION_LOG_NAME)
     return ROTATION_LOG_NAME
+
+
+def _journal_path(args) -> str:
+    """Fleet-journal path for freeze-hold events. Explicit --journal wins;
+    otherwise the journal sits next to the published gate document (the
+    operator's fleet store keeps gate.json and events.jsonl together)."""
+    if args.journal:
+        return args.journal
+    return os.path.join(os.path.dirname(os.path.abspath(args.out)),
+                        FREEZE_HOLD_JOURNAL_NAME)
+
+
+def _read_previous_freeze(out_path: str):
+    """Return (previous_freeze, warning). previous_freeze is the freeze flag
+    of the currently published gate document, or None when it cannot be
+    known: the document is missing (first publish — normal, not a warning),
+    unreadable, undecodable, or carries no boolean freeze field (warning:
+    the operator should know the flip detector is blind). Advisory only —
+    never exits: (OSError, ValueError) covers read errors, JSON syntax
+    errors, AND non-UTF-8 bytes (UnicodeDecodeError is a ValueError
+    sibling, not an OSError — Engineering B1, #1543 review)."""
+    try:
+        with open(out_path, "r", encoding="utf-8") as fh:
+            prev = json.load(fh)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as exc:
+        return None, (f"previous gate document {out_path} unreadable ({exc}); "
+                      "freeze-flip detection skipped for this publish")
+    if not isinstance(prev, dict) or not isinstance(prev.get("freeze"), bool):
+        return None, (f"previous gate document {out_path} has no boolean "
+                      "freeze field; freeze-flip detection skipped for this "
+                      "publish")
+    return prev["freeze"], None
+
+
+def build_freeze_hold_event(old_freeze: bool, new_freeze: bool,
+                            received_at: str, nonce: str) -> dict:
+    """Build the standard-shape fleet-journal event for a freeze flip/clear
+    (issue #1543, G15 S3). Fleet-scoped, not box-scoped: box_id is null and
+    the component is null — the freeze flag governs all updaters, so no
+    single updater enum value is honest (UPDATE_EVENT_REPORTING.md §2 pins
+    this deviation). outcome is succeeded — the flip action succeeded —
+    with the direction carried in the note; trigger is manual (the operator
+    ran the publisher). emitted_at == received_at: the controller clock IS
+    the collector clock, so there is no box/collector clock split to keep.
+    The nonce (per-publish random) keeps every emitted event's id unique
+    even for same-second flip pairs."""
+    direction = "set" if new_freeze else "cleared"
+    return {
+        "schema": EVENT_SCHEMA,
+        "event_id": str(uuid.uuid5(
+            FREEZE_HOLD_EVENT_NS,
+            "freeze-hold|%s|%s|%s|%s" % (old_freeze, new_freeze,
+                                        received_at, nonce))),
+        "box_id": None,
+        "session_epoch": None,
+        "emitted_at": received_at,
+        "received_at": received_at,
+        "source": "controller",
+        "component": None,
+        "subcomponent": None,
+        "subcomponents": None,
+        "kind": "freeze-hold",
+        "outcome": "succeeded",
+        "from": None,
+        "to": None,
+        "from_version": None,
+        "to_version": None,
+        "phase": None,
+        "window": None,
+        "rollout": None,
+        "trigger": "manual",
+        "attested": False,
+        "note": "fleet freeze %s by the controller (gate_publish.py)"
+                % direction,
+    }
+
+
+def _append_freeze_hold_event(journal_path: str, event: dict) -> None:
+    """Append one event line to the fleet journal. O_APPEND keeps one write
+    as one journal line; the fd is fsync'd before close so a controller
+    crash cannot lose an already-reported flip. 0600 applies at creation.
+    Raises OSError to the caller — the caller decides loud-vs-blocking."""
+    line = (json.dumps(event, sort_keys=True, ensure_ascii=False)
+            + "\n").encode("utf-8")
+    fd = os.open(journal_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        written = 0
+        while written < len(line):
+            n = os.write(fd, line[written:])
+            if n == 0:
+                raise OSError("short write appending freeze-hold event")
+            written += n
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _parse_ledger_ts(value):
@@ -419,6 +532,9 @@ def main(argv=None) -> int:
     ap.add_argument("--key-id", help="signing key id (ctl-YYYY-MM)")
     ap.add_argument("--key-file", help="controller MAC key file (0600)")
     ap.add_argument("--out", help="where to write gate.json")
+    ap.add_argument("--journal", default=None,
+                    help="fleet journal for freeze-hold events (default: "
+                    "events.jsonl next to --out)")
     ap.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS,
                     help="document lease in seconds (default 600)")
     ap.add_argument("--rotation-log", default=None,
@@ -469,6 +585,15 @@ def main(argv=None) -> int:
                                args.key_id, args.ttl_seconds)
     doc = sign_document(body, key)
 
+    # Flip detection reads the previous document BEFORE the atomic replace:
+    # the journal event for a freeze flip/clear (issue #1543, G15 S3) is
+    # emitted only after the new document is durable, so a crash between
+    # the two steps retries against the flipped document and emits no
+    # duplicate.
+    prev_freeze, prev_warn = _read_previous_freeze(args.out)
+    if prev_warn:
+        print(f"WARNING: {prev_warn}", file=sys.stderr)
+
     tmp = args.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, sort_keys=True, indent=2, ensure_ascii=False)
@@ -480,6 +605,21 @@ def main(argv=None) -> int:
     # operator's sync path only (§4), and carries no secrets — but the
     # hmac field is keyed material's output, so 0600 is the honest default.
     os.chmod(args.out, 0o600)
+    if prev_freeze is not None and prev_freeze != bool(args.freeze):
+        received_at = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        event = build_freeze_hold_event(prev_freeze, bool(args.freeze),
+                                        received_at,
+                                        secrets.token_hex(8))
+        try:
+            _append_freeze_hold_event(_journal_path(args), event)
+        except OSError as exc:
+            # The gate document is the enforcement point; the journal is
+            # visibility. A journal the tool cannot write is loud on
+            # stderr but never blocks the publish (the rotation-ledger
+            # B1 precedent, #1008).
+            print(f"WARNING: freeze-hold journal append failed ({exc}); "
+                  "gate document published normally.", file=sys.stderr)
     print(f"wrote {args.out} (freeze={args.freeze} key_id={args.key_id} "
           f"ttl={args.ttl_seconds}s)")
     return 0

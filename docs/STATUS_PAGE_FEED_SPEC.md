@@ -5,7 +5,9 @@ Doc-first; the honesty rule is G17 S1's (quoted in §1, from
 G21–G26 analysis's no-fiction contract: everything below is
 **current state and work to do**, not promises. Statuses are pinned to the
 repo as of this commit (re-verified 2026-10-15 against main `1b88bf9`:
-§3.1 rule count, §3.2 freeze-hold tracker, §4.3 ack provenance corrected). This doc is the S1 slice of G22 (tracked on issue
+§3.1 rule count, §3.2 freeze-hold tracker, §4.3 ack provenance corrected;
+§3.2 producer landed 2026-10-18 — `fleet/gate_publish.py` emits
+`kind: freeze-hold` on freeze flip/clear, issue #1543). This doc is the S1 slice of G22 (tracked on issue
 #796): the feed contract for the P7 status page — which journal records
 become feed rows, the dedup/idempotency rule, the ack→resolve lifecycle,
 and what stays operator-only. It designs nothing else: S2 builds the page,
@@ -110,14 +112,17 @@ Rollout rows come from two journaled sources only:
 - The `rollout` envelope on event records (`release_id`, `wave`): while
   the envelope is null on every event (today), the page shows "no
   active rollout" — honestly, not as a gap in the page.
-- `kind: freeze-hold` events (G15 S3 producer, tracked on #1543 —
-  #777 closed 2026-10-05 with only S1a/S1b shipped; the controller's
-  freeze-hold emitter has no other owner): the
+- `kind: freeze-hold` events (G15 S3 producer, landed in
+  `fleet/gate_publish.py`, issue #1543): the
   freeze flip/clear records, rendered as "fleet frozen / freeze cleared
-  at <received_at>". No freeze-hold rows until G15 S3 ships the
-  controller producer — read-time derivation means nothing appears
-  before it lands, and the prose must not imply the source exists
-  today.
+  at <received_at>". Rows appear from the first freeze flip the
+  controller publishes after this lands; publishes that change no freeze
+  flag journal nothing — a quiet history means the flag never flipped,
+  not that the producer is missing. One exception: a first-ever publish
+  made with the flag already set journals nothing (there is no previous
+  document to compare), so a fleet frozen from birth has no freeze-hold
+  row — consumers reconstructing frozen windows seed the current state
+  from the gate document itself.
 
 Until G15 S2 lands, there are no per-wave census rows. The page does not
 invent waves.

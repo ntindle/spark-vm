@@ -1008,3 +1008,29 @@ def test_sort_key_unparseable_sorts_last_with_event_id_tiebreak():
     ]
     ordered = sorted(rows, key=events._sort_key)
     assert [r["event_id"] for r in ordered] == ["0", "a", "b", "c"]
+
+
+def test_append_events_dedups_null_box_id_rows(dirs):
+    # QA B2 (#1543 review): freeze-hold rows carry box_id None; the
+    # (box_id, event_id) dedup keying must still dedup them — a re-fed
+    # controller row is a duplicate, not a new event.
+    events = _import_events_module()
+    estate, store = dirs
+    row = {"schema": "fleet-event/1", "event_id": "freeze-hold-test-1",
+           "box_id": None, "session_epoch": None,
+           "emitted_at": ts(5), "received_at": ts(5),
+           "source": "controller", "component": None,
+           "subcomponent": None, "subcomponents": None,
+           "kind": "freeze-hold", "outcome": "succeeded",
+           "from": None, "to": None,
+           "from_version": None, "to_version": None,
+           "phase": None, "window": None, "rollout": None,
+           "trigger": "manual", "attested": False,
+           "note": "fleet freeze set by the controller (gate_publish.py)"}
+    appended, duplicates, err = events.append_events(store, [row])
+    assert err is None
+    assert (appended, duplicates) == (1, 0)
+    appended, duplicates, err = events.append_events(store, [dict(row)])
+    assert err is None
+    assert (appended, duplicates) == (0, 1)
+    assert len(journal(store, "events.jsonl")) == 1

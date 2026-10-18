@@ -221,6 +221,15 @@ ssh root@box-07.example 'chmod 600 /var/lib/sparkvm/gate/ctl.key'
 # 1. Publish (controller machine; registry/manifest shapes: fleet/gate_publish.py --help)
 python3 fleet/gate_publish.py --registry registry.json --manifest waves.json \
     --key-id ctl-2026-09 --key-file ~/fleet-keys/ctl-2026-09.key --out gate.json
+# Freeze flips journal themselves: when the published freeze flag differs
+# from the previous document at --out, the publisher appends one
+# kind: freeze-hold event (G15 S3, issue #1543) to --journal (default
+# events.jsonl next to gate.json) — the status-page feed's §3.2 source.
+# No flip → no event; a first publish journals nothing (normal — there is
+# no previous document to compare); an unreadable or freeze-less previous
+# document warns loudly on stderr and journals nothing; a journal the tool
+# cannot write is loud on stderr but never blocks the publish (visibility,
+# not enforcement).
 
 # 2. Distribute (operator cron, <=5 min for the 600s S1 TTL)
 GATE=gate.json ESTATE=~/fleet-estate fleet/gate_sync.sh
