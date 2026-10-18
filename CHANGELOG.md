@@ -55,6 +55,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   endpoint-driven push mappings in the hosted component README — two
   shipped reference modules that had no coverage; their test-suite sizes
   are pinned so the docs can't drift. (#1692)
+- The gate publisher now journals freeze flips itself: publishing with a
+  changed freeze flag appends one standard-shape `freeze-hold` event to
+  the fleet journal (direction in the note), so freeze flips and clears
+  show up in the journal — and on the status-page feed — without anyone
+  deriving them from document diffs. (#1702)
 
 ### Fixed
 - The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in

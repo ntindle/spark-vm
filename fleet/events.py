@@ -815,7 +815,8 @@ def append_events(store_dir, events):
                 return None, None, err
             seen = {(e.get("box_id"), e.get("event_id"))
                     for e in existing
-                    if isinstance(e.get("box_id"), str)
+                    if (e.get("box_id") is None
+                        or isinstance(e.get("box_id"), str))
                     and isinstance(e.get("event_id"), str)}
             fresh = [e for e in events
                      if (e.get("box_id"), e.get("event_id")) not in seen]

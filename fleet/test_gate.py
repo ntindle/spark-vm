@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -1286,3 +1287,193 @@ def test_rotation_complete_chained_is_honest(tmp_path, keyfile, registry,
              "--rotation-log", rlog)
     assert r2.returncode == 0, r2.stderr
     assert "sole signing key" in r2.stdout
+
+
+# --- freeze-hold emitter (G15 S3, issue #1543) ---
+
+
+def _publish_gate(tmp_path, keyfile, registry, manifest, freeze=False,
+                  journal=None):
+    out = tmp_path / "gate.json"
+    argv = [sys.executable, PUBLISH,
+            "--registry", registry, "--manifest", manifest,
+            "--key-id", KEY_ID, "--key-file", keyfile,
+            "--out", str(out)]
+    if freeze:
+        argv.append("--freeze")
+    if journal is not None:
+        argv += ["--journal", str(journal)]
+    return run(*argv), out
+
+
+def _read_journal(path):
+    if not os.path.exists(str(path)):
+        return []
+    with open(str(path), "r", encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def _assert_freeze_hold_shape(event, direction):
+    assert event["schema"] == "fleet-event/1"
+    assert event["kind"] == "freeze-hold"
+    assert event["source"] == "controller"
+    assert event["outcome"] == "succeeded"
+    assert event["trigger"] == "manual"
+    assert event["box_id"] is None          # fleet-scoped, not a box
+    assert event["component"] is None       # governs all updaters
+    assert event["session_epoch"] is None
+    assert event["attested"] is False
+    assert event["subcomponent"] is None
+    assert event["subcomponents"] is None
+    assert event["from"] is None and event["to"] is None
+    assert event["from_version"] is None and event["to_version"] is None
+    assert event["phase"] is None and event["window"] is None
+    assert event["rollout"] is None
+    # Controller clock IS the collector clock: no clock split to keep.
+    assert event["emitted_at"] == event["received_at"]
+    assert event["received_at"].endswith("Z")
+    assert event["note"] == \
+        "fleet freeze %s by the controller (gate_publish.py)" % direction
+    parsed = uuid.UUID(event["event_id"])
+    assert parsed.version == 5              # deterministic dedup id
+
+
+def test_freeze_flip_off_to_on_emits_event(tmp_path, keyfile, registry,
+                                           manifest):
+    journal = tmp_path / "events.jsonl"
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=False, journal=journal)
+    assert r.returncode == 0, r.stderr
+    assert _read_journal(journal) == []     # no flip: no event
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=True, journal=journal)
+    assert r.returncode == 0, r.stderr
+    events = _read_journal(journal)
+    assert len(events) == 1
+    _assert_freeze_hold_shape(events[0], "set")
+    assert stat.S_IMODE(os.stat(str(journal)).st_mode) == 0o600
+
+
+def test_freeze_clear_emits_event(tmp_path, keyfile, registry, manifest):
+    journal = tmp_path / "events.jsonl"
+    _publish_gate(tmp_path, keyfile, registry, manifest,
+                  freeze=True, journal=journal)
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=False, journal=journal)
+    assert r.returncode == 0, r.stderr
+    events = _read_journal(journal)
+    assert len(events) == 1
+    _assert_freeze_hold_shape(events[0], "cleared")
+
+
+def test_no_flip_republish_emits_no_event(tmp_path, keyfile, registry,
+                                          manifest):
+    journal = tmp_path / "events.jsonl"
+    _publish_gate(tmp_path, keyfile, registry, manifest,
+                  freeze=True, journal=journal)
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=True, journal=journal)
+    assert r.returncode == 0, r.stderr
+    assert len(_read_journal(journal)) == 0
+
+
+def test_default_journal_sits_next_to_out(tmp_path, keyfile, registry,
+                                          manifest):
+    # No --journal: the flip lands in events.jsonl next to gate.json.
+    _publish_gate(tmp_path, keyfile, registry, manifest, freeze=False)
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest, freeze=True)
+    assert r.returncode == 0, r.stderr
+    default = tmp_path / "events.jsonl"
+    events = _read_journal(default)
+    assert len(events) == 1
+    assert events[0]["kind"] == "freeze-hold"
+
+
+def test_corrupt_previous_doc_warns_and_publishes(tmp_path, keyfile, registry,
+                                                  manifest):
+    journal = tmp_path / "events.jsonl"
+    out = tmp_path / "gate.json"
+    out.write_text("not json at all {{{")
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=True, journal=journal)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "freeze-flip detection skipped" in r.stderr
+    assert os.path.exists(str(out))         # the publish still landed
+    assert _read_journal(journal) == []     # no blind flip event
+
+
+def test_unwritable_journal_does_not_block_publish(tmp_path, keyfile,
+                                                   registry, manifest):
+    # The journal is visibility, not enforcement: a journal the tool cannot
+    # write is loud on stderr but the gate document still publishes (the
+    # rotation-ledger B1 precedent, #1008).
+    journal = tmp_path / "events.jsonl"
+    _publish_gate(tmp_path, keyfile, registry, manifest,
+                  freeze=False, journal=journal)
+    if os.path.exists(str(journal)):
+        os.remove(str(journal))
+    os.mkdir(str(journal))                  # a directory: not appendable
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=True, journal=journal)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "freeze-hold journal append failed" in r.stderr
+    doc = json.loads((tmp_path / "gate.json").read_text())
+    assert doc["freeze"] is True
+
+
+def test_freeze_hold_event_ids_unique_per_emission():
+    # Same-second flip pairs must not share an event_id: a future
+    # deduping consumer would drop a genuine re-freeze. The per-publish
+    # nonce in the UUIDv5 preimage buys uniqueness; exactly-once across
+    # retries comes from the prev-state gate, not the id.
+    sys.path.insert(0, REPO)
+    try:
+        from fleet import gate_publish
+        ts = "2026-10-18T16:05:55Z"
+        e1 = gate_publish.build_freeze_hold_event(False, True, ts, "nonce-a")
+        e2 = gate_publish.build_freeze_hold_event(False, True, ts, "nonce-b")
+        e3 = gate_publish.build_freeze_hold_event(True, False, ts, "nonce-a")
+        assert e1["event_id"] != e2["event_id"]
+        assert e1["event_id"] != e3["event_id"]
+        assert uuid.UUID(e1["event_id"]).version == 5
+    finally:
+        sys.path.remove(REPO)
+
+
+def test_non_utf8_previous_doc_warns_and_publishes(tmp_path, keyfile,
+                                                   registry, manifest):
+    # Engineering B1 (#1543 review): UnicodeDecodeError is a ValueError
+    # sibling, not an OSError — the flip detector's "never exits" contract
+    # must cover non-UTF-8 bytes, not just JSON syntax errors.
+    journal = tmp_path / "events.jsonl"
+    out = tmp_path / "gate.json"
+    out.write_bytes(b"\xff\xfe{\"freeze\": true}")
+    r, _ = _publish_gate(tmp_path, keyfile, registry, manifest,
+                         freeze=True, journal=journal)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "freeze-flip detection skipped" in r.stderr
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["freeze"] is True
+    assert _read_journal(journal) == []
+
+
+def test_event_schema_matches_collector():
+    # gate_publish.py pins EVENT_SCHEMA with a "must match" comment against
+    # fleet/events.py; this test makes the comment load-bearing so a schema
+    # bump in one module can't silently leave the controller emitting stale
+    # schema (Engineering nit, #1543 review).
+    sys.path.insert(0, REPO)
+    try:
+        from fleet import gate_publish
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fleet_events_mod",
+            os.path.join(REPO, "fleet", "events.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert gate_publish.EVENT_SCHEMA == mod.EVENT_SCHEMA
+    finally:
+        sys.path.remove(REPO)
