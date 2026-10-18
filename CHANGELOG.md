@@ -266,6 +266,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and tails them by time, so reconstructing what the bridge did no longer
   means grepping raw log lines. (#1643)
 
+- Competitor watch, 2026-10-18 morning: files C88 (AWS Kiro local
+  sandboxing GA, announced 2026-10-14) and folds pwn.ai's full
+  technical write-up (Part 1 published, Part 2 promised) into the
+  Vercel KVM zero-day row as its third advancement; the Vercel
+  changelog dated sitemap moves 1430 → 1431 (one AI Gateway entry,
+  non-sandbox). (#1697)
+
 - Competitor watch, 2026-10-17 morning: the Vercel KVM zero-day now
   has a formal CVE — CVE-2026-99999 (Critical, CVSS 9.3,
   kernel-maintainer-rated) — with the fix backported to stable kernel
