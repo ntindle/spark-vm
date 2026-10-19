@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   spark-vm. Also in this pass: Vercel's changelog bookkeeping, Boat's
   pricing comparison now includes Freestyle, and no movement on the
   open watches (Baseten's round still unclosed; the Vercel KVM zero-day
-  write-up Part 2 still pending). (#TBD)
+  write-up Part 2 still pending). (#1766)
 - Fleet update events: boxes can now sign their update rows with a
   device identity key, and the collector verifies each signature before
   journaling the event as attested — so a future rollout gate can trust

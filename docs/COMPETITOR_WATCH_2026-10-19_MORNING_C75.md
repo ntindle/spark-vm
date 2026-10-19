@@ -55,26 +55,28 @@ notes, in the goal workspace — not part of this repo).
 
 **C87 fold — Perplexity SPACE partner follow-through (first
 advancement since the 2026-10-15 filing).** New since the cycle-74
-capture ("no new launch partners or traction numbers"): Akamai has
-now launched SPACE on its cloud platform, Crusoe is adding it to its
-Managed AI Services portfolio, and CoreWeave has published setup
-guidance for developers who want to deploy SPACE for evaluation —
-the announcement-day partner list converts into first deployments,
-the first third-party hosted offerings of the open-source
-Firecracker sandbox. Provenance: **THIRD-PARTY** (dev.to piece read
-in full this pass: "Early adopters. Akamai has launched it on its
-cloud, Crusoe is adding it to Managed AI Services, and CoreWeave
-published setup guidance for CKS"; published 2026-10-17T12:54:51Z).
-No new C-number — the advancement is deployment follow-through, not
-a new release. Gate items: repo traction on the open-source release;
-second-wave partner announcements; CoreWeave/Drives-style
-pricing posture if/when any partner prices the managed surface.
+capture ("no new launch partners or traction numbers"): third-party
+corroboration of the announcement-day partner posture — Akamai's
+cloud launch confirmed outside the vendor page (already
+VENDOR-VERIFIED at filing as "tested and launched"); Crusoe moves
+from "partnering to add" to actively adding SPACE to its Managed AI
+Services; CoreWeave's setup guidance is now specified for CKS
+deployments. Net: the announcement-day partner list is
+materializing into live operator offerings. Provenance:
+**THIRD-PARTY** (dev.to piece read in full this pass: "Early
+adopters. Akamai has launched it on its cloud, Crusoe is adding it
+to Managed AI Services, and CoreWeave published setup guidance for
+CKS"; published 2026-10-17T12:54:51Z). No new C-number — the
+advancement is deployment follow-through, not a new release. Gate
+items: repo traction on the open-source release; second-wave
+partner announcements; pricing posture if/when any partner prices
+the managed surface.
 spark-vm relevance: a permissively-licensed, production-tested,
-multi-cloud agent-sandbox runtime is now actually reachable through
+multi-cloud agent-sandbox runtime is increasingly reachable through
 commercial clouds — the SPACE platform (Firecracker microVMs,
 platform-held credentials outside the sandbox, operator-side
 red-teaming) was already the closest public reference architecture
-to spark-vm's own posture; first deployments tighten the
+to spark-vm's own posture; live operator offerings tighten the
 competitive bar on "bring-your-own runtime" options for spark-vm's
 self-host / open-source positioning.
 
@@ -90,13 +92,15 @@ entries the C74 pass read as both 2026-10-17 now render as
 2026-10-18 / 2026-10-17 — a date re-render with no count implication
 beyond the +1.
 
-**docs.boat.dev/pricing "Compared to others" table gained a
-Freestyle row.** Small $0.132 (7x) / default $0.264 (7x) / large
-$0.529 (7x) / xlarge $1.06 (5x) — not in the tracked set. Boat's
+**docs.boat.dev/pricing "Compared to others" table now carries
+Freestyle as a full per-tier row.** Small $0.132 (7x) / default
+$0.264 (7x) / large $0.529 (7x) / xlarge $1.06 (5x). Reconciliation:
+Freestyle already appeared in the corpus row's 2026-09-18
+wall-clock transcription (4vCPU/8GB tier, $0.264); the C73/C74
+tracked-row baseline did not carry a per-tier Freestyle row. Boat's
 own figures verbatim; footer stamp now 2026-10-19T06:39:46.511Z
-(stamp text, not a figure change — C60 precedent). The table and
-the homepage leaderboard name providers as marketing copy, not
-first-party vendor material; no move graded.
+(stamp text, not a figure change — C60 precedent). First-party boat
+material; no move graded beyond the table addition.
 
 ## Standing gates
 
@@ -159,13 +163,9 @@ first-party vendor material; no move graded.
 - **Vercel $1M Sandbox challenge — carry** ($242,000 paid across
   1,285 reports, top report $50,000; no first-party challenge page
   read this pass).
-- **Boat comparison-table expansion — carry** (the docs "Compared
-  to others" table and homepage leaderboard name additional
-  providers — Freestyle joins Novita, exe.dev, Blaxel, Cloudflare,
-  AWS AgentCore, Islo, Deno Sandbox, Fly.io Sprites, Runloop,
-  Railway, Tensorlake, Morph, CodeSandbox — marketing copy, below
-  the tracked anchors; no first-party vendor material surfaced
-  from the table).
+- **Boat homepage leaderboards — carry** (marketing copy naming
+  providers, now including Freestyle alongside the previously-seen
+  set; not first-party vendor material; no move graded).
 - Aged-out stay out: C29, C45, C56, C66, C67, C62,
   Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI; C26 closed.
   No age-out movements this pass; no re-folds beyond C87.
