@@ -486,3 +486,77 @@ def test_lock_missing_dir_stays_darkness(tmp_path, monkeypatch):
         "RELAY_SESSION_JOURNAL", str(tmp_path / "never-deployed" / "j.jsonl")
     )
     assert rl.relay_session_liveness("vm-1", now=NOW) is None
+
+
+# ---------------------------------------------------------------------------
+# #1730 — RAM-bounded tail-first journal scan
+#
+# The chunked reverse reader must yield exactly what the old
+# reversed(readlines()) read yielded, newest-first, while holding only
+# O(chunk) bytes. Chunk sizes down to 1 byte force the multi-chunk
+# path (lines split across many boundaries, multibyte UTF-8 included);
+# 65536 covers the single-chunk path.
+
+
+def _oracle_lines(path):
+    """The old read — reversed(readlines()) — in raw bytes."""
+    with open(path, "rb") as f:
+        return list(reversed(f.read().split(b"\n")))
+
+
+def test_read_lines_newest_first_matches_oracle_across_chunk_sizes(
+    tmp_path, monkeypatch
+):
+    import random
+
+    rng = random.Random(1730)
+    for chunk in (1, 2, 3, 7, 63, 64, 65, 1000, 65536):
+        monkeypatch.setattr(rl, "_REVERSE_CHUNK_BYTES", chunk)
+        payload = b""
+        for i in range(rng.randrange(0, 80)):
+            body = ("l\xednea-%d-" % i).encode("utf-8") + bytes(
+                rng.randrange(33, 127) for _ in range(rng.randrange(0, 400))
+            )
+            payload += body + b"\n"
+        if rng.random() < 0.5 and payload:
+            payload = payload[:-1]  # no trailing newline
+        p = tmp_path / ("j-%d" % chunk)
+        p.write_bytes(payload)
+        with open(str(p), "rb") as f:
+            got = list(rl._read_lines_newest_first(f))
+        assert got == _oracle_lines(str(p)), "chunk=%d" % chunk
+
+
+def test_read_lines_newest_first_empty_file(tmp_path):
+    p = tmp_path / "empty"
+    p.write_bytes(b"")
+    with open(str(p), "rb") as f:
+        assert list(rl._read_lines_newest_first(f)) == []
+
+
+def test_iter_frames_newest_first_with_tiny_chunk(journal, monkeypatch):
+    monkeypatch.setattr(rl, "_REVERSE_CHUNK_BYTES", 7)
+    for i in range(30):
+        rl.emit_frame(**frame(session_id="sess-%d" % i))
+    seen = [fr["session_id"] for fr, _gen in rl._iter_frames(journal)]
+    assert seen == ["sess-%d" % i for i in range(29, -1, -1)]
+
+
+def test_iter_frames_skips_torn_trailing_line(journal):
+    rl.emit_frame(**frame(session_id="sess-1"))
+    with open(journal, "ab") as f:
+        f.write(b'{"torn": true')  # torn write, no trailing newline
+    seen = [fr["session_id"] for fr, _gen in rl._iter_frames(journal)]
+    assert seen == ["sess-1"]
+
+
+def test_liveness_query_matches_with_tiny_chunk(journal, monkeypatch):
+    """The query short-circuits on the first (newest) match even when
+    the match sits several chunks back from the tail."""
+    monkeypatch.setattr(rl, "_REVERSE_CHUNK_BYTES", 16)
+    for i in range(50):
+        rl.emit_frame(**frame(session_id="sess-%d" % i, vm_id="vm-%d" % i))
+    rl.emit_frame(**frame(session_id="sess-target", vm_id="vm-1"))
+    got = rl.relay_session_liveness("vm-1", now=NOW)
+    assert got["session_id"] == "sess-target"
+    assert got["state"] == "active"

@@ -51,6 +51,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Fixed
+- Relay session-liveness checks no longer load the entire session
+  journal into memory on every query: the journal is now read
+  tail-first in small chunks (same newest-first results, bounded
+  memory), and the probe history is no longer re-read when its newest
+  record was already fetched this tick — cutting per-tick I/O on
+  tenants with many boxes.
+  (#TBD)
 - Relay-liveness auto-driver: a corrupt/unparseable watermark sidecar
   no longer restarts silently — the driver notes it LOUD on the record
   of the first tenant ticked in the sweep (persisted in the watermark
