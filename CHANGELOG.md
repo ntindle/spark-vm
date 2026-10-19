@@ -156,6 +156,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- Operator surfaces (the fleet journal and the relay tick journal) now
+  strip Unicode variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF) --
+  invisible code points that can alter how adjacent text renders. The
+  existing category-based scrub could not catch them because they are
+  Mn, not Cf; they are dropped by explicit range, and combining
+  diacritics (the rest of Mn) still pass through. (#TBD)
 - Relay-liveness state locks and the per-tenant watermark read now refuse
   symlinked paths instead of following them: a pre-planted symlink at a
   lock file or at the watermark sidecar fails loudly (surfaced as a

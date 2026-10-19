@@ -1112,3 +1112,22 @@ def test_clean_text_keeps_non_bmp_emoji():
     events = _import_events_module()
     assert events._clean_text("\U0001f916 ok") == "\U0001f916 ok"
     assert events._clean_text("a\u200db") == "ab"
+
+
+def test_clean_text_drops_variation_selectors():
+    # #1776: Mn variation selectors survive the category scrub (they
+    # are Mn, not Cf) — invisible code points that alter adjacent-text
+    # presentation on operator surfaces.
+    events = _import_events_module()
+    assert events._clean_text("a\uFE00b") == "ab"      # VS1
+    assert events._clean_text("a\uFE0Fb") == "ab"      # VS16
+    assert events._clean_text("a\U000E0100b") == "ab"  # VS17
+    assert events._clean_text("a\U000E01EFb") == "ab"  # VS256
+
+
+def test_clean_text_keeps_other_mn_marks():
+    # The #1776 drop is range-exact, not class-wide: combining
+    # diacritics (the rest of Mn) are legitimate text and pass through.
+    events = _import_events_module()
+    assert events._clean_text("caf\u0301") == "caf\u0301"  # combining acute
+    assert events._clean_text("a\u034fb") == "a\u034fb"    # CGJ (Mn)

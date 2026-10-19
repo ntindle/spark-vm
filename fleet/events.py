@@ -226,6 +226,22 @@ _TRANSLATE = {
 _LOCAL_ONLY = {("check", "noop")}
 
 
+def _is_variation_selector(ch):
+    """True for the two Unicode variation-selector ranges.
+
+    U+FE00-U+FE0F (VS1-VS16) and U+E0100-U+E01EF (VS17-VS256) are
+    category Mn, not Cf, so the category-based scrub cannot catch them —
+    yet they are invisible code points that alter the presentation of
+    adjacent text on operator surfaces (the #1776 class). The drop is
+    range-exact, never class-wide: other Mn (combining diacritics) are
+    legitimate text and pass through. Mongolian FVS (U+180B-U+180D)
+    stay: journal/audit fields are machine-generated English, and the
+    issue scopes the fix to the two named ranges.
+    """
+    o = ord(ch)
+    return 0xFE00 <= o <= 0xFE0F or 0xE0100 <= o <= 0xE01EF
+
+
 def _clean_text(value):
     """Strip control and invisible-format characters from a string.
 
@@ -255,6 +271,11 @@ def _clean_text(value):
       non-escaping writer or cross-language consumer would choke; the
       scrub removes them rather than trusting every downstream writer
       to escape.
+    - Mn variation selectors U+FE00-U+FE0F / U+E0100-U+E01EF (#1776):
+      invisible code points that alter adjacent-text presentation, and
+      they are Mn — not Cf — so the category scrub cannot catch them.
+      Dropped by explicit range (see _is_variation_selector), never by
+      class: combining diacritics (the rest of Mn) stay.
 
     Deliberate over-scrub (the same call the relay lane made in PR
     #1763): Cf also holds legitimate RTL controls (LRM/RLM U+200E/U+200F,
@@ -274,8 +295,10 @@ def _clean_text(value):
     if not isinstance(value, str):
         return value
     return "".join(ch for ch in value
-                   if ch == "\t" or unicodedata.category(ch) not in
-                   ("Cc", "Cf", "Cs", "Zl", "Zp"))
+                   if ch == "\t" or (
+                       unicodedata.category(ch) not in
+                       ("Cc", "Cf", "Cs", "Zl", "Zp")
+                       and not _is_variation_selector(ch)))
 
 
 def _str_or_none(value):

@@ -741,6 +741,21 @@ def test_scrub_keeps_newline_tab_printable_and_emoji():
     assert driver._scrub_note(note) == note
 
 
+def test_scrub_note_drops_variation_selectors():
+    # #1776: the relay lane moves with the fleet scrub — Mn variation
+    # selectors are dropped by explicit range (category Mn, not Cf).
+    assert driver._scrub_note("a\uFE00b") == "ab"      # VS1
+    assert driver._scrub_note("a\uFE0Fb") == "ab"      # VS16
+    assert driver._scrub_note("a\U000E0100b") == "ab"  # VS17
+    assert driver._scrub_note("a\U000E01EFb") == "ab"  # VS256
+
+
+def test_scrub_note_keeps_combining_marks():
+    # The #1776 drop is range-exact: combining diacritics (the rest of
+    # Mn) are legitimate text and pass through.
+    assert driver._scrub_note("caf\u0301") == "caf\u0301"
+
+
 def test_scrub_still_strips_c0_controls():
     # Regression guard on the pre-#1738 behavior: C0 controls other
     # than \n / \t stay stripped.
