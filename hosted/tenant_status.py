@@ -1076,6 +1076,19 @@ class TenantStore:
         raw = self._load()["tenants"].get(tenant_id)
         return None if raw is None else self._to_record(tenant_id, raw)
 
+    def tenant_ids(self) -> List[str]:
+        """Sorted tenant-id snapshot (read-only, no lock).
+
+        The relay auto-driver (#1721) enumerates tenants through this.
+        Each per-tenant tick is individually atomic under the store's
+        exclusive lock, so a tenant appearing or disappearing mid-sweep
+        is a benign race — the sweep notes the miss and continues —
+        not corruption. Callers needing a consistent multi-tenant view
+        must hold their own discipline; this is a snapshot, not a
+        transaction.
+        """
+        return sorted(self._load()["tenants"].keys())
+
     def find_by_session_token(self, token: str) -> Optional[TenantRecord]:
         for tenant_id, raw in self._load()["tenants"].items():
             stored = raw.get("session_token")

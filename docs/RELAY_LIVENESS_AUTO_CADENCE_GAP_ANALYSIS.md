@@ -139,9 +139,13 @@ resync only run when an operator remembers to tick.
   discipline for the *operator* path (don't run `--tick` in a tight
   loop against the auto driver); the schedule is the mechanism.
 - **D-AC-4 — Observability is a watermark + journal, not stdout.**
-  Every auto tick writes `{tenant_id, tick_at, applied, events,
-  notes}` to the per-tenant watermark and appends tick-note events to
-  the fleet event journal (F-AC-4, F-AC-7). Staleness (> 2× cadence
+  Every auto tick writes
+  ``{tenant_id, tick_at, applied, skipped, events, stale_probe, failed,
+  notes}`` to the per-tenant watermark and appends tick-note events to
+  the fleet event journal (F-AC-4, F-AC-7). ``skipped`` counts
+  anchor-moved convergence separately from driving (a skip is
+  convergence, not driving); ``stale_probe``/``failed`` are the
+  fail-visible flags S4's staleness rule reads. Staleness (> 2× cadence
   with no applied tick) raises a G18-style alert (F-AC-5). The
   `--tick` CLI stays the manual/override path — its stdout report is
   unchanged; the auto driver is the new default, not a replacement.
@@ -162,6 +166,23 @@ resync only run when an operator remembers to tick.
   convergence cases (concurrent-tick convergence, anchor-moved skip)
   through the port. The in-repo module remains the test truth; it never
   sees a Worker secret (D-PP-1).
+- **D-AC-6 — Self-hosted watermark producer (S1 review, #1721).**
+  F-AC-5 requires the per-tenant watermark on the self-hosted path as
+  "a local sidecar next to the tenant store" — but the slice map's S3
+  (#1723) drives the `--tick` CLI, which writes no watermarks, so
+  self-hosted ticks would never produce them and S4's staleness rule
+  would be silently hosted-plane-only, contradicting the both-supported
+  default. Resolution (option A): S3's self-hosted packaging drives
+  `tick_all_tenants` (the S1 module), not `--tick` — the watermark
+  sidecar lands next to the tenant store exactly as F-AC-5 requires,
+  and the journal notes go to the operator's fleet estate store dir.
+  `--tick` stays the per-tenant manual primitive: human-invoked it is
+  the override path; it is never the scheduled path. #1723's scope is
+  amended accordingly (cron/systemd unit invoking the S1 module).
+  Sequencing (F-AC-5 vs the slice map): S4's staleness rule must land
+  no later than whichever slice first schedules the driver (S2 or S3)
+  — a scheduled driver with no staleness detector re-creates the #1711
+  death mode the detector exists to kill.
 
 ## 4. Slices (filed)
 

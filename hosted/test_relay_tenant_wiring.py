@@ -72,6 +72,16 @@ def _tenant_record(boxes, tenant_id="tnt_test"):
     )
 
 
+def _ws(store):
+    """Wrap a concrete TenantStore in the WiringStore protocol adapter.
+
+    drive_tenant takes the protocol (#1721); the concrete store enters
+    through TenantFileWiringStore — the same adapter the --tick CLI
+    and the auto-driver use.
+    """
+    return wiring.TenantFileWiringStore(store)
+
+
 # ---------------------------------------------------------------------------
 # Anchor selection (TENANT_STATUS_ENDPOINT.md §7/G7)
 
@@ -150,7 +160,7 @@ def test_non_anchor_readings_never_applied(tmp_path):
     b = _arc("box-b", created_at="2026-10-02T00:00:00Z")
     store.create(_tenant_record([a, b]))
     reads = {"box-a": _down("cert"), "box-b": _down("relay")}
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: reads[vm_id])
     assert report["anchor_box_id"] == "box-a"
     by_box = {r["box_id"]: r for r in report["boxes"]}
@@ -177,7 +187,7 @@ def test_non_anchor_instrument_failure_does_not_kill_anchor_tick(tmp_path):
             raise rps.HistoryLockError("wedged")
         return _down("box-leg")
 
-    report = wiring.drive_tenant(store, "tnt_test", read_fn=flaky)
+    report = wiring.drive_tenant(_ws(store), "tnt_test", read_fn=flaky)
     by_box = {r["box_id"]: r for r in report["boxes"]}
     assert by_box["box-a"]["events"] == ["relay-down(detail='box-leg')"]
     assert by_box["box-b"]["reading"] is None
@@ -477,7 +487,7 @@ def test_drive_tenant_tick_persists_across_ticks(tmp_path):
     store.create(_tenant_record([_arc("box-a",
                                      created_at="2026-10-01T00:00:00Z")]))
     reads = {"box-a": _down("cert")}
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: reads[vm_id])
     assert report["anchor_box_id"] == "box-a"
     assert report["boxes"][0]["reading"]["state"] == "down"
@@ -486,7 +496,7 @@ def test_drive_tenant_tick_persists_across_ticks(tmp_path):
     assert rec.boxes["box-a"].latched == "live"
     # Recovery tick.
     reads["box-a"] = _ok()
-    report2 = wiring.drive_tenant(store, "tnt_test",
+    report2 = wiring.drive_tenant(_ws(store), "tnt_test",
                                   read_fn=lambda vm_id: reads[vm_id])
     assert report2["boxes"][0]["events"] == ["relay-reachable",
                                             "relay-recovered"]
@@ -523,7 +533,7 @@ def test_anchor_change_between_read_and_apply_skips(tmp_path):
             store.save(rec)
         return _down("cert")
 
-    report = wiring.drive_tenant(store, "tnt_test", read_fn=read_and_move)
+    report = wiring.drive_tenant(_ws(store), "tnt_test", read_fn=read_and_move)
     assert report["anchor_box_id"] == "box-a"  # the read-phase anchor
     by_box = {r["box_id"]: r for r in report["boxes"]}
     assert by_box["box-a"]["events"] == []  # stale anchor: skipped
@@ -536,7 +546,7 @@ def test_anchor_change_between_read_and_apply_skips(tmp_path):
     assert rec.boxes["box-b"].code == "live"
     assert rec.boxes["box-b"].relay_reachable is True
     # Next tick converges: box-b is the anchor now, its reading drives.
-    report2 = wiring.drive_tenant(store, "tnt_test",
+    report2 = wiring.drive_tenant(_ws(store), "tnt_test",
                                   read_fn=lambda vm_id: _down("relay"))
     by2 = {r["box_id"]: r for r in report2["boxes"]}
     assert report2["anchor_box_id"] == "box-b"
@@ -576,7 +586,7 @@ def test_reads_run_outside_the_store_lock(tmp_path):
         return _ok()
 
     try:
-        report = wiring.drive_tenant(store, "tnt_test", read_fn=spy_read)
+        report = wiring.drive_tenant(_ws(store), "tnt_test", read_fn=spy_read)
     finally:
         store._exclusive = orig_exclusive
 
@@ -599,7 +609,7 @@ def test_drive_tenant_no_anchor_candidate(tmp_path):
              created_at="2026-10-02T00:00:00Z")
     store.create(_tenant_record([a, b]))
 
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: _down("relay"))
     assert report["anchor_box_id"] is None
     assert len(report["boxes"]) == 2
@@ -627,7 +637,7 @@ def test_anchor_read_fn_raise_propagates_leaves_record_untouched(tmp_path):
         raise rps.HistoryLockError("journal wedged")
 
     with pytest.raises(rps.HistoryLockError):
-        wiring.drive_tenant(store, "tnt_test", read_fn=boom)
+        wiring.drive_tenant(_ws(store), "tnt_test", read_fn=boom)
     rec = store.get("tnt_test")
     assert rec.boxes["box-a"].code == "live"
     assert rec.boxes["box-a"].relay_reachable is True
@@ -654,7 +664,7 @@ def test_suspended_anchor_not_reclaimed_by_earlier_box(tmp_path):
     store.create(_tenant_record([a, b]))
 
     # 1. Both live: anchor is the first-created, box-a.
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: _ok())
     assert report["anchor_box_id"] == "box-a"
 
@@ -662,13 +672,13 @@ def test_suspended_anchor_not_reclaimed_by_earlier_box(tmp_path):
     rec = store.get("tnt_test")
     ts.apply_event(rec.boxes["box-a"], "operator-reprovision")
     store.save(rec)
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: _ok())
     assert report["anchor_box_id"] == "box-b"
 
     # 3. Box-b's relay leg fails: rule-6 suspension with the latch held.
     report = wiring.drive_tenant(
-        store, "tnt_test",
+        _ws(store), "tnt_test",
         read_fn=lambda vm_id: _down("box-leg") if vm_id == "box-b" else _ok())
     assert report["anchor_box_id"] == "box-b"
     by_box = {r["box_id"]: r for r in report["boxes"]}
@@ -686,7 +696,7 @@ def test_suspended_anchor_not_reclaimed_by_earlier_box(tmp_path):
     rec = store.get("tnt_test")
     assert rec.boxes["box-a"].code == "live"
     report = wiring.drive_tenant(
-        store, "tnt_test",
+        _ws(store), "tnt_test",
         read_fn=lambda vm_id: _down("box-leg") if vm_id == "box-b" else _ok())
     assert report["anchor_box_id"] == "box-b"  # not reclaimed by box-a
     by_box = {r["box_id"]: r for r in report["boxes"]}
@@ -695,7 +705,7 @@ def test_suspended_anchor_not_reclaimed_by_earlier_box(tmp_path):
     assert rec.boxes["box-b"].code == "connection-unreachable"
 
     # 5. Box-b's relay recovers: its pair is driven — no wedge.
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: _ok())
     assert report["anchor_box_id"] == "box-b"
     by_box = {r["box_id"]: r for r in report["boxes"]}
@@ -707,7 +717,7 @@ def test_suspended_anchor_not_reclaimed_by_earlier_box(tmp_path):
     assert rec.boxes["box-b"].relay_reachable is True
 
     # 6. Suspension exited: anchor returns to the first-created, box-a.
-    report = wiring.drive_tenant(store, "tnt_test",
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
                                  read_fn=lambda vm_id: _ok())
     assert report["anchor_box_id"] == "box-a"
 
