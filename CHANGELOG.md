@@ -50,6 +50,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Changed
+- Relay-liveness wiring internals hardened at the module boundary: the
+  per-box tick emitter is now module-private (nothing outside the wiring
+  module ever called it), so the anchor-only driving discipline is
+  enforced structurally instead of by convention; the created-at instant
+  parser the wiring shares with the tenant layer is now a documented
+  public seam instead of a cross-module private reach. (#1732)
 ### Added
 - Documented the relay-liveness wiring tick for operators: how to run a
   manual tick for a tenant, how to read the tick report it prints, what

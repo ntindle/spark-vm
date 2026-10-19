@@ -406,7 +406,7 @@ def _detail_with_box_suffix(
 # while parsing never rejects — unparseable values sort as oldest.
 
 
-def _created_epoch(created_at: object) -> Optional[float]:
+def created_epoch(created_at: object) -> Optional[float]:
     """Parse an ISO-8601 instant to epoch seconds. ``None`` when the value
     is not a parseable instant (fail-safe: never raises)."""
     if not isinstance(created_at, str):
@@ -442,7 +442,7 @@ def _neg_created(arc: BoxArc) -> float:
     fall through to ``box_id`` — harmless at real ``created_at``
     resolutions.
     """
-    epoch = _created_epoch(arc.created_at)
+    epoch = created_epoch(arc.created_at)
     if epoch is None:
         return float("inf")
     return -epoch
