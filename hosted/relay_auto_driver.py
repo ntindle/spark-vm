@@ -144,7 +144,8 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
 
     Returns True when the sidecar was corrupt/unparseable and history
     restarted from empty, so the caller can note it LOUD on the record
-    (D-AC-7 fail-visible); False when the sidecar read clean.
+    (D-AC-7 fail-visible); False otherwise — a clean read, or a missing
+    file (the normal first run: no history to lose).
     """
     lock_path = path + ".lock"
     corrupt = False

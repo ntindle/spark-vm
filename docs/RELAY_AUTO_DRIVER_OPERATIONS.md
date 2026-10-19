@@ -133,11 +133,18 @@ as applied.
 - A *corrupt* watermark sidecar (unparseable content) is observability
   damage, never a reason to skip the tick: the write restarts from
   empty, the tick still drives, and the corruption is noted LOUD on
-  the ticking tenant's record (persisted in the watermark, and carried
-  in the fleet journal note when journaling is on) — the operator
-  learns the prior per-tenant history was lost, and staleness
-  self-heals from the fresh tick. A *missing* sidecar (the normal
-  first run) restarts from empty silently: no history existed to lose.
+  the record of the tenant ticked first in the sweep (the one whose
+  watermark write met the corrupt file — `tenant_ids()` is a sorted
+  snapshot, so the alphabetically-first tenant): persisted in the
+  watermark, carried in the fleet journal note when journaling is on,
+  and printed in the sweep's stdout report JSON (`journalctl -u
+  relay-auto-driver.service`). The operator learns the prior
+  per-tenant history was lost, and staleness self-heals from the fresh
+  tick. The exact note, for grepping:
+  `LOUD: watermark sidecar was corrupt/unparseable — restarted from
+  empty; prior per-tenant last-tick history lost, staleness self-heals
+  from this tick`. A *missing* sidecar (the normal first run) restarts
+  from empty silently: no history existed to lose.
 
 ## 6. Trust note
 
