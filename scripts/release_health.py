@@ -298,6 +298,9 @@ def fetch_gate_verdict_for_sha(repo, sha, api_url="https://api.github.com",
                 % (api_url.rstrip("/"), repo, run_id))
     jobs_data, _ = api_get(jobs_url, token)
     jobs = jobs_data.get("jobs") if isinstance(jobs_data, dict) else None
+    if jobs is None:
+        raise RuntimeError(
+            "GitHub API returned no jobs list for run %s" % run_id)
     gate = None
     for job in jobs or []:
         if isinstance(job, dict) and str(job.get("name", "")).endswith(

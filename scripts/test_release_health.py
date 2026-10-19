@@ -272,6 +272,14 @@ class GateVerdictTest(unittest.TestCase):
         v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
         self.assertEqual((v, rid), ("not-applicable", 1))
 
+    def test_malformed_jobs_payload_is_loud(self):
+        def bad_jobs(url, token):
+            if "/actions/runs/" in url:
+                return {"unexpected": True}, None
+            return _gate_api_stub({"abc": [_run_obj(1)]}, {})(url, token)
+        with self.assertRaises(RuntimeError):
+            fetch_gate_verdict_for_sha("o/r", "abc", _api_get=bad_jobs)
+
     def test_latest_completed_run_wins(self):
         stub = _gate_api_stub(
             {"abc": [_run_obj(1, updated="2026-10-18T00:00:00Z"),
@@ -427,6 +435,7 @@ class MainGateTest(unittest.TestCase):
                 _fetch_gate_verdicts=boom,
             )
         self.assertEqual(code, EXIT_OK)
+        self.assertIn("no verdict on the golden-image gate", buf.getvalue())
 
     def test_json_includes_gate_drifts(self):
         code, out = self._run(

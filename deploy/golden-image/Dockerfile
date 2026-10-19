@@ -199,8 +199,9 @@ RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
 # environment would serve as a second main proxy and the swap could never
 # resolve. Wait for the port, run the fixture installer, then stop the
 # proxy and remove the first-start CA it generated (/home/swapd/.mitmproxy)
-# so the build leaves the pre-gate state (deploy.sh skips the CA bundle
-# when it is missing; the runtime generates it on first start). One RUN: a
+# so the build leaves the pre-gate state (build_ca_bundle.py skips loudly
+# when the CA is missing on a first deploy; the runtime proxy generates
+# its CA on first start). One RUN: a
 # background process does not survive across layers, and the gate must
 # never leave a proxy running in the published image.
 RUN set -e; \
