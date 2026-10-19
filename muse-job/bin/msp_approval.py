@@ -525,6 +525,40 @@ def looks_like_trust_prompt(prompt):
 # Client calls
 # ---------------------------------------------------------------------------
 
+def list_pending(host, session_id):
+    """Return (approvals, prompts) from ONE approval/listPending call.
+
+    The wire returns both planes together; callers that need both must
+    read them in one call. Two separate calls see two different
+    point-in-time states (a decision landing between them shows in one
+    list but not the other), and each call is a full JSON-RPC round-trip
+    to the serve subprocess. ``list_pending_approvals`` /
+    ``list_pending_user_inputs`` are single-plane views over this
+    primitive.
+    """
+    _check_session_id(session_id)
+    result = host.call("approval/listPending", {"sessionId": session_id})
+    if not isinstance(result, dict):
+        raise MSPApprovalError(
+            "approval/listPending returned a non-dict result: "
+            f"{type(result).__name__}"
+        )
+    raw_approvals = result.get("approvals")
+    if not isinstance(raw_approvals, list):
+        raise MSPApprovalError(
+            "approval/listPending result has no 'approvals' list "
+            f"(keys: {sorted(result)[:8]})"
+        )
+    raw_prompts = result.get("userInputs")
+    if not isinstance(raw_prompts, list):
+        raise MSPApprovalError(
+            "approval/listPending result has no 'userInputs' list "
+            f"(keys: {sorted(result)[:8]})"
+        )
+    return ([parse_approval(a) for a in raw_approvals],
+            [parse_user_input(p) for p in raw_prompts])
+
+
 def list_pending_approvals(host, session_id):
     """Return the session's pending approvals as [Approval].
 
@@ -537,20 +571,8 @@ def list_pending_approvals(host, session_id):
     Raises ValueError for client-side validation failures,
     MSPApprovalError when the result drifts off the wire shape.
     """
-    _check_session_id(session_id)
-    result = host.call("approval/listPending", {"sessionId": session_id})
-    if not isinstance(result, dict):
-        raise MSPApprovalError(
-            "approval/listPending returned a non-dict result: "
-            f"{type(result).__name__}"
-        )
-    raw = result.get("approvals")
-    if not isinstance(raw, list):
-        raise MSPApprovalError(
-            "approval/listPending result has no 'approvals' list "
-            f"(keys: {sorted(result)[:8]})"
-        )
-    return [parse_approval(a) for a in raw]
+    approvals, _ = list_pending(host, session_id)
+    return approvals
 
 
 def list_pending_user_inputs(host, session_id):
@@ -561,20 +583,8 @@ def list_pending_user_inputs(host, session_id):
     operator-surface wiring and the smoke CLI (the #225 contract names the
     approvals half; prompts need a parser too).
     """
-    _check_session_id(session_id)
-    result = host.call("approval/listPending", {"sessionId": session_id})
-    if not isinstance(result, dict):
-        raise MSPApprovalError(
-            "approval/listPending returned a non-dict result: "
-            f"{type(result).__name__}"
-        )
-    raw = result.get("userInputs")
-    if not isinstance(raw, list):
-        raise MSPApprovalError(
-            "approval/listPending result has no 'userInputs' list "
-            f"(keys: {sorted(result)[:8]})"
-        )
-    return [parse_user_input(p) for p in raw]
+    _, prompts = list_pending(host, session_id)
+    return prompts
 
 
 def decide_approval(host, session_id, approval, choice_id, *,
@@ -595,13 +605,25 @@ def decide_approval(host, session_id, approval, choice_id, *,
     updated ``approval/request`` follows).
 
     Raises ValueError when ``choice_id`` is not one of the approval's
-    current available choices (client-side, before anything is sent),
-    MSPApprovalError on result drift.
+    current available choices (client-side, before anything is sent), or
+    when the approval was parsed under a different session (refusing to
+    decide across sessions); MSPApprovalError on result drift.
     """
     _check_session_id(session_id)
     if not isinstance(approval, Approval):
         raise ValueError(
             f"approval must be an Approval, got {type(approval).__name__}"
+        )
+    # The same cross-session refuse as answer_user_input: a stale
+    # Approval parsed under another session must never be decided
+    # against this one (a missing sessionId on the record reads as
+    # unknown, not as a match).
+    if (approval.session_id is not None
+            and approval.session_id != session_id):
+        raise ValueError(
+            f"approval {approval.approval_id!r} belongs to session "
+            f"{approval.session_id!r}, not {session_id!r} -- refusing to "
+            f"decide across sessions"
         )
     if not isinstance(choice_id, str) or not choice_id:
         raise ValueError(
@@ -1128,8 +1150,9 @@ def main(argv):
     host = MSPHost(serve, client_name=args.client_name)
     with host:
         if args.action == "list-pending":
-            approvals = list_pending_approvals(host, session_id)
-            prompts = list_pending_user_inputs(host, session_id)
+            # One call for both planes: two separate calls would see two
+            # different point-in-time states.
+            approvals, prompts = list_pending(host, session_id)
             if args.show_secrets:
                 out = {"approvals": [a.raw for a in approvals],
                        "userInputs": [p.raw for p in prompts]}

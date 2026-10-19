@@ -412,6 +412,28 @@ def test_list_pending_drift_fails_loud(approval_serve):
             mspa.list_pending_user_inputs(host, "drift:no-userinputs")
 
 
+def test_list_pending_single_call_both_planes(approval_serve):
+    # The combined primitive issues exactly one wire call for both
+    # planes: two calls would see two different point-in-time states.
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        approvals, prompts = mspa.list_pending(host, "sess-a")
+    assert [a.approval_id for a in approvals] == ["ap-1"]
+    assert [p.user_input_id for p in prompts] == ["ui-1"]
+    assert len(method_calls(record, "approval/listPending")) == 1
+
+
+def test_single_plane_wrappers_still_one_call_each(approval_serve):
+    # The single-plane wrappers delegate to list_pending: each is still
+    # exactly one round-trip. Callers that need both planes must use
+    # list_pending (one call), not the two wrappers (two calls).
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        assert len(mspa.list_pending_approvals(host, "sess-a")) == 1
+        assert len(mspa.list_pending_user_inputs(host, "sess-a")) == 1
+    assert len(method_calls(record, "approval/listPending")) == 2
+
+
 def test_list_pending_validates_session_id(approval_serve):
     argv, _ = approval_serve
     with make_host(argv) as host:
@@ -465,6 +487,32 @@ def test_decide_stale_requirement_surfaces_server_error(approval_serve):
         with pytest.raises(mspa.ServerError) as ei:
             mspa.decide_approval(host, "sess-a", ap, "allow-once")
     assert ei.value.code == -32053
+
+
+def test_decide_refuses_cross_session(approval_serve):
+    # Mirrors answer_user_input's discipline: a stale Approval parsed
+    # under another session must never be decided against this one.
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        approvals = mspa.list_pending_approvals(host, "sess-a")
+        assert approvals[0].session_id == "sess-a"
+        with pytest.raises(ValueError, match="across sessions"):
+            mspa.decide_approval(host, "sess-b", approvals[0], "allow-once")
+    # Nothing went on the wire: the refusal happened client-side.
+    assert method_calls(record, "approval/decide") == []
+
+
+def test_decide_allows_unrecorded_session(approval_serve):
+    # A record with no recorded session (the server omitted sessionId)
+    # is unknown, not a mismatch: the guard fires only on a positive
+    # mismatch, exactly like answer_user_input.
+    argv, _ = approval_serve
+    with make_host(argv) as host:
+        approvals = mspa.list_pending_approvals(host, "sess-a")
+        ap = approvals[0]
+        ap.session_id = None
+        result = mspa.decide_approval(host, "sess-a", ap, "allow-once")
+    assert result["status"] == "accepted"
 
 
 def test_decide_feedback_only_where_accepted(approval_serve):

@@ -5546,8 +5546,9 @@ def _msp_pending_for_status(host, sid):
     """
     try:
         msp_approval = _msp_approval()
-        approvals = msp_approval.list_pending_approvals(host, sid)
-        prompts = msp_approval.list_pending_user_inputs(host, sid)
+        # One call for both planes: two calls would see two different
+        # point-in-time states (see msp_approval.list_pending).
+        approvals, prompts = msp_approval.list_pending(host, sid)
     except Exception:
         return None
     return (len(approvals), len(prompts))
@@ -5676,8 +5677,9 @@ def cmd_approvals(args):
     msp_approval = _msp_approval()
 
     def go(host):
-        return (msp_approval.list_pending_approvals(host, sid),
-                msp_approval.list_pending_user_inputs(host, sid))
+        # One call for both planes (two calls would disagree on
+        # point-in-time state).
+        return msp_approval.list_pending(host, sid)
 
     try:
         approvals, prompts = _msp_call(slug, job, go)
@@ -6224,8 +6226,9 @@ def _msp_supervisor_list(msp_approval, host, sid, unredacted):
     raw wire shapes -- in the same 0600 rendezvous file the
     queued-answer payloads already use.
     """
-    approvals = msp_approval.list_pending_approvals(host, sid)
-    prompts = msp_approval.list_pending_user_inputs(host, sid)
+    # One call for both planes (two calls would disagree on
+    # point-in-time state).
+    approvals, prompts = msp_approval.list_pending(host, sid)
     payload = {"approvals": [_approval_public(a) for a in approvals],
                "userInputs": [_prompt_public(p) for p in prompts],
                "rawApprovals": None, "rawUserInputs": None}
