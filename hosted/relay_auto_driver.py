@@ -126,7 +126,7 @@ def _open_sidecar_lock(lock_path: str):
     refuses the plant loudly (ELOOP); the caller's observability
     handler turns that into a LOUD record, never a silent wedge.
     """
-    flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW
     fd = os.open(lock_path, flags, 0o600)
     try:
         return os.fdopen(fd, "w", encoding="utf-8")
