@@ -748,12 +748,20 @@ def test_scrub_note_drops_variation_selectors():
     assert driver._scrub_note("a\uFE0Fb") == "ab"      # VS16
     assert driver._scrub_note("a\U000E0100b") == "ab"  # VS17
     assert driver._scrub_note("a\U000E01EFb") == "ab"  # VS256
+    # Range-exactness: the chars adjacent to both ranges pass through,
+    # so an off-by-one in the bounds would fail loudly here.
+    assert driver._scrub_note("a\uFDFFb") == "a\uFDFFb"      # below VS1
+    assert driver._scrub_note("a\uFE10b") == "a\uFE10b"      # above VS16
+    assert driver._scrub_note("a\U000E00FFb") == "a\U000E00FFb"  # below VS17
+    assert driver._scrub_note("a\U000E01F0b") == "a\U000E01F0b"  # above VS256
 
 
 def test_scrub_note_keeps_combining_marks():
     # The #1776 drop is range-exact: combining diacritics (the rest of
     # Mn) are legitimate text and pass through.
     assert driver._scrub_note("caf\u0301") == "caf\u0301"
+    assert driver._scrub_note("a\u034fb") == "a\u034fb"    # CGJ (Mn)
+    assert driver._scrub_note("a\u180Bb") == "a\u180Bb"    # Mongolian FVS1
 
 
 def test_scrub_still_strips_c0_controls():

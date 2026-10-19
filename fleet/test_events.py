@@ -1123,6 +1123,12 @@ def test_clean_text_drops_variation_selectors():
     assert events._clean_text("a\uFE0Fb") == "ab"      # VS16
     assert events._clean_text("a\U000E0100b") == "ab"  # VS17
     assert events._clean_text("a\U000E01EFb") == "ab"  # VS256
+    # Range-exactness: the chars adjacent to both ranges pass through,
+    # so an off-by-one in the bounds would fail loudly here.
+    assert events._clean_text("a\uFDFFb") == "a\uFDFFb"      # below VS1
+    assert events._clean_text("a\uFE10b") == "a\uFE10b"      # above VS16
+    assert events._clean_text("a\U000E00FFb") == "a\U000E00FFb"  # below VS17
+    assert events._clean_text("a\U000E01F0b") == "a\U000E01F0b"  # above VS256
 
 
 def test_clean_text_keeps_other_mn_marks():
@@ -1131,3 +1137,4 @@ def test_clean_text_keeps_other_mn_marks():
     events = _import_events_module()
     assert events._clean_text("caf\u0301") == "caf\u0301"  # combining acute
     assert events._clean_text("a\u034fb") == "a\u034fb"    # CGJ (Mn)
+    assert events._clean_text("a\u180Bb") == "a\u180Bb"    # Mongolian FVS1
