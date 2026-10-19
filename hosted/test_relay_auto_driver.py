@@ -1042,3 +1042,28 @@ def test_bulk_watermark_write_failure_notes_every_tenant(tmp_path, monkeypatch):
     assert len(summary["errors"]) == 2
     assert all(e["tenant_id"] in ("tnt-a", "tnt-b")
                for e in summary["errors"])
+
+
+def test_bulk_watermark_merges_over_preseeded_sidecar(tmp_path):
+    # QA suggestion 2: the "concurrent sweeper's records are merged,
+    # never lost" claim, pinned. A valid sidecar pre-seeded with a
+    # third tenant's record (as a concurrent sweep would have left it)
+    # survives this sweep's bulk merge untouched.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    preseed = {"tnt-z": {"tenant_id": "tnt-z", "tick_at": "old",
+                         "notes": ["pre-existing"]}}
+    with open(wm, "w", encoding="utf-8") as fh:
+        json.dump(preseed, fh)
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert summary["errors"] == []
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert marks["tnt-z"] == preseed["tnt-z"]
+    assert sorted(marks) == ["tnt-a", "tnt-b", "tnt-z"]

@@ -1100,3 +1100,15 @@ def test_note_for_scrubs_attacker_influenced_fields():
     note = events._note_for("deploy", "rolled-back", line)
     assert note == "rolled back to abc31m"
     assert "\x9b" not in note and "\u202e" not in note
+
+
+def test_clean_text_keeps_non_bmp_emoji():
+    # QA suggestion 3: non-BMP emoji (So, not a spoofing class) round-
+    # trips — the relay-lane scrub has the same pin
+    # (test_scrub_keeps_newline_tab_printable_and_emoji); the fleet
+    # choke point gets it too. ZWJ (U+200D, Cf) inside emoji sequences
+    # IS dropped per the deliberate over-scrub — machine-generated
+    # English needs no ZWJ.
+    events = _import_events_module()
+    assert events._clean_text("\U0001f916 ok") == "\U0001f916 ok"
+    assert events._clean_text("a\u200db") == "ab"
