@@ -275,11 +275,11 @@ jobs:
     # so without this carve-out a new docs/*.md file without an index row
     # would land with the coverage invariant unwatched. The doc-inventory
     # pins ride the same carve-out: test_ci_md_link_excludes.py,
-    # test_contributing_ci_gates.py, and test_ci_docs_job_inventory.py
-    # compare doc claims against CI sources of truth, and a docs-only PR
-    # hand-editing those inventory blocks would otherwise land with the
-    # guard skipped. All four are stdlib-only, so the pytest-only install
-    # below suffices.
+    # test_contributing_ci_gates.py, test_ci_docs_job_inventory.py, and
+    # test_relay_wiring_tick_doc.py compare doc claims against CI/code
+    # sources of truth, and a docs-only PR hand-editing those inventory
+    # blocks would otherwise land with the guard skipped. All five are
+    # stdlib-only, so the pytest-only install below suffices.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
@@ -292,7 +292,7 @@ jobs:
       - name: install pytest
         run: pip install pytest
       - name: docs-index coverage + doc-inventory pins
-        run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py -q
+        run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
 
   markdown-links:
     name: markdown link check
