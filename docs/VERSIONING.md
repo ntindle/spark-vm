@@ -150,8 +150,8 @@ GitHub never published, or publishes a release with no tag behind it.
 
 `scripts/release_health.py` is the standing answer to that drift class
 (read-only: it creates no tags and publishes no releases). It compares the
-release-grammar tags (`v` + strict semver, same grammar as cut-release.sh
-and install.sh's `--version` filter) against the published GitHub
+release-grammar tags (`v` + strict semver, the same grammar cut-release.sh's
+preflight enforces) against the published GitHub
 releases, and fails on two drifts:
 
 - **tag-without-release** — the tag exists on the remote but no published

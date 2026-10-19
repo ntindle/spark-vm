@@ -39,15 +39,16 @@ import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Release-tag grammar: `v` + strict semver, the same grammar cut-release.sh
-# and install.sh's --version filter on. Non-release tags (e.g.
+# Release-tag grammar: `v` + strict semver — the same grammar cut-release.sh's
+# preflight enforces (and sparkvm_version.py parses). Non-release tags (e.g.
 # `ghost/20261002-2129`) are not release candidates and are ignored.
-_SEMVER_RE = re.compile(
-    r"\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+_SEMVER_CORE = (
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
-    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
 )
-_RELEASE_TAG_RE = re.compile(r"\Av(" + _SEMVER_RE.pattern[2:-2] + r")\Z")
+_SEMVER_RE = re.compile(r"\A" + _SEMVER_CORE + r"\Z")
+_RELEASE_TAG_RE = re.compile(r"\Av" + _SEMVER_CORE + r"\Z")
 
 
 def is_release_tag(tag):
@@ -150,11 +151,8 @@ def _next_link(link_header):
 def _parse_releases_page(payload):
     """Normalize one /releases API page into (tag_name, draft, prerelease).
 
-    Never raises on malformed entries: unparseable rows are skipped, and an
-    unexpected payload shape degrades to an empty page (the consistency check
-    then reports what it can see; a totally broken response shape is an
-    operational error at the fetch layer only if zero pages parsed AND the
-    request succeeded — see fetch_releases).
+    Never raises on malformed entries: unparseable rows are skipped, and a
+    non-list payload degrades to an empty page.
     """
     rows = []
     if not isinstance(payload, list):

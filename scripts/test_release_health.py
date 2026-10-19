@@ -14,13 +14,16 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_health
 from release_health import (  # noqa: E402
     EXIT_DRIFT,
     EXIT_ERROR,
     EXIT_OK,
+    _next_link,
     _parse_ls_remote,
     _parse_releases_page,
     check_consistency,
+    fetch_releases,
     is_release_tag,
     main,
 )
@@ -75,6 +78,62 @@ class ReleasesParseTest(unittest.TestCase):
     def test_non_list_payload(self):
         self.assertEqual(_parse_releases_page({"x": 1}), [])
         self.assertEqual(_parse_releases_page(None), [])
+
+
+class PaginationTest(unittest.TestCase):
+    def test_next_link_present(self):
+        link = ('<https://api.github.com/repos/o/r/releases?page=2>; rel="next", '
+                '<https://api.github.com/repos/o/r/releases?page=5>; rel="last"')
+        self.assertEqual(
+            _next_link(link),
+            "https://api.github.com/repos/o/r/releases?page=2",
+        )
+
+    def test_next_link_absent(self):
+        link = '<https://api.github.com/repos/o/r/releases?page=1>; rel="last"'
+        self.assertIsNone(_next_link(link))
+
+    def test_next_link_malformed(self):
+        self.assertIsNone(_next_link(""))
+        self.assertIsNone(_next_link(None))
+        self.assertIsNone(_next_link("not a link header"))
+        self.assertIsNone(_next_link('<unclosed; rel="next"'))
+
+    def test_fetch_releases_consumes_all_pages(self):
+        pages = [
+            ([{"tag_name": "v0.6.0", "draft": False, "prerelease": False}],
+             "https://api.github.com/page2"),
+            ([{"tag_name": "v0.5.0", "draft": False, "prerelease": False}],
+             None),
+        ]
+        calls = []
+        real = release_health._api_get
+
+        def stub(url, token):
+            calls.append(url)
+            page, nxt = pages[len(calls) - 1]
+            return page, nxt
+
+        release_health._api_get = stub
+        try:
+            rows = fetch_releases("o/r")
+        finally:
+            release_health._api_get = real
+        self.assertEqual(
+            rows, [_rel("v0.6.0"), _rel("v0.5.0")])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].startswith("https://api.github.com/repos/o/r/releases"))
+
+    def test_fetch_releases_single_page(self):
+        real = release_health._api_get
+        release_health._api_get = (
+            lambda url, token: ([_rel("v0.6.0")], None)
+        )
+        try:
+            rows = fetch_releases("o/r", api_url="https://example.invalid")
+        finally:
+            release_health._api_get = real
+        self.assertEqual(rows, [_rel("v0.6.0")])
 
 
 class ConsistencyTest(unittest.TestCase):
