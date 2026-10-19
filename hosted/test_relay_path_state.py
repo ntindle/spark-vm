@@ -1204,3 +1204,32 @@ def test_maybe_probe_probed_path_threads_fresh_record(history, journal):
         "probed path: the reading must use the just-written record for "
         "its probe half, not re-read the history"
     )
+
+
+def test_history_lock_refuses_symlink_plant(tmp_path):
+    # #1740: a pre-planted symlink at the probe-history lock path must
+    # fail loud as HistoryLockError (ELOOP), never silently move the
+    # flock onto another file (lock-desync / lock-DoS). Neuter-verified:
+    # with plain open(..., "a+b") the lock is silently acquired
+    # through the plant.
+    path = str(tmp_path / "probe-history.jsonl")
+    victim = str(tmp_path / "victim")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, path + ".lock")
+    with pytest.raises(rps.HistoryLockError, match="cannot open probe history lock"):
+        with rps._history_locked(path, exclusive=True):
+            pass
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "victim"
+
+
+def test_history_lock_missing_parent_stays_unwrapped(tmp_path):
+    # The FileNotFoundError contract survives the O_NOFOLLOW
+    # conversion: with O_CREAT, ENOENT still fires only when the
+    # parent directory is missing — the reader still maps it to
+    # no-records instead of a wrapped lock error.
+    path = str(tmp_path / "nope" / "probe-history.jsonl")
+    with pytest.raises(FileNotFoundError):
+        with rps._history_locked(path, exclusive=True, timeout_s=1):
+            pass

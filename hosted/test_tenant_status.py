@@ -1989,3 +1989,23 @@ def test_1465_expired_entry_evicted_not_sticky(store):
     assert svc._seen and all(
         seen_at > time.time() - 301 for seen_at in svc._seen.values()
     )
+
+
+def test_store_lock_refuses_symlink_plant(store_path, tmp_path):
+    # #1740: the <store>.lock sidecar serializes the approvals_url
+    # write-if-absent ("exactly one mints") — a pre-planted symlink at
+    # the lock path must fail loud (ELOOP), never silently move the
+    # flock onto another file (lock-desync / lock-DoS would let two
+    # concurrent stage-2 submissions both mint). Neuter-verified:
+    # with plain open(..., "a") the create succeeds through the plant.
+    store = TenantStore(store_path)
+    victim = str(tmp_path / "victim.lock")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, store_path + ".lock")
+    with pytest.raises(OSError):
+        store.create(_tenant())
+    # The victim was never flocked through and no store file landed.
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "victim"
+    assert not os.path.lexists(store_path)

@@ -963,8 +963,26 @@ class TenantStore:
 
     @contextlib.contextmanager
     def _exclusive(self):
-        """Hold the store's exclusive lock for a read-modify-write cycle."""
-        with open(self.path + ".lock", "a", encoding="utf-8") as lf:
+        """Hold the store's exclusive lock for a read-modify-write cycle.
+
+        The lock sidecar opens with O_NOFOLLOW (#1740): a pre-planted
+        symlink at ``<store>.lock`` fails loud (ELOOP) instead of
+        silently moving the flock onto another file, which would
+        defeat the lock-linearized ``approvals_url`` write-if-absent
+        (two concurrent stage-2 submissions could both mint). Nothing
+        is written through the lock fd — it exists only for flock.
+        """
+        fd = os.open(
+            self.path + ".lock",
+            os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            lf = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with lf:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
             try:
                 yield
