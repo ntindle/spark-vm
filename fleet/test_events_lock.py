@@ -26,6 +26,7 @@ suite.
 import json
 import multiprocessing
 import os
+import errno
 import signal
 import sys
 import tempfile
@@ -469,7 +470,11 @@ def test_journal_lock_rejects_planted_symlink(tmp_path):
         with events.journal_lock(store, timeout_s=1):
             pass
     except events.JournalLockError as exc:
-        assert "Too many levels of symbolic links" in str(exc), exc
+        # The OSError is chained as __context__ (raise without `from`).
+        # Assert on errno, not the message: os.strerror(ELOOP) is
+        # locale-dependent (LC_MESSAGES), errno is not.
+        ctx = exc.__context__
+        assert isinstance(ctx, OSError) and ctx.errno == errno.ELOOP, exc
     else:
         raise AssertionError("planted symlink at journal.lock did not "
                              "fail loud")
