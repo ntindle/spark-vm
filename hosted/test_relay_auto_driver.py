@@ -374,17 +374,55 @@ def test_vanished_tenant_mid_sweep_is_noted_not_failed(tmp_path):
 
 
 def test_corrupt_watermark_sidecar_restarts_empty(tmp_path):
-    # A corrupt sidecar is observability damage, never a reason to skip
-    # the tick: the write restarts from empty and the tick lands.
+    # F-AC-8 / D-AC-7: a corrupt sidecar is observability damage, never a
+    # reason to skip the tick — the write restarts from empty and the tick
+    # lands — but the corruption is fail-visible: the ticking tenant's
+    # record carries a LOUD note, persisted in the sidecar and riding the
+    # journal event.
     store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
     wm = str(tmp_path / "wm.json")
     with open(wm, "w", encoding="utf-8") as fh:
         fh.write("{not json")
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    rec = summary["tenants"]["tnt-a"]
+    assert rec["applied"] is False
+    assert any(
+        n.startswith("LOUD:") and "corrupt" in n for n in rec["notes"]
+    ), rec["notes"]
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert marks["tnt-a"]["tenant_id"] == "tnt-a"
+    assert any(
+        n.startswith("LOUD:") and "corrupt" in n for n in marks["tnt-a"]["notes"]
+    ), marks["tnt-a"]["notes"]
+    rows = _journal_rows(str(estate))
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "relay-tick"
+    assert "LOUD:" in rows[0]["note"]
+    assert "corrupt" in rows[0]["note"]
+
+
+def test_missing_watermark_sidecar_first_run_is_silent(tmp_path):
+    # The normal first run has no sidecar yet: no history exists to lose,
+    # so no LOUD corruption note is emitted — only genuinely corrupt
+    # content gets the loud treatment (neuter: folding the missing-file
+    # case into the corrupt flag fails this test).
+    store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
+    wm = str(tmp_path / "wm.json")  # never created
     summary = driver.tick_all_tenants(
         store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
         latest_probe_fn=_fresh_probe,
     )
-    assert summary["tenants"]["tnt-a"]["applied"] is False
+    rec = summary["tenants"]["tnt-a"]
+    assert not any(
+        n.startswith("LOUD:") and "corrupt" in n for n in rec["notes"]
+    ), rec["notes"]
     with open(wm, encoding="utf-8") as fh:
         marks = json.load(fh)
     assert marks["tnt-a"]["tenant_id"] == "tnt-a"

@@ -135,14 +135,19 @@ def _open_sidecar_lock(lock_path: str):
         raise
 
 
-def _update_watermark(path: str, tenant_id: str, record: dict) -> None:
+def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
     """Read-modify-write the watermark sidecar under a sidecar lock.
 
-    Corrupt/unparseable sidecar content restarts from empty (noted by
-    the caller via the record's notes — a corrupt watermark is
-    observability damage, never a reason to skip the tick).
+    Corrupt/unparseable sidecar content restarts from empty — a corrupt
+    watermark is observability damage, never a reason to skip the tick
+    (staleness self-heals: the current tenant record is written fresh).
+
+    Returns True when the sidecar was corrupt/unparseable and history
+    restarted from empty, so the caller can note it LOUD on the record
+    (D-AC-7 fail-visible); False when the sidecar read clean.
     """
     lock_path = path + ".lock"
+    corrupt = False
     with _open_sidecar_lock(lock_path) as lf:
         if fcntl is not None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
@@ -151,14 +156,21 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> None:
                 with open(path, "r", encoding="utf-8") as fh:
                     marks = json.load(fh)
                 if not isinstance(marks, dict):
-                    marks = {}
-            except (OSError, ValueError):
+                    raise ValueError("sidecar content is not a JSON object")
+            except FileNotFoundError:
+                # Normal first run: no history to lose, nothing to say.
                 marks = {}
+            except (OSError, ValueError):
+                # Corrupt/unreadable content: restart from empty, but
+                # fail-visible per D-AC-7 — the caller notes it LOUD.
+                marks = {}
+                corrupt = True
             marks[tenant_id] = record
             _atomic_write_json_0600(path, marks)
         finally:
             if fcntl is not None:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    return corrupt
 
 
 def _tick_event(
@@ -412,7 +424,18 @@ def tick_all_tenants(
             latest_probe_fn=latest_probe_fn,
         )
         try:
-            _update_watermark(watermark_path, tenant_id, record)
+            sidecar_corrupt = _update_watermark(watermark_path, tenant_id, record)
+            if sidecar_corrupt:
+                # F-AC-8 / D-AC-7: the sidecar was corrupt/unparseable and
+                # restarted from empty — history for other tenants was lost.
+                # Note it LOUD on the record (persisted and journaled),
+                # never silent; staleness self-heals from this tick onward.
+                record["notes"].append(
+                    "LOUD: watermark sidecar was corrupt/unparseable — "
+                    "restarted from empty; prior per-tenant last-tick "
+                    "history lost, staleness self-heals from this tick"
+                )
+                _update_watermark(watermark_path, tenant_id, record)
             if journal_store_dir is not None:
                 event = _tick_event(
                     tenant_id=tenant_id,

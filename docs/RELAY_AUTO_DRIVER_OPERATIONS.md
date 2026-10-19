@@ -130,6 +130,14 @@ as applied.
   success. The MISSING fresh watermark is what S4's staleness rule
   reads as driver trouble (#1724): staleness reads the sidecar, not
   the unit state.
+- A *corrupt* watermark sidecar (unparseable content) is observability
+  damage, never a reason to skip the tick: the write restarts from
+  empty, the tick still drives, and the corruption is noted LOUD on
+  the ticking tenant's record (persisted in the watermark, and carried
+  in the fleet journal note when journaling is on) — the operator
+  learns the prior per-tenant history was lost, and staleness
+  self-heals from the fresh tick. A *missing* sidecar (the normal
+  first run) restarts from empty silently: no history existed to lose.
 
 ## 6. Trust note
 
