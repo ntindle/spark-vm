@@ -57,7 +57,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and carried in the fleet journal note), so the operator learns the
   prior per-tenant history was lost. A missing sidecar (the normal
   first run) still restarts silently.
-  Closes #1744. (#TBD)
+  Closes #1744. (#1750)
 - Gate query now reports an honest per-component wave for canary-stage
   rollouts: the displayed wave is the box's own assignment pin (empty
   when the box has no pin), instead of a hash-derived wave number naming
