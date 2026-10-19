@@ -165,7 +165,7 @@ headers, URL query string, URL path, and text/JSON bodies with the real
 value, but only for hosts listed in `/home/swapd/hosts.allow`. Non-listed
 hosts pass through byte-for-byte (a one-line warning is logged, no values).
 Every swap is audit-logged to `/home/swapd/swap.log` as
-`ts=<utc> host=<host> swapped=<placeholder> flow=<id>` — never values (`flow=` is the mitmproxy flow id, joining swap lines to the flow's egress verdict; `-` when no flow is in scope).
+`ts=<utc> host=<host> swapped=<matched placeholder> ip=<pinned egress ip> tenant=<hint> flow=<id>` — never values (`flow=` is the mitmproxy flow id, joining swap lines to the flow's egress verdict; `-` when no flow is in scope; `tenant=` is an unverified hint — the named tenant, else the box hostname — forensic context only, never an identity claim).
 
 Secret files live in `/home/swapd/secrets/` (0700, swapd-only — enforced by
 `proxy/deploy.sh` on every deploy; the proxy warns at load if the mode ever
@@ -278,7 +278,7 @@ credentials.
    only the registry and secret files):
    ```
    sudo tail -5 /home/swapd/swap.log
-   # ts=... host=acme.example.com swapped=hsurr:acme:password
+   # ts=... host=acme.example.com swapped=hsurr:acme:password ip=... tenant=... flow=...
    ```
 
 ### Inference-model recipe (API key for an LLM provider)
