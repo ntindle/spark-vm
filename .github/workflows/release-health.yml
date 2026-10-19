@@ -1,0 +1,40 @@
+# Release-health monitor: tag <-> release consistency on the published surface.
+#
+# Why this exists (distribution, open-source track): the release pipeline
+# (scripts/cut-release.sh + release.yml) cuts an immutable v* tag and
+# publishes a GitHub release for it. release.yml's in-run recovery covers
+# the tag-pushed / publish-failed class (GitHub #659) *inside the run*, but
+# anything that fails outside that window — a hand-pushed tag, a failed
+# recovery, a publish that silently never happened — drifts silently. This
+# scheduled check fails loudly on that drift so the release surface the
+# project advertises is the surface GitHub actually publishes.
+#
+# Read-only: no tags are created, no releases are published, no mutations.
+# The GITHUB_TOKEN below only raises the Releases API quota; the script
+# works unauthenticated (60 requests/hour is enough for one daily run).
+# The token is never logged.
+
+name: release-health
+
+on:
+  schedule:
+    # Daily, 06:00 UTC (01:00 CDT).
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-health:
+    name: tag/release consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # network-bound (git ls-remote + Releases API), healthy < 2 min
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - name: Self-check the monitor
+        run: python3 -m pytest scripts/test_release_health.py -q
+      - name: Check release health
+        run: python3 scripts/release_health.py

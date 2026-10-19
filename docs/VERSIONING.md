@@ -139,3 +139,32 @@ Never hand-edit `/home/swapd/VERSION` or the deployed copies — they are
 deployment outputs. If they disagree with the updater's `deployed-version`
 state, the updater's audit log is the record of what happened; fix the
 process, not the files.
+
+## Release health
+
+The release workflow recovers the tag-pushed / publish-failed class inside
+its own run (GitHub #659), but anything that fails *outside* that window —
+a hand-pushed tag, a failed recovery, a publish that silently never
+happened — drifts silently: the project advertises a release tag that
+GitHub never published, or publishes a release with no tag behind it.
+
+`scripts/release_health.py` is the standing answer to that drift class
+(read-only: it creates no tags and publishes no releases). It compares the
+release-grammar tags (`v` + strict semver, same grammar as cut-release.sh
+and install.sh's `--version` filter) against the published GitHub
+releases, and fails on two drifts:
+
+- **tag-without-release** — the tag exists on the remote but no published
+  (non-draft) release carries it;
+- **release-without-tag** — a published release whose tag is missing on the
+  remote, or isn't release grammar at all.
+
+Drafts are not published and satisfy nothing; non-release tags (branches,
+`ghost/*`) are ignored. Exit 0 = clean, 2 = drift, 1 = operational error
+(network failures fail loud — a silent monitor is the failure mode being
+prevented). `--json` emits a machine-readable report.
+
+`.github/workflows/release-health.yml` runs it daily (06:00 UTC) plus on
+manual dispatch; a failure notifies the owner through the workflow's own
+failure signal. The check lives on the *published* surface, so it does not
+gate PRs — a PR should never fail because a past release drifted.
