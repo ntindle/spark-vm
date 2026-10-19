@@ -115,6 +115,11 @@ from datetime import datetime, timedelta, timezone
 # never through imports.
 import events
 
+# Sibling module (fleet/attest.py): the #1516 S3 box-event attestation
+# mechanism and write-once box-key registry. Same sibling-import
+# convention as events above.
+import attest
+
 RECORD_SCHEMA = "fleet-inventory-record/1"
 SNAPSHOT_SCHEMA = "fleet-inventory-snapshot/1"
 JOURNAL_NAME = "journal.jsonl"
@@ -1259,10 +1264,18 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     # event/alert write fails the collect loudly: the operator's
     # contract is the exit code, and a silently un-journaled event would
     # be missing evidence masquerading as silence.
+    #
+    # #1516 S3: load the pinned box keys once per collect. A corrupt
+    # registry is an integrity failure — fail the collect closed rather
+    # than silently journaling everything unattested (that would make
+    # the T2 consume-gate rule vacuous by absence).
+    keyring, key_err = attest.load_box_keys(store_dir)
+    if key_err is not None:
+        return "box-key registry: %s" % key_err
     all_events = []
     for box_dir, box_id in box_contexts:
         box_events, _, ev_notes = events.collect_box_events(
-            box_dir, box_id, observed_at)
+            box_dir, box_id, observed_at, keyring=keyring)
         all_events.extend(box_events)
         for note in ev_notes:
             print("fleet events note (%s): %s" % (box_id, note),
@@ -1381,6 +1394,22 @@ def main(argv=None):
     p_events.add_argument("--alert-id", default=None,
                           help="with ack: the alert to acknowledge")
 
+    p_boxkey = sub.add_parser("box-key", help="pin/show box ed25519 "
+                                              "identity keys for event "
+                                              "attestation (#1516 S3)")
+    p_boxkey.add_argument("--store", required=True,
+                          help="fleet store dir (holds box-keys.json)")
+    p_boxkey.add_argument("action", nargs="?", default="show",
+                          choices=["pin", "show"],
+                          help="'pin' pins a box's 64-hex ed25519 pubkey "
+                               "(write-once; re-pinning a different key "
+                               "fails closed); 'show' prints the pinned "
+                               "fingerprint")
+    p_boxkey.add_argument("--box-id", default=None,
+                          help="box id to pin/show")
+    p_boxkey.add_argument("--pubkey", default=None,
+                          help="with pin: the box's 64-hex ed25519 pubkey")
+
     p_api = sub.add_parser("api", help="read-only HTTP projection of the "
                                       "fleet estate store (G21 S1, #795)")
     p_api.add_argument("--store", required=True,
@@ -1452,6 +1481,33 @@ def main(argv=None):
                     return 2
             else:
                 err = "unknown events action %s" % args.action
+        elif args.command == "box-key":
+            if not args.box_id:
+                print("error: box-key requires --box-id", file=sys.stderr)
+                return 2
+            if args.action == "pin":
+                if not args.pubkey:
+                    print("error: box-key pin requires --pubkey",
+                          file=sys.stderr)
+                    return 2
+                fp, err = attest.pin_box_key(args.store, args.box_id,
+                                             args.pubkey)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+                print("pinned box key for %r: %s" % (args.box_id, fp))
+            elif args.action == "show":
+                pub, err = attest.read_box_key(args.store, args.box_id)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+                if pub is None:
+                    print("no box key pinned for %r" % (args.box_id,))
+                else:
+                    print("%s: %s" % (args.box_id,
+                                      attest.ed25519.fingerprint(pub)))
+            else:
+                err = "unknown box-key action %s" % args.action
         elif args.command == "api":
             # G21 S1: the read API lives in fleet/api.py (same-dir import,
             # like the `import events` above). Imported lazily so the

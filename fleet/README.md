@@ -422,8 +422,38 @@ translation table in `events.py`, verified against
   `fleet events watch` exits 1 while any alert is unacknowledged — a
   cron or the operator's existing paging consumes it.
 - **Known S1 limits** — session_epoch/rollout/window are null (no
-  provisioner record, no G15 waves, no G14 windows); `attested` is always
-  false.
+  provisioner record, no G15 waves, no G14 windows); `attested` is true
+  only for rows carrying a valid box signature (see Attestation below),
+  everything else stays false.
+
+### Attestation (#1516 S3, slice 1)
+
+Update rows a box signs with its ed25519 identity key are verified at
+collect time and journaled with `attested: true`; consuming gates may
+read only attested rows (the trust model's S3 T2 rule — "unattested
+events may be logged, never gate-consumed"). The mechanism is
+key-agnostic: a hosted tenant box signs with a layer-below identity
+key — the pairing-ceremony key is disqualified as a signing key
+(guest-resident, tenant-exfiltratable); an operator-estate box signs
+with its provisioned key. The operator pins each box's public key once:
+
+```
+fleet box-key pin  --store ~/fleet-store --box-id tower --pubkey <64-hex>
+fleet box-key show --store ~/fleet-store --box-id tower
+```
+
+The pin is write-once (re-pinning a different key fails closed —
+rotation is a separate design). The signature covers the raw journal
+row bound to the box id; a bad signature on a row that claims
+attestation is journaled with the loudest collector note (the forgery
+signal). Rows with no signature stay `attested: false` — the legacy
+log-only path. Still to come: the deploy agent signing rows at emit
+time (the producer lane — with the custody acceptance that the hosted
+tenant signing key lives in the layer below, never guest-side; the
+pairing key is disqualified, since a root tenant could exfiltrate it);
+the hosted plane-side key source; the box-key rotation ceremony (no
+rotate/unpin path yet — deliberate for slice 1); and the G15 gate
+actually consuming through the attested filter.
 
 ### Sizing the audit tail
 
@@ -548,6 +578,8 @@ provisioner's per-box record (G15 §8) supersedes it.
 ## What's still S2/S3 (#607 stays open)
 
 Push endpoint with box-identity auth, G15 gate integration (wave-k-did-it-land,
-soak evidence, suspect exclusion), G13 attestation
-(`attested: true` admission to the gate quorum), H11 per-tenant slicing,
-P7 status-page projection.
+soak evidence, suspect exclusion), G13 attestation *consumption*
+(the mechanism and ingest verification shipped — `fleet/attest.py`,
+`fleet box-key pin/show`, T2 pinned as the gate filter; remaining:
+box-side signing at emit, hosted key source, the gate itself),
+H11 per-tenant slicing, P7 status-page projection.
