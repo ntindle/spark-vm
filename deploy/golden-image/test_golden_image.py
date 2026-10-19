@@ -351,6 +351,28 @@ def test_gate_run_stops_proxy_and_restores_premitm_state():
     assert "rm -rf /home/swapd/.mitmproxy" in block
 
 
+def test_gate_run_is_single_docker_instruction():
+    """Docker parses instructions line by line: every physical line of the
+    gate RUN except the last must end with a backslash continuation, or a
+    line of shell (e.g. inside a multi-line quoted program) becomes an
+    'unknown instruction' parse error and the whole build fails."""
+    text = _dockerfile_text()
+    needle = "/opt/sparkvm/harness/install-gate-fixture.sh"
+    idx = text.find(needle)
+    assert idx != -1
+    start = text.rfind("\nRUN ", 0, idx) + 1
+    lines = text[start:].splitlines()
+    body = []
+    for line in lines:
+        body.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    assert len(body) > 1, "gate RUN collapsed to one physical line?"
+    assert needle in body[-1], \
+        "RUN block ended before the fixture invocation — a line is " \
+        "missing its backslash continuation"
+
+
 # --- daemon set (supervisord.conf) ----------------------------------------------
 
 

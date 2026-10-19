@@ -220,18 +220,12 @@ RUN set -e; \
         >/tmp/swap-inference-gate.log 2>&1 & \
     proxy_pid=$!; \
     trap 'kill "$proxy_pid" 2>/dev/null || true; rm -rf /home/swapd/.mitmproxy' EXIT; \
-    python3 -c "import socket,sys,time
-deadline=time.time()+20
-while time.time()<deadline:
-    try:
-        socket.create_connection(('127.0.0.1',18081),timeout=1).close()
-        break
-    except OSError:
-        time.sleep(0.2)
-else:
-    log=open('/tmp/swap-inference-gate.log',errors='replace').read()[-3000:]
-    sys.exit('gate: inference proxy did not listen on 127.0.0.1:18081\n'+log)
-"; \
+    ready=0; i=0; \
+    while [ "$i" -lt 100 ]; do \
+        if python3 -c "import socket; socket.create_connection(('127.0.0.1',18081),timeout=1).close()" 2>/dev/null; then ready=1; break; fi; \
+        i=$((i + 1)); sleep 0.2; \
+    done; \
+    if [ "$ready" != "1" ]; then echo "gate: inference proxy did not listen on 127.0.0.1:18081" >&2; tail -c 3000 /tmp/swap-inference-gate.log >&2 || true; exit 1; fi; \
     /opt/sparkvm/harness/install-gate-fixture.sh
 
 # --- image manifest (the D-P1 artifact) --------------------------------------
