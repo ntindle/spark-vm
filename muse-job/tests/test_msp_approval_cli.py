@@ -255,7 +255,9 @@ def test_approvals_lists_redacted(cli, fakes, capsys):
     assert "approval ap-1: Run shell command" in out
     assert "allow-once (approved)" in out and "deny (denied)" in out
     assert "user-input ui-1" in out
-    assert "looks like a trust prompt" in out
+    # Issue #1773: the machine hint renders only behind --show-heuristic --
+    # the default surface shows no machine verdict.
+    assert "trust prompt" not in out
     assert "rm -rf /tmp/x" not in out
     assert "rawArgs" not in out
     methods = [c[0] for c in fakes.host_calls()]
@@ -263,6 +265,32 @@ def test_approvals_lists_redacted(cli, fakes, capsys):
     # prompts in a single round-trip so the two lists share one
     # point-in-time state).
     assert methods.count("approval/listPending") == 1
+
+
+def test_approvals_show_heuristic_opt_in(cli, fakes, capsys):
+    # Issue #1773: --show-heuristic renders the hint, reworded so its
+    # non-authority is impossible to miss.
+    slug = "job1"
+    _make_job(cli, slug)
+    rc = cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False,
+                               show_heuristic=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ("user-input ui-1 "
+            "[hint: looks like a trust prompt — verify yourself]") in out
+
+
+def test_approvals_show_heuristic_json_keeps_machine_field(cli, fakes, capsys):
+    # Issue #1773: --json keeps the machine-readable looksLikeTrustPrompt
+    # field regardless of --show-heuristic (scripts consume it; the issue
+    # only gates the human tag).
+    import json as _json
+    slug = "job1"
+    _make_job(cli, slug)
+    rc = cli.cmd_approvals(_ns(slug=slug, json=True, show_secrets=False))
+    assert rc == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert out["userInputs"][0]["looksLikeTrustPrompt"] is True
 
 
 def test_approvals_json_redacted(cli, fakes, capsys):
