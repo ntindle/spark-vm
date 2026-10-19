@@ -53,8 +53,8 @@ COMPONENTS_CONF = ROOT / "deploy" / "components.conf"
 # Registering or removing a test file is a deliberate gate-policy change:
 # it must edit this pin, not slip through a range check.
 EXPECTED_REGISTERED_COUNTS = {
-    "proxy": 17,  # issue #1167 set 15 (incl. test_enforce_pending_dir.py); +test_readme_inventory.py; +test_deploy_inventory.py (#1235)
-    "confirm": 5,  # +test_plane_signal.py (#1268)
+    "proxy": 18,  # issue #1167 set 15 (incl. test_enforce_pending_dir.py); +test_readme_inventory.py; +test_deploy_inventory.py (#1235); +test_swap_addon_lock.py (#1755)
+    "confirm": 6,  # +test_plane_signal.py (#1268); +test_push_lock.py (#1755)
 }
 
 # Test files that intentionally run in CI but are NOT in the pre-deploy
