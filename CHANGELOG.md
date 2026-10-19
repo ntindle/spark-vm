@@ -191,7 +191,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   symlink loudly (fail-visible) instead of silently moving the flock onto
   another file, which would have desynced concurrent sweeps or wedged the
   watermark. Same O_NOFOLLOW discipline the gate lane already pins for
-  key/state paths. (#TBD)
+  key/state paths. (#1742)
 
 ## [0.9.0] - 2026-10-18
 
