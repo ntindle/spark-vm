@@ -120,6 +120,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   pin-only semantics is now individually guarded. (#1707)
 
 ### Fixed
+- The release-gating rotation ledger now gets the same atomic-write
+  discipline as the gate document: its temp file is created
+  O_EXCL/0600 so a pre-planted symlink can fail loud instead of
+  redirecting the write, and a stale temp from a crashed run is unlinked
+  and retried once. (#1735)
 - A box whose release-gating files were unreadable or malformed crashed
   the box-side gate query with a traceback instead of failing closed to
   frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII
