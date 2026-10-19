@@ -101,10 +101,11 @@ this module's ``--tick`` CLI (``main()``). No auto cadence driver
 exists in production; driving is an explicit operator action (a human
 run, a cron entry, or a supervisor loop) rather than a silent gap.
 The single-driver-per-box discipline (D-RL34-3a) binds ANY driver —
-at most one tick per box at a time, whoever starts it. Direct
-``_drive_box`` calls remain anchor-only (see its docstring); a future
-auto cadence driver, if built, inherits this section's discipline,
-and #1711 stays open to track it.
+at most one tick per box at a time, whoever starts it. The only
+direct ``_drive_box`` caller is ``drive_tenant``'s apply phase —
+anchor-only (see its docstring); a future auto cadence driver, if
+built, inherits this section's discipline, and #1711 stays open to
+track it.
 
 Stdlib only — runs on the control plane like the rest of the lane.
 """
@@ -409,8 +410,13 @@ def _drive_box(
 
     ``_drive_box`` is the per-box single ordered emitter ONLY when
     invoked for the anchor — the anchor-only constraint lives in
-    ``drive_tenant``. No auto cadence driver exists (issue #1711):
-    future callers must not drive non-anchor boxes through it.
+    ``drive_tenant``: its apply phase is the only caller, driving the
+    read-phase anchor through here under the store's exclusive lock.
+    The producer reading is passed through ``read_fn`` (the read runs
+    in the lock-free read phase — producer I/O must never run under
+    the lock), so the apply-phase call only plans and emits. No auto
+    cadence driver exists (issue #1711): future callers must not drive
+    non-anchor boxes through it.
 
     ``read_fn`` overrides the producer read (tests): it is called as
     ``read_fn(vm_id)`` — a caller-supplied ``read_fn`` silently ignores
@@ -537,8 +543,10 @@ def drive_tenant(
     like ``_drive_box``, a caller-supplied ``read_fn`` silently ignores
     ``journal_timeout_s``.
 
-    Returns ``{tenant_id, anchor_box_id, boxes: [_drive_box-style
-    reports]}``. Non-anchor boxes report ``events: []`` with a note —
+    Returns ``{tenant_id, anchor_box_id, boxes: [...]}`` — the anchor
+    box's entry is the ``_drive_box`` report (the single ordered
+    emitter, driven by the apply phase with the read-phase reading).
+    Non-anchor boxes report ``events: []`` with a note —
     their readings were observed, never applied. ``anchor_box_id`` is
     the read-phase anchor (``None`` when no box held a candidate arc).
     """
@@ -633,16 +641,16 @@ def drive_tenant(
                 fresh_anchor.box_id if fresh_anchor is not None else None
             )
             if fresh_anchor_id == read_anchor_id:
-                arc = rec.boxes[read_anchor_id]
-                events, notes = plan_events(arc, anchor_reading)
-                emitted = _emit(arc, events)
-                reports[anchor_slot] = {
-                    "box_id": arc.box_id,
-                    "vm_id": anchor_vm_id,
-                    "reading": _reading_summary(anchor_reading),
-                    "events": emitted,
-                    "notes": notes,
-                }
+                # The producer reading came from the lock-free read phase
+                # (producer I/O must never run under the store's exclusive
+                # lock), so the apply phase drives the anchor's single
+                # ordered emitter with the cached reading — plan and emit
+                # only, anchor-only per the anchor-only contract.
+                reports[anchor_slot] = _drive_box(
+                    rec.boxes[read_anchor_id],
+                    anchor_vm_id,
+                    read_fn=lambda _vm_id: anchor_reading,
+                )
             else:
                 reports[anchor_slot] = {
                     "box_id": read_anchor_id,
