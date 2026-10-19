@@ -161,7 +161,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   invisible code points that can alter how adjacent text renders. The
   existing category-based scrub could not catch them because they are
   Mn, not Cf; they are dropped by explicit range, and combining
-  diacritics (the rest of Mn) still pass through. (#TBD)
+  diacritics (the rest of Mn) still pass through. (#1778)
 - Relay-liveness state locks and the per-tenant watermark read now refuse
   symlinked paths instead of following them: a pre-planted symlink at a
   lock file or at the watermark sidecar fails loudly (surfaced as a
