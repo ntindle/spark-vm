@@ -198,6 +198,61 @@ def _read_sidecar_nofollow(path: str) -> dict:
         return json.load(fh)
 
 
+# D-AC-7 fail-visible text for a corrupt/unparseable watermark sidecar.
+# Hoisted so the pre-loop hint path and the bulk-write path note the
+# identical bytes (a drift between the two would fork the operator's
+# reading of "history was lost").
+_CORRUPT_SIDECAR_LOUD = (
+    "LOUD: watermark sidecar was corrupt/unparseable — "
+    "restarted from empty; prior per-tenant last-tick "
+    "history lost, staleness self-heals from this tick"
+)
+
+
+def _read_watermark_marks(path: str):
+    """Read half of the watermark sidecar read-modify-write.
+
+    Returns ``(marks, corrupt)``: the parsed sidecar dict — or ``{}``
+    when the file is missing or unparseable — and whether the content
+    was corrupt/unparseable. A missing file is the normal first run,
+    NOT corruption (no history exists to lose). A symlink at the
+    sidecar path raises ``OSError`` with ``errno.ELOOP`` loud (#1741):
+    a plant is never restarted-from-empty over.
+
+    Shared by the per-tenant ``_update_watermark`` and the sweep-level
+    bulk write (``_write_watermark_bulk``) — #1739 collapsed N
+    per-tenant read-modify-writes per sweep into one, and both halves
+    of the operation must agree on what "corrupt" means.
+    """
+    try:
+        marks = _read_sidecar_nofollow(path)
+        if not isinstance(marks, dict):
+            raise ValueError("sidecar content is not a JSON object")
+    except FileNotFoundError:
+        # Normal first run: no history to lose, nothing to say.
+        return {}, False
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            # #1741: symlink plant — refuse loud, like the write path.
+            # A plant must never be restarted from empty over (that
+            # would silently discard the evidence of the plant). errno
+            # is preserved so a handler can distinguish a plant from a
+            # disk error programmatically.
+            raise OSError(
+                errno.ELOOP,
+                "refusing to read watermark through symlink: %r"
+                % (path,),
+            ) from exc
+        # Corrupt/unreadable content: restart from empty, but
+        # fail-visible per D-AC-7 — the caller notes it LOUD.
+        return {}, True
+    except ValueError:
+        # Corrupt/unreadable content (incl. JSONDecodeError, which is a
+        # ValueError): restart from empty, fail-visible per D-AC-7.
+        return {}, True
+    return marks, False
+
+
 def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
     """Read-modify-write the watermark sidecar under a sidecar lock.
 
@@ -220,36 +275,56 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
         if fcntl is not None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
-            try:
-                marks = _read_sidecar_nofollow(path)
-                if not isinstance(marks, dict):
-                    raise ValueError("sidecar content is not a JSON object")
-            except FileNotFoundError:
-                # Normal first run: no history to lose, nothing to say.
-                marks = {}
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    # #1741: symlink plant — refuse loud, like the
-                    # write path. A plant must never be restarted
-                    # from empty over (that would silently discard
-                    # the evidence of the plant). errno is preserved
-                    # so a handler can distinguish a plant from a
-                    # disk error programmatically.
-                    raise OSError(
-                        errno.ELOOP,
-                        "refusing to read watermark through symlink: %r"
-                        % (path,),
-                    ) from exc
-                # Corrupt/unreadable content: restart from empty, but
-                # fail-visible per D-AC-7 — the caller notes it LOUD.
-                marks = {}
-                corrupt = True
-            except ValueError:
-                # Corrupt/unreadable content: restart from empty, but
-                # fail-visible per D-AC-7 — the caller notes it LOUD.
-                marks = {}
-                corrupt = True
+            marks, corrupt = _read_watermark_marks(path)
             marks[tenant_id] = record
+            _atomic_write_json_0600(path, marks)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    return corrupt
+
+
+def _write_watermark_bulk(path: str, records: dict, corrupt_note=None,
+                          already_noted=False) -> bool:
+    """One read-modify-write of the watermark sidecar for a whole sweep.
+
+    ``records`` maps tenant_id -> record; every entry merges over the
+    freshly-read sidecar in a SINGLE locked read-modify-write. #1739:
+    the old per-tenant ``_update_watermark`` re-read the ENTIRE sidecar
+    JSON and rewrote it atomically for every tenant, so one sweep over
+    N tenants was N full read-modify-write cycles of a file holding N
+    records — O(N^2) JSON IO on the probe cadence. This is O(N).
+
+    Returns True when the sidecar was corrupt/unparseable and history
+    restarted from empty (the same D-AC-7 fail-visible contract as
+    ``_update_watermark`` — the caller notes it LOUD); a missing file
+    is the normal first run, not corruption. A symlink plant raises
+    ``OSError`` with ``errno.ELOOP`` loud (#1741).
+
+    ``corrupt_note`` / ``already_noted`` serve the mid-sweep-corruption
+    path: when the fresh read inside this RMW finds a corrupt sidecar
+    that the caller had NOT already noted (``already_noted=False``),
+    the note is appended to every record INSIDE the locked RMW, before
+    the merge — so it lands in the sidecar, not just the caller's
+    in-memory copies. (Appending after the write returns cannot reach
+    the disk; a past revision did exactly that and the comment lied
+    about it.)
+
+    The lock is held only for this read-modify-write — never across the
+    sweep's drive phase — so a slow tenant cannot wedge a concurrent
+    sweeper's observability, and the fresh locked read means a
+    concurrent sweeper's records are merged, never lost.
+    """
+    lock_path = path + ".lock"
+    with _open_sidecar_lock(lock_path) as lf:
+        if fcntl is not None:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            marks, corrupt = _read_watermark_marks(path)
+            if corrupt and not already_noted and corrupt_note is not None:
+                for rec in records.values():
+                    rec["notes"].append(corrupt_note)
+            marks.update(records)
             _atomic_write_json_0600(path, marks)
         finally:
             if fcntl is not None:
@@ -489,6 +564,11 @@ def tick_all_tenants(
     "errors": [...]}`` — ``errors`` carries per-tenant observability
     failures (watermark/journal), never drive failures (those are
     ``failed=True`` on the tenant's own record).
+
+    The watermark sidecar gets exactly ONE read-modify-write per sweep
+    (#1739): per-tenant records are collected in memory and merged in a
+    single locked write after the drive loop, instead of one full
+    read-modify-write per tenant (O(N^2) JSON IO on the probe cadence).
     """
     tick_at = time.time() if now is None else now
     tick_iso = _now_iso(tick_at)
@@ -501,8 +581,28 @@ def tick_all_tenants(
     if latest_probe_fn is None:
         latest_probe_fn = rps.latest_probe
 
+    # #1739: read the sidecar once up front. The corrupt flag must be
+    # known BEFORE the journal events are built, because the D-AC-7
+    # LOUD corruption note rides the journaled tick-note (pinned by
+    # test_corrupt_watermark_sidecar_restarts_empty). This read is only
+    # the hint; the authoritative merge is the single locked
+    # read-modify-write after the drive loop, so a concurrent sweeper's
+    # records are merged, never lost.
+    try:
+        _, wm_corrupt = _read_watermark_marks(watermark_path)
+        wm_read_exc = None
+    except OSError as exc:
+        # _read_watermark_marks raises OSError only for errno.ELOOP: a
+        # symlink plant at the sidecar path (#1741). Defer it to the
+        # per-tenant observability handler below so the sweep still
+        # drives every tenant — the watermark simply does not persist
+        # this sweep, exactly as the old per-tenant raise did.
+        wm_corrupt = False
+        wm_read_exc = exc
+
     tenants: Dict[str, dict] = {}
     errors: List[dict] = []
+    pending_writes: Dict[str, dict] = {}
     for tenant_id in store.tenant_ids():
         record, anchor_box_id = _tick_one_tenant(
             store,
@@ -516,18 +616,23 @@ def tick_all_tenants(
             latest_probe_fn=latest_probe_fn,
         )
         try:
-            sidecar_corrupt = _update_watermark(watermark_path, tenant_id, record)
-            if sidecar_corrupt:
-                # F-AC-8 / D-AC-7: the sidecar was corrupt/unparseable and
-                # restarted from empty — history for other tenants was lost.
-                # Note it LOUD on the record (persisted and journaled),
-                # never silent; staleness self-heals from this tick onward.
-                record["notes"].append(
-                    "LOUD: watermark sidecar was corrupt/unparseable — "
-                    "restarted from empty; prior per-tenant last-tick "
-                    "history lost, staleness self-heals from this tick"
-                )
-                _update_watermark(watermark_path, tenant_id, record)
+            if wm_read_exc is not None:
+                # #1741: the sidecar read refused a symlink plant — fail
+                # this tenant's observability loud, like the old
+                # per-tenant raise; the journal append below is skipped
+                # for the same reason it was unreachable before.
+                raise wm_read_exc
+            if wm_corrupt:
+                # F-AC-8 / D-AC-7: the sidecar was corrupt/unparseable
+                # and restarts from empty — history for every tenant
+                # was lost, so every record this sweep carries the
+                # LOUD note (the old per-tenant writes noted it only
+                # on the first tenant's record — an artifact of the
+                # incremental writes, not the contract). The note is
+                # appended before the journal event is built, so it
+                # rides the journaled tick-note; staleness self-heals
+                # from this tick onward.
+                record["notes"].append(_CORRUPT_SIDECAR_LOUD)
             if journal_store_dir is not None:
                 event = _tick_event(
                     tenant_id=tenant_id,
@@ -538,10 +643,11 @@ def tick_all_tenants(
                 journal_err = _append_journal_note(journal_store_dir, event)
                 if journal_err is not None:
                     # Secondary observability only: note it on the
-                    # record (the watermark already landed) and keep
-                    # sweeping.
+                    # record and keep sweeping — the record is
+                    # collected below and the single bulk write
+                    # persists the final notes.
                     record["notes"].append(journal_err)
-                    _update_watermark(watermark_path, tenant_id, record)
+            pending_writes[tenant_id] = record
         except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
             # The tenant was already driven; only its observability
             # failed. Note LOUD on the returned record and keep
@@ -559,6 +665,33 @@ def tick_all_tenants(
                 }
             )
         tenants[tenant_id] = record
+
+    # #1739: the single locked read-modify-write for the whole sweep.
+    # The mid-sweep-corruption case (pre-loop hint clean, fresh read
+    # inside the RMW corrupt) is handled INSIDE _write_watermark_bulk:
+    # the LOUD note is appended to every record before the merge, so it
+    # lands in the sidecar and the returned summary. The journal events
+    # were already built by then, so that note does not ride the
+    # journal — only the pre-loop-corrupt note does.
+    if wm_read_exc is None and pending_writes:
+        try:
+            _write_watermark_bulk(
+                watermark_path, pending_writes,
+                corrupt_note=_CORRUPT_SIDECAR_LOUD,
+                already_noted=wm_corrupt,
+            )
+        except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
+            for tid, rec in pending_writes.items():
+                rec["notes"].append(
+                    "LOUD: tick observability failed for tenant %r: %s: %s"
+                    % (tid, type(exc).__name__, exc)
+                )
+                errors.append(
+                    {
+                        "tenant_id": tid,
+                        "error": "%s: %s" % (type(exc).__name__, exc),
+                    }
+                )
 
     return {
         "tick_at": tick_iso,

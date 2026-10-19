@@ -803,3 +803,267 @@ def test_tick_event_box_id_is_scrubbed():
                 "events": 1, "notes": []},
     )
     assert ev["box_id"] == "tnt-a"
+
+
+# ---------------------------------------------------------------------------
+# #1739 — one watermark read-modify-write per sweep (not per tenant)
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_watermark_single_write_per_sweep(tmp_path, monkeypatch):
+    # #1739: one sweep over N tenants performs exactly ONE watermark
+    # sidecar write. The old per-tenant _update_watermark re-read the
+    # entire sidecar JSON and rewrote it atomically for every tenant —
+    # N full read-modify-write cycles of a file holding N records
+    # (O(N^2) JSON IO on the probe cadence). Neuter check: the
+    # pre-#1739 per-tenant loop calls _atomic_write_json_0600 three
+    # times for three tenants, failing the == 1 assertion.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+        "tnt-c": [_arc("box-c")],
+    })
+    wm = str(tmp_path / "wm.json")
+    writes = []
+    real_write = driver._atomic_write_json_0600
+
+    def counting_write(path, obj):
+        if os.path.abspath(path) == os.path.abspath(wm):
+            writes.append(path)
+        return real_write(path, obj)
+
+    monkeypatch.setattr(driver, "_atomic_write_json_0600", counting_write)
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert len(writes) == 1, writes
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert sorted(marks) == ["tnt-a", "tnt-b", "tnt-c"]
+    for tid in ("tnt-a", "tnt-b", "tnt-c"):
+        assert marks[tid]["tenant_id"] == tid
+        assert summary["tenants"][tid]["tenant_id"] == tid
+        assert summary["tenants"][tid]["failed"] is False
+    assert summary["errors"] == []
+
+
+def test_bulk_watermark_corrupt_notes_every_tenant(tmp_path):
+    # #1739 deliberate change, pinned: the D-AC-7 LOUD corruption note
+    # describes sidecar-level history loss, which hits every tenant
+    # equally — so every record this sweep carries it. (The old
+    # per-tenant writes noted it only on the first tenant's record, an
+    # artifact of the incremental writes, not the contract.) The note
+    # still rides every journaled tick-note, and the persisted sidecar
+    # restarts from empty with exactly this sweep's tenants.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert any(
+            n.startswith("LOUD:") and "corrupt" in n for n in rec["notes"]
+        ), rec["notes"]
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert sorted(marks) == ["tnt-a", "tnt-b"]
+    rows = _journal_rows(str(estate))
+    assert len(rows) == 2
+    assert all(
+        "LOUD:" in r["note"] and "corrupt" in r["note"] for r in rows
+    )
+
+
+def test_bulk_watermark_symlink_plant_still_drives(tmp_path):
+    # #1741 preserved under the #1739 bulk write: a symlink plant at
+    # the sidecar path fails loud per tenant, but the sweep still
+    # drives every tenant (observability never wedges the sweep) and
+    # writes nothing through the plant.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.json")
+    with open(victim, "w", encoding="utf-8") as fh:
+        json.dump({"attacker": {"seed": "poison"}}, fh)
+    os.symlink(victim, wm)
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    # Both tenants were driven (no drive failure), and each record
+    # carries the LOUD observability failure naming the plant.
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False
+        assert any(
+            "observability failed" in n and "symlink" in n
+            for n in rec["notes"]
+        ), rec["notes"]
+    assert len(summary["errors"]) == 2
+    # Nothing was written through the plant: the victim is untouched
+    # and the sidecar path is still the link.
+    with open(victim, encoding="utf-8") as fh:
+        assert json.load(fh) == {"attacker": {"seed": "poison"}}
+    assert os.path.islink(wm)
+
+
+def test_write_watermark_bulk_notes_mid_sweep_corruption(tmp_path):
+    # Unit contract for the mid-sweep-corruption path: when the fresh
+    # read inside the bulk RMW finds a corrupt sidecar the caller had
+    # NOT already noted, the LOUD note is appended inside the locked
+    # RMW — so it lands in the persisted sidecar, not just in-memory.
+    # (A past revision appended after the write returned; the note
+    # never reached the disk.)
+    wm = str(tmp_path / "wm.json")
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    rec = {"tenant_id": "tnt-a", "notes": []}
+    corrupt = driver._write_watermark_bulk(
+        wm, {"tnt-a": rec},
+        corrupt_note=driver._CORRUPT_SIDECAR_LOUD,
+        already_noted=False,
+    )
+    assert corrupt is True
+    assert driver._CORRUPT_SIDECAR_LOUD in rec["notes"]
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert driver._CORRUPT_SIDECAR_LOUD in marks["tnt-a"]["notes"]
+
+    # already_noted=True: the caller's pre-loop note stands — no
+    # duplicate appended by the bulk write.
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    rec2 = {"tenant_id": "tnt-a", "notes": [driver._CORRUPT_SIDECAR_LOUD]}
+    corrupt = driver._write_watermark_bulk(
+        wm, {"tnt-a": rec2},
+        corrupt_note=driver._CORRUPT_SIDECAR_LOUD,
+        already_noted=True,
+    )
+    assert corrupt is True
+    assert rec2["notes"].count(driver._CORRUPT_SIDECAR_LOUD) == 1
+
+
+def test_bulk_watermark_mid_sweep_corruption_noted_on_disk(tmp_path, monkeypatch):
+    # Tick-level mid-sweep corruption: the pre-loop hint read sees a
+    # clean sidecar, but the fresh read inside the bulk RMW finds it
+    # corrupt (concurrent writer / disk event between the two reads).
+    # The LOUD note must land in the persisted sidecar AND the returned
+    # records. It does NOT ride the journaled tick-notes — those were
+    # built before the bulk write (documented divergence).
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    real_read = driver._read_watermark_marks
+    calls = []
+
+    def scripted_read(path):
+        calls.append(path)
+        if len(calls) == 1:
+            return {}, False  # pre-loop hint: clean
+        return real_read(path)  # bulk write's fresh read: corrupt
+
+    monkeypatch.setattr(driver, "_read_watermark_marks", scripted_read)
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert len(calls) == 2
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert any(
+            n.startswith("LOUD:") and "corrupt" in n for n in rec["notes"]
+        ), rec["notes"]
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert sorted(marks) == ["tnt-a", "tnt-b"]
+    for tid in ("tnt-a", "tnt-b"):
+        assert any(
+            n.startswith("LOUD:") and "corrupt" in n
+            for n in marks[tid]["notes"]
+        ), marks[tid]["notes"]
+    # The journal events were built before the bulk write saw the
+    # corruption, so they do not carry the note.
+    rows = _journal_rows(str(estate))
+    assert len(rows) == 2
+    assert all("corrupt" not in r["note"] for r in rows)
+
+
+def test_bulk_watermark_write_failure_notes_every_tenant(tmp_path, monkeypatch):
+    # A failed bulk write (disk full / permission) notes LOUD on every
+    # tenant's record and keeps the sweep alive — observability never
+    # wedges the sweep, and nothing is silently dropped.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    real_write = driver._atomic_write_json_0600
+
+    def failing_write(path, obj):
+        if os.path.abspath(path) == os.path.abspath(wm):
+            raise OSError("disk full (test)")
+        return real_write(path, obj)
+
+    monkeypatch.setattr(driver, "_atomic_write_json_0600", failing_write)
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False  # the drive itself succeeded
+        assert any(
+            "observability failed" in n and "disk full" in n
+            for n in rec["notes"]
+        ), rec["notes"]
+    assert len(summary["errors"]) == 2
+    assert all(e["tenant_id"] in ("tnt-a", "tnt-b")
+               for e in summary["errors"])
+
+
+def test_bulk_watermark_merges_over_preseeded_sidecar(tmp_path):
+    # QA suggestion 2: the "concurrent sweeper's records are merged,
+    # never lost" claim, pinned. A valid sidecar pre-seeded with a
+    # third tenant's record (as a concurrent sweep would have left it)
+    # survives this sweep's bulk merge untouched.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    preseed = {"tnt-z": {"tenant_id": "tnt-z", "tick_at": "old",
+                         "notes": ["pre-existing"]}}
+    with open(wm, "w", encoding="utf-8") as fh:
+        json.dump(preseed, fh)
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert summary["errors"] == []
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert marks["tnt-z"] == preseed["tnt-z"]
+    assert sorted(marks) == ["tnt-a", "tnt-b", "tnt-z"]

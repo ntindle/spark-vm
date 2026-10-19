@@ -35,8 +35,8 @@ bind is impossible on this API. ``--port`` stays configurable (default
 18760). No auth in S1: the operator's own box is the trust boundary,
 same as the CLI. Errors never leak box-controlled bytes raw: box-
 controlled free text (event ``note``, alert ``detail``) passes through
-``_clean_text`` (control-char strip) exactly like the CLI's display
-path; a crafted audit line can never forge an API row. The access log
+``_clean_text`` (Cc/Cf/Cs/Zl/Zp spoofing-class scrub) exactly like the
+CLI's display path; a crafted audit line can never forge an API row. The access log
 is scrubbed the same way at write time (``_clean_log_line``): the
 request line is client-controlled and reaches the operator's terminal
 raw, so control bytes are stripped before logging.
