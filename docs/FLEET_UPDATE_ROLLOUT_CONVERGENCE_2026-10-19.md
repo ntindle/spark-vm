@@ -34,9 +34,12 @@ rolls out tenant-plane updates."
 | Hardening | #1342/#1343/#1346, #1627, #1636 | in-lock pin writes and wave assignment, freeze-mid-promote refusal, dry-run gate honesty, journal crash-completeness |
 
 D-RC-6 closes the D-MT5 instrument gap the #1261 body named: every deploy
-and rollback the S4 driver performs appends a cost event (update/rollback,
+and rollback the S4 driver completes appends a cost event (update/rollback,
 duration, optional cost) — the driver is the measurement instrument, so
-the trigger's input is fed, not estimated.
+the trigger's input is fed, not estimated. A push that fails closed
+records a `deploy-failed` journal event but no cost event, and dry-runs
+record nothing: failed rollouts' cost stays unmeasured, the honest bound
+of the trigger's input.
 
 ## #1261 acceptance — re-verified leg by leg
 
@@ -49,7 +52,10 @@ the trigger's input is fed, not estimated.
 - **Rollback:** `rollback` redeploys the plane's `last_known_good` pin; a
   rollback target without a pinned manifest fails closed.
 - **Per-plane operational cost measurable:** cost ledger (S1) +
-  driver-appended events (D-RC-6) + `cost-summary`.
+  driver-appended events (D-RC-6) + `cost-summary` — for *completed*
+  deploys/rollbacks only; a failed push records a `deploy-failed`
+  journal event but no cost event, and dry-runs record nothing, so the
+  ledger measures completed work, not burned attempts.
 
 The acceptance is met at the instrument level and E2E-verified
 (`test_plane_rollout_e2e.py`). **Honest residual:** no live tenant-plane
@@ -59,8 +65,9 @@ first live rollout, not before. That is an operational milestone, not a
 build slice; it does not keep #1261 open.
 
 **Decision D-FC-1:** #1261 closes with this convergence pin. The lane's
-remaining open items are the box-estate remainders (#1630, #1632, #1633,
-#1649 — owned by the 2026-10-18 `GATE_CHANNEL_ROLLOUT_GAP_ANALYSIS.md`;
+remaining open items are the box-estate remainders (#1630, #1632, #1633
+— owned by the 2026-10-17 `GATE_CHANNEL_ROLLOUT_GAP_ANALYSIS.md`;
+#1649 — filed by `docs/ROLLOUT_ALERT_STACK_GAP_2026-10-17.md`, split
 #1634 hosted), which never belonged to this vision.
 
 ## #1292 — design question answered: keep the current behavior
@@ -99,8 +106,9 @@ it never built.
 
 ## Residuals — explicitly not this turn's gaps
 
-- Box-estate wave assignment + operator tooling: #1630, #1632, #1633,
-  #1649 (fresh owners in the 2026-10-18 gate-channel analysis); #1634
+- Box-estate wave assignment + operator tooling: #1630, #1632, #1633
+  (fresh owners in the 2026-10-17 gate-channel analysis), #1649 (filed
+  by the 2026-10-17 rollout-alert-stack analysis); #1634
   (hosted S3). Untouched here.
 - #1557 remains the post-#777 remainders tracker.
 - First live tenant-plane rollout (the D-MT5 trigger's first real

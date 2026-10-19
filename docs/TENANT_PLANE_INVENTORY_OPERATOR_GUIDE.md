@@ -95,7 +95,7 @@ Against that honest-operator baseline, the tool still refuses to
 present a false green: **every read replays the planes journal's
 latest-per-plane records and fails closed (exit 2) on any divergence**
 with the snapshot. A tampered or stale-restored snapshot cannot tell
-the `stale` pre-promotion gate "all converged". A `null` planes
+the `stale` estate-convergence report "all converged". A `null` planes
 document is structural corruption, not an empty store — it exits 2,
 never reads as "no planes".
 
@@ -176,7 +176,7 @@ Excluded planes are printed alongside the percentage, so a 100%
 census over 1 of 50 planes is honest. Planes registered without
 `--template` appear with `template_version: null`.
 
-### `stale` — the pre-promotion gate
+### `stale` — the estate convergence report
 
 ```
 python3 fleet/plane_inventory.py --store ~/var/plane-store \
@@ -210,7 +210,7 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
   fresh forever.
 - A typo'd `--store` path silently becomes a fresh empty store, and
   `stale` on it exits 0 with `count: 0` — a false green for the
-  pre-promotion gate. The controller must pin and verify the store
+  estate convergence report. The controller must pin and verify the store
   path rather than rely on fail-closed behavior here.
 
 ## A rollout wave, end to end
