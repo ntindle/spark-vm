@@ -107,8 +107,34 @@ codified as rule 6 so future watch bullets arrive compliant.)
   single stale box stays a per-box row on the fleet inventory table,
   not a page.
   (#1754)
+- The daily release-health check now also verifies the golden-image
+  build gate for every published release — so a release that published
+  fine but whose image gate never passed can no longer sit quietly in
+  the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Golden-image build gate: the image recipe now starts the inference
+  credential-swapping proxy during the build before running its gate
+  verification — previously the proxy was never running at build time, so
+  the gate's end-to-end swap proof failed and no release since the gate
+  was added could pass it. The gate-time proxy runs with the same
+  credential-isolation setup as the deployed service. The gate also
+  starts a throwaway confirmd (loopback only, fresh self-signed cert,
+  scratch approvals dir — all torn down in the same build step) because
+  the probe's gate mode checks the approvals path too. The container's
+  runtime proxy setup is also corrected to carry that same isolation, so
+  the inference port can no longer serve as an unintended second copy of
+  the main proxy. The gate's baked-secrets scan also stopped
+  false-refusing on the first end-to-end run: its secret shapes are
+  textual, so it now matches text files only (binary values in the
+  credential stores are still caught byte-exact), and inert test keys
+  shipped inside third-party libraries are covered by narrow, reviewed
+  path exclusions instead of failing the image. The workflow's
+  gate-record step runs again too — `build-image.sh` was missing its
+  executable bit in git (exit 126), so the gate-record skeleton could
+  never be emitted — and the manifest-preflight step now removes its
+  transient `image-manifest.json` so the gate-record step's dirty-tree
+  preflight (which refuses untracked files) passes. (#1779)
 - muse-job approvals: the approvals listing and the supervisor's approval
   payload now read both pending planes (tool approvals and user-input
   prompts) in one round-trip instead of two — so the two lists can no

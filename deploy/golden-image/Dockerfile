@@ -66,7 +66,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # install inventory (SETUP.md) the image must carry instead of apt-installing
 # at provision time.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-    ca-certificates curl git jq unzip sudo \
+    ca-certificates curl git jq openssl unzip sudo \
     openssh-server supervisor tini \
     unattended-upgrades \
     xvfb xfce4 xfce4-terminal dbus-x11 \
@@ -186,7 +186,83 @@ RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
 # (harness/muse-gate-shim.py via PROBE_MUSE_BIN; GitHub #1715), so the
 # automatable gate proves the inference-proxy swap path without the real
 # muse CLI the recipe deliberately does not bake.
-RUN /opt/sparkvm/harness/install-gate-fixture.sh
+#
+# The gate proves the swap through the REAL proxy, so the inference proxy
+# must be listening during this RUN: proxy/deploy.sh runs with --no-restart
+# (services start under supervisord at container runtime), and nothing else
+# starts it at build time — without this, the probe fails with
+# ConnectionRefused on 127.0.0.1:18081 (GitHub #1715's unmasked remainder).
+# Start the proxy as swapd with the inference environment from
+# proxy/swap-inference.service (own secrets dir, hosts file, registry,
+# SSRF allow file, inference mode, no approvals dir) — the fixture
+# installer writes exactly those inference paths, so a proxy without this
+# environment would serve as a second main proxy and the swap could never
+# resolve. Wait for the port, run the fixture installer, then stop the
+# proxy and remove the first-start CA it generated (/home/swapd/.mitmproxy)
+# so the build leaves the pre-gate state (build_ca_bundle.py skips loudly
+# when the CA is missing on a first deploy; the runtime proxy generates
+# its CA on first start). One RUN: a
+# background process does not survive across layers, and the gate must
+# never leave a proxy running in the published image.
+#
+# The probe's gate mode ALSO checks confirmd after the swap proof
+# (check_confirmd: the approvals path the first task needs — confirmd
+# itself must answer on 127.0.0.1:8443 with its 403 self-peer shape).
+# confirmd never runs at build time either, so the same RUN starts a
+# throwaway confirmd as swapd before the fixture installer: CONFIRM_BIND
+# pinned to 127.0.0.1 (tailscale is unreachable at build time, and the
+# probe connects to loopback), a throwaway self-signed cert generated
+# fresh in this RUN (the probe ignores cert identity — CERT_NONE — so
+# the cert is only a TLS-shape carrier; generated and deleted in this
+# RUN, it never lands in a layer), and a scratch approvals dir under
+# /tmp (never the real /home/swapd paths). Wait for a real TLS
+# handshake on :8443 — a bare TCP connect is not enough, confirmd
+# defers the handshake out of the accept loop — then run the fixture
+# installer; the trap kills confirmd and removes the gate dir so the
+# build leaves the pre-gate state there too.
+RUN set -e; \
+    sudo -u swapd env HOME=/home/swapd \
+        SWAP_SECRETS_DIR=/home/swapd/inference-secrets \
+        SWAP_HOSTS_FILE=/home/swapd/inference-hosts.allow \
+        SWAP_REGISTRY_FILE=/home/swapd/inference-registry.json \
+        SWAP_LOG_FILE=/home/swapd/inference-swap.log \
+        SWAP_SSRF_FILE=/home/swapd/inference-ssrf.allow \
+        SWAP_INFERENCE_MODE=1 \
+        SWAP_ENABLE_APPROVALS=0 \
+        /home/swapd/.venvs/mitm/bin/mitmdump \
+        -p 18081 --set listen_host=127.0.0.1 \
+        -s /home/swapd/swap_addon.py --set termlog_verbosity=warn \
+        --set "dumper_filter=~d nomatch.invalid" \
+        >/tmp/swap-inference-gate.log 2>&1 & \
+    proxy_pid=$!; \
+    confirmd_pid=""; \
+    trap 'kill "$proxy_pid" 2>/dev/null || true; kill "$confirmd_pid" 2>/dev/null || true; rm -rf /home/swapd/.mitmproxy /tmp/confirmd-gate' EXIT; \
+    ready=0; i=0; \
+    while [ "$i" -lt 100 ]; do \
+        if python3 -c "import socket; socket.create_connection(('127.0.0.1',18081),timeout=1).close()" 2>/dev/null; then ready=1; break; fi; \
+        i=$((i + 1)); sleep 0.2; \
+    done; \
+    if [ "$ready" != "1" ]; then echo "gate: inference proxy did not listen on 127.0.0.1:18081" >&2; tail -c 3000 /tmp/swap-inference-gate.log >&2 || true; exit 1; fi; \
+    gate_dir=/tmp/confirmd-gate; \
+    install -d -o swapd -g swapd -m 0700 "$gate_dir" "$gate_dir/approvals"; \
+    sudo -u swapd openssl req -x509 -newkey rsa:2048 -keyout "$gate_dir/key.pem" -out "$gate_dir/cert.crt" -days 1 -nodes -subj "/CN=127.0.0.1" >/dev/null 2>&1 || { echo "gate: throwaway cert generation failed" >&2; exit 1; }; \
+    sudo -u swapd env HOME=/home/swapd \
+        CONFIRM_BIND=127.0.0.1 \
+        CONFIRM_PORT=8443 \
+        CONFIRM_CERT="$gate_dir/cert.crt" \
+        CONFIRM_KEY="$gate_dir/key.pem" \
+        CONFIRM_OWNER=ntindle@github \
+        CONFIRM_DIR="$gate_dir/approvals" \
+        /usr/bin/python3 /home/swapd/confirmd.py \
+        >/tmp/confirmd-gate.log 2>&1 & \
+    confirmd_pid=$!; \
+    ready=0; i=0; \
+    while [ "$i" -lt 100 ]; do \
+        if python3 -c "import socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; c.wrap_socket(socket.create_connection(('127.0.0.1',8443),timeout=2),server_hostname='127.0.0.1').close()" 2>/dev/null; then ready=1; break; fi; \
+        i=$((i + 1)); sleep 0.2; \
+    done; \
+    if [ "$ready" != "1" ]; then echo "gate: confirmd did not complete a TLS handshake on 127.0.0.1:8443" >&2; tail -c 3000 /tmp/confirmd-gate.log >&2 || true; exit 1; fi; \
+    /opt/sparkvm/harness/install-gate-fixture.sh
 
 # --- image manifest (the D-P1 artifact) --------------------------------------
 # The manifest is generated on the HOST by build-image.sh (or the CI job)

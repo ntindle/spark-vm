@@ -117,6 +117,11 @@ jobs:
           harness/generate-image-manifest.sh --out image-manifest.json
           harness/check-image-manifest.sh image-manifest.json \
             --expect-version "${SPARKVM_SHA}"
+          # Transient verification artifact: remove it so the tree stays
+          # pristine for the gate-record step's dirty-tree preflight
+          # (build-image.sh refuses untracked files — an artifact left
+          # here fails the gate).
+          rm -f image-manifest.json
       - name: Emit the gate-record skeleton
         run: |
           deploy/golden-image/build-image.sh --gate-record-out gate-record.json

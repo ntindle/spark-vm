@@ -308,6 +308,58 @@ def test_pycache_pruned(tmp_path):
     assert p.returncode == 0, p.stdout + p.stderr
 
 
+def test_content_walk_skips_binary_files(tmp_path):
+    # The content patterns are textual shapes (PEM armor, AKIA, ghp_,
+    # sk-): a matching byte sequence inside a binary file is not a hit.
+    # Real byte sequences like these live in system libraries (libssh,
+    # libgnutls) and toolchain binaries — the first end-to-end gate run
+    # false-refused on 22 of them. Binary VALUES where values actually
+    # live are still caught byte-exact by the secrets-dir rule
+    # (test_binary_secret_value_refused); a secret compiled into a
+    # binary is out of scope for the content walk (documented residual).
+    blob = tmp_path / "usr" / "lib" / "libfake.so"
+    blob.parent.mkdir(parents=True)
+    # Secret-shaped literals are split (like the other tests in this
+    # file) so the repo tree itself stays scan-clean.
+    blob.write_bytes(b"\x7fELF\x00" + b"-----BEG" + b"IN RSA PRIVATE KEY-----\x00"
+                     + b"AKIA" + b"IOSFODNN7EXAMPLE\x00"
+                     + b"sk-" + b"fakefakefakefakefakefakex\x00")
+    p = run_scan(tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_prune_path_excludes_test_vectors(tmp_path):
+    # Third-party test vectors: a PEM block under a pruned path is not a
+    # hit — content alone cannot tell a test key from a real one, so the
+    # discriminator is the reviewed path.
+    pem = ("-----BEG" + "IN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n"
+           + "-----END RSA PRIVATE KEY-----\n")
+    write(tmp_path / "venv" / "lib" / "site-packages" / "tornado" / "test" / "test.key", pem)
+    p = run_scan(tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_prune_path_does_not_hide_first_party(tmp_path):
+    # The prune is path-scoped: the identical PEM block outside the
+    # pruned subtree still refuses.
+    pem = ("-----BEG" + "IN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n"
+           + "-----END RSA PRIVATE KEY-----\n")
+    write(tmp_path / "home" / "swapd" / "ca-key.pem", pem)
+    p = run_scan(tmp_path)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT pem-private-key" in p.stdout
+
+
+def test_prune_path_applies_to_filename_walk(tmp_path):
+    # A prune covers every walk, not just the content walk: a
+    # credential-shaped filename under a pruned path is not a hit.
+    d = tmp_path / "venv" / "lib" / "site-packages" / "tornado" / "test"
+    d.mkdir(parents=True)
+    (d / "id_rsa").write_text("not-a-key\n")
+    p = run_scan(tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
 def test_allowlist_multiword_value(tmp_path):
     # The allowlist compare must not word-split multi-word entries.
     pat = tmp_path / "patterns.txt"

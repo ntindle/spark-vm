@@ -284,6 +284,141 @@ def test_dockerfile_runs_gate_tooling():
     assert "proxy/deploy.sh --no-restart" in text
 
 
+# The inference environment the gate-time proxy must carry: the fixture
+# installer writes the inference paths (registry, hosts, SSRF allow,
+# secrets), so the proxy proving the swap must read them — the same
+# environment proxy/swap-inference.service declares.
+_INFERENCE_ENV = {
+    "SWAP_SECRETS_DIR": "/home/swapd/inference-secrets",
+    "SWAP_HOSTS_FILE": "/home/swapd/inference-hosts.allow",
+    "SWAP_REGISTRY_FILE": "/home/swapd/inference-registry.json",
+    "SWAP_LOG_FILE": "/home/swapd/inference-swap.log",
+    "SWAP_SSRF_FILE": "/home/swapd/inference-ssrf.allow",
+    "SWAP_INFERENCE_MODE": "1",
+    "SWAP_ENABLE_APPROVALS": "0",
+}
+
+
+def _gate_run_block():
+    """The Dockerfile RUN block that installs the gate fixture: the RUN
+    instruction whose shell actually invokes
+    /opt/sparkvm/harness/install-gate-fixture.sh (comment mentions don't
+    count)."""
+    text = _dockerfile_text()
+    needle = "/opt/sparkvm/harness/install-gate-fixture.sh"
+    idx = text.find(needle)
+    assert idx != -1, "no gate-fixture RUN in the Dockerfile"
+    start = text.rfind("\nRUN ", 0, idx) + 1
+    # The block ends at the next top-level Dockerfile instruction.
+    end = len(text)
+    for m in re.finditer(r"(?m)^[A-Z]+ ", text[idx:]):
+        end = idx + m.start()
+        break
+    return text[start:end]
+
+
+def test_gate_run_starts_inference_proxy():
+    """The gate proves the swap through the REAL proxy, so the fixture RUN
+    must start the inference proxy itself: proxy/deploy.sh runs with
+    --no-restart and nothing else starts it at build time (the probe
+    otherwise fails with ConnectionRefused on 127.0.0.1:18081)."""
+    block = _gate_run_block()
+    assert "mitmdump" in block, "gate RUN never starts the proxy"
+    assert "18081" in block, "gate proxy does not listen on the inference port"
+    assert "install-gate-fixture.sh" in block
+    # The proxy must be up before the fixture installer runs its probe.
+    assert block.find("18081") < block.find("install-gate-fixture.sh")
+
+
+def test_gate_proxy_carries_inference_environment():
+    """The gate-time proxy must read the inference paths the fixture
+    installer writes — without SWAP_INFERENCE_MODE=1 and the inference
+    file overrides it serves as a second main proxy and the swap can
+    never resolve."""
+    block = _gate_run_block()
+    for key, val in _INFERENCE_ENV.items():
+        assert "%s=%s" % (key, val) in block, \
+            "gate proxy missing %s=%s" % (key, val)
+
+
+def test_gate_run_stops_proxy_and_restores_premitm_state():
+    """The gate must not leave a proxy running in the published image, and
+    must remove the first-start CA the gate proxy generated: deploy.sh
+    skips the CA bundle when /home/swapd/.mitmproxy is missing and the
+    runtime generates it on first start."""
+    block = _gate_run_block()
+    assert "trap" in block, "gate RUN has no EXIT trap for the proxy"
+    assert "rm -rf /home/swapd/.mitmproxy" in block
+
+
+def test_gate_run_is_single_docker_instruction():
+    """Docker parses instructions line by line: every physical line of the
+    gate RUN except the last must end with a backslash continuation, or a
+    line of shell (e.g. inside a multi-line quoted program) becomes an
+    'unknown instruction' parse error and the whole build fails."""
+    text = _dockerfile_text()
+    needle = "/opt/sparkvm/harness/install-gate-fixture.sh"
+    idx = text.find(needle)
+    assert idx != -1
+    start = text.rfind("\nRUN ", 0, idx) + 1
+    lines = text[start:].splitlines()
+    body = []
+    for line in lines:
+        body.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    assert len(body) > 1, "gate RUN collapsed to one physical line?"
+    assert needle in body[-1], \
+        "RUN block ended before the fixture invocation — a line is " \
+        "missing its backslash continuation"
+
+
+def test_gate_run_starts_throwaway_confirmd():
+    """The probe's gate mode runs check_confirmd (confirmd itself answering
+    on 127.0.0.1:8443 with its 403 self-peer shape) after the swap proof —
+    so the gate RUN must start confirmd at build time too, or the gate
+    fails with ConnectionRefused exactly like the proxy did before the
+    inference-proxy fix. The confirmd is throwaway: loopback bind, a fresh
+    self-signed cert (never the production cert path), a scratch approvals
+    dir (never the real one), and the EXIT trap kills it and removes the
+    gate dir."""
+    block = _gate_run_block()
+    assert "CONFIRM_BIND=127.0.0.1" in block
+    assert "/home/swapd/confirmd.py" in block
+    # throwaway cert minted fresh in the RUN — the production CONFIRM_CERT
+    # default must never appear in the gate RUN
+    assert "openssl req -x509" in block
+    assert 'CONFIRM_CERT="$gate_dir/cert.crt"' in block
+    assert "CONFIRM_CERT=/home/swapd/confirmd/cert.crt" not in block
+    # scratch approvals dir — never the real one
+    assert 'CONFIRM_DIR="$gate_dir/approvals"' in block
+    assert "CONFIRM_DIR=/home/swapd/approvals" not in block
+    # readiness is a real TLS handshake on 8443, not a bare TCP connect
+    # (confirmd defers the handshake out of the accept loop)
+    assert "8443" in block
+    assert "ssl.SSLContext" in block
+    assert "CERT_NONE" in block
+    # teardown: killed on EXIT and the gate dir removed with it
+    assert 'kill "$confirmd_pid"' in block
+    assert "rm -rf /home/swapd/.mitmproxy /tmp/confirmd-gate" in block
+
+
+def test_gate_tooling_installs_openssl():
+    """The gate RUN mints confirmd's throwaway TLS cert with openssl — the
+    OS layer must install it explicitly rather than assuming it from the
+    base image."""
+    text = _dockerfile_text()
+    start = text.find("RUN apt-get update")
+    assert start != -1, "no apt-get OS layer in the Dockerfile"
+    lines = text[start:].splitlines()
+    body = []
+    for line in lines:
+        body.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    assert "openssl" in "\n".join(body)
+
+
 # --- daemon set (supervisord.conf) ----------------------------------------------
 
 
@@ -350,6 +485,27 @@ def test_supervisord_privilege_split():
         if s.startswith("program:")
     }
     assert programs == expected, programs
+
+
+def test_supervisord_swap_inference_environment():
+    """The runtime swap-inference program must carry the inference
+    environment from proxy/swap-inference.service: without it the
+    container's :18081 serves as a second MAIN proxy (main secrets dir,
+    hosts file, registry), defeating finding 31's credential isolation —
+    the provider key would never be read from its own store and the main
+    proxy's keys would be served on the inference port."""
+    cfg = _supervisord()
+    raw = cfg.get("program:swap-inference", "environment")
+    env = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        env[k.strip()] = v.strip().strip('"')
+    for key, val in _INFERENCE_ENV.items():
+        assert env.get(key) == val, \
+            "swap-inference missing %s=%s (got %r)" % (key, val, env.get(key))
 
 
 def test_dockerfile_creates_sparkpair_service_user():

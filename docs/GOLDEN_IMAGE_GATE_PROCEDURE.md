@@ -207,6 +207,16 @@ Operational notes:
   regenerated test artifacts. If the scan's own report would be the
   thing under review, note the exclusion; the exclusion is exactly one
   file (the pattern file used for the run), never a directory.
+- Content patterns match text files only (`grep -I` skips binaries):
+  every content shape is textual, so a baked secret matching one is
+  necessarily text; binary values in the credential stores are still
+  caught byte-exact by the secrets-dir rule. Inert test keys shipped
+  inside third-party libraries (tornado's test suite, cryptography's
+  SSH module, aioquic, npm's config docs) are pruned via the reviewed
+  `prune-path` kind in `baked-secrets-patterns.txt` — content alone
+  cannot tell a test key from a real one. Each prune is narrow, carries
+  its rationale, and never covers a first-party path; a prune that
+  could hide a real baked key is a gate hole.
 - Unreadable entries are skipped **loudly, not silently**: a directory
   the walk cannot descend warns on stderr and is skipped fail-open —
   the gate runs as root, which moots it on a healthy image. A file
@@ -265,6 +275,14 @@ Triage a failed installer run from its captured output:
 - **Installer exit 3 (fixture startup):** the echo fixture failed to
   start. Diagnose from the captured stderr the installer prints; do not
   proceed without the fixture.
+- **Probe gate mode, confirmd leg:** gate mode checks confirmd itself
+  answering on `127.0.0.1:8443` after the swap proof. In the recipe's
+  gate RUN the RUN itself starts a throwaway confirmd (loopback bind,
+  fresh self-signed cert, scratch approvals dir — see the Dockerfile
+  gate-RUN comment); a standalone installer run outside that context
+  needs a confirmd listening on the loopback port first, or this leg
+  fails with `ConnectionRefused` on `:8443` — that is a gate-environment
+  failure, not an image defect.
 
 Any nonzero installer exit is **no-gate**: the gate did not run. But the
 classes differ — environment/setup failures are fixed and the gate

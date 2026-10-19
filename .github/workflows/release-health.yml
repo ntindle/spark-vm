@@ -1,4 +1,5 @@
-# Release-health monitor: tag <-> release consistency on the published surface.
+# Release-health monitor: tag <-> release consistency + golden-image gate
+# verdicts on the published surface.
 #
 # Why this exists (distribution, open-source track): the release pipeline
 # (scripts/cut-release.sh + release.yml) cuts an immutable v* tag and
@@ -9,10 +10,15 @@
 # scheduled check fails loudly on that drift so the release surface the
 # project advertises is the surface GitHub actually publishes.
 #
-# Read-only: no tags are created, no releases are published, no mutations.
-# The GITHUB_TOKEN below only raises the Releases API quota; the script
-# works unauthenticated (60 requests/hour is enough for one daily run).
-# The token is never logged.
+# The same run also reads the golden-image build gate verdict per published
+# release: a published release whose gate never passed (the v0.9.0 cut
+# shipped exactly this way) is drift the tag/release check cannot see.
+#
+# Read-only: no tags are created, no releases are published, no workflows
+# are dispatched, no mutations. The GITHUB_TOKEN below raises the API quota
+# (the gate check reads workflow runs, so it needs actions:read; without
+# it the script fails loud, never silently passes). The token is never
+# logged.
 
 name: release-health
 
@@ -24,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # release_health.py reads release.yml workflow runs for the gate verdicts
 
 jobs:
   release-health:

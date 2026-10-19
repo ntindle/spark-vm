@@ -38,6 +38,18 @@
 # a skipped scan visible at audit time).
 #
 # Honest residuals:
+# - Content patterns match TEXT files only (grep -I skips binary files):
+#   every content shape the patterns name (PEM armor, AKIA, ghp_,
+#   sk- prefixes) is textual, so a baked secret matching them is
+#   necessarily text; a secret compiled into a binary is out of scope
+#   for the content walk. Binary VALUES where values actually live are
+#   still caught byte-exact by the secrets-dir rule (cmp, no patterns).
+# - Third-party test vectors (inert PEM blocks / key-shaped strings
+#   shipped inside library packages) are pruned via the reviewed
+#   prune-path kind in the patterns file — content alone cannot tell a
+#   test key from a real one, so the discriminator is the path, each
+#   with a rationale a reviewer weighs. A prune covering a first-party
+#   path would be a gate hole; prunes stay narrow by convention.
 # - A secret in a format no content pattern names, stored OUTSIDE the
 #   secrets dirs, is not caught — the pattern list is the reviewed,
 #   extensible control for that half; extend it when new shapes matter.
@@ -118,6 +130,7 @@ esac
 CONTENT_RULES=()  # "id:regex"
 NAME_RULES=()     # "id:glob"
 ALLOW_VALUES=()   # exact strings
+PRUNE_PATHS=()    # find -path patterns; pruned from every walk
 lineno=0
 while IFS= read -r line || [[ -n "$line" ]]; do
   lineno=$((lineno + 1))
@@ -140,6 +153,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     content) CONTENT_RULES+=("$id:$rule") ;;
     name)    NAME_RULES+=("$id:$rule") ;;
     allow)   ALLOW_VALUES+=("$rule") ;;
+    prune-path) PRUNE_PATHS+=("$rule") ;;
     *)
       echo "baked-secrets-scan: $PATTERNS:$lineno: unknown kind '$kind'" >&2; exit 2 ;;
   esac
@@ -168,10 +182,18 @@ trap 'rm -f "$allow_tmp" "$ERR_TMP"' EXIT
 # ${TARGET_C%/} keeps the prunes correct when TARGET is / ("/proc", not
 # "//proc" — find -path does string matching, so "//proc" never matches).
 PSEUDO_PRUNES=( -path "${TARGET_C%/}/proc" -o -path "${TARGET_C%/}/sys" -o -path "${TARGET_C%/}/dev" )
+# prune-path entries from the patterns file (reviewed third-party
+# test-vector exclusions): one -path clause each. \( -false ... \) when
+# empty so the group is inert and the find expression stays well-formed.
+PRUNE_CLAUSES=( -false )
+for pp in ${PRUNE_PATHS[@]+"${PRUNE_PATHS[@]}"}; do
+  PRUNE_CLAUSES+=( -o -path "$pp" )
+done
 walk_files() {  # prints NUL-delimited regular-file/symlink paths
   find "$TARGET_C" \
     \( "${PSEUDO_PRUNES[@]}" \) -prune -o \
     \( -type d \( -name __pycache__ -o -name .pytest_cache \) \) -prune -o \
+    \( "${PRUNE_CLAUSES[@]}" \) -prune -o \
     \( -type f -o -type l \) -print0 2>>"$ERR_TMP"
 }
 
@@ -181,10 +203,14 @@ for entry in ${CONTENT_RULES[@]+"${CONTENT_RULES[@]}"}; do
   re="${entry#*:}"
   # xargs -r (GNU): grep never runs on an empty file list, so a tree with
   # no files is not a hang. A batch with no match exits 1 -> || true.
+  # Content patterns are textual shapes: skip binary files (grep -I).
+  # A baked secret matching these shapes is necessarily text; binary
+  # values in the credential dirs are still caught byte-exact by the
+  # secrets-dir rule below.
   while IFS= read -r f; do
     [[ -n "$SELF" && "$f" == "$SELF" ]] && continue
     hit "$id" "$f"
-  done < <(walk_files | xargs -0 -r grep -lE -e "$re" 2>/dev/null || true)
+  done < <(walk_files | xargs -0 -r grep -lIE -e "$re" 2>/dev/null || true)
 done
 
 # --- 2. filename globs -----------------------------------------------------
@@ -207,6 +233,7 @@ if ((${#NAME_RULES[@]})); then
   done < <(find "$TARGET_C" \
              \( "${PSEUDO_PRUNES[@]}" \) -prune -o \
              \( -type d \( -name __pycache__ -o -name .pytest_cache \) \) -prune -o \
+             \( "${PRUNE_CLAUSES[@]}" \) -prune -o \
              \( -type f -o -type l \) \( -false "${find_expr[@]}" \) -print 2>>"$ERR_TMP" || true)
 fi
 
