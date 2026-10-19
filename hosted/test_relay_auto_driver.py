@@ -609,3 +609,32 @@ def test_tick_all_tenants_drives_protocol_store():
     rec = summary["tenants"]["tnt-z"]
     assert rec["applied"] is True
     assert store.get("tnt-z").boxes["box-a"].code == "connection-unreachable"
+
+
+def test_watermark_lock_refuses_symlink_plant(tmp_path):
+    # F1 (security sweep 20261018-2259): the sidecar lock serializes
+    # read-modify-write across sweep processes — a pre-planted symlink
+    # at the lock path must not silently move the flock onto another
+    # file (lock-desync / lock-DoS). The tick refuses loudly
+    # (fail-visible through the observability handler), the drive
+    # itself still works, and the sweep is not wedged.
+    store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.lock")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, wm + ".lock")
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    rec = summary["tenants"]["tnt-a"]
+    assert rec["failed"] is False  # the drive itself worked
+    assert any("observability failed" in n for n in rec["notes"])
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["tenant_id"] == "tnt-a"
+    # The victim file was never flocked through: no lock sibling was
+    # created behind the plant, and the real watermark was not written.
+    assert not os.path.exists(wm)
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "victim"
