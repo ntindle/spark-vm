@@ -1163,7 +1163,8 @@ def test_maybe_probe_not_due_threads_record_to_reading(history, journal):
     assert out["probed"] is False
     assert out["reading"]["probe"] == prober.PATH_OK
     assert calls == [VM], (
-        "exactly one history read (maybe_probe's); the reading must reuse it"
+        "exactly one latest_probe read (maybe_probe's); the reading must "
+        "reuse it for its probe half"
     )
 
 
@@ -1200,6 +1201,6 @@ def test_maybe_probe_probed_path_threads_fresh_record(history, journal):
     assert out["probed"] is True
     assert out["reading"]["probe"] == prober.PATH_OK
     assert calls == [VM], (
-        "probed path: the reading must use the just-written record, "
-        "not re-read the history"
+        "probed path: the reading must use the just-written record for "
+        "its probe half, not re-read the history"
     )

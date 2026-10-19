@@ -43,8 +43,10 @@ Design decisions (all per the design doc, no improvisation):
 - Journal reads are RAM-bounded: the scan walks each generation
   tail-first in fixed-size chunks, holding O(chunk) bytes (#1730) —
   the query no longer materializes the whole (up to 64 MiB per
-  generation) file on every call, while yielding exactly the same
-  newest-first frames as the old whole-file read.
+  generation) file on every call, while yielding the same
+  newest-first frames for every writer-produced line (one deliberate
+  lone-``\r`` difference from the old text-mode read, documented on
+  ``_read_lines_newest_first``).
 
 Slice boundaries: R2 wires the dial prober (active instrument, hands
 this journal the identity-marker discriminator it already enforces);
@@ -416,14 +418,20 @@ def _read_lines_newest_first(f):
     straddle a chunk boundary, so the reader's memory stays O(chunk)
     even for a 64 MiB generation — the old ``reversed(f.readlines())``
     materialized the entire file on every ``relay_session_liveness()``
-    call, i.e. once per box per tick (#1730). Semantics match the old
-    read exactly, newest-first: a torn trailing line (reader racing the
-    writer's fsync) comes out as a leading fragment whose JSON parse
-    fails and is skipped, same as before; a file not ending in a
-    newline yields its last line intact; multibyte UTF-8 sequences
-    split across a chunk boundary are reassembled before any decode,
-    so the errors="replace" decode the caller applies behaves
-    identically.
+    call, i.e. once per box per tick (#1730). Line content matches the
+    old read, newest-first, for every line the journal writer can
+    produce: a torn trailing line (reader racing the writer's fsync)
+    comes out as a leading fragment whose JSON parse fails and is
+    skipped, same as before; a file not ending in a newline yields its
+    last line intact; multibyte UTF-8 sequences split across a chunk
+    boundary are reassembled before any decode, so the errors="replace"
+    decode the caller applies behaves identically. One deliberate
+    difference: the reader splits on ``\n`` only, while the old
+    text-mode read also treated a lone ``\r`` as a line boundary
+    (universal-newline translation). The journal writer (``json.dumps``
+    + ``"\n"``) can never emit a raw ``\r`` — it is JSON-escaped — so
+    this only affects hand-edited or corrupted lines, which stay
+    skipped-as-corrupt either way.
     """
     f.seek(0, os.SEEK_END)
     pos = f.tell()
@@ -458,7 +466,10 @@ def _iter_frames(path):
     corruption can't crash the query; such a line never parses as JSON
     and is skipped like any other corrupt line). The scan is
     RAM-bounded: generations are walked tail-first in fixed-size
-    chunks, holding O(chunk) bytes, never the whole file (#1730)."""
+    chunks, holding O(chunk) bytes, never the whole file (#1730). Line
+    splitting is on ``\n`` only — see ``_read_lines_newest_first`` for
+    the one deliberate lone-``\r`` difference from the old text-mode
+    read."""
     gens = [""] + [".%d" % g for g in range(1, MAX_ROTATED + 1)]
     for gen in gens:
         fname = path + gen

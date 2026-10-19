@@ -499,7 +499,11 @@ def test_lock_missing_dir_stays_darkness(tmp_path, monkeypatch):
 
 
 def _oracle_lines(path):
-    """The old read — reversed(readlines()) — in raw bytes."""
+    """Byte-equivalent of the old text-mode ``reversed(readlines())``
+    after the consumer's strip/skip-empty normalization: matches the
+    old read on every line not containing a lone ``\\r`` (see
+    ``test_iter_frames_lone_cr_is_not_split`` for the one deliberate
+    difference)."""
     with open(path, "rb") as f:
         return list(reversed(f.read().split(b"\n")))
 
@@ -514,7 +518,11 @@ def test_read_lines_newest_first_matches_oracle_across_chunk_sizes(
         monkeypatch.setattr(rl, "_REVERSE_CHUNK_BYTES", chunk)
         payload = b""
         for i in range(rng.randrange(0, 80)):
-            body = ("l\xednea-%d-" % i).encode("utf-8") + bytes(
+            # Valid multibyte UTF-8 (straddles chunk boundaries at
+            # small chunk sizes) plus the invalid \xed byte and
+            # ordinary ASCII — no lone \r: that is the one deliberate
+            # divergence, pinned separately below.
+            body = ("l\xednea-%d-✓-" % i).encode("utf-8") + bytes(
                 rng.randrange(33, 127) for _ in range(rng.randrange(0, 400))
             )
             payload += body + b"\n"
@@ -546,6 +554,24 @@ def test_iter_frames_skips_torn_trailing_line(journal):
     rl.emit_frame(**frame(session_id="sess-1"))
     with open(journal, "ab") as f:
         f.write(b'{"torn": true')  # torn write, no trailing newline
+    seen = [fr["session_id"] for fr, _gen in rl._iter_frames(journal)]
+    assert seen == ["sess-1"]
+
+
+def test_iter_frames_lone_cr_is_not_split(journal):
+    """Pin the one deliberate divergence from the old text-mode read
+    (#1730 QA review): the chunked reader splits on ``\\n`` only, so a
+    lone ``\\r`` does NOT start a new line. The journal writer
+    (``json.dumps`` + ``"\\n"``) can never emit a raw ``\\r`` — it
+    arrives only via hand-edit or corruption — so the two ``\\r``-joined
+    frames below stay one unparseable line and are skipped, while the
+    honest frame parses."""
+    rl.emit_frame(**frame(session_id="sess-1"))
+    with open(journal, "ab") as f:
+        f.write(b'{"session_id":"sess-2"}\r{"session_id":"sess-3"}\n')
+    with open(journal, "rb") as f:
+        raw = list(rl._read_lines_newest_first(f))
+    assert any(b"\r" in line for line in raw), "lone CR must not split lines"
     seen = [fr["session_id"] for fr, _gen in rl._iter_frames(journal)]
     assert seen == ["sess-1"]
 
