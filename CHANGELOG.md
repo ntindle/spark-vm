@@ -124,7 +124,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the probe's gate mode checks the approvals path too. The container's
   runtime proxy setup is also corrected to carry that same isolation, so
   the inference port can no longer serve as an unintended second copy of
-  the main proxy. (#1779)
+  the main proxy. The gate's baked-secrets scan also stopped
+  false-refusing on the first end-to-end run: its secret shapes are
+  textual, so it now matches text files only (binary values in the
+  credential stores are still caught byte-exact), and inert test keys
+  shipped inside third-party libraries are covered by narrow, reviewed
+  path exclusions instead of failing the image. (#1779)
 - muse-job approvals: the approvals listing and the supervisor's approval
   payload now read both pending planes (tool approvals and user-input
   prompts) in one round-trip instead of two — so the two lists can no
