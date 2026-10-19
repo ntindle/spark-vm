@@ -9,7 +9,8 @@ collect time, appends them to the store's event journal with
 (box_id, event_id) dedup, and evaluates the five event-journal S1
 alert rules on every collect; the sixth S1 rule (correlated gate-stale,
 #1631) is collector-side and lives in inventory.py, reading the
-collector's gate answer-age field instead of the event stream. Alert transport at S1 is the operator's fleet journal
+collector's gate answer-age field instead of the event stream. Alert
+transport at S1 is the operator's fleet journal
 (alerts.jsonl in the store) plus `fleet events watch` exiting nonzero
 on unacknowledged alerts.
 
