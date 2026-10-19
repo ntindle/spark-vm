@@ -190,10 +190,13 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
                     # #1741: symlink plant — refuse loud, like the
                     # write path. A plant must never be restarted
                     # from empty over (that would silently discard
-                    # the evidence of the plant).
+                    # the evidence of the plant). errno is preserved
+                    # so a handler can distinguish a plant from a
+                    # disk error programmatically.
                     raise OSError(
+                        errno.ELOOP,
                         "refusing to read watermark through symlink: %r"
-                        % (path,)
+                        % (path,),
                     ) from exc
                 # Corrupt/unreadable content: restart from empty, but
                 # fail-visible per D-AC-7 — the caller notes it LOUD.

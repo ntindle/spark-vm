@@ -279,7 +279,13 @@ def _journal_locked(path, exclusive=True, timeout_s=None):
     #1740: the lock sidecar opens with O_NOFOLLOW — a pre-planted
     symlink at the lock path fails loud as JournalLockError (ELOOP)
     instead of silently moving the flock onto another file
-    (lock-desync / lock-DoS).
+    (lock-desync / lock-DoS). The session journal data path itself
+    deliberately keeps plain O_CREAT|O_APPEND (see the #1538
+    divergence note on relay_path_state._record_outcome): the lock
+    guards the mutual-exclusion safety invariant, which a plant
+    silently desyncs, while the data path's residual risk was already
+    adjudicated there — do not "complete" this asymmetry without
+    revisiting that analysis.
     """
     if timeout_s is None:
         timeout_s = _JOURNAL_LOCK_WAIT_TIMEOUT_S
