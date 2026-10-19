@@ -51,6 +51,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Documented the relay-liveness wiring tick for operators: how to run a
+  manual tick for a tenant, how to read the tick report it prints, what
+  the exit codes and failure behavior mean, and the operating discipline
+  until the auto-cadence driver lands — with a test that fails if the
+  doc drifts from the wiring's real flags, report fields, and notes.
+  (#TBD)
 - The CI guide's job list is now pinned to the workflow itself: a new
   contributor-docs check fails if the job table in the CI reference drifts
   from the actual jobs (a new job without a table row, or a stale row for a

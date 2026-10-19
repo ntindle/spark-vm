@@ -145,8 +145,8 @@ local-gate plan (nothing executed):
   3. changed-paths gate    — docs-only diffs skip step 6, exactly like CI
                              (evaluated before any step that writes to the
                              tree)
-  4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py -q
-                             (CI's exact four-file invocation; runs on every
+  4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
+                             (CI's exact five-file invocation; runs on every
                              PR like CI, docs-only included)
   5. shellcheck            — severity=error over the CI job's shell-file
                              selection on the whole checkout (like CI's
@@ -182,18 +182,21 @@ gate_verdict="$(bash "$SCRIPT_DIR/local-gate.sh" --eval-changed-paths --worktree
 echo "local-gate: diff is $gate_verdict"
 
 step "docs index coverage"
-# CI's `docs index coverage` job runs four test files on every PR
-# (docs-only included): the docs-index coverage test plus the three
+# CI's `docs index coverage` job runs five test files on every PR
+# (docs-only included): the docs-index coverage test plus the four
 # doc-inventory pins (link-exclude inventory vs ci.yml; CONTRIBUTING's
 # gate inventory vs ci.yml and the branch-protection ruleset; the CI.md
-# job-table inventory vs ci.yml's job ids). Running the job's exact
-# four-file invocation here keeps the docs-only local path honest — a
+# job-table inventory vs ci.yml's job ids; the wiring-tick operator doc
+# vs hosted/relay_tenant_wiring.py). Running the job's exact
+# five-file invocation here keeps the docs-only local path honest — a
 # docs-only PR hand-editing one of those inventory blocks would otherwise
 # pass this step locally while CI fails it.
-# (dx 20261011-0429: this step used to run only the index-coverage file.)
+# (dx 20261011-0429: this step used to run only the index-coverage file;
+#  dx 20261018-1829: test_ci_docs_job_inventory.py closed the docs-only
+#  escape hatch for the CI.md job table.)
 python3 -m pytest scripts/test_docs_index_coverage.py \
   scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py \
-  scripts/test_ci_docs_job_inventory.py -q
+  scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
 
 step "shellcheck (severity=error, CI job selection)"
 if ! command -v shellcheck >/dev/null 2>&1; then
