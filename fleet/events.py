@@ -65,7 +65,13 @@ from datetime import datetime, timedelta, timezone
 # the T2 consume-gate rule. Imported as a sibling because the fleet
 # modules are script-run (python3 fleet/events.py puts fleet/ on
 # sys.path); the hermetic suite inserts fleet/ before importing.
-import attest
+# The fallback covers package-style importers (`from fleet import
+# events`, e.g. hosted/relay_auto_driver.py), where the sibling
+# resolves as fleet.attest.
+try:
+    import attest
+except ImportError:
+    from fleet import attest
 
 try:
     import fcntl

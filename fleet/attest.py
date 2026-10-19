@@ -313,7 +313,12 @@ def pin_box_key(store_dir, box_id, pubkey_hex):
                        "normalized)")
     if not os.path.isdir(store_dir):
         return None, "store dir %s does not exist" % (store_dir,)
-    from events import journal_lock  # lazy: events.py imports this module
+    try:
+        from events import journal_lock  # lazy: events.py imports this
+        # module; the fallback covers package-style importers
+        # (`from fleet import ...`), where the sibling is fleet.events.
+    except ImportError:
+        from fleet.events import journal_lock
     path = _box_keys_path(store_dir)
     fp = _fingerprint_of_pubkey(pub)
     try:
