@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 # The workflows whose jobs this pins (the full CI + release surface).
-WORKFLOW_FILES = ["ci.yml", "golden-image.yml", "release.yml"]
+WORKFLOW_FILES = ["ci.yml", "golden-image.yml", "release.yml", "release-health.yml"]
 
 # A job block starts at a 2-space-indented key and runs to the next such
 # key or end of file (job keys are the only 2-space-indented mappings in
