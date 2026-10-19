@@ -903,6 +903,8 @@ def test_forget_post_deletes_row_and_spools_confirmation():
     status, html = svc.forget_post(forget_token)
     assert status == 200
     assert "Your waitlist entry is gone" in html
+    # Healthy spool: the confirmation line is true, so it is rendered.
+    assert "We sent a confirmation email as well" in html
     # The row is gone — in memory and after a reload.
     assert entry_id not in svc.rows
     assert row["owner_email"] not in svc.by_email
@@ -943,6 +945,8 @@ def test_forget_post_spool_failure_deletion_still_200_notice_lost(monkeypatch):
     status, html = svc.forget_post(forget_token)
     assert status == 200  # no exception propagated → no 500
     assert "Your waitlist entry is gone" in html
+    # Honest page: no claim of a confirmation email that never queued.
+    assert "We sent a confirmation email as well" not in html
     # The deletion committed: row gone in memory and after a reload.
     assert entry_id not in svc.rows
     assert row["owner_email"] not in svc.by_email
