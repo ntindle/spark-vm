@@ -101,7 +101,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   merge. Planting such a link already required write access to the
   operator state directory, so the practical risk was low — this closes
   the read/write asymmetry.
-  Closes #1740. Closes #1741. (#TBD)
+  Closes #1740. Closes #1741. (#1756)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
