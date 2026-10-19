@@ -534,7 +534,9 @@ def list_pending(host, session_id):
     list but not the other), and each call is a full JSON-RPC round-trip
     to the serve subprocess. ``list_pending_approvals`` /
     ``list_pending_user_inputs`` are single-plane views over this
-    primitive.
+    primitive. Both planes are validated on every call (the both-planes
+    wire contract pinned by #225), so a drifted result fails loud even
+    for single-plane readers.
     """
     _check_session_id(session_id)
     result = host.call("approval/listPending", {"sessionId": session_id})
