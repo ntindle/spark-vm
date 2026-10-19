@@ -1,0 +1,27 @@
+[Unit]
+Description=Run the relay auto-driver sweep on the probe cadence
+# S3 packaging (#1723): the scheduled half of the both-supported driver
+# story. Fires the relay-auto-driver.service oneshot on the probe
+# cadence — the timer period IS the probe cadence by construction.
+
+[Timer]
+# D-AC-1 — one clock: the drive cadence is the probe cadence. The
+# period below matches hosted/relay_path_state.DEFAULT_CADENCE_S
+# (300 s); test_relay_auto_driver_packaging.py pins the equality, so a
+# cadence change that forgets this file fails CI. Operators overriding
+# RELAY_PROBE_CADENCE_S read the mismatch footnote in
+# docs/RELAY_AUTO_DRIVER_OPERATIONS.md.
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Missed runs after downtime are not piled up: the next tick drives
+# every tenant on the fresh state anyway (the watermark records what
+# happened, not what was scheduled — and S4's staleness rule reads the
+# watermark, not the schedule).
+Persistent=false
+# D-AC-3 — overlap-safe, not overlap-prevented: a still-running sweep
+# when the next fires is safe (ticks converge under the store lock).
+# The delay spreads the firing off exact clock boundaries.
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
