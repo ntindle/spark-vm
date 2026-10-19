@@ -506,6 +506,42 @@ def test_drive_tenant_tick_persists_across_ticks(tmp_path):
     assert rec2.boxes["box-a"].relay_reachable is True
 
 
+def test_apply_phase_drives_anchor_through_drive_box(tmp_path, monkeypatch):
+    # #1733 regression pin: ``_drive_box`` was dead code — its docstring
+    # claimed it was "the per-box single ordered emitter" while
+    # ``drive_tenant``'s apply phase inlined the plan+emit+report path.
+    # The apply phase now drives the anchor through ``_drive_box``
+    # (anchor-only) with the read-phase reading passed through
+    # ``read_fn`` (producer reads must never run under the store's
+    # exclusive lock). Neuter check: restoring the inlined apply path
+    # leaves ``_drive_box`` uncalled and fails the calls assertion.
+    store = ts.TenantStore(str(tmp_path / "tenants.json"))
+    store.create(_tenant_record([_arc("box-a",
+                                     created_at="2026-10-01T00:00:00Z")]))
+    reading = _down("cert")
+    calls = []
+    real = wiring._drive_box
+
+    def spy(arc, vm_id, *, read_fn=None, journal_timeout_s=None):
+        calls.append((arc.box_id, vm_id))
+        passed = read_fn(vm_id)
+        assert passed is reading  # the read-phase reading, not a re-read
+        return real(arc, vm_id, read_fn=read_fn,
+                    journal_timeout_s=journal_timeout_s)
+
+    monkeypatch.setattr(wiring, "_drive_box", spy)
+    report = wiring.drive_tenant(_ws(store), "tnt_test",
+                                 read_fn=lambda vm_id: reading)
+    assert report["anchor_box_id"] == "box-a"
+    assert calls == [("box-a", "box-a")]  # anchor-only, once
+    # The report is the ``_drive_box`` report, unchanged in shape.
+    by_box = {r["box_id"]: r for r in report["boxes"]}
+    assert by_box["box-a"]["reading"]["state"] == "down"
+    assert by_box["box-a"]["events"] == ["relay-down(detail='cert')"]
+    rec = store.get("tnt_test")
+    assert rec.boxes["box-a"].code == "connection-unreachable"
+
+
 # ---------------------------------------------------------------------------
 # Read/apply split — the tick never holds the store's exclusive lock
 # across producer I/O; the apply phase re-selects the anchor from the
