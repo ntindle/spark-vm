@@ -126,7 +126,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   count toward the fleet-outage quorum, and the alert marks their ages
   with the `~` fallback sigil) and the ten-box cap on the alert
   detail ("and N more" beyond the first ten) are now pinned by
-  hermetic tests. (#TBD)
+  hermetic tests. (#1781)
 - Golden-image build gate: the image recipe now starts the inference
   credential-swapping proxy during the build before running its gate
   verification — previously the proxy was never running at build time, so
