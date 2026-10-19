@@ -402,14 +402,58 @@ def _load_rotation_log(path: str) -> dict:
     return data
 
 
-def _save_rotation_log(path: str, log: dict) -> None:
+def _atomic_write_0600(path: str, render, *, tighten: bool = False) -> None:
+    """Write ``path`` atomically with 0600-from-first-byte discipline.
+
+    ``render`` is a callable taking the open text file handle; it is called
+    after the tmp file is created and before fsync.
+
+    The tmp file (``path + ".tmp"``) is created O_EXCL so a pre-planted
+    symlink at the tmp path fails loud instead of redirecting the write
+    (O_EXCL never follows symlinks), and there is no window between replace
+    and chmod where the file is group/other-readable. A stale tmp from a
+    crashed earlier write is unlinked and retried once; a second failure is
+    real contention or a plant and raises OSError (a plant can only DoS the
+    write, never redirect it — the open refuses to follow it). Callers
+    choose the failure discipline: gate.json's main() converts the OSError
+    to a loud sys.exit (the document is the enforcement point), while the
+    rotation-ledger path lets it propagate to process_rotation's B1 handler
+    (advisory state must never block the release channel).
+
+    ``tighten`` applies os.chmod(path, 0o600) after the replace, tightening
+    a file an older tool version left looser (gate.json, whose hmac is
+    keyed material's output); writers whose files carry no such material
+    leave tighten off and keep whatever the tmp carried.
+    """
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(log, fh, sort_keys=True, indent=2, ensure_ascii=False)
-        fh.write("\n")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            os.unlink(tmp)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            raise OSError(f"cannot create temp file {tmp}: {exc}") from exc
+    except OSError as exc:
+        raise OSError(f"cannot create temp file {tmp}: {exc}") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        render(fh)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    if tighten:
+        os.chmod(path, 0o600)
+
+
+def _save_rotation_log(path: str, log: dict) -> None:
+    # The ledger holds key_ids + timestamps, never key material, but it
+    # gets the same tmp discipline as gate.json (#1719): ambient-umask
+    # open() + follow-symlink was the pre-F3 pattern.
+    def _render(fh):
+        json.dump(log, fh, sort_keys=True, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+    _atomic_write_0600(path, _render)
 
 
 def _open_rotations(log: dict):
@@ -645,35 +689,14 @@ def main(argv=None) -> int:
     if prev_warn:
         print(f"WARNING: {prev_warn}", file=sys.stderr)
 
-    tmp = args.out + ".tmp"
-    # 0600 from the first byte: the tmp is created O_EXCL so a pre-planted
-    # symlink at the tmp path fails loud instead of redirecting the write,
-    # and there is no window between replace and chmod where the document
-    # is group/other-readable. A stale tmp from a crashed earlier publish
-    # is unlinked and retried once; a second failure is real contention or
-    # a plant and fails loud (a plant can only DoS the publish, never
-    # redirect it — the open refuses to follow it).
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        try:
-            os.unlink(tmp)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except OSError as exc:
-            sys.exit(f"ERROR: cannot create publish temp file {tmp}: {exc}")
-    except OSError as exc:
-        sys.exit(f"ERROR: cannot create publish temp file {tmp}: {exc}")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    def _render_gate(fh):
         json.dump(doc, fh, sort_keys=True, indent=2, ensure_ascii=False)
         fh.write("\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, args.out)
-    # The published document is 0600 from its first byte: it transits the
-    # operator's sync path only (§4), and the hmac field is keyed
-    # material's output, so 0600 is the honest default. The chmod also
-    # tightens a pre-existing gate.json an older tool version left looser.
-    os.chmod(args.out, 0o600)
+
+    try:
+        _atomic_write_0600(args.out, _render_gate, tighten=True)
+    except OSError as exc:
+        sys.exit(f"ERROR: cannot create publish temp file: {exc}")
     if prev_freeze is not None and prev_freeze != bool(args.freeze):
         received_at = datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ")

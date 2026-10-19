@@ -1512,6 +1512,59 @@ def test_publish_gate_json_created_0600(tmp_path, keyfile, registry, manifest):
     assert not os.path.exists(out + ".tmp")  # no publish litter left behind
 
 
+def _import_gate_publish():
+    sys.path.insert(0, REPO)
+    try:
+        from fleet import gate_publish as gp
+    finally:
+        sys.path.remove(REPO)
+    return gp
+
+
+def test_rotation_log_symlink_plant_never_redirected(tmp_path):
+    # #1719: a pre-planted symlink at <ledger>.tmp must not redirect the
+    # ledger write. O_EXCL creation refuses to follow the link; the helper
+    # unlinks the plant (retry-once) and the write lands in a real file —
+    # the decoy is never touched.
+    gp = _import_gate_publish()
+    log = str(tmp_path / "ledger.json")
+    decoy = str(tmp_path / "decoy")
+    with open(decoy, "w") as fh:
+        fh.write("planted")
+    os.symlink(decoy, log + ".tmp")
+    gp._save_rotation_log(log, {"rotations": []})
+    assert open(decoy).read() == "planted"  # never written through the link
+    assert not os.path.islink(log + ".tmp")  # the plant itself is gone
+    assert json.loads(open(log).read()) == {"rotations": []}
+    assert stat.S_IMODE(os.stat(log).st_mode) == 0o600  # 0600 from first byte
+
+
+def test_rotation_log_tmp_directory_fails_loud(tmp_path):
+    # #1719: when the tmp path is occupied by something that cannot be
+    # unlinked for a retry (a directory), the helper fails LOUD with
+    # OSError instead of writing anywhere — the plant can only DoS the
+    # write, never redirect it. process_rotation's B1 handler turns this
+    # into a loud non-blocking warning; close_rotation lets it propagate.
+    gp = _import_gate_publish()
+    log = str(tmp_path / "ledger.json")
+    os.mkdir(log + ".tmp")
+    with pytest.raises(OSError):
+        gp._save_rotation_log(log, {"rotations": []})
+    assert not os.path.exists(log)  # nothing written, nowhere
+
+
+def test_atomic_write_stale_tmp_unlinked_and_retried(tmp_path):
+    # #1719: a stale REGULAR tmp file from a crashed earlier write is
+    # unlinked and retried once — the write proceeds instead of failing.
+    gp = _import_gate_publish()
+    log = str(tmp_path / "ledger.json")
+    with open(log + ".tmp", "w") as fh:
+        fh.write("stale litter")
+    gp._save_rotation_log(log, {"rotations": []})
+    assert json.loads(open(log).read()) == {"rotations": []}
+    assert not os.path.exists(log + ".tmp")  # no litter left behind
+
+
 def test_close_rotation_serializes_on_ledger_lock(tmp_path):
     # close_rotation must take the same ledger lock as process_rotation: a
     # manual close racing a cron publish serializes instead of silently
