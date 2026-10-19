@@ -1250,8 +1250,10 @@ class WaitlistService:
         paths catch it and commit nothing (#406): all return False with
         the row/ledger state untouched, and the next retry (wave,
         re-submit, reminder job, path-A re-drive) picks the send up
-        cleanly. The deletion-notice path lets OSError propagate, as
-        before the change. Returns the published filename.
+        cleanly. The deletion-notice path catches OSError and returns
+        False — fail the email, not the request — because the deletion
+        already committed (row gone, scrubs run, "forgot" emitted); the
+        caller renders 200. Returns the published filename.
 
         mint: zero-arg callable returning the desired final filename;
         called once per attempt so a retry re-mints with fresh entropy.
@@ -2759,8 +2761,11 @@ class WaitlistService:
             self._scrub_quarantine_sidecars(owner)
             self._purge_spool_for(owner)
             self._emit("forgot", entry_id)
-            self._queue_deleted_email(owner, entry_id)
-            return 200, page_deleted()
+            # The notice-queue return is load-bearing: when the spool is
+            # sick, the deletion still stands but no confirmation email
+            # goes out — the page must not claim one was sent.
+            notice_queued = self._queue_deleted_email(owner, entry_id)
+            return 200, page_deleted(notice_queued)
 
     def _queue_deleted_email(self, owner_email, entry_id):
         """Spool the deletion confirmation. No 3/24h cap ledger: the forget
@@ -2778,9 +2783,18 @@ class WaitlistService:
         }
         ts = int(self.clock().timestamp())
         prefix = f"{entry_id}-deleted-{ts}"
-        # #1522: exclusive publish — the deletion notice can never
-        # silently overwrite a colliding send.
-        self._write_spool(lambda: _spool_name(prefix), doc)  # #389
+        try:
+            # #1522: exclusive publish — the deletion notice can never
+            # silently overwrite a colliding send.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
+        except OSError:
+            # #406 convergence (2026-10-19): this was the one spool path
+            # #406's parity fix missed — mirror the invite path's
+            # return-False handling. The deletion already committed (row
+            # gone, scrubs run, "forgot" emitted), so a sick spool must
+            # not 500 the already-successful request — fail the email,
+            # not the request. The caller still renders 200.
+            return False
         return True
 
 
@@ -4090,13 +4104,21 @@ def page_forget_expired():
     )
 
 
-def page_deleted():
+def page_deleted(notice_queued=True):
+    # The confirmation line is conditional: on the sick-spool path the
+    # deletion stands but no notice email was queued — the page must not
+    # promise one. (Callers: forget_post passes the
+    # _queue_deleted_email return; default True keeps the page honest
+    # for any path that queued the notice first.)
+    notice_line = (
+        " We sent a confirmation email as well." if notice_queued else ""
+    )
     return PAGE_SHELL.format(
         title="Deleted",
         body=(
             "<h1>Deleted</h1>"
             "<p>Your waitlist entry is gone — all of its data has been "
-            "deleted. We sent a confirmation email as well.</p>"
+            f"deleted.{notice_line}</p>"
         ),
     )
 

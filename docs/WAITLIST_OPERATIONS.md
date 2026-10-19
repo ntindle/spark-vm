@@ -221,6 +221,35 @@ the waitlist" is a waitlist promise, not a trial promise (trial terms TBD,
 Billing decision); the "doesn't verify identity" line is the §3 honesty
 rule in user-facing form.
 
+**Token commit/consume ordering (per flow — the collected #398 record,
+D-WL-6).** The full policy lives in code (`site/waitlistd.py`, the
+`TOKEN COMMIT/CONSUME ORDERING POLICY` block); this is the one-line-per-flow
+summary so nobody re-derives it. Every order is chosen so a crash in any
+window fails toward retryability: never two live tokens for one row, and
+never a committed state with no live token and no retry path.
+
+- *submit:* save, then emit `waitlist_submitted`, then spool, then save,
+  then emit `confirm_sent` (no old token to consume on a fresh submit).
+  *re-submit:* save (the `submitted_at` refresh — Rule 1's one pre-spool
+  commit), then spool, then save, then emit `confirm_sent`, then consume
+  the old token. A failed spool leaves the old token live (and the refresh
+  already committed), so the next re-submit or the +7d reminder retries
+  cleanly.
+- *confirm:* save, then consume the old token, then emit `confirmed`.
+- *reminder (+7d job):* spool, then save, then consume the old token,
+  then emit `reminder_sent`.
+- *invite (wave):* spool, then consume the old invite token, then save,
+  then emit `invite_sent`. The crash window between consume and commit on
+  a re-wave is the one non-self-healing window: the row commits as invited
+  with no live token, and recovery is the operator `reinstate_confirmed`
+  repair.
+- *claim:* save, then consume, then emit `claimed`.
+- *forget:* consume auxiliary tokens, rewrite (row deleted), consume the
+  user's own forget token, emit `forgot`, then spool the deletion notice.
+- *drop (expiry):* consume, then save, then emit `dropped`.
+- *purge (retention):* emit `purged` *before* the rewrite — deliberate
+  at-least-once (a duplicate on retry is inert; no §9 metric counts purges).
+
 ## 5. Data model, privacy, retention
 
 Operator-side store only — never the repo, never a gist, never a log the
