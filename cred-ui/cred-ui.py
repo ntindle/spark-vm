@@ -818,7 +818,27 @@ def api_set(data):
         # deep-read finding). The failure still reports loudly: a failed
         # compensation names the orphaned credential explicitly instead
         # of hiding it behind "(secret IS stored)".
-        rrc, _, rerr = run(SECRET_DELETE + [name])
+        #
+        # Trade-off (fail-closed by design): on OVERWRITE, a register
+        # failure now deletes the previously-working credential — the old
+        # value is unrecoverable (no store-read writer exists by design),
+        # so the error tells the operator to re-enter it. A half-updated
+        # credential with stale host metadata would be the silent-
+        # inconsistency class this codebase hunts (#116/#672).
+        #
+        # Compensation covers the rc-failure path only: if the register
+        # writer HANGS, run() raises and the writer may or may not have
+        # applied the change — deleting then could destroy a registered
+        # credential's value, so the timeout reports loudly (500) and the
+        # operator inspects instead.
+        try:
+            rrc, _, rerr = run(SECRET_DELETE + [name])
+        except RuntimeError as e:
+            # The compensation itself failed (e.g. the delete writer hung
+            # and run() converted the timeout) — fall through to the
+            # orphan-naming branch so the stored-but-unregistered secret
+            # is never left unnamed.
+            rrc, rerr = 1, "rollback attempt failed: %s" % e
         if rrc == 0:
             raise RuntimeError("register failed; stored secret was rolled "
                                "back: %s" % err.strip()[-200:])

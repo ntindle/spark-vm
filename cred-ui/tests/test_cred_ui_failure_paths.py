@@ -216,5 +216,39 @@ def test_set_success_path_unchanged(monkeypatch):
         ),
     )
     assert cred_ui.api_set(_set_body()) == {"ok": True, "name": "deepread-test"}
-    # No compensating delete on the happy path.
-    assert not any("cred-store-delete" in c for c in calls), calls
+    # No compensating delete on the happy path (match on argv elements,
+    # not whole-argvs — `in` on the argv list tests exact element
+    # membership, which the full binary path would never satisfy).
+    assert not any("cred-store-delete" in arg for c in calls for arg in c), calls
+
+
+def test_set_registry_failure_with_hung_compensation_names_orphan(monkeypatch):
+    # Double failure: the register writer fails AND the compensation
+    # delete hangs. The real run() converts the delete's TimeoutExpired
+    # to RuntimeError; api_set must still fall through to the
+    # orphan-naming branch, never answer a bare timeout with the secret
+    # unnamed. Patch subprocess.run (not cred_ui.run) so the conversion
+    # happens on the wire.
+    class _Completed:
+        def __init__(self, rc, out, err):
+            self.returncode = rc
+            self.stdout = out.encode()
+            self.stderr = err.encode()
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[4].endswith("cred-registry-set"):
+            return _Completed(1, "", "writer exploded")
+        if argv[4].endswith("cred-store-delete"):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=15)
+        return _Completed(0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    try:
+        cred_ui.api_set(_set_body())
+    except RuntimeError as e:
+        msg = str(e)
+        assert "rollback failed" in msg
+        assert "deepread-test" in msg  # the orphan is still named
+        assert "rollback attempt failed" in msg
+    else:
+        raise AssertionError("api_set did not raise on registry failure")
