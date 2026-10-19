@@ -4960,8 +4960,9 @@ def _read_bounded_tail(path, limit):
 # convenience for the caller, never a classification -- and the old
 # "[looks like a trust prompt]" tag sat adjacent to the very decision it
 # must not make, inviting automation bias. The hint renders only behind
-# --show-heuristic, and the tag text itself names its non-authority.
-_HEURISTIC_HINT_TAG = " [hint: looks like a trust prompt — verify yourself]"
+# --show-heuristic, and the tag leads with a denial so a skim cannot
+# mistake it for a classification (Design review, round 1).
+_HEURISTIC_HINT_TAG = " [NOT a classification: heuristic hint -- verify yourself]"
 
 def _msp_status_render_requested(st, show_heuristic=False):
     """Render ledgered requests like cmd_approvals' direct-path output.

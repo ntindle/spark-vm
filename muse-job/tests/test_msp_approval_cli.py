@@ -277,7 +277,7 @@ def test_approvals_show_heuristic_opt_in(cli, fakes, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert ("user-input ui-1 "
-            "[hint: looks like a trust prompt — verify yourself]") in out
+            "[NOT a classification: heuristic hint -- verify yourself]") in out
 
 
 def test_approvals_show_heuristic_json_keeps_machine_field(cli, fakes, capsys):

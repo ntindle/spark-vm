@@ -1184,7 +1184,7 @@ def test_status_renders_requested_with_runnable_commands(cli, fakes,
     cli._msp_status_render_requested(st, show_heuristic=True)
     out = capsys.readouterr().out
     assert ("user-input ui-1 "
-            "[hint: looks like a trust prompt — verify yourself]") in out
+            "[NOT a classification: heuristic hint -- verify yourself]") in out
     assert ("muse-job answer job1 --user-input-id ui-1 "
             "--answers") in out
     assert "--classified-not-trust-prompt|--trust-policy-opt-in" in out

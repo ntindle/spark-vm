@@ -338,8 +338,10 @@ template — and
 every open user-input prompt — with the ready-to-copy `muse-job answer`
 invocation template. A machine heuristic can flag prompts that look like
 a trust prompt — `muse-job approvals --show-heuristic` (or
-`muse-job status --show-heuristic` for requested requests) — but the hint
-is off by default and explicitly non-authoritative: the listing never
+`muse-job status --show-heuristic` for the requested items `status`
+lists) — but the hint is off by default and explicitly non-authoritative:
+it renders as `[NOT a classification: heuristic hint -- verify yourself]`,
+and the listing never
 classifies prompts on its own, and the operator still classifies every
 prompt with `--trust-policy-opt-in` or `--classified-not-trust-prompt`
 (#1773). The
