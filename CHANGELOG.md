@@ -135,7 +135,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   quadratic disk IO on the probe cadence. The corrupt-sidecar loud note
   now rides every affected tenant's record instead of just the first
   ticked, and a planted symlink still fails loud without wedging the
-  sweep. Closes #1739. (#TBD)
+  sweep. Closes #1739. (#1775)
 - Credential UI: if the registration step fails after the secret was
   stored, the UI now deletes the just-stored secret instead of leaving
   an orphaned secret on disk (a hung or failed cleanup names the
@@ -181,7 +181,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reaches the event journal or the operator's display — so a crafted
   audit line can no longer inject terminal escapes or hide text on an
   operator surface through the fleet-box audit path. Tabs still allowed;
-  newlines still rejected. Closes #1764. (#TBD)
+  newlines still rejected. Closes #1764. (#1775)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
