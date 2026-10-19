@@ -801,3 +801,81 @@ def test_answer_list_release_entry_is_frozen(tmp_path):
     assert ans["state"] == "frozen"
     assert ans["reason"].startswith("no-signal: ")
     assert "release entry for 'repo' is not an object" in ans["reason"]
+
+
+# ---------------------------------------------------------------------------
+# answer: canary _my_wave is the pin, never the hash cohort (#1718)
+
+
+def _canary_doc(box_id_to_pin, assignments=None):
+    """A gate doc with repo in canary state; other components unstaged."""
+    if assignments is None:
+        assignments = {"canary-pinned-1": 1, "canary-pinned-2": 2}
+    waves = {"repo": {"state": "canary", "live": 0,
+                      "assignments": assignments}}
+    return _make_gate_doc(freeze=False, waves=waves)
+
+
+def _canary_answer(tmp_path, box_id, assignments=None):
+    path = str(tmp_path / "gate.json")
+    _write_gate(path, _canary_doc(None, assignments=assignments))
+    return gate_query.answer(path, box_id, {"k1": KEY_A})
+
+
+def test_answer_canary_my_wave_reports_pin_for_admitted_box(tmp_path):
+    # Canary is pin-only: the box pinned to wave 1 is in the canary, and
+    # _my_wave must name the actual pin (1) — NOT box_wave()'s hash cohort
+    # (sha256("canary-pinned-1") % 4 == 2, pinned below, not recomputed).
+    ans = _canary_answer(tmp_path, "canary-pinned-1")
+    assert ans["state"] == "live"
+    assert ans["repo_permitted"] == "true"
+    assert ans["repo_my_wave"] == "1"
+    assert ans["repo_my_wave"] != "2"  # the hash cohort it must not show
+
+
+def test_answer_canary_my_wave_reports_pin_for_denied_box(tmp_path):
+    # Pinned to wave 2: not admitted to the canary, but the pin is still
+    # the box's actual cohort — "2", not its hash cohort ("0").
+    ans = _canary_answer(tmp_path, "canary-pinned-2")
+    assert ans["state"] == "live"
+    assert ans["repo_permitted"] == "false"
+    assert ans["repo_my_wave"] == "2"
+    assert ans["repo_my_wave"] != "0"  # the hash cohort it must not show
+
+
+def test_answer_canary_my_wave_empty_when_unpinned(tmp_path):
+    # No pin: no canary cohort. "" (the <comp>_max empty convention) —
+    # never the hash cohort "0" the old display path computed (#1718).
+    ans = _canary_answer(tmp_path, "canary-unpinned")
+    assert ans["state"] == "live"
+    assert ans["repo_permitted"] == "false"
+    assert ans["repo_my_wave"] == ""
+
+
+def test_answer_canary_my_wave_empty_when_assignments_not_a_map(tmp_path):
+    # A truthy non-dict assignments field is not a pin map: no pins, so
+    # nobody is admitted (enforcement) and no cohort is displayed (#1718).
+    ans = _canary_answer(tmp_path, "canary-pinned-1", assignments=["nope"])
+    assert ans["state"] == "live"
+    assert ans["repo_permitted"] == "false"
+    assert ans["repo_my_wave"] == ""
+
+
+def test_answer_canary_malformed_pin_freezes(tmp_path):
+    # A malformed pin is no-signal — the whole answer freezes, exactly as
+    # the enforcement path does (display must never outrun enforcement).
+    ans = _canary_answer(tmp_path, "canary-pinned-1",
+                         assignments={"canary-pinned-1": "one"})
+    assert ans["state"] == "frozen"
+    assert ans["reason"].startswith("no-signal: ")
+    assert "malformed" in ans["reason"]
+
+
+def test_answer_canary_present_none_pin_freezes(tmp_path):
+    # Present-but-None pin: enforcement raises NoSignal (int(None)), so
+    # display must freeze too — a quiet "" here would lie about a doc the
+    # box must freeze on.
+    ans = _canary_answer(tmp_path, "canary-pinned-1",
+                         assignments={"canary-pinned-1": None})
+    assert ans["state"] == "frozen"
+    assert "malformed" in ans["reason"]
