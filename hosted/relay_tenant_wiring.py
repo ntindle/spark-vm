@@ -115,7 +115,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Protocol, Tuple
 
 from hosted import relay_path_state as rps
 from hosted import tenant_status as ts
@@ -427,8 +427,68 @@ def _drive_box(
     }
 
 
+# ---------------------------------------------------------------------------
+# Store boundary (D-AC-5, #1721): drive_tenant is parameterized over this
+# protocol, not the concrete TenantStore.
+
+
+class WiringStore(Protocol):
+    """The store boundary the R3 wiring drives through.
+
+    Read + read-modify-write, nothing else: the apply phase's anchor
+    re-selection runs inside ``read_modify_write``'s exclusive hold —
+    that is the convergence guarantee (D-RL34-3a). The in-repo
+    implementation is ``TenantFileWiringStore`` below (JSON file +
+    fcntl lock); the S2 plane port implements this same protocol
+    against the worker's async D1 — the port is async, this protocol is
+    sync by design (the async boundary is S2's problem, not this
+    module's). Never invent a second boundary: a new store backend
+    implements these three methods.
+    """
+
+    def get(self, tenant_id: str) -> Optional[ts.TenantRecord]:
+        """Snapshot the tenant record (no lock held by the caller)."""
+        ...
+
+    def read_modify_write(
+        self, tenant_id: str, fn: Callable[[ts.TenantRecord], None]
+    ) -> ts.TenantRecord:
+        """Run ``fn`` under the store's exclusive inter-process lock and
+        return the re-read record."""
+        ...
+
+    def tenant_ids(self) -> List[str]:
+        """Sorted tenant-id snapshot for tick-all sweeps."""
+        ...
+
+
+class TenantFileWiringStore:
+    """In-repo ``WiringStore``: JSON-file tenant store + fcntl lock.
+
+    Owns the single sanctioned ``TenantStore._mutate`` call in the
+    wiring lane (resolves the drive_tenant half of #1734): every other
+    wiring path drives through the protocol. The fcntl file lock does
+    not exist on Workers — the S2 async port implements ``WiringStore``
+    against D1 instead of wrapping this class.
+    """
+
+    def __init__(self, store: ts.TenantStore) -> None:
+        self._store = store
+
+    def get(self, tenant_id: str) -> Optional[ts.TenantRecord]:
+        return self._store.get(tenant_id)
+
+    def read_modify_write(
+        self, tenant_id: str, fn: Callable[[ts.TenantRecord], None]
+    ) -> ts.TenantRecord:
+        return self._store._mutate(tenant_id, fn)
+
+    def tenant_ids(self) -> List[str]:
+        return self._store.tenant_ids()
+
+
 def drive_tenant(
-    store: ts.TenantStore,
+    store: WiringStore,
     tenant_id: str,
     *,
     read_fn: Callable[[str], dict] = None,
@@ -436,6 +496,11 @@ def drive_tenant(
     journal_timeout_s: Optional[float] = None,
 ) -> dict:
     """Run one R3 wiring tick for a tenant: select the anchor, drive it.
+
+    ``store`` is any ``WiringStore`` — the wiring never touches a
+    concrete store type, so the S2 plane port can drive this exact
+    function against D1. The in-repo caller wraps its ``TenantStore``
+    in ``TenantFileWiringStore`` (the ``--tick`` CLI does this).
 
     The live-anchor box's reading is the tenant-driving one; every other
     box's reading is read for the operator surface and never applied to
@@ -448,7 +513,7 @@ def drive_tenant(
     lock up to 60s, the journal lock up to ``journal_timeout_s``), and
     the store's exclusive lock is a blocking inter-process
     ``fcntl.LOCK_EX`` serializing ALL tenants' writers — per-box I/O
-    must never run under it. The apply phase (``TenantStore._mutate``)
+    must never run under it. The apply phase (``WiringStore.read_modify_write``)
     re-selects the anchor from the FRESH record and applies
     ``plan_events`` + ``_emit`` only if the fresh anchor is still the
     box that was read; otherwise the stale reading is skipped and the
@@ -585,7 +650,7 @@ def drive_tenant(
                     ],
                 }
 
-        store._mutate(tenant_id, _apply)
+        store.read_modify_write(tenant_id, _apply)
 
     assert all(r is not None for r in reports)
     return {
@@ -638,7 +703,10 @@ def main(argv=None):
         os.environ["RELAY_PROBE_HISTORY"] = args.history
     if args.journal:
         os.environ["RELAY_SESSION_JOURNAL"] = args.journal
-    store = ts.TenantStore(args.store)
+    # The CLI is the manual/override path (D-RL34-7): its contract is
+    # unchanged — the concrete store enters drive_tenant through the
+    # same WiringStore adapter the auto-driver uses.
+    store = TenantFileWiringStore(ts.TenantStore(args.store))
     try:
         report = drive_tenant(
             store, args.tick, journal_timeout_s=args.journal_timeout_s
