@@ -185,6 +185,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   has). The in-repo sender threads its own send clock through so its
   frozen test clocks compare consistently. (#1698)
 
+### Security
+- The relay auto-driver's per-tenant tick watermark no longer serializes
+  its lock file through a symlink: the lock open refuses a pre-planted
+  symlink loudly (fail-visible) instead of silently moving the flock onto
+  another file, which would have desynced concurrent sweeps or wedged the
+  watermark. Same O_NOFOLLOW discipline the gate lane already pins for
+  key/state paths. (#1742)
+
 ## [0.9.0] - 2026-10-18
 
 ### Security

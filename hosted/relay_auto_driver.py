@@ -115,6 +115,26 @@ def _atomic_write_json_0600(path: str, obj: dict) -> None:
         raise
 
 
+def _open_sidecar_lock(lock_path: str):
+    """Open the watermark sidecar lock without following symlinks.
+
+    The lock serializes the sidecar's read-modify-write across
+    processes. A pre-planted symlink at the lock path would silently
+    move the flock onto another file (lock-desync across sweep
+    processes, or a lock-DoS via a permanently-held lock) — the same
+    plant class the gate lane pins O_NOFOLLOW for (#1720). O_NOFOLLOW
+    refuses the plant loudly (ELOOP); the caller's observability
+    handler turns that into a LOUD record, never a silent wedge.
+    """
+    flags = os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _update_watermark(path: str, tenant_id: str, record: dict) -> None:
     """Read-modify-write the watermark sidecar under a sidecar lock.
 
@@ -123,7 +143,7 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> None:
     observability damage, never a reason to skip the tick).
     """
     lock_path = path + ".lock"
-    with open(lock_path, "a", encoding="utf-8") as lf:
+    with _open_sidecar_lock(lock_path) as lf:
         if fcntl is not None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
