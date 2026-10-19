@@ -58,6 +58,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   parser the wiring shares with the tenant layer is now a documented
   public seam instead of a cross-module private reach. (#1732)
 ### Added
+- Relay auto-driver lane convergence analysis: vision-vs-state pin after the
+  scheduled-packaging slice shipped — the four genuinely-new findings a
+  fresh read of the shipped driver turned up (silent corrupt-watermark
+  restart, watermark never pruning deleted tenants, unbounded journal-append
+  leg, undocumented no-anchor journal attribution), the four continuing
+  decisions, and the re-pinned slice table with the staleness-alert
+  enablement gate. (#[PR])
 - Relay-liveness auto-driver, scheduled packaging slice: the self-hosted
   half of the scheduled driver — a systemd service + timer that fires a
   new sweep entry point once per probe-cadence tick, driving every
