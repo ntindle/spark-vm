@@ -50,6 +50,20 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Added
+- Fleet alerting: a fleet-wide gate-sync outage now pages once as a
+  single fleet incident instead of staying invisible — when two or more
+  boxes hold gate answers 20 minutes or older (twice the S1 design gate
+  TTL of 600s), the collector raises one alert naming the affected
+  boxes. The rule assumes the estate sync + collect cadence keeps
+  healthy gate answers well under 20 minutes; slower pipelines page on
+  delay, not on outage. The same outage never pages twice: the alert
+  re-fires only when new boxes join it, and the episode resolves once
+  fewer than two boxes are stale, so a later re-outage pages again. A
+  single stale box stays a per-box row on the fleet inventory table,
+  not a page.
+  (#1754)
+
 ### Fixed
 - Relay session-liveness checks no longer load the entire session
   journal into memory on every query: the journal is now read
