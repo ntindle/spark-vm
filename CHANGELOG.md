@@ -77,7 +77,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rule all hold — and filed the three remaining unowned pieces as
   tracked work: the box-side signing at emit time (the signing key
   must live where the tenant can't reach it), the key-rotation
-  ceremony, and the hosted plane's key store. (#TBD)
+  ceremony, and the hosted plane's key store. (#1770)
 - A daily release-health check now verifies that every release tag on the
   repo has a matching published GitHub release and vice versa — so a tag
   that never got published (or a release with no tag behind it) fails
