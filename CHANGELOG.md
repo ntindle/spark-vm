@@ -63,7 +63,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - A daily release-health check now verifies that every release tag on the
   repo has a matching published GitHub release and vice versa — so a tag
   that never got published (or a release with no tag behind it) fails
-  loudly instead of drifting silently. (#TBD)
+  loudly instead of drifting silently. (#1765)
 - Waitlist: the waitlist durability analysis is refreshed to current
   main — the four unrepaired funnel crash windows are re-verified, the
   per-flow token commit/consume ordering policy is now documented in the
