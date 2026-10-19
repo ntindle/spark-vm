@@ -1739,3 +1739,254 @@ def test_box_snapshot_frozen_unfrozen_overrides_frozen_file(tmp_path):
                            "--frozen", "unfrozen"])
     assert snap["gate"]["frozen"] is False
     assert snap["gate"]["answer_age_s"] is None
+
+
+# --- correlated gate-stale, sixth S1 alert rule (G18 §7, #1631) ----------
+
+
+def _stale_gate_snapshot(stale_seconds, frozen=False):
+    gen = (NOW - timedelta(seconds=stale_seconds)).isoformat()
+    return {"repo_commit": COMMIT_A,
+            "gate": {"frozen": frozen, "answer_age_s": stale_seconds,
+                     "generated_at": gen},
+            "arc_active": None, "image_version": None,
+            "note": None, "emitted_at": NOW.isoformat()}
+
+
+def _expected_gate_stale_id(episode, stale_boxes):
+    # Mirrors events._alert's id derivation: uuid5 over
+    # rule|box_id|subcomponent|to|dedup_key — fleet-scoped, so box_id,
+    # subcomponent and to are empty; the dedup key is the episode
+    # number plus the sorted stale set joined on "|".
+    alert_ns = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "https://github.com/ntindle/spark-vm/fleet/alerts")
+    return str(uuid.uuid5(
+        alert_ns, "correlated-gate-stale||||ep%d|%s" % (
+            episode, "|".join(sorted(stale_boxes)))))
+
+
+def _gate_stale_watermark(store):
+    with open(os.path.join(store, "gate_stale_watermark.json")) as fh:
+        return json.load(fh)
+
+
+def test_correlated_gate_stale_fires_fleet_scoped_alert(env):
+    # Two boxes hold gate answers older than 2x the S1 TTL while a third
+    # stays fresh: one fleet-scoped page, not one per box.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(1800, frozen=True)},
+        "box-c": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(60)},
+    })
+    rows = _alerts(store)
+    assert len(rows) == 1, rows
+    alert = rows[0]
+    assert alert["schema"] == "fleet-alert/1"
+    assert alert["rule"] == "correlated-gate-stale"
+    assert alert["box_id"] is None  # fleet-scoped: no box owns the outage
+    assert alert["acked"] is False
+    assert "fleet gate sync outage" in alert["detail"]
+    assert "box-a" in alert["detail"] and "box-b" in alert["detail"]
+    assert "box-c" not in alert["detail"]
+    assert alert["alert_id"] == _expected_gate_stale_id(1, ["box-a", "box-b"])
+    # The paging path sees it: `events watch` exits 1 while the alert
+    # is unacknowledged.
+    watch = run_inventory("events", "watch", "--store", store)
+    assert watch.returncode == 1, watch.stdout
+    assert "correlated-gate-stale" in watch.stdout
+
+
+def test_correlated_gate_stale_single_box_silent(env):
+    # Below the correlation quorum: a lone stale box is a per-box row on
+    # the inventory table, never a page.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(60)},
+    })
+    assert _alerts(store) == []
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "correlated-gate-stale alert(s) fired" not in proc.stdout
+    assert _alerts(store) == []
+
+
+def test_correlated_gate_stale_same_episode_dedups(env):
+    # The identical stale set on the next collect stays silent: one page
+    # per outage, not per collect.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "correlated-gate-stale alert(s) fired" not in proc.stdout
+    assert len(_alerts(store)) == 1
+
+
+def test_correlated_gate_stale_growth_refires(env):
+    # A new box joining the outage is new evidence: the grown set pages
+    # again under a new alert id (rule 2's #927 discipline, fleet-side).
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    _write_box(estate, "box-c", status=_status_json(),
+               snapshot=_stale_gate_snapshot(3600))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "1 correlated-gate-stale alert(s) fired" in proc.stdout
+    rows = _alerts(store)
+    assert len(rows) == 2, rows
+    assert rows[1]["alert_id"] == _expected_gate_stale_id(
+        2, ["box-a", "box-b", "box-c"])
+
+
+def test_correlated_gate_stale_shrinkage_silent(env):
+    # A box recovering out of the outage (quorum still held) narrows the
+    # episode silently — the operator was already paged on the wider set.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-c": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    _write_box(estate, "box-c", status=_status_json(),
+               snapshot=_stale_gate_snapshot(60))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "correlated-gate-stale alert(s) fired" not in proc.stdout
+    assert len(_alerts(store)) == 1
+    wm = _gate_stale_watermark(store)
+    assert wm["stale_boxes"] == ["box-a", "box-b"]
+    assert wm["episode"] == 1  # shrinkage keeps the episode number
+
+
+def test_correlated_gate_stale_resolves_then_refires(env):
+    # The stale set dropping below quorum resolves the episode; a later
+    # re-outage of the same boxes is a new episode and pages again.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    for box in ("box-a", "box-b"):
+        _write_box(estate, box, status=_status_json(),
+                   snapshot=_stale_gate_snapshot(60))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "correlated-gate-stale alert(s) fired" not in proc.stdout
+    assert len(_alerts(store)) == 1
+    # The episode resolved but the counter persisted: the watermark is
+    # still on disk with an empty box set.
+    wm = _gate_stale_watermark(store)
+    assert wm["stale_boxes"] == [] and wm["episode"] == 1
+    for box in ("box-a", "box-b"):
+        _write_box(estate, box, status=_status_json(),
+                   snapshot=_stale_gate_snapshot(3600))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "1 correlated-gate-stale alert(s) fired" in proc.stdout
+    rows = _alerts(store)
+    assert len(rows) == 2, rows
+    # New episode, new alert id — the re-outage pages again.
+    assert rows[1]["alert_id"] == _expected_gate_stale_id(
+        2, ["box-a", "box-b"])
+
+
+def test_correlated_gate_stale_uncomputable_age_not_evidence(env):
+    # Gate-unmanaged boxes (no gate answer at all) are missing evidence,
+    # not a stale signal — even two of them never page.
+    snap = {"repo_commit": COMMIT_A, "arc_active": None,
+            "image_version": None, "note": None,
+            "emitted_at": NOW.isoformat()}
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(), "snapshot": snap},
+        "box-b": {"status": _status_json(), "snapshot": snap},
+    })
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert _alerts(store) == []
+
+
+def test_correlated_gate_stale_corrupt_watermark_fails_loud(env):
+    # A corrupt watermark refuses the evaluation loudly (fail-visible,
+    # the #1744 precedent) instead of resetting the episode counter to
+    # zero — a paging rule must never fail silent on its own state.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    wm_path = os.path.join(store, "gate_stale_watermark.json")
+    garbage = b"\x00\x01not json{{{{"
+    with open(wm_path, "wb") as fh:
+        fh.write(garbage)
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode != 0, (proc.returncode, proc.stdout)
+    assert "gate-stale watermark" in proc.stderr, proc.stderr
+    assert "corrupt" in proc.stderr, proc.stderr
+    assert len(_alerts(store)) == 1  # no new page on a refused evaluation
+    # The refusal never rewrites the file: the operator's evidence is
+    # intact for inspection/backup.
+    assert open(wm_path, "rb").read() == garbage
+
+
+def test_correlated_gate_stale_wrong_schema_watermark_fails_loud(env):
+    # Same loud refusal for a well-formed JSON file with the wrong
+    # schema — episode identity cannot be reconstructed from it either.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    wm_path = os.path.join(store, "gate_stale_watermark.json")
+    with open(wm_path, "w") as fh:
+        json.dump({"schema": "something-else/9", "stale_boxes": ["x"]}, fh)
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode != 0, (proc.returncode, proc.stdout)
+    assert "gate-stale watermark" in proc.stderr, proc.stderr
+    assert len(_alerts(store)) == 1
+
+
+def test_correlated_gate_stale_lost_watermark_no_double_page(env):
+    # Crash-ordering regression: the alert journaled but the watermark
+    # write was lost (simulated by deleting the file between collects).
+    # The retry mints the same episode number, so the journal dedup —
+    # not a second page — is the result, and the watermark is
+    # re-established.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _stale_gate_snapshot(3600)},
+    })
+    assert len(_alerts(store)) == 1
+    os.unlink(os.path.join(store, "gate_stale_watermark.json"))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "correlated-gate-stale alert(s) fired" not in proc.stdout
+    assert len(_alerts(store)) == 1
+    wm = _gate_stale_watermark(store)
+    assert wm["stale_boxes"] == ["box-a", "box-b"]
+    assert wm["episode"] == 1

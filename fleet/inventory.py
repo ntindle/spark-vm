@@ -763,6 +763,243 @@ def _format_gate_age(age_s, emit_time_fallback):
     return text + "~" if emit_time_fallback else text
 
 
+# --- Correlated gate-stale fleet alert rule (G18 §7, #1631) -----------------
+# The sixth S1 alert rule. A fleet-wide gate-sync outage is invisible in
+# the event stream by design (G17 §3: the S1 canonicalizer infers nothing
+# from gate silence), so this rule reads the collector's gate answer-age
+# field — the same field `fleet inventory` renders per box — and pages
+# once per fleet-wide outage instead of once per box.
+#
+# Trigger: >= _GATE_STALE_QUORUM boxes whose gate answers are stale beyond
+# _GATE_STALE_THRESHOLD_S. A single stale box stays a per-box row on the
+# inventory table, not a page: it is the box-down or one-off-sync story,
+# and the correlation quorum is what makes the alert fleet-scoped.
+#
+# Evidence discipline: an uncomputable gate age (no generated_at and no
+# numeric answer_age_s — e.g. gate-unmanaged boxes) is missing evidence,
+# not a stale signal (the G17 §3 discipline, carried over). A box whose
+# frozen emit-time answer_age_s already exceeds the threshold still
+# counts: the fallback understates the true age, so a stale verdict on it
+# is safe — it can only under-fire, never over-fire.
+#
+# Episode identity (watermark): the alert pages once per outage, not once
+# per collect. A watermark file records the currently-firing box set and
+# a monotonically increasing episode number; the identical set on the
+# next collect stays silent; a grown set (new boxes joined the outage)
+# is new evidence and re-pages; a shrunken set (boxes recovered but the
+# quorum still holds) updates the watermark silently — the operator was
+# already paged on the wider set. When the stale set drops below quorum
+# the episode resolves but the counter persists, so a later re-outage
+# of the same boxes is a new episode and pages again. This mirrors rule
+# 2's #927 cluster-growth discipline; the alert journal's own alert_id
+# dedup is the backstop.
+#
+# The episode number (not the box set alone) rides in the alert's
+# dedup key. That is what makes the alert-first-then-watermark ordering
+# crash-safe: if the alert appends but the watermark write fails, the
+# next collect retries the same episode number, and the alert journal's
+# alert_id dedup turns the retry into a no-op instead of a duplicate
+# page. A timestamp anchor would not survive that failure direction —
+# the retry would mint a new key and page twice for one outage.
+_GATE_STALE_THRESHOLD_S = 1200  # 2x the S1 gate TTL (600s, G18 §4): one
+# missed sync loop rides out on the TTL's jitter margin; past 2x the box
+# has frozen loudly by design and the sync path is down, not late. The
+# operator-configured TTL (--ttl-seconds) can differ; the divergence is a
+# documented limitation, not a silent one.
+_GATE_STALE_QUORUM = 2  # "correlated" is what makes this fleet-scoped.
+_GATE_STALE_WATERMARK_NAME = "gate_stale_watermark.json"
+_GATE_STALE_WATERMARK_SCHEMA = "fleet-gate-stale-watermark/1"
+_GATE_STALE_DETAIL_BOXES = 10  # cap on boxes named in the alert detail
+
+
+def _gate_stale_candidates(snapshot, now):
+    """(box_id, age_s, emit_time_fallback) for stale gate answers.
+
+    Sorted by box_id. Never raises: a malformed boxes map yields no
+    candidates rather than failing the collect.
+    """
+    boxes = snapshot.get("boxes") if isinstance(snapshot, dict) else None
+    if not isinstance(boxes, dict):
+        return []
+    stale = []
+    for box_id in sorted(boxes, key=str):
+        record = boxes[box_id]
+        if not isinstance(record, dict):
+            continue
+        gate = record.get("gate")
+        if not isinstance(gate, dict):
+            continue
+        age_s, fallback = _gate_age_s(gate, now)
+        if age_s is None or age_s < _GATE_STALE_THRESHOLD_S:
+            continue
+        stale.append((str(box_id), age_s, fallback))
+    return stale
+
+
+def _read_gate_stale_watermark(store_dir):
+    """The active episode: (sorted stale-box list, episode number, error).
+
+    Returns (None, last_episode, None) when no episode is active. A
+    *missing* file is a fresh counter — fine. A *corrupt* file is a
+    loud error, not a silent reset: the episode counter is the rule's
+    episode identity, and resetting it to zero would both miss a
+    genuine re-outage page (the retried key collides with the
+    journaled one) and double-page an ongoing outage (a fresh key for
+    the same boxes). Fail-visible, per the #1744 precedent — a paging
+    rule must never fail silent on its own state. The caller refuses
+    to evaluate (fails the collect) on this error; the operator
+    inspects, backs up, and removes or restores the file.
+    """
+    path = os.path.join(store_dir, _GATE_STALE_WATERMARK_NAME)
+    data, err = _read_json_file(path)
+    if err == "missing":
+        return None, 0, None
+    if err is not None:
+        return None, None, (
+            "gate-stale watermark %s is corrupt (%s); refusing to "
+            "evaluate — episode identity cannot be reconstructed. "
+            "Inspect, back up, and remove the file to start a fresh "
+            "episode counter (or restore it from backup)."
+            % (_GATE_STALE_WATERMARK_NAME, err))
+    episode = 0
+    if isinstance(data, dict) \
+            and data.get("schema") == _GATE_STALE_WATERMARK_SCHEMA:
+        ep = data.get("episode")
+        if isinstance(ep, int) and not isinstance(ep, bool) and ep >= 0:
+            episode = ep
+        boxes = data.get("stale_boxes")
+        if isinstance(boxes, list) \
+                and all(isinstance(b, str) for b in boxes):
+            # An empty set is a resolved episode: no active incident,
+            # but the counter persists for the next one.
+            return (sorted(boxes) or None), episode, None
+    return None, None, (
+        "gate-stale watermark %s has the wrong schema or fields; "
+        "refusing to evaluate — episode identity cannot be "
+        "reconstructed. Inspect, back up, and remove the file to start "
+        "a fresh episode counter (or restore it from backup)."
+        % _GATE_STALE_WATERMARK_NAME)
+
+
+def _write_gate_stale_watermark(store_dir, stale_boxes, episode):
+    """Record the episode's box set and number; an empty list resolves
+    the episode while keeping the counter for the next one.
+
+    Returns an error string, or None on success.
+    """
+    path = os.path.join(store_dir, _GATE_STALE_WATERMARK_NAME)
+    payload = {"schema": _GATE_STALE_WATERMARK_SCHEMA,
+               "stale_boxes": sorted(stale_boxes or []),
+               "episode": episode}
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        # Don't litter the store with a tmp on failure (mirrors
+        # events._save_tail_watermarks).
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return "cannot write gate-stale watermark: %s" % exc
+    return None
+
+
+def _gate_stale_detail(stale):
+    """Operator-facing detail for the fleet-scoped alert."""
+    named = stale[:_GATE_STALE_DETAIL_BOXES]
+    parts = ["%s (%s)" % (box_id, _format_gate_age(age_s, fallback))
+             for box_id, age_s, fallback in named]
+    if len(stale) > _GATE_STALE_DETAIL_BOXES:
+        parts.append("and %d more" % (len(stale) - _GATE_STALE_DETAIL_BOXES))
+    return ("fleet gate sync outage: %d boxes with gate answers older "
+            "than %s (%s)" % (
+                len(stale), _format_gate_age(_GATE_STALE_THRESHOLD_S, False),
+                ", ".join(parts)))
+
+
+def evaluate_gate_stale_alerts(store_dir, observed_at=None):
+    """Evaluate the correlated gate-stale rule (G18 §7, #1631) over the
+    collector's freshly rebuilt snapshot; journal newly fired alerts.
+
+    Returns (fired_alerts, error). Call after append_journal ->
+    rebuild_snapshot so the snapshot is current.
+
+    The watermark read happens before the lock (a corrupt watermark
+    refuses the evaluation loudly instead of wedging the collect);
+    the alert append and the watermark advance run under the
+    store-scoped journal lock, alert-first then watermark — the
+    alert_id dedup makes the ordering crash-safe in both directions
+    (see check_tail_continuity's failure-ordering comment, which this
+    follows). Reaches into events' private alert helpers like the rest
+    of this module already does (events._clean_text et al.).
+    """
+    snapshot, err = load_snapshot(store_dir)
+    if err:
+        return None, err
+    now = _parse_ts(observed_at)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    stale = _gate_stale_candidates(snapshot, now)
+    stale_ids = [box_id for box_id, _age_s, _fallback in stale]
+    # The watermark read happens BEFORE the lock on purpose: a corrupt
+    # watermark refuses the evaluation loudly here (Engineering B1,
+    # #1631 review) instead of wedging the collect behind a lock it
+    # will never use.
+    prev, episode, werr = _read_gate_stale_watermark(store_dir)
+    if werr:
+        return None, werr
+    try:
+        with events.journal_lock(store_dir):
+            if len(stale_ids) < _GATE_STALE_QUORUM:
+                # Below quorum: no page. Resolve any active episode (the
+                # counter persists) so a later re-outage of the same
+                # boxes is a new episode and pages again.
+                if prev is not None:
+                    werr = _write_gate_stale_watermark(store_dir, [], episode)
+                    if werr:
+                        return None, werr
+                return [], None
+            if prev is not None and set(stale_ids) <= set(prev):
+                # Same or shrunken set: the operator was already paged on
+                # this episode (shrinkage is good news, not new evidence).
+                # Narrow the watermark silently so the episode tracks the
+                # current incident set; the episode number is unchanged.
+                if stale_ids != prev:
+                    werr = _write_gate_stale_watermark(store_dir, stale_ids,
+                                                      episode)
+                    if werr:
+                        return None, werr
+                return [], None
+            # New episode, or the outage grew: page once for the fleet.
+            # The episode number rides in the dedup key (see the episode
+            # comment above), so a crashed watermark write retries the
+            # same key on the next collect and the journal dedup — not a
+            # second page — is the result. Fleet-scoped (box_id=None): no
+            # single box owns the outage — the same null-box_id
+            # convention as the freeze-hold fleet events in
+            # UPDATE_EVENT_REPORTING §3.
+            episode += 1
+            alert = events._alert(
+                "correlated-gate-stale", observed_at,
+                _gate_stale_detail(stale),
+                box_id=None,
+                dedup_key="ep%d|%s" % (episode, "|".join(stale_ids)))
+            fired, aerr = events._append_alerts_nolock(store_dir, [alert])
+            if aerr:
+                return None, aerr
+            werr = _write_gate_stale_watermark(store_dir, stale_ids, episode)
+            if werr:
+                return None, werr
+            return fired, None
+    except events.JournalLockError as exc:
+        return None, str(exc)
+
+
 def cmd_inventory(store_dir, staleness_hours, box_id):
     snapshot, err = load_snapshot(store_dir)
     if err:
@@ -1018,7 +1255,7 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
 
     # G17 S1: canonicalize each box's audit tail into the update-event
     # journal (the design's S1 sink — the same estate dir the collector
-    # already pulls), then evaluate the five fleet alert rules. A failed
+    # already pulls), then evaluate the six fleet alert rules. A failed
     # event/alert write fails the collect loudly: the operator's
     # contract is the exit code, and a silently un-journaled event would
     # be missing evidence masquerading as silence.
@@ -1059,6 +1296,18 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     if cont_fired:
         print("fleet events: %d tail-discontinuity alert(s) fired"
               % len(cont_fired))
+    # Correlated gate-stale (G18 §7, #1631): the sixth S1 alert rule. A
+    # fleet-wide gate-sync outage is invisible in the event stream by
+    # design, so this rule reads the collector's gate answer-age field
+    # from the freshly rebuilt snapshot and pages once per outage
+    # instead of once per box.
+    gate_fired, gate_err = evaluate_gate_stale_alerts(store_dir,
+                                                      observed_at)
+    if gate_err:
+        return "gate-stale evaluation: %s" % gate_err
+    if gate_fired:
+        print("fleet events: %d correlated-gate-stale alert(s) fired"
+              % len(gate_fired))
     print("collected %d %s into %s (%d appended this run; %d journal "
           "lines replayed)"
           % (len(records), "box" if len(records) == 1 else "boxes",

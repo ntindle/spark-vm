@@ -160,7 +160,7 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 - **Read:** `fleet events` shows the per-box outcome series;
   `fleet events --wave` filters by the rollout envelope (null until G15 S2).
 - **Alert — the promptness ask.** The issue's core requirement is that a
-  failed fleet update is *noticed*, not discovered. Five fleet-side rules,
+  failed fleet update is *noticed*, not discovered. Six fleet-side rules,
   evaluated on every collect:
   1. **Any `rollback-failed`** → immediate alert (a box stuck on a
      known-bad build).
@@ -218,6 +218,44 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      continuity check (`fleet/events.py: check_tail_continuity`). A
      warning-only signal would be exactly as losable as the events it
      reports, so the durable paging path carries the finding.
+  6. **Correlated gate-stale (G18 §7, #1631):** a fleet-wide gate-sync
+     outage is invisible in the event stream by design (G17 §3: the S1
+     canonicalizer infers nothing from gate silence), so this rule
+     reads the collector's gate answer-age field — the same field
+     `fleet inventory` renders per box — instead of the event stream.
+     When ≥2 boxes hold gate answers 20 minutes or older (2× the S1
+     design gate TTL of 600s; the box itself freezes loudly past the
+     TTL, so past 2× the sync path is down, not late), the fleet pages
+     once as a fleet incident, not once per box. A single stale box
+     stays a per-box row on the inventory table, not a page. One page
+     per outage: a watermark records the firing box set plus an
+     episode number, so the identical set on the next collect stays
+     silent, a grown set re-pages (new evidence), and the set dropping
+     below quorum resolves the episode so a later re-outage pages
+     again. A corrupt watermark refuses the evaluation loudly (the
+     collect fails) rather than guessing at episode identity.
+     Uncomputable gate ages (gate-unmanaged boxes) are missing
+     evidence, not a stale signal. Like rule 5 this rule does not scan
+     the event journal: it fires from the collector
+     (`fleet/inventory.py: evaluate_gate_stale_alerts`).
+     **Cadence precondition (D-GA-1):** the age is measured
+     collector-side — `now − gate.generated_at` — so it includes
+     estate-sync and collect-pipeline delay, not just box-side sync
+     lag. The rule assumes the estate sync + collect cadence keeps
+     healthy gate-answer ages well under 20 minutes; an operator whose
+     sync/collect pipeline is slower than ~15 minutes will page on
+     pipeline delay, not on a real outage. **Fixed threshold:** the
+     20-minute constant is pinned to the S1 design TTL (600s); it is
+     not derived from the operator's `--ttl-seconds`, so a
+     non-default gate TTL needs its own threshold judgment (a larger
+     TTL with the fixed 20-minute threshold pages on healthy,
+     unfrozen boxes). The correlated shape points at the shared
+     sync/pull path — independent simultaneous hook deaths would read
+     the same, so treat the page as "the fleet's gate answers went
+     stale together", then confirm which leg broke.
+     (Numbering note: G18 §7 specified this as "the fifth fleet alert
+     rule" before rule-5 tail-discontinuity (#1006) landed; in code it
+     is the sixth S1 rule.)
   Alert transport, honestly staged: S1 writes the alert into the
   operator's fleet journal and `fleet events watch` exits nonzero on
   unacknowledged alerts — a cron or the operator's existing paging consumes
@@ -367,7 +405,7 @@ waits on:
 - **S1 — canonicalize + alert (ship first):** fleet-side canonicalizer for
   the auto-deploy audit shape (the toolset half is planned-not-known);
   event journal in the fleet store with (box_id, event_id) dedup;
-  `fleet events` CLI; the five alert rules with interim journal+exit-code
+  `fleet events` CLI; the six alert rules with interim journal+exit-code
   transport; noop-stays-local noise discipline.
   No box-side change. #608's acceptance sketch is this slice.
 - **S2 — box-side journal + gate aggregation:** `update-events.jsonl`
