@@ -115,7 +115,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   of letting a pre-planted link silently move an exclusive lock onto
   another file. Planting such a link already required write access to the
   respective state directory, so the practical risk was low. Refs #1755
-  (the remaining lock sites land in following slices). (#TBD)
+  (the remaining lock sites land in following slices). (#1761)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
