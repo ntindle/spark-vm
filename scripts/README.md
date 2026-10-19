@@ -147,6 +147,7 @@ never drift from what's on disk.
 | `test_bounded_http.py` | `bounded_http.py` bounded threading server |
 | `test_ci_job_timeouts.py` | CI workflow job `timeout-minutes` pins (issue #1367) |
 | `test_ci_linkcheck_retry.py` | `markdown-links` job retry wiring (`LYCHEE_ARGS` + fail-gate) |
+| `test_ci_docs_job_inventory.py` | CI job inventory (`docs/CI.md` job table ↔ `ci.yml` job ids) |
 | `test_ci_md_link_excludes.py` | `docs/CI.md` link-check exclusion inventory |
 | `test_ci_md_suite_inventory.py` | CI python-tests suite inventory |
 | `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
