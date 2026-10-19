@@ -107,7 +107,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   instead of carrying an inlined copy of that path — so the documented
   "one ordered emitter per box" discipline is what the code actually
   does. No behavior change; the previously dead emitter is now the
-  wired path. (#1733)
+  wired path. (#1733, #1771)
 - Relay session-liveness checks no longer load the entire session
   journal into memory on every query: the journal is now read
   tail-first in small chunks (same newest-first results for every
