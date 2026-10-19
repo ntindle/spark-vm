@@ -22,6 +22,7 @@ import copy
 import json
 import os
 import stat
+import tempfile
 import threading
 import time
 
@@ -107,7 +108,7 @@ def test_tick_all_drives_down_reading_through_real_wiring(tmp_path):
     })
     estate = tmp_path / "estate"
     estate.mkdir()
-    wm = str(tmp_path / "tenants.json.relay-tick-watermarks.json")
+    wm = driver.watermark_path_for(str(tmp_path / "tenants.json"))
 
     def read_fn(vm_id):
         return _down("relay")
@@ -211,9 +212,10 @@ def test_stale_probe_noted_loud_and_still_drives(tmp_path):
     assert "LOUD:" in rows[0]["note"]
 
 
-def test_stale_probe_age_threshold(tmp_path):
+def test_stale_probe_age_threshold(tmp_path, monkeypatch):
     # Older than 2x cadence -> stale; within -> fresh. The cadence is
-    # the shipped 300s default (D-AC-1: same knob as the probe).
+    # pinned (D-AC-1: the same knob the probe reads).
+    monkeypatch.setenv("RELAY_PROBE_CADENCE_S", "300")
     store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
     wm = str(tmp_path / "wm.json")
     old = driver.tick_all_tenants(
@@ -293,6 +295,126 @@ def test_broken_anchor_instrument_does_not_wedge_sweep(tmp_path):
     with open(wm, encoding="utf-8") as fh:
         marks = json.load(fh)
     assert set(marks) == {"tnt-a", "tnt-b"}
+
+
+def test_store_get_raising_does_not_wedge_sweep(tmp_path):
+    # Engineering B1: the fault boundary covers the whole per-tenant
+    # body — a store.get raising for one tenant (file deleted
+    # mid-sweep) becomes a failed=True LOUD record, not a sweep abort.
+    # Neuter check: moving store.get back outside the try lets the
+    # FileNotFoundError propagate and fails the sweep-completes
+    # assertion.
+    inner = ts.TenantStore(str(tmp_path / "tenants.json"))
+    inner.create(_tenant_record([_arc("box-a")], "tnt-a"))
+    inner.create(_tenant_record([_arc("box-a")], "tnt-b"))
+
+    class FlakyGetStore(wiring.TenantFileWiringStore):
+        def get(self, tenant_id):
+            if tenant_id == "tnt-a":
+                raise FileNotFoundError("store file deleted mid-sweep")
+            return super().get(tenant_id)
+
+    store = FlakyGetStore(inner)
+    wm = str(tmp_path / "wm.json")
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    rec_a = summary["tenants"]["tnt-a"]
+    assert rec_a["failed"] is True
+    assert rec_a["applied"] is False
+    assert any("LOUD:" in n for n in rec_a["notes"])
+    # tnt-b ticked normally through the same sweep.
+    assert summary["tenants"]["tnt-b"]["failed"] is False
+
+
+def test_unreadable_probe_history_noted_loud(tmp_path):
+    # D-AC-2's third branch: latest_probe_fn raising (history lock
+    # wedged) is fail-visible, not fail-dead — the tick still drives.
+    store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
+    wm = str(tmp_path / "wm.json")
+
+    def boom(vm_id):
+        raise OSError("history lock wedged")
+
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _down("relay"),
+        now=NOW, latest_probe_fn=boom,
+    )
+    rec = summary["tenants"]["tnt-a"]
+    assert rec["stale_probe"] is True
+    assert any("LOUD:" in n and "unreadable" in n for n in rec["notes"])
+    assert rec["applied"] is True
+
+
+def test_vanished_tenant_mid_sweep_is_noted_not_failed(tmp_path):
+    # Benign race: listed by tenant_ids(), gone by get(). No tick ran,
+    # so failed=False — and the note must not claim a skip (QA-3).
+    class GhostStore:
+        def tenant_ids(self):
+            return ["ghost"]
+
+        def get(self, tenant_id):
+            return None
+
+        def read_modify_write(self, tenant_id, fn):
+            raise AssertionError("must not drive a vanished tenant")
+
+    wm = str(tmp_path / "wm.json")
+    summary = driver.tick_all_tenants(
+        GhostStore(), watermark_path=wm, read_fn=lambda vm_id: _ok(),
+        now=NOW, latest_probe_fn=_fresh_probe,
+    )
+    rec = summary["tenants"]["ghost"]
+    assert rec["failed"] is False
+    assert rec["applied"] is False
+    assert rec["skipped"] is False
+    assert any("vanished mid-sweep" in n for n in rec["notes"])
+    assert not any("skipped" in n for n in rec["notes"])
+
+
+def test_corrupt_watermark_sidecar_restarts_empty(tmp_path):
+    # A corrupt sidecar is observability damage, never a reason to skip
+    # the tick: the write restarts from empty and the tick lands.
+    store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
+    wm = str(tmp_path / "wm.json")
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert summary["tenants"]["tnt-a"]["applied"] is False
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    assert marks["tnt-a"]["tenant_id"] == "tnt-a"
+
+
+def test_observability_failure_does_not_wedge_sweep(tmp_path):
+    # Engineering A2: a watermark write failure (missing parent dir)
+    # is fail-soft — the tenant was already driven; the sweep continues
+    # and the failure surfaces LOUD in the summary's errors.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-a")],
+    })
+    wm = str(tmp_path / "no-such-dir" / "wm.json")
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    assert set(summary["tenants"]) == {"tnt-a", "tnt-b"}
+    assert len(summary["errors"]) == 2
+    assert all(e["tenant_id"] in ("tnt-a", "tnt-b") for e in summary["errors"])
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False  # the drive itself worked
+        assert any("observability failed" in n for n in rec["notes"])
+
+
+def test_watermark_path_for_appends_suffix():
+    assert driver.watermark_path_for("/x/tenants.json") == \
+        "/x/tenants.json.relay-tick-watermarks.json"
 
 
 def test_watermark_sidecar_is_atomic_0600(tmp_path):
@@ -403,8 +525,9 @@ def test_protocol_concurrent_ticks_converge():
     # from the fresh (now suspended) record inside the store lock: its
     # re-plan takes the already-suspended branch — the detail-less
     # boolean-flip form "relay-down", never a second
-    # "relay-down(detail=...)". Neuter check: dropping the apply-phase
-    # re-selection guard makes both reports carry the detail form.
+    # "relay-down(detail=...)". Neuter check: breaking the store-lock
+    # atomicity (both threads load the live record before either saves)
+    # makes both reports carry the detail form.
     store = FakeWiringStore()
     store.create(_tenant_record([_arc("box-a")], "tnt-x"))
 
@@ -475,9 +598,8 @@ def test_tick_all_tenants_drives_protocol_store():
     # The driver itself is protocol-pure: it ticks a non-file store.
     store = FakeWiringStore()
     store.create(_tenant_record([_arc("box-a")], "tnt-z"))
-    import tempfile as _tf
 
-    with _tf.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory() as td:
         wm = os.path.join(td, "wm.json")
         summary = driver.tick_all_tenants(
             store, watermark_path=wm,

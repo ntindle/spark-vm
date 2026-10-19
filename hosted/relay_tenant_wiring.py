@@ -123,6 +123,13 @@ from hosted import tenant_status as ts
 # ---------------------------------------------------------------------------
 # Tenant-layer predicates (R2b names these "the tenant layer's answer").
 
+# The apply-phase skip note prefix (D-RL34-3a): the auto-driver matches
+# this prefix (not a substring) to count anchor-moved skips separately
+# from applied ticks (F-AC-7, #1721). Keep the prefix stable — both the
+# wiring's note construction and the driver's matcher pin it, and a
+# rewording would silently degrade skip accounting to "noop".
+ANCHOR_MOVED_NOTE = "anchor moved between read and apply"
+
 # Arc codes that imply the box reached ``live`` in its current session.
 # (Every one is reachable only via a post-live transition: the rule-6/8
 # entries and the stuck entry all require a post-live code, and the
@@ -643,9 +650,9 @@ def drive_tenant(
                     "reading": _reading_summary(anchor_reading),
                     "events": [],
                     "notes": [
-                        "anchor moved between read and apply (read %r, "
-                        "fresh %r) — reading not applied; next tick "
-                        "re-selects and converges"
+                        ANCHOR_MOVED_NOTE
+                        + " (read %r, fresh %r) — reading not applied; "
+                        "next tick re-selects and converges"
                         % (read_anchor_id, fresh_anchor_id)
                     ],
                 }
