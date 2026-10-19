@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   all in place and E2E-tested, so the lane's vision issue closes on
   evidence; the retired-planes-in-`stale` design question is answered
   (keep the behavior — the real promotion gate never consumed that
-  report), and the operator guide now names the real gate. (#TBD)
+  report), and the operator guide now names the real gate. (#1780)
 - `muse-job approvals` and `muse-job status` no longer print a machine
   verdict next to prompts that look like trust prompts — the old tag sat
   next to the one decision the trust machinery keeps explicitly human,
