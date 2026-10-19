@@ -58,6 +58,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   parser the wiring shares with the tenant layer is now a documented
   public seam instead of a cross-module private reach. (#1732)
 ### Added
+- Relay-liveness auto-driver, scheduled packaging slice: the self-hosted
+  half of the scheduled driver — a systemd service + timer that fires a
+  new sweep entry point once per probe-cadence tick, driving every
+  tenant's relay wiring through the driver module (never the manual
+  tick), landing each tick in the per-tenant watermark sidecar and the
+  fleet journal. Ships with an operator's guide (install, cadence knob,
+  where the output goes, sweep-vs-manual-tick discipline) and tests that
+  pin the timer period to the probe-cadence default. The timer ships
+  disabled until the staleness alert (#1724) lands. (#TBD)
 - Relay-liveness auto-driver, first slice: a new in-repo module provides
   the tick-all-tenants driver that follow-up slices will invoke on the
   probe schedule — it ticks every tenant's relay wiring, records each
