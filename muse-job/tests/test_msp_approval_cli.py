@@ -259,9 +259,10 @@ def test_approvals_lists_redacted(cli, fakes, capsys):
     assert "rm -rf /tmp/x" not in out
     assert "rawArgs" not in out
     methods = [c[0] for c in fakes.host_calls()]
-    # One listPending per plane helper (the smoke CLI does the same --
-    # the wire returns both planes together but the helpers each read it).
-    assert methods.count("approval/listPending") == 2
+    # One listPending for both planes (list_pending reads approvals and
+    # prompts in a single round-trip so the two lists share one
+    # point-in-time state).
+    assert methods.count("approval/listPending") == 1
 
 
 def test_approvals_json_redacted(cli, fakes, capsys):

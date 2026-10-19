@@ -102,6 +102,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (#1754)
 
 ### Fixed
+- muse-job approvals: the approvals listing and the supervisor's approval
+  payload now read both pending planes (tool approvals and user-input
+  prompts) in one round-trip instead of two — so the two lists can no
+  longer disagree about what was pending at the same moment. A stale
+  approval parsed under a different session is also refused client-side
+  instead of being decided against the wrong session. (#1774)
 - Relay tenant-wiring: the apply phase now drives the tenant's anchor
   box through the same single per-box emitter the design doc describes,
   instead of carrying an inlined copy of that path — so the documented
