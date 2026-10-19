@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   fewer than two boxes are stale, so a later re-outage pages again. A
   single stale box stays a per-box row on the fleet inventory table,
   not a page.
-  (#TBD)
+  (#1754)
 
 ### Fixed
 - Relay session-liveness checks no longer load the entire session
