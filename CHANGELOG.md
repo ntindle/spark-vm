@@ -58,12 +58,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   parser the wiring shares with the tenant layer is now a documented
   public seam instead of a cross-module private reach. (#1732)
 ### Added
-- Relay-liveness auto-driver, first slice: an in-repo driver module
-  ticks every tenant's relay wiring on the probe schedule, records each
+- Relay-liveness auto-driver, first slice: a new in-repo module provides
+  the tick-all-tenants driver that follow-up slices will invoke on the
+  probe schedule — it ticks every tenant's relay wiring, records each
   tick in a per-tenant watermark and the fleet event journal, and flags
   stale probe data loudly instead of probing it itself. The hosted cron
   trigger and self-hosted packaging arrive as follow-up slices; the
-  manual tick stays the override path. (#TBD)
+  manual tick stays the override path. (#1737)
 - Documented the relay-liveness wiring tick for operators: how to run a
   manual tick for a tenant, how to read the tick report it prints, what
   the exit codes and failure behavior mean, and the operating discipline
