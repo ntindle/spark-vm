@@ -2,7 +2,7 @@
 
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `2e33ceca` (2026-10-19, PR
-#1765's merge — four slots after the S3 ingest landed). Issue/PR
+#1765's merge — two merges after the S3 ingest landed). Issue/PR
 numbers are GitHub references as of 2026-10-19 (not code-verifiable
 from the tree). Honesty rules apply (`docs/POSITIONING.md`): this
 describes current state and work to do, not promises. Nothing here
@@ -123,9 +123,10 @@ remainders.
 consuming gate today, so "never gate-consumed" is still vacuous by
 absence — and the T2 acceptance now rides on the G15 gate build
 inheriting `gate_consumable_events` rather than re-deriving the
-rule. #1516 stays open for the producer half + the first gate's T2
-inheritance; its shipped acceptance (mechanism + ingest + T2 pin) is
-done.
+rule. #1516 stays open as the S3-remainder tracker linking the
+filed builds — the producer-half build itself is #1767 (D-AI-1) —
+and the first gate's T2 inheritance rides on the G15 gate build;
+its shipped acceptance (mechanism + ingest + T2 pin) is done.
 
 ## 4. Decisions
 
