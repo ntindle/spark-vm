@@ -131,7 +131,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   control-character scrub can reorder or hide displayed text for anyone
   reading the journal, so a hostile producer note could misrepresent
   what happened. Journal notes are plain text now (newlines and tabs
-  still allowed). Closes #1738. (#TBD)
+  still allowed). Closes #1738. (#1763)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the

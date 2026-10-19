@@ -767,8 +767,9 @@ def test_tick_event_note_is_scrubbed():
     assert ev["note"] == "stale probe (reversed!)ok"
 
 
-def test_scrub_strips_lone_surrogates():
-    # Cs: a lone surrogate cannot be UTF-8-encoded, so one reaching
-    # the journal's JSON write would silently drop the tick-note
-    # event (append fails soft). The scrub eats it instead.
-    assert driver._scrub_note("ok\ud800\udc00done") == "okdone"
+def test_scrub_strips_surrogates():
+    # Cs: a lone surrogate is never valid text (str.encode('utf-8')
+    # raises), so the scrub eats it rather than trusting every
+    # downstream writer to escape it.
+    assert driver._scrub_note("ok\ud800done") == "okdone"  # true lone surrogate
+    assert driver._scrub_note("ok\ud800\udc00done") == "okdone"  # pair halves

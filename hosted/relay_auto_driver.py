@@ -85,18 +85,25 @@ def _now_iso(ts: float) -> str:
 def _scrub_note(text: str) -> str:
     """Strip control and invisible-format characters from a journal note.
 
-    Removes C0/C1 controls (except ``\\n``/``\\t``, which the journal
-    format uses) AND Unicode format controls (category Cf): bidi
-    overrides U+202A-U+202E, isolates U+2066-U+2069, zero-width
-    controls U+200B-U+200D, BOM U+FEFF, and the rest of the Cf class
-    (soft hyphen, interlinear annotation anchors, ...). Those survive
-    an ``ord() >= 0x20`` scrub but can reorder or hide displayed text
-    for anyone rendering the journal (fleet console, status feed) —
-    a display-layer spoofing primitive (issue #1738). Surrogates
-    (Cs) go too: they cannot be UTF-8-encoded, so a lone surrogate
-    would fail the journal's JSON write and silently drop the whole
-    tick-note event (the append path fails soft). Fail-closed typing:
-    non-str input is stringified, never dropped.
+    Removes C0 controls (except ``\\n``/``\\t``, which the journal
+    format uses — ``\\r`` is dropped) AND Unicode format controls
+    (category Cf): bidi overrides U+202A-U+202E, isolates
+    U+2066-U+2069, zero-width controls U+200B-U+200D, BOM U+FEFF, and
+    the rest of the Cf class (soft hyphen, interlinear annotation
+    anchors, ...). DEL and the C1 controls pass through, as before —
+    the scrub targets only display-invisible format controls, not the
+    full Cc class. The Cf set survives an ``ord() >= 0x20`` scrub but
+    can reorder or hide displayed text for anyone rendering the
+    journal (fleet console, status feed) — a display-layer spoofing
+    primitive (issue #1738). Surrogates (Cs) go too: a lone surrogate
+    is never valid text — ``str.encode('utf-8')`` raises
+    ``UnicodeEncodeError``, so any non-escaping writer or
+    cross-language consumer (e.g. the future S2-port side) would
+    choke; the scrub removes them rather than trusting every
+    downstream writer to escape. Side effect to know: ZWJ
+    (U+200D) stripping splits multi-person emoji into separate
+    glyphs — acceptable for a plain-text security journal.
+    Fail-closed typing: non-str input is stringified, never dropped.
     """
     if not isinstance(text, str):
         text = str(text)
