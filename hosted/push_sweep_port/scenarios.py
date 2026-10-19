@@ -458,6 +458,52 @@ def build_d8_ttl_boundary(conn):
     return base_spec()
 
 
+def build_reminders_poisoned_multi_page(conn):
+    """Keyset pagination under poison, with cross-box aid ordering
+    (D68/D69/D78).
+
+    Three due approvals across three boxes, aids chosen to cross box
+    order (box-a/r3, box-b/r1, box-c/r2), at page_size=1/max_pages=3.
+    With the keyset predicate the sweep pages (box-a,r3) → (box-b,r1)
+    → (box-c,r2); r1's record read poisons (D78) and the healthy
+    candidates still page — {queued: 2, poisoned: 1}, candidates_seen=3.
+    Dropping the keyset predicate re-selects (box-a,r3) on page 2,
+    which the D75 anti-join masks (empty page → break), so r1/r2 are
+    never reached: {queued: 1}, candidates_seen=1. Flipping the ORDER
+    BY changes the page order, which shows up in push_send_results'
+    id order even when the disposition set is identical.
+    """
+    file_approval(conn, "box-a", "r3", ttl=600, age=400, owner="owner-1")
+    file_approval(conn, "box-b", "r1", ttl=600, age=400, owner="owner-2")
+    file_approval(conn, "box-c", "r2", ttl=600, age=400, owner="owner-3")
+    real = push_sweep.make_record_adapter(conn, EPOCH_T0)
+
+    def adapter(box_id, aid):
+        if aid == "r1":
+            raise RuntimeError("fixture poison: r1's record is corrupt")
+        return real(box_id, aid)
+
+    return base_spec(
+        record_adapter=adapter,
+        sweep_kwargs={"page_size": 1, "max_pages": 3},
+        registry={"box-a": "owner-1", "box-b": "owner-2",
+                  "box-c": "owner-3"})
+
+
+def build_d68_half_ttl_boundary(conn):
+    """The half-TTL hint predicate's exclusion direction (D68).
+
+    ttl=600, age=100: due under the ttl>=300 (D8) predicate but
+    excluded by the half-TTL hint predicate (`age >= ttl/2` required,
+    100 < 300). The point of this scenario is the HINT's exclusion:
+    a port that drops the half-TTL predicate selects the candidate,
+    the policy gate then reports not-due, and the summary stops
+    matching the record (candidates_seen=0, empty reminder map).
+    """
+    file_approval(conn, "box-a", "r1", ttl=600, age=100)
+    return base_spec()
+
+
 SCENARIOS = [
     {"name": "reminder_due",
      "doc": "One due reminder produces exactly one queued page.",
@@ -547,6 +593,15 @@ SCENARIOS = [
      "doc": "ttl=200 never a candidate, ttl=400 pages exactly once — the "
             "hint and the gate agree on the 300s bound (D8, #1507).",
      "build": build_d8_ttl_boundary},
+    {"name": "reminders_poisoned_multi_page",
+     "doc": "Keyset pagination under poison with cross-box aid ordering: "
+            "three pages in (box,a) order, one poisoned, the rest page "
+            "(D68/D69/D78).",
+     "build": build_reminders_poisoned_multi_page},
+    {"name": "d68_half_ttl_boundary",
+     "doc": "ttl=600, age=100 is excluded by the half-TTL hint "
+            "predicate: zero candidates, zero dispositions (D68).",
+     "build": build_d68_half_ttl_boundary},
 ]
 
 
