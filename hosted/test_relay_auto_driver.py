@@ -700,3 +700,75 @@ def test_watermark_read_refuses_symlink_plant(tmp_path):
     with open(victim, encoding="utf-8") as fh:
         assert json.load(fh) == {"attacker": {"seed": "poison"}}
     assert os.path.islink(wm)
+
+
+# ---------------------------------------------------------------------------
+# #1738 — bidi / zero-width display spoofing in journal notes
+# ---------------------------------------------------------------------------
+
+_BIDI_OVERRIDES = [chr(cp) for cp in range(0x202A, 0x202E + 1)]
+_ISOLATES = [chr(cp) for cp in range(0x2066, 0x2069 + 1)]
+_ZERO_WIDTH = ["\u200b", "\u200c", "\u200d", "\ufeff"]
+
+
+def test_scrub_strips_bidi_overrides():
+    # #1738: bidi override controls survived the Cc-only scrub
+    # (ord >= 0x20) and could reorder displayed journal text.
+    for bidi in _BIDI_OVERRIDES:
+        scrubbed = driver._scrub_note("probe stale " + bidi + "ok")
+        assert bidi not in scrubbed, hex(ord(bidi))
+        assert scrubbed == "probe stale ok"
+
+
+def test_scrub_strips_zero_width_isolates_and_bom():
+    # #1738: zero-width controls, directional isolates, and the BOM
+    # are all Cf and must not reach the journal.
+    note = "a" + "".join(_ZERO_WIDTH + _ISOLATES) + "b"
+    assert driver._scrub_note(note) == "ab"
+
+
+def test_scrub_strips_rest_of_cf_class():
+    # #1738: the fix strips the whole Cf class, not just the
+    # enumerated spoofing set — soft hyphen (U+00AD) is display-
+    # invisible and has no place in a journal note either.
+    assert driver._scrub_note("up\u00addate") == "update"
+
+
+def test_scrub_keeps_newline_tab_printable_and_emoji():
+    # The Cf strip must not eat the two legitimate controls or
+    # ordinary text — including non-BMP printable characters.
+    note = "line one\nline two\tcolumn \U0001f916"
+    assert driver._scrub_note(note) == note
+
+
+def test_scrub_still_strips_c0_controls():
+    # Regression guard on the pre-#1738 behavior: C0 controls other
+    # than \n / \t stay stripped.
+    assert driver._scrub_note("a\x00b\x07c\x1bd") == "abcd"
+    assert driver._scrub_note("a\nb\tc") == "a\nb\tc"
+
+
+def test_scrub_fail_closed_typing():
+    # Non-str input is stringified, never dropped silently.
+    assert driver._scrub_note(None) == "None"
+    assert driver._scrub_note(42) == "42"
+
+
+def test_tick_event_note_is_scrubbed():
+    # End to end: a hostile producer note riding through _tick_event
+    # lands in the journal event with the spoofing characters gone.
+    hostile = "stale probe\u202e (reversed!)\u200bok"
+    ev = driver._tick_event(
+        tenant_id="tnt-a", anchor_box_id=None, tick_iso="2026-10-19T00:00:00+00:00",
+        record={"failed": False, "applied": True, "skipped": False,
+                "events": 1, "notes": [hostile]},
+    )
+    assert "\u202e" not in ev["note"] and "\u200b" not in ev["note"]
+    assert ev["note"] == "stale probe (reversed!)ok"
+
+
+def test_scrub_strips_lone_surrogates():
+    # Cs: a lone surrogate cannot be UTF-8-encoded, so one reaching
+    # the journal's JSON write would silently drop the tick-note
+    # event (append fails soft). The scrub eats it instead.
+    assert driver._scrub_note("ok\ud800\udc00done") == "okdone"

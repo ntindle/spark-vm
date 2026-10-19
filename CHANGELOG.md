@@ -125,6 +125,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   another file. Planting such a link already required write access to the
   respective state directory, so the practical risk was low. Refs #1755
   (the remaining lock sites land in following slices). (#1761)
+- Tick notes written to the fleet event journal no longer carry invisible
+  Unicode format controls: text-direction overrides, isolates,
+  zero-width characters, and similar characters that survive a plain
+  control-character scrub can reorder or hide displayed text for anyone
+  reading the journal, so a hostile producer note could misrepresent
+  what happened. Journal notes are plain text now (newlines and tabs
+  still allowed). Closes #1738. (#TBD)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the

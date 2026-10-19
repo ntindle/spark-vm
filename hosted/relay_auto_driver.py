@@ -42,6 +42,7 @@ import json
 import os
 import tempfile
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -82,12 +83,35 @@ def _now_iso(ts: float) -> str:
 
 
 def _scrub_note(text: str) -> str:
-    """Strip control characters from a journal note (fail-closed typing)."""
+    """Strip control and invisible-format characters from a journal note.
+
+    Removes C0/C1 controls (except ``\\n``/``\\t``, which the journal
+    format uses) AND Unicode format controls (category Cf): bidi
+    overrides U+202A-U+202E, isolates U+2066-U+2069, zero-width
+    controls U+200B-U+200D, BOM U+FEFF, and the rest of the Cf class
+    (soft hyphen, interlinear annotation anchors, ...). Those survive
+    an ``ord() >= 0x20`` scrub but can reorder or hide displayed text
+    for anyone rendering the journal (fleet console, status feed) —
+    a display-layer spoofing primitive (issue #1738). Surrogates
+    (Cs) go too: they cannot be UTF-8-encoded, so a lone surrogate
+    would fail the journal's JSON write and silently drop the whole
+    tick-note event (the append path fails soft). Fail-closed typing:
+    non-str input is stringified, never dropped.
+    """
     if not isinstance(text, str):
         text = str(text)
-    return "".join(
-        ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 0x20
-    )
+    return "".join(ch for ch in text if _scrub_keep(ch))
+
+
+def _scrub_keep(ch: str) -> bool:
+    """Keep predicate for :func:`_scrub_note`: the two legitimate
+    controls, plus everything printable that is neither an invisible
+    format control (Cf) nor a surrogate (Cs)."""
+    if ch in ("\n", "\t"):
+        return True
+    if ord(ch) < 0x20:
+        return False
+    return unicodedata.category(ch) not in ("Cf", "Cs")
 
 
 def _atomic_write_json_0600(path: str, obj: dict) -> None:
