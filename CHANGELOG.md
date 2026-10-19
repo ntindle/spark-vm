@@ -61,8 +61,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Relay auto-driver lane convergence analysis: vision-vs-state pin after the
   scheduled-packaging slice shipped — the four genuinely-new findings a
   fresh read of the shipped driver turned up (silent corrupt-watermark
-  restart, watermark never pruning deleted tenants, unbounded journal-append
-  leg, undocumented no-anchor journal attribution), the four continuing
+  restart, watermark never pruning deleted tenants, the journal-append
+  bound sitting at the fleet 300s default instead of tick scale,
+  undocumented no-anchor journal attribution), the four continuing
   decisions, and the re-pinned slice table with the staleness-alert
   enablement gate. (#[PR])
 - Relay-liveness auto-driver, scheduled packaging slice: the self-hosted

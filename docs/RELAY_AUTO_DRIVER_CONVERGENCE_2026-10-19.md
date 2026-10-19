@@ -41,14 +41,17 @@ turned up that the slice map did not.
   The sidecar grows unboundedly, and S4's staleness rule (#1724) will
   evaluate phantom tenants — a staleness alert on a deleted tenant is
   a false positive waiting for a rule that reads the sidecar naively.
-- **F-AC-10 — the driver's own journal append has no timeout.**
-  D-AC-3 claims "ticks are bounded", and the bound covers the producer
-  read (`journal_timeout_s` → `drive_tenant`) — but the driver's own
-  `_append_journal_note` → `fleet.events.append_events` takes the
-  fleet journal lock with no timeout. A wedged journal lock stalls the
-  sweep's remaining tenants indefinitely (the watermark already landed,
-  so S4 would eventually read staleness — but the stall is silent
-  until it resolves, and it delays every tenant behind the wedge).
+- **F-AC-10 — the driver's journal-append bound is fleet-scale, not
+  tick-scale.** `_append_journal_note` → `fleet.events.append_events`
+  runs under `journal_lock(store_dir)`, which raises `JournalLockError`
+  after a bounded wait — but the bound is the fleet default of 300 s
+  (`fleet/events.py:684`), not a tick-scale timeout. A wedged journal
+  lock stalls the sweep up to 300 s per tenant behind the wedge before
+  the error surfaces (already noted LOUD on the record with sweeping
+  continuing — the leg fails visible, not silent; the gap is only the
+  bound's scale). `append_events` takes no timeout parameter today, so
+  the driver's journal leg cannot request a tighter bound without a
+  signature change.
 - **F-AC-11 — journal `box_id` falls back to `tenant_id`, undocumented.**
   `_tick_event` sets `box_id = anchor_box_id if ... is not None else
   tenant_id`. A no-live-anchor tick journals an event whose `box_id` is
@@ -68,10 +71,12 @@ turned up that the slice map did not.
   deletes sidecar records for tenants absent from `store.tenant_ids()`
   (a prune pass, not a per-tick delete), so S4 never evaluates
   phantoms. Filed as #1745.
-- **D-AC-9 — journal-append gets the same timeout discipline as the
-  producer read.** `_append_journal_note` runs the append under a
-  bounded wait; on timeout the tick notes it LOUD and moves on (the
-  journal is secondary observability per D-AC-4). Filed as #1746.
+- **D-AC-9 — journal-append gets a tick-scale timeout.** Thread a
+  timeout parameter through `append_events` into
+  `journal_lock(store_dir, timeout_s=...)` so `_append_journal_note`
+  can request a tick-scale bound (not the fleet 300 s default); on
+  timeout the tick notes it LOUD and moves on (the journal is
+  secondary observability per D-AC-4). Filed as #1746.
 - **D-AC-10 — no-anchor ticks journal with an explicit tenant scope.**
   `_tick_event` keeps the `box_id=tenant_id` fallback but the docstring
   pins it as the documented tenant-scoped convention, with the G17
