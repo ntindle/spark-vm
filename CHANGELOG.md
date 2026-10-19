@@ -66,7 +66,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   fleet journal. Ships with an operator's guide (install, cadence knob,
   where the output goes, sweep-vs-manual-tick discipline) and tests that
   pin the timer period to the probe-cadence default. The timer ships
-  disabled until the staleness alert (#1724) lands. (#TBD)
+  disabled until the staleness alert (#1724) lands. (#1723)
 - Relay-liveness auto-driver, first slice: a new in-repo module provides
   the tick-all-tenants driver that follow-up slices will invoke on the
   probe schedule — it ticks every tenant's relay wiring, records each

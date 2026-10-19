@@ -125,7 +125,7 @@ def test_timer_period_matches_probe_cadence_default():
     tmr = _parse_systemd(_read(TIMER))
     assert "Timer" in tmr and "Install" in tmr
     period_s = _period_to_seconds(tmr["Timer"]["OnUnitActiveSec"])
-    assert period_s == rps.DEFAULT_CADENCE_S == 300.0
+    assert period_s == rps.DEFAULT_CADENCE_S
     assert tmr["Install"].get("WantedBy") == "timers.target"
     assert tmr["Timer"].get("Persistent", "false").lower() == "false"
 

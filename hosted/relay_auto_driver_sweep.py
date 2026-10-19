@@ -22,10 +22,12 @@ the unit's journal through this path.
 
 Exit contract: 0 when the sweep completed and the report printed
 (per-tenant drive failures are IN the report per D-AC-3 — a broken
-tenant instrument fails loud in its own record, never the sweep);
-exit 2 when the sweep itself could not run (bad input / store
-unwritable / internal error), one line on stderr, never a bare
-traceback.
+tenant instrument fails loud in its own record, never the sweep; a
+wedged watermark sidecar likewise lands LOUD in the report's
+errors[] and still exits 0 — the S4 staleness rule reads the
+sidecar's absence, not the unit state); exit 2 when the sweep
+itself could not run (bad input / unreadable store / internal
+error), one line on stderr, never a bare traceback.
 """
 
 import argparse

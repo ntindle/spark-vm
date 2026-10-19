@@ -32,6 +32,10 @@ sudo systemctl daemon-reload
 # sudo systemctl enable --now relay-auto-driver.timer
 ```
 
+The checkout itself must be operator-owned (a non-owner-writable
+checkout is the same class of trust as a non-owner-writable
+`<BOX_OWNER>` home — the unit's trust model in §6 assumes it).
+
 `<TENANT_STORE>` is the same tenant-record JSON store path the
 wiring's `--tick` CLI takes. `<ESTATE_STORE_DIR>` is the fleet estate
 store dir whose `events.jsonl` receives the tick-note journal events
@@ -59,9 +63,11 @@ If the operator overrides `RELAY_PROBE_CADENCE_S` (systemd `Environment=`
 on the service, or the environment), the two diverge:
 
 - knob **above** the timer period: sweeps run more often than the
-  cadence; a tick that finds no new reading is a cheap no-op
-  (idempotent — the wiring's re-plan on the fresh record emits
-  nothing observable). Safe, just extra work.
+  cadence; a tick that finds no new reading is state-idempotent (the
+  arc takes only the boolean flip, no transition) but NOT
+  unobservable: every sweep still lands a watermark record and a
+  fleet-journal tick-note per tenant and rewrites the store file.
+  Safe, just extra work — journal/watermark/store churn per firing.
 - knob **below** the timer period: the driver cannot drive faster than
   the timer; cadence granularity is lost. Keep the timer period ≤ the
   knob, or change both together.
@@ -117,9 +123,13 @@ as applied.
   failure is evidence, in the watermark.
 - The sweep exits 2 (one line on stderr, unit shows failed) only
   when the sweep itself could not run: bad input, unreadable store,
-  unwritable watermark sidecar, internal error. A failed unit run
-  with no fresh watermark is exactly what S4's staleness rule will
-  read as driver trouble (#1724).
+  internal error.
+- A wedged watermark sidecar never wedges the sweep: the tick still
+  drives, the failure lands LOUD on the tenant's record (and in the
+  report's `errors[]`), the sweep still exits 0 — the unit shows
+  success. The MISSING fresh watermark is what S4's staleness rule
+  reads as driver trouble (#1724): staleness reads the sidecar, not
+  the unit state.
 
 ## 6. Trust note
 
