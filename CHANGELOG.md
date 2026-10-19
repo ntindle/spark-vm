@@ -92,6 +92,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
   when the box has no pin), instead of a hash-derived wave number naming
   a cohort the box was never in. (#1749)
 
+### Security
+- Relay-liveness state locks and the per-tenant watermark read now refuse
+  symlinked paths instead of following them: a pre-planted symlink at a
+  lock file or at the watermark sidecar fails loudly (surfaced as a
+  broken instrument, never a silent wedge) instead of silently moving a
+  lock onto another file or feeding planted bytes into the watermark
+  merge. Planting such a link already required write access to the
+  operator state directory, so the practical risk was low — this closes
+  the read/write asymmetry.
+  Closes #1740. Closes #1741. (#TBD)
+
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
   per-box tick emitter is now module-private (nothing outside the wiring

@@ -275,6 +275,11 @@ def _journal_locked(path, exclusive=True, timeout_s=None):
     missing journal directory before locking. Darkness is an absent
     instrument; a lock wedge is a broken one — they must not share an
     error shape.
+
+    #1740: the lock sidecar opens with O_NOFOLLOW — a pre-planted
+    symlink at the lock path fails loud as JournalLockError (ELOOP)
+    instead of silently moving the flock onto another file
+    (lock-desync / lock-DoS).
     """
     if timeout_s is None:
         timeout_s = _JOURNAL_LOCK_WAIT_TIMEOUT_S
@@ -284,8 +289,22 @@ def _journal_locked(path, exclusive=True, timeout_s=None):
             "seconds, got %r" % (timeout_s,))
     lock_path = path + ".lock"
     try:
-        lf = open(lock_path, "a+b")
+        fd = os.open(
+            lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+        )
     except FileNotFoundError:
+        # Missing parent directory: NOT wrapped — the reader maps it
+        # to darkness, the writer already refused before locking.
+        raise
+    except OSError as exc:
+        # #1740: symlink plant (ELOOP) — fail loud as JournalLockError,
+        # the lock function's loud shape for a broken instrument.
+        raise JournalLockError(
+            "cannot open relay journal lock %s: %s" % (lock_path, exc))
+    try:
+        lf = os.fdopen(fd, "r+b")
+    except BaseException:
+        os.close(fd)
         raise
     with lf:
         deadline = time.monotonic() + timeout_s

@@ -676,3 +676,27 @@ def test_watermark_lock_refuses_symlink_plant(tmp_path):
     assert not os.path.exists(wm)
     with open(victim, encoding="utf-8") as fh:
         assert fh.read() == "victim"
+
+
+def test_watermark_read_refuses_symlink_plant(tmp_path):
+    # #1741: the sidecar read must pin the same O_NOFOLLOW discipline
+    # the write path has — a pre-planted symlink at the sidecar path
+    # must not feed the plant's bytes into the read-modify-write
+    # merge. The read refuses loud (ELOOP -> OSError naming the
+    # plant); the victim file is untouched and no watermark lands.
+    # Neuter-verified: with plain open(path, "r") the read follows
+    # the link and merges the plant's bytes; the OSError that does
+    # surface then names the WRITE path, failing the match below.
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.json")
+    with open(victim, "w", encoding="utf-8") as fh:
+        json.dump({"attacker": {"seed": "poison"}}, fh)
+    os.symlink(victim, wm)
+    with pytest.raises(OSError, match="refusing to read watermark through symlink"):
+        driver._update_watermark(wm, "tnt-a", {"ok": True})
+    # The plant never influenced the merge: the victim holds only the
+    # attacker's bytes, and the sidecar path is still the plant (no
+    # real watermark was written through it).
+    with open(victim, encoding="utf-8") as fh:
+        assert json.load(fh) == {"attacker": {"seed": "poison"}}
+    assert os.path.islink(wm)

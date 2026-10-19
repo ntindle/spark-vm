@@ -37,6 +37,7 @@ The ``--tick`` CLI in ``relay_tenant_wiring.py`` stays the
 manual/override path — untouched.
 """
 
+import errno
 import json
 import os
 import tempfile
@@ -135,6 +136,26 @@ def _open_sidecar_lock(lock_path: str):
         raise
 
 
+def _read_sidecar_nofollow(path: str) -> dict:
+    """Read the JSON sidecar without following symlinks (#1741).
+
+    The write path (``_atomic_write_json_0600``) refuses a symlink at the
+    destination loudly; the read pins the same discipline so a
+    pre-planted symlink cannot influence which bytes feed the
+    read-modify-write merge. O_NOFOLLOW refuses the plant with ELOOP
+    (fail-loud); a missing file is still FileNotFoundError (the normal
+    first run).
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fh:
+        return json.load(fh)
+
+
 def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
     """Read-modify-write the watermark sidecar under a sidecar lock.
 
@@ -146,6 +167,10 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
     restarted from empty, so the caller can note it LOUD on the record
     (D-AC-7 fail-visible); False otherwise — a clean read, or a missing
     file (the normal first run: no history to lose).
+
+    #1741: a symlink at the sidecar path is a plant, not corruption —
+    ELOOP from the O_NOFOLLOW read is re-raised loud (same as the
+    write-path refusal), never restarted-from-empty over.
     """
     lock_path = path + ".lock"
     corrupt = False
@@ -154,14 +179,27 @@ def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
             try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    marks = json.load(fh)
+                marks = _read_sidecar_nofollow(path)
                 if not isinstance(marks, dict):
                     raise ValueError("sidecar content is not a JSON object")
             except FileNotFoundError:
                 # Normal first run: no history to lose, nothing to say.
                 marks = {}
-            except (OSError, ValueError):
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    # #1741: symlink plant — refuse loud, like the
+                    # write path. A plant must never be restarted
+                    # from empty over (that would silently discard
+                    # the evidence of the plant).
+                    raise OSError(
+                        "refusing to read watermark through symlink: %r"
+                        % (path,)
+                    ) from exc
+                # Corrupt/unreadable content: restart from empty, but
+                # fail-visible per D-AC-7 — the caller notes it LOUD.
+                marks = {}
+                corrupt = True
+            except ValueError:
                 # Corrupt/unreadable content: restart from empty, but
                 # fail-visible per D-AC-7 — the caller notes it LOUD.
                 marks = {}

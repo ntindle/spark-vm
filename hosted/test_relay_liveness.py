@@ -586,3 +586,32 @@ def test_liveness_query_matches_with_tiny_chunk(journal, monkeypatch):
     got = rl.relay_session_liveness("vm-1", now=NOW)
     assert got["session_id"] == "sess-target"
     assert got["state"] == "active"
+
+
+def test_journal_lock_refuses_symlink_plant(tmp_path):
+    # #1740: a pre-planted symlink at the journal lock path must fail
+    # loud as JournalLockError (ELOOP), never silently move the flock
+    # onto another file (lock-desync / lock-DoS). Neuter-verified:
+    # with plain open(..., "a+b") the lock is silently acquired
+    # through the plant.
+    path = str(tmp_path / "journal.jsonl")
+    victim = str(tmp_path / "victim")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, path + ".lock")
+    with pytest.raises(rl.JournalLockError, match="cannot open relay journal lock"):
+        with rl._journal_locked(path, exclusive=True):
+            pass
+    with open(victim, encoding="utf-8") as fh:
+        assert fh.read() == "victim"
+
+
+def test_journal_lock_missing_parent_stays_unwrapped(tmp_path):
+    # The FileNotFoundError contract survives the O_NOFOLLOW
+    # conversion: with O_CREAT, ENOENT still fires only when the
+    # parent directory is missing — the reader still maps it to
+    # darkness instead of a wrapped lock error.
+    path = str(tmp_path / "nope" / "journal.jsonl")
+    with pytest.raises(FileNotFoundError):
+        with rl._journal_locked(path, exclusive=True, timeout_s=1):
+            pass
