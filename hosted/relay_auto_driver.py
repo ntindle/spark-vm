@@ -112,6 +112,11 @@ def _scrub_note(text: str) -> str:
       non-escaping writer or cross-language consumer (e.g. the future
       S2-port side) would choke; the scrub removes them rather than
       trusting every downstream writer to escape.
+    - Mn variation selectors U+FE00-U+FE0F / U+E0100-U+E01EF (#1776):
+      invisible code points that alter adjacent-text presentation,
+      and they are Mn — not Cf — so the category predicate cannot
+      catch them; dropped by explicit range instead (other Mn, like
+      combining diacritics, stay).
     Side effect to know: ZWJ (U+200D) stripping splits multi-person
     emoji into separate glyphs — acceptable for a plain-text security
     journal. Fail-closed typing: non-str input is stringified, never
@@ -122,13 +127,30 @@ def _scrub_note(text: str) -> str:
     return "".join(ch for ch in text if _scrub_keep(ch))
 
 
+def _is_variation_selector(ch: str) -> bool:
+    """True for the two Unicode variation-selector ranges.
+
+    U+FE00-U+FE0F (VS1-VS16) and U+E0100-U+E01EF (VS17-VS256) are
+    category Mn, not Cf, so the category-based :func:`_scrub_keep`
+    cannot catch them — yet they are invisible code points that alter
+    the presentation of adjacent text in the journal (the #1776 class).
+    Range-exact, never class-wide: other Mn (combining diacritics) stay.
+    """
+    o = ord(ch)
+    return 0xFE00 <= o <= 0xFE0F or 0xE0100 <= o <= 0xE01EF
+
+
 def _scrub_keep(ch: str) -> bool:
     """Keep predicate for :func:`_scrub_note`: the two legitimate
     controls, plus text in none of the spoofing classes (Cc, Cf, Cs,
-    Zl, Zp). Purely category-based — no ord() cutoffs, so the whole
-    Cc class (C0, DEL, C1) is covered."""
+    Zl, Zp) and outside the Mn variation-selector ranges (U+FE00-U+FE0F,
+    U+E0100-U+E01EF — #1776: Mn, not Cf, so the class scrub misses
+    them). Purely category-based otherwise — no ord() cutoffs, so the
+    whole Cc class (C0, DEL, C1) is covered."""
     if ch in ("\n", "\t"):
         return True
+    if _is_variation_selector(ch):
+        return False
     return unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
