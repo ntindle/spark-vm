@@ -321,8 +321,10 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 
 **Shipped (slice 1, #1516): the attestation mechanism + ingest
 verification.** Boxes sign journal rows with their ed25519 identity key
-(the pairing key for hosted tenant boxes, the provisioned key for
-operator-estate boxes — the mechanism is key-agnostic); the collector
+(a layer-below identity key for hosted tenant boxes — the #844 pairing
+key is explicitly disqualified as a signing key, it is guest-resident
+and tenant-exfiltratable; the provisioned key for operator-estate
+boxes — the mechanism is key-agnostic); the collector
 verifies each row's signature against the store's write-once box-key
 registry (`fleet box-key pin/show`) and journals `attested: true` only
 on a valid signature. A bad signature on a claiming row is the forgery

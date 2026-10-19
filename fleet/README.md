@@ -432,9 +432,10 @@ Update rows a box signs with its ed25519 identity key are verified at
 collect time and journaled with `attested: true`; consuming gates may
 read only attested rows (the trust model's S3 T2 rule — "unattested
 events may be logged, never gate-consumed"). The mechanism is
-key-agnostic: a hosted tenant box signs with the key the pairing
-ceremony generated for it; an operator-estate box signs with its
-provisioned key. The operator pins each box's public key once:
+key-agnostic: a hosted tenant box signs with a layer-below identity
+key — the pairing-ceremony key is disqualified as a signing key
+(guest-resident, tenant-exfiltratable); an operator-estate box signs
+with its provisioned key. The operator pins each box's public key once:
 
 ```
 fleet box-key pin  --store ~/fleet-store --box-id tower --pubkey <64-hex>
