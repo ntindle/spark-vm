@@ -773,3 +773,33 @@ def test_scrub_strips_surrogates():
     # downstream writer to escape it.
     assert driver._scrub_note("ok\ud800done") == "okdone"  # true lone surrogate
     assert driver._scrub_note("ok\ud800\udc00done") == "okdone"  # pair halves
+
+
+def test_scrub_strips_c1_controls_and_del():
+    # Security round-1: C1 CSI (U+009B) is a live terminal-escape
+    # introducer on ECMA-48 terminals — the pre-#1738 scrub kept C1
+    # (ord >= 0x20), so "terminal-escape injection is handled" was
+    # only true for 7-bit ESC. The whole Cc class goes now.
+    # the CSI introducer is gone; the printable payload stays (a
+    # payload without an introducer is inert text).
+    assert driver._scrub_note("a\u009b2Jb") == "a2Jb"  # C1 CSI + sequence
+    assert driver._scrub_note("a\u0085b") == "ab"  # NEL
+    assert driver._scrub_note("a\x7fb") == "ab"  # DEL
+
+
+def test_scrub_strips_line_paragraph_separators():
+    # Security round-1: U+2028/U+2029 are line terminators on
+    # JS-rendered surfaces — a hostile note could forge journal lines.
+    assert driver._scrub_note("a\u2028b\u2029c") == "abc"
+
+
+def test_tick_event_box_id_is_scrubbed():
+    # box_id rides the same operator displays as the note, so it
+    # gets the same scrub.
+    ev = driver._tick_event(
+        tenant_id="tnt-\u202ea", anchor_box_id=None,
+        tick_iso="2026-10-19T00:00:00+00:00",
+        record={"failed": False, "applied": True, "skipped": False,
+                "events": 1, "notes": []},
+    )
+    assert ev["box_id"] == "tnt-a"
