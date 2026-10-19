@@ -51,6 +51,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- `muse-job approvals` and `muse-job status` no longer print a machine
+  verdict next to prompts that look like trust prompts — the old tag sat
+  next to the one decision the trust machinery keeps explicitly human,
+  inviting automation bias. The hint is now opt-in behind
+  `--show-heuristic`, and reworded so the first word a skim lands on is a
+  denial ("[NOT a classification ... -- verify yourself]"); the operator
+  still classifies every prompt explicitly. (#1777)
 - Competitor watch (2026-10-19 morning): Perplexity's open-source SPACE
   agent sandbox is getting independent confirmation of its cloud partner
   traction — Akamai has launched it on its cloud, Crusoe is adding it

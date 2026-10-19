@@ -336,7 +336,15 @@ section is the operator reference.
 with its choice ids and the ready-to-copy `muse-job decide` invocation
 template — and
 every open user-input prompt — with the ready-to-copy `muse-job answer`
-invocation template, flagged when the prompt looks like a trust prompt. The
+invocation template. A machine heuristic can flag prompts that look like
+a trust prompt — `muse-job approvals --show-heuristic` (or
+`muse-job status --show-heuristic` for the requested items `status`
+lists) — but the hint is off by default and explicitly non-authoritative:
+it renders as `[NOT a classification: heuristic hint -- verify yourself]`,
+and the listing never
+classifies prompts on its own, and the operator still classifies every
+prompt with `--trust-policy-opt-in` or `--classified-not-trust-prompt`
+(#1773). The
 output is redacted by default: approval subjects, raw tool args, and
 prompt answers are withheld, because they may carry real secrets.
 `--json` keeps the same redaction; `--show-secrets` (which only takes

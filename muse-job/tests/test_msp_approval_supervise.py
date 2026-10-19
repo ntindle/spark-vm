@@ -1176,9 +1176,15 @@ def test_status_renders_requested_with_runnable_commands(cli, fakes,
     assert ("muse-job decide job1 --approval-id ap-1 "
             "--choice-id <id>") in out
     assert "allow-once (approved)" in out and "deny (denied)" in out
-    assert "user-input ui-1 [looks like a trust prompt]" in out
+    # Issue #1773: the default surface shows no machine verdict ...
+    assert "trust prompt" not in out
     assert "Do you trust this workspace?" in out
     assert "Yes, trust it, No" in out
+    # ... and --show-heuristic renders the explicitly non-authoritative hint.
+    cli._msp_status_render_requested(st, show_heuristic=True)
+    out = capsys.readouterr().out
+    assert ("user-input ui-1 "
+            "[NOT a classification: heuristic hint -- verify yourself]") in out
     assert ("muse-job answer job1 --user-input-id ui-1 "
             "--answers") in out
     assert "--classified-not-trust-prompt|--trust-policy-opt-in" in out
