@@ -1034,3 +1034,69 @@ def test_append_events_dedups_null_box_id_rows(dirs):
     assert err is None
     assert (appended, duplicates) == (0, 1)
     assert len(journal(store, "events.jsonl")) == 1
+
+
+# --- Spoofing-class scrub hardening (#1764) --------------------------------
+# The fleet-origin audit fields take the fleet/events._clean_text path
+# (S1 synthesis here + the display path in fleet/api.py, which reuses
+# events._clean_text on every rendered row). The pre-#1764 scrub was
+# ASCII-only (ord() >= 0x20 survived), so the #1738 class — C1 escape
+# introducers, Cf bidi/zero-width controls, Zl/Zp separators, lone
+# surrogates — reached operator displays. These tests pin the
+# category-based scrub at the shared choke point, plus one synthesis
+# end-to-end through _note_for.
+
+
+def test_clean_text_drops_c1_csi():
+    # #1764: C1 CSI (U+009B) is a live terminal-escape introducer on
+    # ECMA-48 terminals — the pre-#1764 scrub kept it (ord >= 0x20).
+    events = _import_events_module()
+    assert events._clean_text("ok\x9b31mred") == "ok31mred"
+
+
+def test_clean_text_drops_cf_bidi_and_zero_width():
+    # #1764: Cf bidi overrides / zero-width controls reorder or hide
+    # displayed text (the #1738 display-spoofing class).
+    events = _import_events_module()
+    assert events._clean_text("a\u202eb") == "ab"  # RTL override
+    assert events._clean_text("a\u200bb") == "ab"  # zero-width space
+    assert events._clean_text("a\ufeffb") == "ab"  # BOM
+
+
+def test_clean_text_drops_line_separators():
+    # #1764: Zl/Zp are line terminators on JS-rendered surfaces — a
+    # hostile field could forge extra journal lines.
+    events = _import_events_module()
+    assert events._clean_text("a\u2028b\u2029c") == "abc"
+
+
+def test_clean_text_drops_lone_surrogate():
+    # #1764: a lone surrogate makes str.encode('utf-8') raise, choking
+    # any non-escaping downstream writer.
+    events = _import_events_module()
+    assert events._clean_text("a\ud800b") == "ab"
+
+
+def test_clean_text_keeps_tab_drops_ascii_controls():
+    # Parity with the pre-#1764 scrub for plain ASCII: tab survives, the
+    # rest of C0 + DEL + newline still go.
+    events = _import_events_module()
+    assert events._clean_text("a\tb\nc\x00d\x7fe") == "a\tbcde"
+
+
+def test_clean_text_non_str_passthrough():
+    # Callers apply it uniformly at synthesis and display; non-strings
+    # pass through unchanged.
+    events = _import_events_module()
+    assert events._clean_text(None) is None
+    assert events._clean_text(12345) == 12345
+
+
+def test_note_for_scrubs_attacker_influenced_fields():
+    # #1764 end-to-end at synthesis: attacker-influenced audit fields
+    # are scrubbed before they reach the journaled note.
+    events = _import_events_module()
+    line = {"to": "abc\x9b31m\u202e", "phase": "install\u200b"}
+    note = events._note_for("deploy", "rolled-back", line)
+    assert note == "rolled back to abc31m"
+    assert "\x9b" not in note and "\u202e" not in note

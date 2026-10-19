@@ -129,6 +129,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   prior per-tenant history was lost. A missing sidecar (the normal
   first run) still restarts silently.
   Closes #1744. (#1750)
+- Relay-liveness auto-driver: the per-tenant watermark sidecar is now
+  persisted once per sweep instead of re-read and rewritten for every
+  tenant — on a many-tenant box the old pattern turned each sweep into
+  quadratic disk IO on the probe cadence. The corrupt-sidecar loud note
+  now rides every affected tenant's record instead of just the first
+  ticked, and a planted symlink still fails loud without wedging the
+  sweep. Closes #1739. (#TBD)
 - Credential UI: if the registration step fails after the secret was
   stored, the UI now deletes the just-stored secret instead of leaving
   an orphaned secret on disk (a hung or failed cleanup names the
@@ -166,6 +173,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reading the journal, so a hostile producer note could misrepresent
   what happened. Journal notes are plain text now (newlines and tabs
   still allowed). Closes #1738. (#1763)
+- Box-originated fleet audit fields are now scrubbed against the same
+  invisible-Unicode classes the journal notes got last week: terminal
+  escape introducers (including the C1 CSI byte the old ASCII-only scrub
+  let through), text-direction overrides and zero-width controls, line
+  separators, and lone surrogates are all stripped before the field
+  reaches the event journal or the operator's display — so a crafted
+  audit line can no longer inject terminal escapes or hide text on an
+  operator surface through the fleet-box audit path. Tabs still allowed;
+  newlines still rejected. Closes #1764. (#TBD)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the

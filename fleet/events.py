@@ -57,6 +57,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -226,21 +227,55 @@ _LOCAL_ONLY = {("check", "noop")}
 
 
 def _clean_text(value):
-    """Strip ASCII control characters from a string.
+    """Strip control and invisible-format characters from a string.
 
     Audit lines are box-emitted and may carry attacker-influenced bytes
-    (audit() interpolates raw variables into JSON). Raw control bytes
-    must never reach operator-facing output: a newline in an audit field
-    would forge extra lines in cron logs and the alert transport, and
-    escape sequences would inject terminal control codes into the CLI
-    tables. Tab is kept (it cannot break a line); everything else below
-    0x20 plus DEL is dropped. Non-strings pass through unchanged so
-    callers can apply it uniformly at synthesis and display.
+    (audit() interpolates raw variables into JSON). The scrub is
+    category-based — the whole Unicode spoofing classes go, not just the
+    ASCII controls:
+
+    - Cc (controls): C0, DEL, AND the C1 controls U+0080-U+009F. C1 CSI
+      (U+009B) is a live terminal-escape introducer on ECMA-48 terminals,
+      so the pre-#1764 scrub (everything with ord() >= 0x20 survived) left
+      a real escape-injection primitive in operator output. A newline in
+      an audit field would forge extra lines in cron logs and the alert
+      transport, so Cc is dropped whole — tab is the one survivor (it
+      cannot break a line).
+    - Cf (format): bidi overrides U+202A-U+202E, isolates U+2066-U+2069,
+      zero-width controls U+200B-U+200D, BOM U+FEFF, and the rest of the
+      class (soft hyphen, interlinear annotation anchors, ...). These
+      reorder or hide displayed text for anyone rendering the journal
+      (fleet console, API rows) — a display-layer spoofing primitive
+      (the #1738 class, closed on the relay lane in PR #1763).
+    - Zl/Zp (line/paragraph separators U+2028/U+2029): line terminators
+      on JS-rendered surfaces — a hostile field could forge extra
+      journal lines or split an alert line.
+    - Cs (surrogates): a lone surrogate is never valid text —
+      str.encode('utf-8') raises UnicodeEncodeError, so any
+      non-escaping writer or cross-language consumer would choke; the
+      scrub removes them rather than trusting every downstream writer
+      to escape.
+
+    Deliberate over-scrub (the same call the relay lane made in PR
+    #1763): Cf also holds legitimate RTL controls (LRM/RLM U+200E/U+200F,
+    ARABIC LETTER MARK U+061C, ...) — acceptable because journal fields
+    are machine-generated English, and a future RTL-text use must not
+    "fix" this back without a threat review.
+
+    This one function is the scrub for BOTH paths that reach operator
+    output: S1 synthesis (every per-field call site in this module) and
+    the display path (fleet/api.py reuses events._clean_text on every
+    rendered row). Hardening here closes the #1738 class on the
+    fleet-origin fields (#1764) with no per-lane layering split.
+
+    Non-strings pass through unchanged so callers can apply it uniformly
+    at synthesis and display.
     """
     if not isinstance(value, str):
         return value
     return "".join(ch for ch in value
-                   if ch == "\t" or not (ord(ch) < 0x20 or ord(ch) == 0x7f))
+                   if ch == "\t" or unicodedata.category(ch) not in
+                   ("Cc", "Cf", "Cs", "Zl", "Zp"))
 
 
 def _str_or_none(value):
