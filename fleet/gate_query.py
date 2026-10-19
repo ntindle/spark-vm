@@ -226,7 +226,7 @@ def box_wave(box_id: str, wave: dict) -> int:
     return int(hashlib.sha256(box_id.encode("utf-8")).hexdigest(), 16) % 4
 
 
-def _canary_pin(box_id: str, wave: dict):
+def _canary_pin(box_id: str, wave: dict) -> int | None:
     """This box's canary assignment pin, or None when the box has no pin.
 
     Shared by the canary enforcement path (component_permitted) and the
@@ -279,11 +279,12 @@ def _canary_wave_display(box_id: str, wave: dict) -> str:
 
     Canary admission is pin-only, so the hash_mod_4 cohort that box_wave()
     computes names a cohort the box is not actually in (#1718). Report the
-    box's own assignment pin instead — the actual canary cohort. A box with
-    no pin has no canary cohort: reported as "" (the same empty convention
-    as `<comp>_max` when no release is named), never the hash cohort. A
-    malformed pin raises NoSignal — the whole answer freezes, matching the
-    enforcement path.
+    box's own assignment pin instead (the admission decision itself lives
+    in `<comp>_permitted`; a denied box's pin is still the pin, not a
+    cohort it belongs to). A box with no pin has no canary cohort: reported
+    as "" (the same empty convention as `<comp>_max` when no release is
+    named), never the hash cohort. A malformed pin raises NoSignal — the
+    whole answer freezes, matching the enforcement path.
     """
     pin = _canary_pin(box_id, wave)
     return "" if pin is None else str(pin)
