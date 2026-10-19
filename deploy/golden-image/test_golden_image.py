@@ -284,6 +284,73 @@ def test_dockerfile_runs_gate_tooling():
     assert "proxy/deploy.sh --no-restart" in text
 
 
+# The inference environment the gate-time proxy must carry: the fixture
+# installer writes the inference paths (registry, hosts, SSRF allow,
+# secrets), so the proxy proving the swap must read them — the same
+# environment proxy/swap-inference.service declares.
+_INFERENCE_ENV = {
+    "SWAP_SECRETS_DIR": "/home/swapd/inference-secrets",
+    "SWAP_HOSTS_FILE": "/home/swapd/inference-hosts.allow",
+    "SWAP_REGISTRY_FILE": "/home/swapd/inference-registry.json",
+    "SWAP_LOG_FILE": "/home/swapd/inference-swap.log",
+    "SWAP_SSRF_FILE": "/home/swapd/inference-ssrf.allow",
+    "SWAP_INFERENCE_MODE": "1",
+    "SWAP_ENABLE_APPROVALS": "0",
+}
+
+
+def _gate_run_block():
+    """The Dockerfile RUN block that installs the gate fixture: the RUN
+    instruction whose shell actually invokes
+    /opt/sparkvm/harness/install-gate-fixture.sh (comment mentions don't
+    count)."""
+    text = _dockerfile_text()
+    needle = "/opt/sparkvm/harness/install-gate-fixture.sh"
+    idx = text.find(needle)
+    assert idx != -1, "no gate-fixture RUN in the Dockerfile"
+    start = text.rfind("\nRUN ", 0, idx) + 1
+    # The block ends at the next top-level Dockerfile instruction.
+    end = len(text)
+    for m in re.finditer(r"(?m)^[A-Z]+ ", text[idx:]):
+        end = idx + m.start()
+        break
+    return text[start:end]
+
+
+def test_gate_run_starts_inference_proxy():
+    """The gate proves the swap through the REAL proxy, so the fixture RUN
+    must start the inference proxy itself: proxy/deploy.sh runs with
+    --no-restart and nothing else starts it at build time (the probe
+    otherwise fails with ConnectionRefused on 127.0.0.1:18081)."""
+    block = _gate_run_block()
+    assert "mitmdump" in block, "gate RUN never starts the proxy"
+    assert "18081" in block, "gate proxy does not listen on the inference port"
+    assert "install-gate-fixture.sh" in block
+    # The proxy must be up before the fixture installer runs its probe.
+    assert block.find("18081") < block.find("install-gate-fixture.sh")
+
+
+def test_gate_proxy_carries_inference_environment():
+    """The gate-time proxy must read the inference paths the fixture
+    installer writes — without SWAP_INFERENCE_MODE=1 and the inference
+    file overrides it serves as a second main proxy and the swap can
+    never resolve."""
+    block = _gate_run_block()
+    for key, val in _INFERENCE_ENV.items():
+        assert "%s=%s" % (key, val) in block, \
+            "gate proxy missing %s=%s" % (key, val)
+
+
+def test_gate_run_stops_proxy_and_restores_premitm_state():
+    """The gate must not leave a proxy running in the published image, and
+    must remove the first-start CA the gate proxy generated: deploy.sh
+    skips the CA bundle when /home/swapd/.mitmproxy is missing and the
+    runtime generates it on first start."""
+    block = _gate_run_block()
+    assert "trap" in block, "gate RUN has no EXIT trap for the proxy"
+    assert "rm -rf /home/swapd/.mitmproxy" in block
+
+
 # --- daemon set (supervisord.conf) ----------------------------------------------
 
 
@@ -350,6 +417,27 @@ def test_supervisord_privilege_split():
         if s.startswith("program:")
     }
     assert programs == expected, programs
+
+
+def test_supervisord_swap_inference_environment():
+    """The runtime swap-inference program must carry the inference
+    environment from proxy/swap-inference.service: without it the
+    container's :18081 serves as a second MAIN proxy (main secrets dir,
+    hosts file, registry), defeating finding 31's credential isolation —
+    the provider key would never be read from its own store and the main
+    proxy's keys would be served on the inference port."""
+    cfg = _supervisord()
+    raw = cfg.get("program:swap-inference", "environment")
+    env = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        env[k.strip()] = v.strip().strip('"')
+    for key, val in _INFERENCE_ENV.items():
+        assert env.get(key) == val, \
+            "swap-inference missing %s=%s (got %r)" % (key, val, env.get(key))
 
 
 def test_dockerfile_creates_sparkpair_service_user():

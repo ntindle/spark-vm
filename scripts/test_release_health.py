@@ -21,8 +21,11 @@ from release_health import (  # noqa: E402
     EXIT_OK,
     _next_link,
     _parse_ls_remote,
+    _parse_ls_remote_deref,
     _parse_releases_page,
     check_consistency,
+    check_gate_coverage,
+    fetch_gate_verdict_for_sha,
     fetch_releases,
     is_release_tag,
     main,
@@ -185,14 +188,163 @@ class ConsistencyTest(unittest.TestCase):
         self.assertEqual(d, [])
 
 
+class TagShaParseTest(unittest.TestCase):
+    def test_deref_wins_over_tag_object(self):
+        out = ("aaa\trefs/tags/v0.6.0\n"
+               "bbb\trefs/tags/v0.6.0^{}\n")
+        self.assertEqual(_parse_ls_remote_deref(out), {"v0.6.0": "bbb"})
+
+    def test_lightweight_tag_falls_back_to_plain_sha(self):
+        out = "ccc\trefs/tags/v0.5.0\n"
+        self.assertEqual(_parse_ls_remote_deref(out), {"v0.5.0": "ccc"})
+
+    def test_skips_non_tag_refs_and_garbage(self):
+        out = ("aaa\trefs/heads/main\n"
+               "not a line\n"
+               "ddd\trefs/tags/v0.4.0^{}\n")
+        self.assertEqual(_parse_ls_remote_deref(out), {"v0.4.0": "ddd"})
+        self.assertEqual(_parse_ls_remote_deref(""), {})
+
+
+def _gate_api_stub(runs_for_sha, jobs_for_run):
+    """Stub _api_get: runs_for_sha maps sha -> runs payload list;
+    jobs_for_run maps run id -> jobs payload list."""
+    def stub(url, token):
+        if "/actions/workflows/release.yml/runs" in url:
+            sha = url.split("head_sha=")[1].split("&")[0]
+            return {"workflow_runs": runs_for_sha.get(sha, [])}, None
+        run_id = int(url.split("/actions/runs/")[1].split("/")[0])
+        return {"jobs": jobs_for_run.get(run_id, [])}, None
+    return stub
+
+
+def _run_obj(run_id, status="completed", updated="2026-10-19T00:00:00Z"):
+    return {"id": run_id, "status": status, "updated_at": updated}
+
+
+def _job(name, conclusion):
+    return {"name": name, "conclusion": conclusion}
+
+
+class GateVerdictTest(unittest.TestCase):
+    SUFFIX = "build recipe + baked-secrets scan + manifest preflight"
+
+    def test_success(self):
+        stub = _gate_api_stub(
+            {"abc": [_run_obj(1)]},
+            {1: [_job("release", "success"),
+                 _job("golden-image build gate / " + self.SUFFIX, "success")]},
+        )
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("success", 1))
+
+    def test_failure(self):
+        stub = _gate_api_stub(
+            {"abc": [_run_obj(1)]},
+            {1: [_job(self.SUFFIX, "failure")]},
+        )
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("failure", 1))
+
+    def test_cancelled_counts_as_failure(self):
+        stub = _gate_api_stub(
+            {"abc": [_run_obj(1)]},
+            {1: [_job(self.SUFFIX, "cancelled")]},
+        )
+        v, _ = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual(v, "failure")
+
+    def test_pending_when_run_in_flight(self):
+        stub = _gate_api_stub({"abc": [_run_obj(7, status="in_progress")]}, {})
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("pending", 7))
+
+    def test_missing_when_no_run(self):
+        stub = _gate_api_stub({}, {})
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("missing", None))
+
+    def test_not_applicable_when_run_predates_gate(self):
+        stub = _gate_api_stub(
+            {"abc": [_run_obj(1)]},
+            {1: [_job("release", "success")]},
+        )
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("not-applicable", 1))
+
+    def test_latest_completed_run_wins(self):
+        stub = _gate_api_stub(
+            {"abc": [_run_obj(1, updated="2026-10-18T00:00:00Z"),
+                     _run_obj(2, updated="2026-10-19T00:00:00Z")]},
+            {1: [_job(self.SUFFIX, "success")],
+             2: [_job(self.SUFFIX, "failure")]},
+        )
+        v, rid = fetch_gate_verdict_for_sha("o/r", "abc", _api_get=stub)
+        self.assertEqual((v, rid), ("failure", 2))
+
+
+class GateCoverageTest(unittest.TestCase):
+    def test_success_is_clean(self):
+        d = check_gate_coverage({"v0.6.0"}, {"v0.6.0": "aaa"},
+                                {"aaa": ("success", 1)})
+        self.assertEqual(d, [])
+
+    def test_not_applicable_is_clean(self):
+        d = check_gate_coverage({"v0.6.0"}, {"v0.6.0": "aaa"},
+                                {"aaa": ("not-applicable", 1)})
+        self.assertEqual(d, [])
+
+    def test_failure_is_drift_with_run_id(self):
+        d = check_gate_coverage({"v0.6.0"}, {"v0.6.0": "aaa"},
+                                {"aaa": ("failure", 99)})
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0]["kind"], "gate-failed")
+        self.assertEqual(d[0]["tag"], "v0.6.0")
+        self.assertIn("99", d[0]["detail"])
+
+    def test_pending_and_missing_are_unverified(self):
+        d = check_gate_coverage(
+            {"v0.6.0", "v0.5.0"},
+            {"v0.6.0": "aaa", "v0.5.0": "bbb"},
+            {"aaa": ("pending", 7), "bbb": ("missing", None)})
+        kinds = {x["tag"]: x["kind"] for x in d}
+        self.assertEqual(kinds, {"v0.6.0": "gate-unverified",
+                                 "v0.5.0": "gate-unverified"})
+
+    def test_unknown_sha_is_unverified(self):
+        d = check_gate_coverage({"v0.6.0"}, {}, {})
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0]["kind"], "gate-unverified")
+
+    def test_unpublished_tags_not_checked(self):
+        # A tag with no published release owes no gate verdict — the
+        # consistency check owns that drift class.
+        d = check_gate_coverage(set(), {"v0.6.0": "aaa"},
+                                {"aaa": ("failure", 1)})
+        self.assertEqual(d, [])
+
+    def test_malformed_inputs_never_raise(self):
+        d = check_gate_coverage({None, 42, "v0.6.0"},
+                                {"v0.6.0": None}, {None: ("bogus", 1)})
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0]["kind"], "gate-unverified")
+
+
 class MainExitCodesTest(unittest.TestCase):
     def _run(self, tags, releases):
+        # The gate fetchers are pinned green so these tests keep exercising
+        # the consistency core only (the gate core has its own test class).
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = main(
                 ["--repo", "o/r"],
                 _fetch_tags=lambda repo: tags,
                 _fetch_releases=lambda repo, url: releases,
+                _fetch_tag_shas=lambda repo: {
+                    t: "sha-" + t for t in tags if isinstance(t, str)},
+                _fetch_gate_verdicts=lambda repo, shas, url: {
+                    s: ("success", 1) for s in shas.values()
+                    if isinstance(s, str)},
             )
         return code, buf.getvalue()
 
@@ -223,12 +375,81 @@ class MainExitCodesTest(unittest.TestCase):
                 ["--repo", "o/r", "--json"],
                 _fetch_tags=lambda repo: ["v0.6.0"],
                 _fetch_releases=lambda repo, url: [],
+                _fetch_tag_shas=lambda repo: {"v0.6.0": "sha-v0.6.0"},
+                _fetch_gate_verdicts=lambda repo, shas, url: {},
             )
         payload = json.loads(buf.getvalue())
         self.assertEqual(code, EXIT_DRIFT)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["repo"], "o/r")
         self.assertEqual(payload["drifts"][0]["kind"], "tag-without-release")
+
+
+class MainGateTest(unittest.TestCase):
+    def _run(self, argv, tags, releases, shas, verdicts):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(
+                argv,
+                _fetch_tags=lambda repo: tags,
+                _fetch_releases=lambda repo, url: releases,
+                _fetch_tag_shas=lambda repo: shas,
+                _fetch_gate_verdicts=lambda repo, s, url: verdicts,
+            )
+        return code, buf.getvalue()
+
+    def test_gate_failure_is_drift(self):
+        code, out = self._run(
+            ["--repo", "o/r"], ["v0.6.0"], [_rel("v0.6.0")],
+            {"v0.6.0": "aaa"}, {"aaa": ("failure", 99)})
+        self.assertEqual(code, EXIT_DRIFT)
+        self.assertIn("gate-failed", out)
+        self.assertIn("v0.6.0", out)
+
+    def test_gate_clean_is_ok(self):
+        code, out = self._run(
+            ["--repo", "o/r"], ["v0.6.0"], [_rel("v0.6.0")],
+            {"v0.6.0": "aaa"}, {"aaa": ("success", 1)})
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("golden-image gate passed", out)
+
+    def test_skip_gate(self):
+        def boom(repo, shas, url):
+            raise AssertionError("gate fetch must not run with --skip-gate")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(
+                ["--repo", "o/r", "--skip-gate"],
+                _fetch_tags=lambda repo: ["v0.6.0"],
+                _fetch_releases=lambda repo, url: [_rel("v0.6.0")],
+                _fetch_tag_shas=lambda repo: (_ for _ in ()).throw(
+                    AssertionError("must not run")),
+                _fetch_gate_verdicts=boom,
+            )
+        self.assertEqual(code, EXIT_OK)
+
+    def test_json_includes_gate_drifts(self):
+        code, out = self._run(
+            ["--repo", "o/r", "--json"], ["v0.6.0"], [_rel("v0.6.0")],
+            {"v0.6.0": "aaa"}, {"aaa": ("missing", None)})
+        payload = json.loads(out)
+        self.assertEqual(code, EXIT_DRIFT)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["gate_drifts"][0]["kind"], "gate-unverified")
+
+    def test_gate_error_is_operational_error(self):
+        def boom(repo):
+            raise RuntimeError("nope")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(
+                ["--repo", "o/r"],
+                _fetch_tags=lambda repo: ["v0.6.0"],
+                _fetch_releases=lambda repo, url: [_rel("v0.6.0")],
+                _fetch_tag_shas=boom,
+                _fetch_gate_verdicts=lambda repo, s, url: {},
+            )
+        self.assertEqual(code, EXIT_ERROR)
 
 
 if __name__ == "__main__":

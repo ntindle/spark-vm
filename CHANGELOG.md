@@ -107,8 +107,21 @@ codified as rule 6 so future watch bullets arrive compliant.)
   single stale box stays a per-box row on the fleet inventory table,
   not a page.
   (#1754)
+- The daily release-health check now also verifies the golden-image
+  build gate for every published release — so a release that published
+  fine but whose image gate never passed can no longer sit quietly in
+  the release list with no buildable image behind it. (#TBD)
 
 ### Fixed
+- Golden-image build gate: the image recipe now starts the inference
+  credential-swapping proxy during the build before running its gate
+  verification — previously the proxy was never running at build time, so
+  the gate's end-to-end swap proof failed and no release since the gate
+  was added could pass it. The gate-time proxy runs with the same
+  credential-isolation setup as the deployed service. The container's
+  runtime proxy setup is also corrected to carry that same isolation, so
+  the inference port can no longer serve as an unintended second copy of
+  the main proxy. (#TBD)
 - muse-job approvals: the approvals listing and the supervisor's approval
   payload now read both pending planes (tool approvals and user-input
   prompts) in one round-trip instead of two — so the two lists can no

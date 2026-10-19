@@ -149,20 +149,37 @@ happened — drifts silently: the project advertises a release tag that
 GitHub never published, or publishes a release with no tag behind it.
 
 `scripts/release_health.py` is the standing answer to that drift class
-(read-only: it creates no tags and publishes no releases). It compares the
-release-grammar tags (`v` + strict semver, the same grammar cut-release.sh's
-preflight enforces) against the published GitHub
-releases, and fails on two drifts:
+(read-only: it creates no tags, publishes no releases, dispatches no
+workflows). It compares the release-grammar tags (`v` + strict semver, the
+same grammar cut-release.sh's preflight enforces) against the published
+GitHub releases, and fails on two drifts:
 
 - **tag-without-release** — the tag exists on the remote but no published
   (non-draft) release carries it;
 - **release-without-tag** — a published release whose tag is missing on the
   remote, or isn't release grammar at all.
 
+It also checks the golden-image build gate for every published release:
+release.yml calls `.github/workflows/golden-image.yml` after publishing,
+and a published release whose gate never passed — the release job
+succeeded but the gate job failed, or no release run is on record for the
+tag's commit — leaves the release shippable in name only (no gate record,
+no publishable image; the v0.9.0 cut shipped exactly this way). Two more
+drift kinds cover it:
+
+- **gate-failed** — the golden-image gate job for the release's commit did
+  not conclude success (the release.yml run id is cited);
+- **gate-unverified** — no gate verdict exists yet: no release.yml run for
+  the tag's commit, or the run hasn't completed. A pending gate is not a
+  pass. Releases cut before the gate existed are skipped, not drift.
+
 Drafts are not published and satisfy nothing; non-release tags (branches,
 `ghost/*`) are ignored. Exit 0 = clean, 2 = drift, 1 = operational error
 (network failures fail loud — a silent monitor is the failure mode being
-prevented). `--json` emits a machine-readable report.
+prevented). `--json` emits a machine-readable report. `--skip-gate` runs
+only the tag/release consistency check (e.g. when the token lacks
+`actions: read`); the output says the gate was skipped rather than
+implying it passed.
 
 `.github/workflows/release-health.yml` runs it daily (06:00 UTC) plus on
 manual dispatch; a failure notifies the owner through the workflow's own

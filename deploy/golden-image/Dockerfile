@@ -186,7 +186,52 @@ RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
 # (harness/muse-gate-shim.py via PROBE_MUSE_BIN; GitHub #1715), so the
 # automatable gate proves the inference-proxy swap path without the real
 # muse CLI the recipe deliberately does not bake.
-RUN /opt/sparkvm/harness/install-gate-fixture.sh
+#
+# The gate proves the swap through the REAL proxy, so the inference proxy
+# must be listening during this RUN: proxy/deploy.sh runs with --no-restart
+# (services start under supervisord at container runtime), and nothing else
+# starts it at build time — without this, the probe fails with
+# ConnectionRefused on 127.0.0.1:18081 (GitHub #1715's unmasked remainder).
+# Start the proxy as swapd with the inference environment from
+# proxy/swap-inference.service (own secrets dir, hosts file, registry,
+# SSRF allow file, inference mode, no approvals dir) — the fixture
+# installer writes exactly those inference paths, so a proxy without this
+# environment would serve as a second main proxy and the swap could never
+# resolve. Wait for the port, run the fixture installer, then stop the
+# proxy and remove the first-start CA it generated (/home/swapd/.mitmproxy)
+# so the build leaves the pre-gate state (deploy.sh skips the CA bundle
+# when it is missing; the runtime generates it on first start). One RUN: a
+# background process does not survive across layers, and the gate must
+# never leave a proxy running in the published image.
+RUN set -e; \
+    sudo -u swapd env HOME=/home/swapd \
+        SWAP_SECRETS_DIR=/home/swapd/inference-secrets \
+        SWAP_HOSTS_FILE=/home/swapd/inference-hosts.allow \
+        SWAP_REGISTRY_FILE=/home/swapd/inference-registry.json \
+        SWAP_LOG_FILE=/home/swapd/inference-swap.log \
+        SWAP_SSRF_FILE=/home/swapd/inference-ssrf.allow \
+        SWAP_INFERENCE_MODE=1 \
+        SWAP_ENABLE_APPROVALS=0 \
+        /home/swapd/.venvs/mitm/bin/mitmdump \
+        -p 18081 --set listen_host=127.0.0.1 \
+        -s /home/swapd/swap_addon.py --set termlog_verbosity=warn \
+        --set "dumper_filter=~d nomatch.invalid" \
+        >/tmp/swap-inference-gate.log 2>&1 & \
+    proxy_pid=$!; \
+    trap 'kill "$proxy_pid" 2>/dev/null || true; rm -rf /home/swapd/.mitmproxy' EXIT; \
+    python3 -c "import socket,sys,time
+deadline=time.time()+20
+while time.time()<deadline:
+    try:
+        socket.create_connection(('127.0.0.1',18081),timeout=1).close()
+        break
+    except OSError:
+        time.sleep(0.2)
+else:
+    log=open('/tmp/swap-inference-gate.log',errors='replace').read()[-3000:]
+    sys.exit('gate: inference proxy did not listen on 127.0.0.1:18081\n'+log)
+"; \
+    /opt/sparkvm/harness/install-gate-fixture.sh
 
 # --- image manifest (the D-P1 artifact) --------------------------------------
 # The manifest is generated on the HOST by build-image.sh (or the CI job)
