@@ -13,7 +13,7 @@ turned up that the slice map did not.
 | Slice | Issue | State at `9c85d9a5` |
 |---|---|---|
 | S1 in-repo auto-driver module (`tick_all_tenants`, watermark sidecar, journal notes) | #1721 | **Shipped** — PR #1737 squash-merged |
-| S1 security hardening (symlink-refusing sidecar write + lock) | (follows #1742's class) | **Shipped** — PR #1742 squash-merged |
+| S1 security hardening (symlink-refusing sidecar write + lock) | **Shipped** — PR #1742 squash-merged |
 | S3 self-hosted packaging (sweep CLI, systemd units, ops guide) | #1723 | **Shipped** — PR #1743 squash-merged (this turn) |
 | S2 plane async port + cron trigger + verifier | #1722 (p2) | Open — the hosted-lane half of the driver |
 | S4 staleness alert on the driver watermark | #1724 (p3) | Open — **the enablement gate**: the S3 timer ships disabled until this lands (D-AC-6 sequencing, [ops guide](RELAY_AUTO_DRIVER_OPERATIONS.md) §1) |

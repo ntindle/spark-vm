@@ -65,7 +65,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   bound sitting at the fleet 300s default instead of tick scale,
   undocumented no-anchor journal attribution), the four continuing
   decisions, and the re-pinned slice table with the staleness-alert
-  enablement gate. (#[PR])
+  enablement gate. (#1711)
 - Relay-liveness auto-driver, scheduled packaging slice: the self-hosted
   half of the scheduled driver — a systemd service + timer that fires a
   new sweep entry point once per probe-cadence tick, driving every
