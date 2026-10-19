@@ -349,7 +349,7 @@ def is_record_fresh(record, stale_hours):
 
     A record the operator has not refreshed within the window is not an
     observation the controller may promote on — same rule the `stale`
-    pre-promotion gate applies, one definition.
+    estate-convergence report applies, one definition.
 
     Corruption fails closed, never launders into "stale": only a missing
     or unparseable timestamp reads as not-fresh. A non-dict record or a
@@ -440,7 +440,7 @@ def _verify_snapshot_consistent(store_dir, planes):
     The journal is the source of truth; the snapshot is derived. A
     divergence means the snapshot was tampered with or restored from a
     stale backup — reading it as if it were current would be a
-    false-green for the pre-promotion `stale` gate.
+    false-green for the estate-convergence `stale` report.
     """
     journal = _latest_journal_records(store_dir)
     if set(journal) != set(planes):

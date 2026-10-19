@@ -51,6 +51,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Fleet update-rollout lane convergence pin: the September rollout
+  vision (reframed by the tenant-plane pivot) is checked against
+  everything shipped since — staged waves, per-plane inventory,
+  last-known-good rollback, and driver-fed per-plane cost events are
+  all in place and E2E-tested, so the lane's vision issue closes on
+  evidence; the retired-planes-in-`stale` design question is answered
+  (keep the behavior — the real promotion gate never consumed that
+  report), and the operator guide now names the real gate. (#1780)
 - `muse-job approvals` and `muse-job status` no longer print a machine
   verdict next to prompts that look like trust prompts — the old tag sat
   next to the one decision the trust machinery keeps explicitly human,

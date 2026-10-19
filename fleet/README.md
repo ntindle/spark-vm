@@ -30,9 +30,10 @@ box. No new box-side daemon, no new inbound port, no control plane.
 - `plane_inventory.py` — per-tenant-plane version inventory + the D-MT5
   operational-cost ledger (#1261 / F-OP7/D-OP7): the box inventory's two
   questions asked of the *plane layer* — which template version each
-  tenant plane runs, and which planes have not converged (`stale`
-  exits 1 when any plane is off the expected template, so the rollout
-  controller can gate wave promotion on it). Cost events
+  tenant plane runs, and which planes have not converged (an
+  estate-wide convergence report — `stale` exits 1 when any plane is off
+  the expected template; the promotion gate is `promote`'s D-RC-4
+  `_wave_gate`, which never consumes `stale`'s exit code). Cost events
   (provision/update/rollback with duration and optional cost) feed the
   D-MT5 revisit trigger's measured per-plane operational cost.
   S3 (#1286) adds template releases: each template version is pinned to

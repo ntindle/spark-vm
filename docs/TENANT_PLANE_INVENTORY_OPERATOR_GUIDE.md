@@ -40,8 +40,12 @@ store — there is no init step.
 - **Exit 1** from `stale` only: the `not_converged` list is
   non-empty — an eligible plane on the wrong template, a
   record-stale plane, *or a retired plane* (listed with reason
-  `retired`). The rollout controller reads this before promoting a
-  wave — 1 means "do not promote". Exit 0 only when no plane is
+  `retired`). This is the estate-wide convergence report, not the
+  promotion gate: 1 means "the estate is not converged on the expected
+  template". The actual promotion gate is `promote`'s D-RC-4 check,
+  which never promotes into a retired plane (a retired plane in the
+  live wave fails closed — reassign the rollout) and is not blocked by
+  store-wide retired planes. Exit 0 only when no plane is
   listed at all.
 - **Exit 2** on bad input, unwritable `--store`, a fail-closed trust
   check, or an internal failure. Operational errors print one line
@@ -91,7 +95,7 @@ Against that honest-operator baseline, the tool still refuses to
 present a false green: **every read replays the planes journal's
 latest-per-plane records and fails closed (exit 2) on any divergence**
 with the snapshot. A tampered or stale-restored snapshot cannot tell
-the `stale` pre-promotion gate "all converged". A `null` planes
+the `stale` estate-convergence report "all converged". A `null` planes
 document is structural corruption, not an empty store — it exits 2,
 never reads as "no planes".
 
@@ -139,9 +143,12 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
 The plane is kept for cost history but excluded from census
 percentages. Note the asymmetry: `stale` still lists retired planes
 in `not_converged` (reason `retired`, `template_version: null`), so
-a retired plane keeps the pre-promotion gate at exit 1 —
+a retired plane keeps the estate convergence report non-empty —
 retirements are operator-visible to the rollout, not silently
-dropped. Retiring an already-retired plane succeeds (it refreshes
+dropped. It does not block promotion: the promotion gate (`promote`,
+D-RC-4) ignores store-wide retired planes and refuses only a retired
+plane sitting in the live wave (fail-closed: reassign the rollout).
+Retiring an already-retired plane succeeds (it refreshes
 `observed_at`).
 
 ## Observation commands
@@ -169,7 +176,7 @@ Excluded planes are printed alongside the percentage, so a 100%
 census over 1 of 50 planes is honest. Planes registered without
 `--template` appear with `template_version: null`.
 
-### `stale` — the pre-promotion gate
+### `stale` — the estate convergence report
 
 ```
 python3 fleet/plane_inventory.py --store ~/var/plane-store \
@@ -203,7 +210,7 @@ python3 fleet/plane_inventory.py --store ~/var/plane-store \
   fresh forever.
 - A typo'd `--store` path silently becomes a fresh empty store, and
   `stale` on it exits 0 with `count: 0` — a false green for the
-  pre-promotion gate. The controller must pin and verify the store
+  estate convergence report. The controller must pin and verify the store
   path rather than rely on fail-closed behavior here.
 
 ## A rollout wave, end to end
