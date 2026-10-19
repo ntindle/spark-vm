@@ -1990,3 +1990,57 @@ def test_correlated_gate_stale_lost_watermark_no_double_page(env):
     wm = _gate_stale_watermark(store)
     assert wm["stale_boxes"] == ["box-a", "box-b"]
     assert wm["episode"] == 1
+
+
+def _emit_time_gate_snapshot(stale_seconds):
+    # The box's hook nulled generated_at (unparseable); only the
+    # emit-time-frozen answer_age_s survives (#1631 design note: "still
+    # counts" — the frozen value understates the true age, so a stale
+    # verdict on it can only under-fire, never over-fire).
+    snap = _stale_gate_snapshot(stale_seconds)
+    snap["gate"]["generated_at"] = None
+    return snap
+
+
+def test_correlated_gate_stale_emit_time_fallback_fires(env):
+    # Boxes whose generated_at is missing or unparseable still count
+    # via the emit-time-frozen answer_age_s: the design comment claims
+    # "still counts", and the fallback understates the true age so the
+    # stale verdict is safe. The alert detail carries the `1h~`
+    # fallback markers, so the operator sees the age froze at
+    # snapshot emission.
+    estate, store = _collect(env, {
+        "box-a": {"status": _status_json(),
+                  "snapshot": _emit_time_gate_snapshot(3600)},
+        "box-b": {"status": _status_json(),
+                  "snapshot": _emit_time_gate_snapshot(3600)},
+    })
+    rows = _alerts(store)
+    assert len(rows) == 1, rows
+    alert = rows[0]
+    assert alert["rule"] == "correlated-gate-stale"
+    assert alert["box_id"] is None  # fleet-scoped
+    assert "box-a (1h~)" in alert["detail"], alert["detail"]
+    assert "box-b (1h~)" in alert["detail"], alert["detail"]
+    assert alert["alert_id"] == _expected_gate_stale_id(
+        1, ["box-a", "box-b"])
+
+
+def test_correlated_gate_stale_detail_caps_named_boxes(env):
+    # The fleet-scoped detail names at most _GATE_STALE_DETAIL_BOXES
+    # boxes and counts the rest: twelve stale boxes page once, with
+    # ten named and "and 2 more" covering the remainder.
+    boxes = {"box-%02d" % n: {"status": _status_json(),
+                              "snapshot": _stale_gate_snapshot(3600)}
+             for n in range(1, 13)}
+    estate, store = _collect(env, boxes)
+    rows = _alerts(store)
+    assert len(rows) == 1, rows
+    detail = rows[0]["detail"]
+    assert detail.startswith(
+        "fleet gate sync outage: 12 boxes with gate answers older "
+        "than 20m ("), detail
+    for n in range(1, 11):
+        assert "box-%02d (1h)" % n in detail, detail
+    assert "and 2 more" in detail, detail
+    assert "box-11" not in detail and "box-12" not in detail, detail
