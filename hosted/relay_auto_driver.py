@@ -42,6 +42,7 @@ import json
 import os
 import tempfile
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -82,12 +83,53 @@ def _now_iso(ts: float) -> str:
 
 
 def _scrub_note(text: str) -> str:
-    """Strip control characters from a journal note (fail-closed typing)."""
+    """Strip control and invisible-format characters from a journal note.
+
+    The only characters that survive are ``\\n``/``\\t`` (which the
+    journal format uses) and text whose Unicode category is none of
+    the spoofing classes:
+    - Cc (controls): C0, DEL, AND the C1 controls U+0080-U+009F.
+      The pre-#1738 scrub kept C1 (``ord() >= 0x20``); C1 CSI
+      (U+009B) is a live terminal-escape introducer on ECMA-48
+      terminals, so "terminal-escape injection is handled" was only
+      true for the 7-bit ESC encoding — the whole Cc class goes now.
+    - Cf (format): bidi overrides U+202A-U+202E, isolates
+      U+2066-U+2069, zero-width controls U+200B-U+200D, BOM U+FEFF,
+      and the rest of the class (soft hyphen, interlinear annotation
+      anchors, ...). These reorder or hide displayed text for anyone
+      rendering the journal (fleet console, status feed) — a
+      display-layer spoofing primitive (issue #1738). Deliberate
+      over-scrub: Cf also holds legitimate RTL controls (LRM/RLM
+      U+200E/U+200F, ARABIC LETTER MARK U+061C, ...) — acceptable
+      because tick notes are machine-generated English, and a future
+      RTL-text use must not "fix" this back without a threat review.
+    - Zl/Zp (line/paragraph separators U+2028/U+2029): line
+      terminators on JS-rendered surfaces (status feed, React
+      console) — a hostile note could forge extra journal lines or
+      split an alert line.
+    - Cs (surrogates): a lone surrogate is never valid text —
+      ``str.encode('utf-8')`` raises ``UnicodeEncodeError``, so any
+      non-escaping writer or cross-language consumer (e.g. the future
+      S2-port side) would choke; the scrub removes them rather than
+      trusting every downstream writer to escape.
+    Side effect to know: ZWJ (U+200D) stripping splits multi-person
+    emoji into separate glyphs — acceptable for a plain-text security
+    journal. Fail-closed typing: non-str input is stringified, never
+    dropped.
+    """
     if not isinstance(text, str):
         text = str(text)
-    return "".join(
-        ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 0x20
-    )
+    return "".join(ch for ch in text if _scrub_keep(ch))
+
+
+def _scrub_keep(ch: str) -> bool:
+    """Keep predicate for :func:`_scrub_note`: the two legitimate
+    controls, plus text in none of the spoofing classes (Cc, Cf, Cs,
+    Zl, Zp). Purely category-based — no ord() cutoffs, so the whole
+    Cc class (C0, DEL, C1) is covered."""
+    if ch in ("\n", "\t"):
+        return True
+    return unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
 def _atomic_write_json_0600(path: str, obj: dict) -> None:
@@ -244,7 +286,15 @@ def _tick_event(
         "event_id": str(
             uuid.uuid5(_EVENT_NS, "relay-tick|%s|%s" % (tenant_id, tick_iso))
         ),
-        "box_id": anchor_box_id if anchor_box_id is not None else tenant_id,
+        # box_id is operator-displayed alongside the note; a bidi-laden
+        # tenant id would reach the same surfaces, so it gets the same
+        # scrub (ids are operator-configured, but the scrub is one line
+        # and closes the producer-side hole completely).
+        "box_id": (
+            _scrub_note(anchor_box_id)
+            if anchor_box_id is not None
+            else _scrub_note(tenant_id)
+        ),
         "session_epoch": None,
         "emitted_at": tick_iso,
         "received_at": tick_iso,
