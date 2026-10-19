@@ -2778,9 +2778,18 @@ class WaitlistService:
         }
         ts = int(self.clock().timestamp())
         prefix = f"{entry_id}-deleted-{ts}"
-        # #1522: exclusive publish — the deletion notice can never
-        # silently overwrite a colliding send.
-        self._write_spool(lambda: _spool_name(prefix), doc)  # #389
+        try:
+            # #1522: exclusive publish — the deletion notice can never
+            # silently overwrite a colliding send.
+            self._write_spool(lambda: _spool_name(prefix), doc)  # #389
+        except OSError:
+            # #406 convergence (2026-10-19): this was the one spool path
+            # #406's parity fix missed — mirror the invite path's
+            # return-False handling. The deletion already committed (row
+            # gone, scrubs run, "forgot" emitted), so a sick spool must
+            # not 500 the already-successful request — fail the email,
+            # not the request. The caller still renders 200.
+            return False
         return True
 
 

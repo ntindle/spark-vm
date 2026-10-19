@@ -922,6 +922,41 @@ def test_forget_post_deletes_row_and_spools_confirmation():
     assert deleted[0]["subject"] == wd.FORGET_SUBJECT
 
 
+def test_forget_post_spool_failure_deletion_still_200_notice_lost(monkeypatch):
+    # #406 convergence (2026-10-19): the deleted-notice path was the one
+    # bare spool write #406's parity fix missed. A disk-full on the
+    # deletion confirmation must not 500 an already-successful deletion —
+    # fail the email, not the request (the invite path's return-False
+    # handling, mirrored). The row is gone, the scrubs ran, "forgot"
+    # fired; only the confirmation notice is lost, and the user still
+    # sees the honest 200 page.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget7@example.com")
+    entry_id = row["entry_id"]
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+
+    def boom(mint, doc):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(svc, "_write_spool", boom)
+    status, html = svc.forget_post(forget_token)
+    assert status == 200  # no exception propagated → no 500
+    assert "Your waitlist entry is gone" in html
+    # The deletion committed: row gone in memory and after a reload.
+    assert entry_id not in svc.rows
+    assert row["owner_email"] not in svc.by_email
+    svc.reload()
+    assert entry_id not in svc.rows
+    # `forgot` event emitted; the confirmation notice was never queued.
+    events = read_events(tmp)
+    assert [e for e in events
+            if e["event"] == "forgot" and e["ref"] == entry_id]
+    deleted = [d for d in spool_docs_newest_first(tmp)
+               if d.get("kind") == "deleted"]
+    assert deleted == []
+
+
 def test_forget_post_on_confirmed_row():
     svc, tmp = make_service()
     row = _submit(svc, "forget7@example.com")

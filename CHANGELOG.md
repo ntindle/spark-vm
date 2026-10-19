@@ -51,6 +51,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Waitlist: the waitlist durability analysis is refreshed to current
+  main — the four unrepaired funnel crash windows are re-verified, the
+  per-flow token commit/consume ordering policy is now documented in the
+  operations guide, and one leftover fix lands: a sick mail spool can no
+  longer error an already-successful forget-me deletion (the deletion
+  stands; only the confirmation notice is lost). (#TBD)
 - Fleet alerting: a fleet-wide gate-sync outage now pages once as a
   single fleet incident instead of staying invisible — when two or more
   boxes hold gate answers 20 minutes or older (twice the S1 design gate
