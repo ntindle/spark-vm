@@ -71,6 +71,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   proves nothing — the producer lane must pin layer-below custody);
   unsigned rows keep working exactly as before (logged, never trusted
   by gates). (#1762)
+- Attested-ingest lane converged: re-verified the trust model's
+  attested-event slice against what shipped — the signing mechanism,
+  the ingest verification, and the "gates read only attested rows"
+  rule all hold — and filed the three remaining unowned pieces as
+  tracked work: the box-side signing at emit time (the signing key
+  must live where the tenant can't reach it), the key-rotation
+  ceremony, and the hosted plane's key store. (#TBD)
 - A daily release-health check now verifies that every release tag on the
   repo has a matching published GitHub release and vice versa — so a tag
   that never got published (or a release with no tag behind it) fails
