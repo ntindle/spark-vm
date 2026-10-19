@@ -226,6 +226,27 @@ def box_wave(box_id: str, wave: dict) -> int:
     return int(hashlib.sha256(box_id.encode("utf-8")).hexdigest(), 16) % 4
 
 
+def _canary_pin(box_id: str, wave: dict) -> int | None:
+    """This box's canary assignment pin, or None when the box has no pin.
+
+    Shared by the canary enforcement path (component_permitted) and the
+    canary `_my_wave` display path (answer): one pin reader, so display
+    can never disagree with enforcement about which cohort the box is in
+    (#1718). A truthy non-dict assignments field (e.g. a list) is not a
+    pin map at all — treat it as no pins, so nobody is admitted (the
+    fail-closed direction for canary; QA round-2 note). A malformed pin
+    is no-signal (same fail-closed reasoning as box_wave).
+    """
+    assign = wave.get("assignments")
+    pin_src = assign if isinstance(assign, dict) else {}
+    if box_id not in pin_src:
+        return None
+    try:
+        return int(pin_src[box_id])
+    except (TypeError, ValueError, OverflowError):
+        raise NoSignal(f"canary assignment for {box_id!r} is malformed")
+
+
 def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
     """May this box converge to the component's max-permitted version?"""
     wave = waves.get(comp)
@@ -240,17 +261,10 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
         return False
     if state == "canary":
         # Canary is pin-only: only boxes assigned wave 1 are in the canary.
-        # A malformed pin is no-signal (same fail-closed reasoning as
-        # box_wave). A truthy non-dict assignments field (e.g. a list) is
-        # not a pin map at all — treat it as no pins, so nobody is admitted
-        # (the fail-closed direction for canary; QA round-2 note).
-        assign = wave.get("assignments")
-        pin_src = assign if isinstance(assign, dict) else {}
-        try:
-            pin = int(pin_src.get(box_id, -1))
-        except (TypeError, ValueError, OverflowError):
-            raise NoSignal(f"canary assignment for {box_id!r} is malformed")
-        return pin == 1
+        # The None case is the not-pinned direction — a box with no pin is
+        # simply denied (QA round-2 note); a malformed pin raises NoSignal
+        # from _canary_pin, freezing the whole answer.
+        return _canary_pin(box_id, wave) == 1
     try:
         ceiling = int(wave.get("live", 0))
     except (TypeError, ValueError, OverflowError):
@@ -258,6 +272,22 @@ def component_permitted(box_id: str, comp: str, waves: dict) -> bool:
         # than a ValueError traceback (QA B2).
         raise NoSignal(f"wave live ceiling for {comp!r} is malformed")
     return box_wave(box_id, wave) <= ceiling
+
+
+def _canary_wave_display(box_id: str, wave: dict) -> str:
+    """Honest `_my_wave` for a canary component: the pin, not the hash cohort.
+
+    Canary admission is pin-only, so the hash_mod_4 cohort that box_wave()
+    computes names a cohort the box is not actually in (#1718). Report the
+    box's own assignment pin instead (the admission decision itself lives
+    in `<comp>_permitted`; a denied box's pin is still the pin, not a
+    cohort it belongs to). A box with no pin has no canary cohort: reported
+    as "" (the same empty convention as `<comp>_max` when no release is
+    named), never the hash cohort. A malformed pin raises NoSignal — the
+    whole answer freezes, matching the enforcement path.
+    """
+    pin = _canary_pin(box_id, wave)
+    return "" if pin is None else str(pin)
 
 
 def answer(gate_path: str, box_id: str, keys: dict) -> dict:
@@ -307,7 +337,16 @@ def answer(gate_path: str, box_id: str, keys: dict) -> dict:
                                      or rel.get("max_permitted_pin")
                                      or rel.get("max_permitted_image_version")
                                      or "")
-            out[f"{comp}_my_wave"] = str(box_wave(box_id, waves.get(comp, {})))
+            wave_entry = waves.get(comp, {})
+            if (isinstance(wave_entry, dict)
+                    and wave_entry.get("state") == "canary"):
+                # Canary is pin-only: box_wave()'s hash_mod_4 cohort names a
+                # cohort the box is not actually in — report the pin (or ""
+                # when the box has no pin), never the hash cohort (#1718).
+                out[f"{comp}_my_wave"] = _canary_wave_display(box_id,
+                                                             wave_entry)
+            else:
+                out[f"{comp}_my_wave"] = str(box_wave(box_id, wave_entry))
         return out
     except NoSignal as exc:
         return {"state": "frozen", "freeze": "true",
