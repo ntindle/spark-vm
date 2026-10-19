@@ -59,11 +59,11 @@ the pinned tree; line numbers are current-tree pins.
 
 | Issue | Prior disposition | Today |
 |---|---|---|
-| #386 GETs take the exclusive lock | D-WL-1, pinned | closed — the store-size mitigation still stands; nothing outgrew it |
+| #386 GETs take the exclusive lock | **D-WL-1 SUPERSEDED** (see D-WL-11) | closed — commit `bfe013cc` (#1592, "read-path lock discipline") landed since the 2026-10-11 pin: public GETs + dry-run now deliberately skip the cross-process data lock (thread-lock-only renders; freshness rationale in `_refresh_under_lock`, waitlistd.py:900). The per-GET exclusive-lock cost the store-size mitigation existed to bound is gone, so that mitigation framing is moot. Whole-wave/whole-run exclusive locks (D-WL-3) are unchanged. |
 | #387 proxy-blind `_ip_limited` | CLOSE per F-WL-1 | closed ✓ |
-| #391 wave holds the lock | D-WL-3, KEEP | open — the docstring at :2834 still admits the whole-wave lock; heartbeat still nice-to-have; no mitigation shipped |
+| #391 wave holds the lock | D-WL-3, KEEP | open — the docstring at waitlistd.py:3132 still admits the whole-wave lock ("A large wave holds that lock for the whole run"); heartbeat still nice-to-have; no mitigation shipped |
 | #393 post-claim forget invisibility | D-WL-4, KEEP until prose lands | open — prose landed (item 1) but the footer qualification + unowned-until-H15 naming remain (residuals a/b) |
-| #396 CLI whole-run lock holds | D-WL-3 companion, KEEP | open — whole-run LOCK_EX holds unchanged (`waitlist_jobs.py:128`, `waitlist_invites.py:236`) |
+| #396 CLI whole-run lock holds | D-WL-3 companion, KEEP | open — whole-run `data_lock` holds unchanged (`waitlist_jobs.py:182`, `waitlist_invites.py:309`) |
 | #397 crash windows unrepairable | RE-SCOPE | open, re-scoped this turn to its four kinds |
 | #398 token ordering | D-WL-6, KEEP | closed — the policy block (waitlistd.py:994) is the collected, per-flow ordering record; D-WL-6's ops-doc note lands this turn |
 | #399 dropped rows not forget-deletable | D-WL-4, KEEP until prose lands | closed — the §5 prose documents the retention-window resolution |
@@ -76,25 +76,35 @@ the pinned tree; line numbers are current-tree pins.
   unrepaired commit→emit kinds — `confirmed` (waitlistd.py:2391),
   `dropped` (:1614), `reminder_sent` (:1584), `forgot` (:2761). Every
   one was re-verified commit-before-emit on the pinned tree (kill
-  window exists; a crash leaves the event permanently unfired with no
-  operator recourse). The six-kind reconcile build (this issue's four
-  + `confirm_sent` (:1445, the §9 funnel's most metrically
-  load-bearing event) + `waitlist_submitted` (:1945)) is forward work
-  for a design turn; it does not land here because D-WL-5's accepted
-  policy — conservative under-reporting, never over-reporting — still
-  holds, and the funnel's accuracy need hasn't changed since
-  2026-10-11.
+  window exists; a crash leaves the event unfired with no operator
+  recourse — with one qualification: for `confirm_sent`, a later
+  re-submit or the +7d reminder re-spools and re-emits, so the failure
+  mode there is duplication, not permanent loss). The six-kind
+  reconcile build (this issue's four + `confirm_sent` (:1445, the §9
+  funnel's most metrically load-bearing event) + `waitlist_submitted`
+  (:1945)) is forward work for a design turn, filed as #1757; it does
+  not land here because D-WL-5's accepted policy — conservative
+  under-reporting, never over-reporting — still holds, and the
+  funnel's accuracy need hasn't changed since 2026-10-11.
 - **D-WL-10 (#406 residual):** the deleted-notice path was genuinely
   out of #406's closed scope, not a regression — it was bare at
   #1390's merge. Fixed per D-WL-8's standing consensus rather than
   re-opening #406: a new issue for a one-line parity fix would have
   cost more process than the fix. The convergence doc records it so
   the close stays honest.
+- **D-WL-11 (#386 supersession, #1592):** D-WL-1's
+  "read-under-exclusive-lock stays" is superseded — commit `bfe013cc`
+  moved the daemon's public GETs and dry-run to thread-lock-only
+  renders with the freshness rationale in `_refresh_under_lock`. The
+  supersession covers read-only renders only: whole-wave/whole-run
+  exclusive locks (D-WL-3, #391/#396) are unchanged, and the
+  "store stays small" lever from D-WL-1 no longer has a per-GET lock
+  cost to bound.
 
 ## 4. Remaining gaps (owning archetype)
 
 1. Six unrepaired commit→emit kinds — design turn (D-WL-9), filed as
-   a build home this turn.
+   #1757 this turn.
 2. Whole-wave / whole-run exclusive locks (#391, #396) — execution
    backlog; re-check when the store outgrows the purge cadence.
 3. Footer-copy scope qualification + post-claim-erasure ownership

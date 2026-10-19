@@ -228,9 +228,13 @@ summary so nobody re-derives it. Every order is chosen so a crash in any
 window fails toward retryability: never two live tokens for one row, and
 never a committed state with no live token and no retry path.
 
-- *submit → confirm:* spool, then save, then emit `confirm_sent`, then
-  consume the old token. A failed spool leaves the old token live, so the
-  next re-submit or the +7d reminder retries cleanly.
+- *submit:* save, then emit `waitlist_submitted`, then spool, then save,
+  then emit `confirm_sent` (no old token to consume on a fresh submit).
+  *re-submit:* save (the `submitted_at` refresh — Rule 1's one pre-spool
+  commit), then spool, then save, then emit `confirm_sent`, then consume
+  the old token. A failed spool leaves the old token live (and the refresh
+  already committed), so the next re-submit or the +7d reminder retries
+  cleanly.
 - *confirm:* save, then consume the old token, then emit `confirmed`.
 - *reminder (+7d job):* spool, then save, then consume the old token,
   then emit `reminder_sent`.

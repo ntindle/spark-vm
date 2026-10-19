@@ -1250,8 +1250,10 @@ class WaitlistService:
         paths catch it and commit nothing (#406): all return False with
         the row/ledger state untouched, and the next retry (wave,
         re-submit, reminder job, path-A re-drive) picks the send up
-        cleanly. The deletion-notice path lets OSError propagate, as
-        before the change. Returns the published filename.
+        cleanly. The deletion-notice path catches OSError and returns
+        False — fail the email, not the request — because the deletion
+        already committed (row gone, scrubs run, "forgot" emitted); the
+        caller renders 200. Returns the published filename.
 
         mint: zero-arg callable returning the desired final filename;
         called once per attempt so a retry re-mints with fresh entropy.
