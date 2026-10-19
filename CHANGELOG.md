@@ -58,6 +58,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   prior per-tenant history was lost. A missing sidecar (the normal
   first run) still restarts silently.
   Closes #1744. (#1750)
+- Credential UI: if the registration step fails after the secret was
+  stored, the UI now deletes the just-stored secret instead of leaving
+  an orphaned secret on disk (a hung or failed cleanup names the
+  affected credential explicitly). A hung credential operation now fails
+  with a proper error response instead of dropping the connection
+  silently.
+  (#1752)
 - Gate query now reports an honest per-component wave for canary-stage
   rollouts: the displayed wave is the box's own assignment pin (empty
   when the box has no pin), instead of a hash-derived wave number naming

@@ -488,7 +488,17 @@ def run(argv, inp=None):
     # once, instead of at every call site.
     if isinstance(inp, str):
         inp = inp.encode("utf-8")
-    p = subprocess.run(argv, input=inp, capture_output=True, timeout=15)
+    try:
+        p = subprocess.run(argv, input=inp, capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        # A hung sudo writer must fail closed with the same loud error as
+        # a nonzero exit. TimeoutExpired is neither ValueError nor
+        # RuntimeError, so without this conversion it escapes do_POST's
+        # exception contract: the handler thread dies and the connection
+        # is dropped with no JSON response at all (2026-10-19 arch
+        # deep-read finding). Raise RuntimeError so every POST path
+        # answers 500 loudly, same as any other writer failure.
+        raise RuntimeError("credential operation timed out after 15s")
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
@@ -802,7 +812,40 @@ def api_set(data):
     # with only a prefix of its intended hosts.
     rc, _, err = run(REGISTRY_SET + ["set-with-hosts", name, entry, pjson] + hosts)
     if rc != 0:
-        raise RuntimeError("register failed (secret IS stored): %s" % err.strip()[-200:])
+        # The secret IS stored but not registered. Compensate by deleting
+        # the stored value, so a writer failure between the two phases
+        # never leaves an orphaned secret on disk (2026-10-19 arch
+        # deep-read finding). The failure still reports loudly: a failed
+        # compensation names the orphaned credential explicitly instead
+        # of hiding it behind "(secret IS stored)".
+        #
+        # Trade-off (fail-closed by design): on OVERWRITE, a register
+        # failure now deletes the previously-working credential — the old
+        # value is unrecoverable (no store-read writer exists by design),
+        # so the error tells the operator to re-enter it. A half-updated
+        # credential with stale host metadata would be the silent-
+        # inconsistency class this codebase hunts (#116/#672).
+        #
+        # Compensation covers the rc-failure path only: if the register
+        # writer HANGS, run() raises and the writer may or may not have
+        # applied the change — deleting then could destroy a registered
+        # credential's value, so the timeout reports loudly (500) and the
+        # operator inspects instead.
+        try:
+            rrc, _, rerr = run(SECRET_DELETE + [name])
+        except RuntimeError as e:
+            # The compensation itself failed (e.g. the delete writer hung
+            # and run() converted the timeout) — fall through to the
+            # orphan-naming branch so the stored-but-unregistered secret
+            # is never left unnamed.
+            rrc, rerr = 1, "rollback attempt failed: %s" % e
+        if rrc == 0:
+            raise RuntimeError("register failed; stored secret was rolled "
+                               "back: %s" % err.strip()[-200:])
+        raise RuntimeError(
+            "register failed AND rollback failed — secret '%s' is stored "
+            "but not registered (delete it via the UI): %s / %s"
+            % (name, err.strip()[-200:], rerr.strip()[-200:]))
     return {"ok": True, "name": name}
 
 
