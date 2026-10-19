@@ -51,6 +51,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-10-19 morning): Perplexity's open-source SPACE
+  agent sandbox is moving from announcement to deployment — Akamai has
+  launched it on its cloud, Crusoe is adding it to its managed AI
+  services, and CoreWeave published setup guidance — so a team weighing a
+  self-hosted agent sandbox now has a permissively-licensed, multi-cloud
+  runtime option with production-scale lineage to evaluate against
+  spark-vm. Also in this pass: Vercel's changelog bookkeeping, Boat's
+  pricing comparison now includes Freestyle, and no movement on the
+  open watches (Baseten's round still unclosed; the Vercel KVM zero-day
+  write-up Part 2 still pending). (#TBD)
 - Fleet update events: boxes can now sign their update rows with a
   device identity key, and the collector verifies each signature before
   journaling the event as attested — so a future rollout gate can trust
