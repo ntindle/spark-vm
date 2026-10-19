@@ -724,6 +724,12 @@ def journal_lock(store_dir, timeout_s=None):
     proceeding unsynchronized. Callers translate that into their error
     return shape so a collect fails loudly instead of journaling
     duplicates or losing acks.
+
+    #1755: the lock sidecar opens with O_NOFOLLOW — a pre-planted
+    symlink at the lock path fails loud as JournalLockError (ELOOP)
+    instead of silently moving the flock onto another file
+    (lock-desync / lock-DoS). Mirrors the #1740 hardening on the
+    hosted relay journal lock.
     """
     if timeout_s is None:
         timeout_s = _JOURNAL_LOCK_WAIT_TIMEOUT_S
@@ -739,10 +745,16 @@ def journal_lock(store_dir, timeout_s=None):
         raise JournalLockError(err)
     lock_path = os.path.join(store_dir, _JOURNAL_LOCK_NAME)
     try:
-        fh = open(lock_path, "a", encoding="utf-8")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                     0o600)
     except OSError as exc:
         raise JournalLockError(
             "cannot open journal lock %s: %s" % (lock_path, exc))
+    try:
+        fh = os.fdopen(fd, "r+b")
+    except BaseException:
+        os.close(fd)
+        raise
     with fh:
         deadline = time.monotonic() + timeout_s
         while True:

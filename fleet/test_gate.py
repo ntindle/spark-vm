@@ -10,6 +10,7 @@ Run from the repo root: python3 -m pytest fleet/test_gate.py -q
 """
 
 import binascii
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -1635,3 +1636,26 @@ def test_publish_lock_open_failure_warns_but_publishes(tmp_path, keyfile,
     assert r.returncode == 0, r.stderr
     assert "cannot lock rotation ledger" in r.stderr
     assert os.path.exists(out)
+
+
+def test_ledger_lock_rejects_planted_symlink(tmp_path):
+    """#1755: a pre-planted symlink at the ledger lock path fails loud as
+    OSError (ELOOP) at _LedgerLock construction — the flock never moves
+    onto the plant target (lock-desync / lock-DoS)."""
+    sys.path.insert(0, REPO)
+    try:
+        from fleet import gate_publish as gp
+    finally:
+        sys.path.remove(REPO)
+    target = tmp_path / "plant-target.txt"
+    target.write_text("not the lock")
+    log = str(tmp_path / "gate_rotation_log.json")
+    os.symlink(target, log + ".lock")
+    try:
+        gp._LedgerLock(log)
+    except OSError as exc:
+        assert exc.errno == errno.ELOOP, exc
+    else:
+        raise AssertionError("planted symlink at the ledger lock path did "
+                             "not fail loud (expected ELOOP)")
+    assert target.read_text() == "not the lock"

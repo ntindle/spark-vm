@@ -628,9 +628,20 @@ def _summons_locked(path):
     and _load_push_module only covers the box layout. The body is the
     same flock-on-sidecar mechanics as push.py's `_locked`; there is no
     logic here to diverge, only OS calls.
+
+    #1755: the lock sidecar opens with O_NOFOLLOW — a pre-planted
+    symlink at the lock path fails loud as OSError (ELOOP) instead of
+    silently moving the flock onto another file (lock-desync /
+    lock-DoS). Kept byte-identical in mechanics to push.py's `_locked`.
     """
     lock_path = path + ".lock"
-    with open(lock_path, "a+b") as lf:
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        lf = os.fdopen(fd, "r+b")
+    except BaseException:
+        os.close(fd)
+        raise
+    with lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
             yield
