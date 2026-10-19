@@ -283,11 +283,13 @@ def test_approvals_show_heuristic_opt_in(cli, fakes, capsys):
 def test_approvals_show_heuristic_json_keeps_machine_field(cli, fakes, capsys):
     # Issue #1773: --json keeps the machine-readable looksLikeTrustPrompt
     # field regardless of --show-heuristic (scripts consume it; the issue
-    # only gates the human tag).
+    # only gates the human tag) -- and --show-heuristic is a no-op on the
+    # JSON path (human-render only).
     import json as _json
     slug = "job1"
     _make_job(cli, slug)
-    rc = cli.cmd_approvals(_ns(slug=slug, json=True, show_secrets=False))
+    rc = cli.cmd_approvals(_ns(slug=slug, json=True, show_secrets=False,
+                               show_heuristic=True))
     assert rc == 0
     out = _json.loads(capsys.readouterr().out)
     assert out["userInputs"][0]["looksLikeTrustPrompt"] is True

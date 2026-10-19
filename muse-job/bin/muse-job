@@ -4889,10 +4889,9 @@ def _msp_status(job, slug, args):
             # operator has not decided/answered yet, with the full
             # runnable command for each -- `muse-job approvals` cannot
             # list on a supervisor-held session, so `status` carries the
-            # choices/questions the operator needs to act.
-            # user decides on.) Issue #1773: the heuristic hint only renders
-            # behind --show-heuristic -- the default surface shows no
-            # machine verdict.
+            # choices/questions the operator needs to act. Issue #1773:
+            # the heuristic hint only renders behind --show-heuristic --
+            # the default surface shows no machine verdict.
             _msp_status_render_requested(
                 st, show_heuristic=getattr(args, "show_heuristic", False))
         if st["pending"]:
@@ -6522,8 +6521,9 @@ def build_parser():
     s.add_argument("--show-heuristic", action="store_true",
                    help="show the machine heuristic hint on requested "
                    "user-input prompts that look like trust prompts "
-                   "(#1773: hidden by default -- non-authoritative; "
-                   "the operator still classifies every prompt)")
+                   "(#1773: hidden by default; human-render only, no "
+                   "effect with --json -- the hint is non-authoritative "
+                   "and the operator still classifies every prompt)")
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("list", help="all jobs")
@@ -6561,8 +6561,9 @@ def build_parser():
     s.add_argument("--show-heuristic", action="store_true",
                    help="show the machine heuristic hint on user-input "
                    "prompts that look like trust prompts (#1773: hidden "
-                   "by default -- the hint is non-authoritative; the "
-                   "operator still classifies every prompt explicitly)")
+                   "by default; human-render only, no effect with --json "
+                   "-- the hint is non-authoritative; the operator still "
+                   "classifies every prompt explicitly)")
     s.set_defaults(fn=cmd_approvals)
 
     s = sub.add_parser("decide", help="decide one pending MSP approval (#1372)")
