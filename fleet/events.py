@@ -41,6 +41,13 @@ Key design rules, from the doc (call-site-auditable):
     on every event and no max-wait is armed, so a literal reading would
     page every healthy idle estate. The rule exists in code, short-
     circuits, and writes nothing.
+  - Attestation (#1516 S3): rows carrying an `attestation` member are
+    verified against the store's pinned box keys (fleet/attest.py);
+    valid signatures stamp `attested: True`. Anything else — no key
+    pinned, malformed claim, bad signature — stays `attested: False`
+    with a collector note (a bad signature is the forgery signal and
+    gets the loudest note). Consuming gates read only attested rows
+    (attest.gate_consumable_events) — trust-model S3 T2 as code.
 """
 
 import argparse
@@ -52,6 +59,13 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+
+# Sibling module (fleet/attest.py): the #1516 S3 box-event attestation
+# mechanism — ed25519 envelopes, the write-once box-key registry, and
+# the T2 consume-gate rule. Imported as a sibling because the fleet
+# modules are script-run (python3 fleet/events.py puts fleet/ on
+# sys.path); the hermetic suite inserts fleet/ before importing.
+import attest
 
 try:
     import fcntl
@@ -293,7 +307,8 @@ def _event_id_for(box_id, ts, event, result, frm, to, subcomponent=None):
 
 
 def _build_event(box_id, received_at, line, kind, outcome,
-                 subcomponent=None, subcomponents_verbatim=None):
+                 attested=False, subcomponent=None,
+                 subcomponents_verbatim=None):
     """Build one standard-shape event (§2) from an audit line.
 
     Free-form audit fields are coerced to str-or-None up front: a
@@ -341,7 +356,10 @@ def _build_event(box_id, received_at, line, kind, outcome,
         "window": None,            # G14 maintenance windows are future
         "rollout": None,           # G15 S2 assigns waves
         "trigger": trigger,
-        "attested": False,         # S1/S2: false, always
+        "attested": attested,       # #1516 S3: True only on a verified
+                                    # box signature (see
+                                    # canonicalize_audit_rows); legacy
+                                    # rows stay False
         "note": _note_for(line.get("event"), line.get("result"), line),
     }
     if (line.get("event"), line.get("result")) == ("deploy", "reload-fail"):
@@ -349,7 +367,7 @@ def _build_event(box_id, received_at, line, kind, outcome,
     return event
 
 
-def canonicalize_audit_rows(rows, box_id, received_at):
+def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
     """Translate audit-tail rows into standard-shape events (§3).
 
     Returns (events, local_noops, notes). Fail-closed: unparseable
@@ -357,6 +375,14 @@ def canonicalize_audit_rows(rows, box_id, received_at):
     are recorded in notes, never emitted as events. check-noop events
     are counted in local_noops and stay local per the noise discipline.
     Never raises for bad input rows.
+
+    `keyring` maps box_id -> 32-byte ed25519 pubkey (see
+    attest.load_box_keys); None means the legacy estate with no keys
+    pinned — every row stays unattested. Rows carrying an `attestation`
+    member are verified once per row (before the deploy-ok fan-out, so
+    all fanned events share the row's verdict): a valid signature
+    stamps `attested: True`; anything else stays `attested: False`
+    with a note.
     """
     events = []
     local_noops = 0
@@ -382,6 +408,12 @@ def canonicalize_audit_rows(rows, box_id, received_at):
                          % (_clean_text(event), _clean_text(result)))
             continue
         kind, outcome = translated
+        # #1516 S3: verify the row's attestation claim once per row, so
+        # the deploy-ok fan-out below inherits one verdict per row.
+        attested, attest_note = attest.verify_attestation(
+            keyring, box_id, row)
+        if attest_note is not None:
+            notes.append(attest_note)
         if shape == ("deploy", "ok"):
             # Fan-out: one event per component in the plural `components`
             # value; the verbatim plural rides along as `subcomponents`
@@ -396,26 +428,33 @@ def canonicalize_audit_rows(rows, box_id, received_at):
             for comp in comps:
                 events.append(_build_event(
                     box_id, received_at, row, kind, outcome,
+                    attested=attested,
                     subcomponent=comp,
                     subcomponents_verbatim=comps_raw
                     if isinstance(comps_raw, str) else None))
         else:
             events.append(_build_event(
                 box_id, received_at, row, kind, outcome,
+                attested=attested,
                 subcomponent=row.get("component")
                 if isinstance(row.get("component"), str) else None))
     return events, local_noops, notes
 
 
-def collect_box_events(box_dir, box_id, received_at):
+def collect_box_events(box_dir, box_id, received_at, keyring=None):
     """Read one box's audit-tail.jsonl and canonicalize it. Returns
-    (events, local_noops, notes); never raises for bad artifacts."""
+    (events, local_noops, notes); never raises for bad artifacts.
+
+    `keyring` maps box_id -> 32-byte ed25519 pubkey (attest.load_box_keys);
+    None keeps the legacy all-unattested behavior.
+    """
     rows, skipped, err = _read_jsonl_file(
         os.path.join(box_dir, "audit-tail.jsonl"))
     if err:
         return [], 0, ["audit-tail.jsonl %s" % err]
     events, local_noops, notes = canonicalize_audit_rows(rows, box_id,
-                                                         received_at)
+                                                         received_at,
+                                                         keyring=keyring)
     if skipped:
         notes.append("audit tail had %d malformed line(s) skipped" % skipped)
     if local_noops:

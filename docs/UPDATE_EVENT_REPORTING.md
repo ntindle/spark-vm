@@ -319,13 +319,27 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 
 ### S3 — control-plane endpoint with attestation (hosted)
 
+**Shipped (slice 1, #1516): the attestation mechanism + ingest
+verification.** Boxes sign journal rows with their ed25519 identity key
+(the pairing key for hosted tenant boxes, the provisioned key for
+operator-estate boxes — the mechanism is key-agnostic); the collector
+verifies each row's signature against the store's write-once box-key
+registry (`fleet box-key pin/show`) and journals `attested: true` only
+on a valid signature. A bad signature on a claiming row is the forgery
+signal (loudest collector note); unsigned rows stay `attested: false`
+(the legacy log-only path). The T2 consume-gate rule ships as code:
+consuming gates read only attested rows. Remaining: box-side signing at
+emit time (the deploy agent stamps rows — the producer lane), the
+hosted plane-side key source, and the G15 gate itself.
+
 - **Sink:** boxes push events to the control plane (or the plane pulls —
   S2's transport decision); the push endpoint is built on the provisioned
   trust root (`ROLLOUT_CONTROLLER_DESIGN.md` §5: the box learns the
   controller's identity at install/provision time, pinned in
-  operator-deployed config). The signed box→plane channel itself is S3
-  design work owned by the G13 residual — until it exists, tenant-fleet
-  gates stay operator-promote-only per G15 §4 (never automatic).
+  operator-deployed config). The signed box→plane channel mechanism
+  itself was S3 design work owned by the G13 residual — slice 1 above
+  ships it; until the G15 gate consumes it, tenant-fleet gates stay
+  operator-promote-only per G15 §4 (never automatic).
 - **Trust:** the attested-admission rule is G13's standing decision —
   tenant-fleet gates consume only box-identity-attested G17 events;
   unattested events may be logged, never gate-consumed
