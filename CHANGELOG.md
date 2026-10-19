@@ -54,7 +54,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Gate query now reports an honest per-component wave for canary-stage
   rollouts: the displayed wave is the box's own assignment pin (empty
   when the box has no pin), instead of a hash-derived wave number naming
-  a cohort the box was never in. (#TBD)
+  a cohort the box was never in. (#1749)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
