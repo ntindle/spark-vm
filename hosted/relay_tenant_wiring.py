@@ -102,7 +102,7 @@ exists in production; driving is an explicit operator action (a human
 run, a cron entry, or a supervisor loop) rather than a silent gap.
 The single-driver-per-box discipline (D-RL34-3a) binds ANY driver —
 at most one tick per box at a time, whoever starts it. Direct
-``drive_box`` calls remain anchor-only (see its docstring); a future
+``_drive_box`` calls remain anchor-only (see its docstring); a future
 auto cadence driver, if built, inherits this section's discipline,
 and #1711 stays open to track it.
 
@@ -201,7 +201,7 @@ def _anchor_created_key(arc: ts.BoxArc) -> float:
     """
     # Reuse the tenant layer's lenient instant parser (#1467): it never
     # raises, so a hostile timestamp cannot take down selection.
-    epoch = ts._created_epoch(arc.created_at)
+    epoch = ts.created_epoch(arc.created_at)
     return epoch if epoch is not None else float("inf")
 
 
@@ -384,7 +384,7 @@ def _reading_summary(reading: dict) -> dict:
     }
 
 
-def drive_box(
+def _drive_box(
     arc: ts.BoxArc,
     vm_id: str,
     *,
@@ -400,7 +400,7 @@ def drive_box(
     instrument (``JournalLockError`` / ``HistoryLockError`` from the
     read) propagates — a broken instrument is loud, never darkness.
 
-    ``drive_box`` is the per-box single ordered emitter ONLY when
+    ``_drive_box`` is the per-box single ordered emitter ONLY when
     invoked for the anchor — the anchor-only constraint lives in
     ``drive_tenant``. No auto cadence driver exists (issue #1711):
     future callers must not drive non-anchor boxes through it.
@@ -462,10 +462,10 @@ def drive_tenant(
     ``box_to_vm`` maps a box id to the instrument's ``vm_id``; the
     default is the identity (the current box-id/vm-id convention).
     ``read_fn(vm_id) -> reading`` overrides the producer read (tests);
-    like ``drive_box``, a caller-supplied ``read_fn`` silently ignores
+    like ``_drive_box``, a caller-supplied ``read_fn`` silently ignores
     ``journal_timeout_s``.
 
-    Returns ``{tenant_id, anchor_box_id, boxes: [drive_box-style
+    Returns ``{tenant_id, anchor_box_id, boxes: [_drive_box-style
     reports]}``. Non-anchor boxes report ``events: []`` with a note —
     their readings were observed, never applied. ``anchor_box_id`` is
     the read-phase anchor (``None`` when no box held a candidate arc).
