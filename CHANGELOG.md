@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   has to live outside the tenant's reach (a key the tenant could read
   proves nothing — the producer lane must pin layer-below custody);
   unsigned rows keep working exactly as before (logged, never trusted
-  by gates). (#TBD)
+  by gates). (#1762)
 - Waitlist: the waitlist durability analysis is refreshed to current
   main — the four unrepaired funnel crash windows are re-verified, the
   per-flow token commit/consume ordering policy is now documented in the
