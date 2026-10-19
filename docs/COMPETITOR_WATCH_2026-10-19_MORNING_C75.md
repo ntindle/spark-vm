@@ -15,14 +15,14 @@ large $0.529 (7x) / xlarge $1.06 (5x); boat's own figures verbatim;
 footer stamp 2026-10-19T06:39:46.511Z, stamp text per the C60
 precedent).
 Surveyor B (delegated subagent, read-only): bounded delta news scan —
-**1 CANDIDATE / 11 clean dedupes / 5 flagged-only** (12/15 searches,
+**1 CANDIDATE / 11 clean dedupes / 5 flagged-only** (12 searches,
 all successful / 0 failed; 1 page opened and read in full,
 successful). The 1 candidate is corpus-move-grade: Perplexity SPACE
-partner follow-through — Akamai has now launched SPACE on its cloud,
-Crusoe is adding it to its Managed AI Services, and CoreWeave has
-published setup guidance for CKS — converting the Oct-15
-announcement-day partner list into first deployments; folded into the
-tracked SPACE capture (no new C-number).
+partner-status corroboration — an independent third-party piece
+confirms the Oct-15 announcement-day partner list as live (Akamai's
+cloud launch, Crusoe's managed-services addition in progress,
+CoreWeave's CKS setup guidance); folded into the tracked SPACE
+capture (no new C-number).
 **C11 FILE-ON-CLOSE NOT TRIGGERED** (Baseten ~$26B still talks-only —
 latest closed round remains the June 22, 2026 Series F; DefiLlama
 estimated $19.8B as of Oct 18; no first-party close announcement);
@@ -44,7 +44,7 @@ notes, in the goal workspace — not part of this repo).
 > 7c, 7d, 8a, 8b, 8c, 8d, 9), and with its fetch stats (20
 > successful fetches + 1 established 404 = 21 opens). Surveyor B's
 > capture enumerates exactly 1 candidate + 11 dedupes + 5
-> flagged-only, reconciling with its header and search stats (12/15
+> flagged-only, reconciling with its header and search stats (12
 > successful searches; 1/1 successful open). The B-lane candidate is
 > a re-fold of the tracked SPACE item, not a new filing — the
 > integration records 1 fold + 2 bookkeeping deltas, not a mint.
@@ -53,32 +53,35 @@ notes, in the goal workspace — not part of this repo).
 
 ## Corpus moves: filings + folds
 
-**C87 fold — Perplexity SPACE partner follow-through (first
-advancement since the 2026-10-15 filing).** New since the cycle-74
-capture ("no new launch partners or traction numbers"): third-party
-corroboration of the announcement-day partner posture — Akamai's
-cloud launch confirmed outside the vendor page (already
-VENDOR-VERIFIED at filing as "tested and launched"); Crusoe moves
-from "partnering to add" to actively adding SPACE to its Managed AI
-Services; CoreWeave's setup guidance is now specified for CKS
-deployments. Net: the announcement-day partner list is
-materializing into live operator offerings. Provenance:
-**THIRD-PARTY** (dev.to piece read in full this pass: "Early
-adopters. Akamai has launched it on its cloud, Crusoe is adding it
-to Managed AI Services, and CoreWeave published setup guidance for
-CKS"; published 2026-10-17T12:54:51Z). No new C-number — the
-advancement is deployment follow-through, not a new release. Gate
+**C87 fold — Perplexity SPACE partner-status corroboration (first
+third-party confirmation since the 2026-10-15 filing).** Akamai has
+launched SPACE on its cloud platform, Crusoe is adding it to its
+Managed AI Services portfolio, and CoreWeave has published setup
+guidance for developers who want to deploy SPACE for evaluation —
+an independent third-party piece confirms the announcement-day
+partner list as live. Note the Oct-15 first-party announcement
+already quoted Akamai as "has tested and launched", so this pass
+corroborates rather than advances: the first independent
+confirmation of a third-party hosted deployment of the open-source
+Firecracker sandbox. Provenance: **THIRD-PARTY** (dev.to piece read
+in full this pass: "Early adopters. Akamai has launched it on its
+cloud, Crusoe is adding it to Managed AI Services, and CoreWeave
+published setup guidance for CKS"; published 2026-10-17T12:54:51Z).
+No new C-number — deployment corroboration, not a new release. Gate
 items: repo traction on the open-source release; second-wave
 partner announcements; pricing posture if/when any partner prices
 the managed surface.
-spark-vm relevance: a permissively-licensed, production-tested,
-multi-cloud agent-sandbox runtime is increasingly reachable through
-commercial clouds — the SPACE platform (Firecracker microVMs,
+spark-vm relevance: the first independent confirmation that a
+permissively-licensed, production-tested agent-sandbox runtime is
+reachable through a commercial cloud (Akamai), with Crusoe's
+managed addition still in progress and CoreWeave evaluation
+guidance published — the SPACE platform (Firecracker microVMs,
 platform-held credentials outside the sandbox, operator-side
 red-teaming) was already the closest public reference architecture
-to spark-vm's own posture; live operator offerings tighten the
-competitive bar on "bring-your-own runtime" options for spark-vm's
-self-host / open-source positioning.
+to spark-vm's own posture; third-party corroboration of multi-cloud
+operator traction tightens the competitive bar on
+"bring-your-own runtime" options for spark-vm's self-host /
+open-source positioning.
 
 ## Watch-doc deltas (no new C-numbers)
 

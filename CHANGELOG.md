@@ -52,10 +52,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 - Competitor watch (2026-10-19 morning): Perplexity's open-source SPACE
-  agent sandbox is moving from announcement to deployment — Akamai has
-  launched it on its cloud, Crusoe is adding it to its managed AI
-  services, and CoreWeave published setup guidance — so a team weighing a
-  self-hosted agent sandbox now has a permissively-licensed, multi-cloud
+  agent sandbox is getting independent confirmation of its cloud partner
+  traction — Akamai has launched it on its cloud, Crusoe is adding it
+  to its managed AI services, and CoreWeave published setup guidance —
+  so a team weighing a self-hosted agent sandbox now has a
+  permissively-licensed, multi-cloud
   runtime option with production-scale lineage to evaluate against
   spark-vm. Also in this pass: Vercel's changelog bookkeeping, Boat's
   pricing comparison now includes Freestyle, and no movement on the
