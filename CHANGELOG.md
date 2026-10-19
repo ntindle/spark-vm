@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   relay reading no longer re-reads the probe history when its newest
   record was already fetched this tick — cutting redundant per-tick
   reads on tenants with many boxes.
-  (#TBD)
+  (#1753)
 - Relay-liveness auto-driver: a corrupt/unparseable watermark sidecar
   no longer restarts silently — the driver notes it LOUD on the record
   of the first tenant ticked in the sweep (persisted in the watermark
