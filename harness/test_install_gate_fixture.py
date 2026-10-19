@@ -34,11 +34,15 @@ just the happy path):
   assert the installer populates the inference SSRF allow file
   (idempotently), which is the installer's side of that contract.
 
-The installer starts the REAL harness/echo-fixture.py and runs the REAL
-harness/harness-auth-probe in gate mode; the only other fakes are the
-muse CLI vehicle (PROBE_MUSE_BIN, honoring the probe's child-env
-contract) and a stub confirmd. The happy-path assertion on the echo log
-proves the swapped credential reached the origin end to end.
+The installer starts the REAL harness/echo-fixture.py, runs the REAL
+harness/harness-auth-probe in gate mode, and drives it with the REAL
+shipped CLI vehicle (harness/muse-gate-shim.py, forced via PROBE_MUSE_BIN
+inside the installer -- GitHub #1715: the build-time gate no longer
+depends on an ambient `muse` binary the recipe deliberately does not
+bake). The only other fakes are the store/registry writers, the sudo
+seam, the swap proxy, and a stub confirmd. The happy-path assertion on
+the echo log proves the swapped credential reached the origin end to
+end.
 
 Nothing here touches the live credential store, registry, or allowlist
 files.
@@ -64,31 +68,6 @@ INSTALLER = os.path.join(HERE, "install-gate-fixture.sh")
 INSTALLER_DUMMY = "GATE-FIXTURE-DUMMY-NOT-A-SECRET"
 KEY_NAME = "llm-api"
 PLACEHOLDER = "hsurr:" + KEY_NAME
-
-# Fake muse CLI vehicle: honors the canonical probe's child-env contract
-# (META_API_KEY placeholder, forced proxy env) and sends one GET through
-# the proxy carrying the placeholder Bearer header, like the real CLI.
-FAKE_MUSE = """#!/usr/bin/env python3
-import os, sys, urllib.request
-base = None
-for i, a in enumerate(sys.argv):
-    if a == "--base-url" and i + 1 < len(sys.argv):
-        base = sys.argv[i + 1]
-proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-placeholder = os.environ.get("META_API_KEY", "")
-req = urllib.request.Request(
-    base.rstrip("/") + "/", method="GET",
-    headers={"Authorization": "Bearer " + placeholder})
-opener = urllib.request.build_opener(
-    urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-try:
-    with opener.open(req, timeout=5) as resp:
-        resp.read()
-except Exception as e:  # noqa: BLE001 -- stub only
-    sys.stderr.write("fake-muse: %r\\n" % (e,))
-    sys.exit(3)
-sys.exit(0)
-"""
 
 # Fake sudo: asserts the production privilege argv (-u swapd), then
 # enforces the production sudoers allowlist (proxy/sudoers-swapd): the
@@ -214,6 +193,14 @@ class _SwapProxyHandler(BaseHTTPRequestHandler):
     secrets_dir = None
 
     def do_GET(self):
+        self._forward("GET")
+
+    def do_POST(self):
+        # The gate vehicle POSTs (the real CLI's model-call shape); the
+        # proxy must forward the method and body, not just GETs.
+        self._forward("POST")
+
+    def _forward(self, method):
         # self.path is the absolute URI for proxy requests.
         target = urllib.parse.urlsplit(self.path)
         auth = self.headers.get("Authorization")
@@ -227,20 +214,32 @@ class _SwapProxyHandler(BaseHTTPRequestHandler):
                         auth = "Bearer " + f.read()
             # else: unknown credential -- placeholder passes through
             # unswapped, exactly like _resolve's refusal.
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        length = max(length, 0)
+        body = self.rfile.read(length) if length else None
+        headers = {"Authorization": auth} if auth else {}
+        content_type = self.headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
         fwd = urllib.request.Request(
-            "http://%s%s" % (target.netloc, target.path or "/"),
-            headers={"Authorization": auth},
-            method="GET",
+            "http://%s%s%s" % (target.netloc, target.path or "/",
+                               ("?" + target.query) if target.query else ""),
+            data=body,
+            headers=headers,
+            method=method,
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(fwd, timeout=10) as resp:
-                body = resp.read()
+                data = resp.read()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(data)
         except Exception as e:  # noqa: BLE001 -- stub only
             self.send_error(502, str(e))
 
@@ -292,13 +291,12 @@ def stack(tmp_path):
     (bin_dir / "fake-store-writer").write_text(FAKE_STORE_WRITER)
     (bin_dir / "fake-store-verify").write_text(FAKE_STORE_VERIFY)
     (bin_dir / "fake-registry-writer").write_text(FAKE_REGISTRY_WRITER)
-    (bin_dir / "fake-muse").write_text(FAKE_MUSE)
     # Fake sudo: asserts the production privilege argv (-u swapd) and
     # enforces the production sudoers allowlist, so a test can exercise
     # the installer's default SUDO_PREFIX value end to end.
     (bin_dir / "sudo").write_text(FAKE_SUDO)
     for f in ("fake-store-writer", "fake-store-verify", "fake-registry-writer",
-              "fake-muse", "sudo"):
+              "sudo"):
         os.chmod(bin_dir / f, 0o755)
 
     proxy = _serve(_SwapProxyHandler, swap=True,
@@ -317,12 +315,13 @@ def stack(tmp_path):
         "SUDO_PREFIX": "",
         "HARNESS_GATE_ECHO_LOG": str(echo_log),
         "PROBE_PROXY": "http://127.0.0.1:%d" % proxy.server_address[1],
-        "PROBE_MUSE_BIN": str(bin_dir / "fake-muse"),
         "PROBE_CONFIRMD_URL":
             "http://127.0.0.1:%d" % confirmd.server_address[1],
         "FAKE_REGISTRY_FILE": str(registry_file),
-        # PATH must not leak a real `muse` anywhere; the probe takes the
-        # absolute fake path, but keep the seam honest anyway.
+        # PATH must not leak a real `muse` anywhere; the installer forces
+        # PROBE_MUSE_BIN to the shipped shim, but keep the seam honest
+        # anyway (a stray `muse` on PATH must not be able to influence
+        # the gate).
         "PATH": str(bin_dir) + ":/usr/bin:/bin",
     })
     yield (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
@@ -567,7 +566,8 @@ def test_installer_echo_fixture_startup_failure(stack):
 
 @pytest.mark.parametrize("var", ["CRED_REGISTRY_SET_INFERENCE",
                                  "CRED_STORE_VERIFY_INFERENCE",
-                                 "HARNESS_PROBE_BIN"])
+                                 "HARNESS_PROBE_BIN",
+                                 "MUSE_GATE_SHIM"])
 def test_installer_missing_binary_fails(stack, var):
     # The remaining -x prechecks (registry writer, store verify writer,
     # probe) fail closed with the env-var name in the message -- the
@@ -708,3 +708,45 @@ def test_installer_missing_secrets_dir_fails_recoverably(stack):
     assert proc.returncode == 0, proc.stderr.decode()
     assert (secrets_dir / "no-such-dir" / KEY_NAME).read_text() == \
         INSTALLER_DUMMY
+
+
+def test_installer_forces_probe_vehicle_to_shipped_shim(stack, tmp_path):
+    # GitHub #1715: the installer always sets PROBE_MUSE_BIN to the
+    # shipped gate shim -- an ambient PROBE_MUSE_BIN from the caller must
+    # not leak through, and the gate must not depend on a real `muse`.
+    (env, *_rest) = stack
+    env = dict(env)
+    env["PROBE_MUSE_BIN"] = "/nonexistent/ambient-muse"  # must be ignored
+    dump = tmp_path / "probe-muse-bin.txt"
+    fake_probe = tmp_path / "fake-probe"
+    fake_probe.write_text(
+        "#!/bin/sh\n"
+        "printf '%%s' \"$PROBE_MUSE_BIN\" > \"%s\"\n"
+        "exit 0\n" % dump)
+    fake_probe.chmod(0o755)
+    env["HARNESS_PROBE_BIN"] = str(fake_probe)
+    proc = _run_installer(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    shipped = os.path.join(HERE, "muse-gate-shim.py")
+    assert dump.read_text() == shipped
+    assert os.access(shipped, os.X_OK), "shipped shim must be executable"
+
+
+def test_installer_shim_override_is_honored(stack, tmp_path):
+    # MUSE_GATE_SHIM overrides the default shim path (test seam, same
+    # pattern as HARNESS_PROBE_BIN).
+    (env, *_rest) = stack
+    env = dict(env)
+    dump = tmp_path / "probe-muse-bin.txt"
+    fake_probe = tmp_path / "fake-probe"
+    fake_probe.write_text(
+        "#!/bin/sh\n"
+        "printf '%%s' \"$PROBE_MUSE_BIN\" > \"%s\"\n"
+        "exit 0\n" % dump)
+    fake_probe.chmod(0o755)
+    env["HARNESS_PROBE_BIN"] = str(fake_probe)
+    env["MUSE_GATE_SHIM"] = "/opt/custom/shim.py"
+    proc = _run_installer(env)
+    # The override is not executable -> the fail-closed precheck refuses.
+    assert proc.returncode == 2
+    assert b"MUSE_GATE_SHIM" in proc.stderr

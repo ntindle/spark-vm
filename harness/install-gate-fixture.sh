@@ -86,11 +86,17 @@
 #                            (default "sudo -u swapd"; empty runs directly)
 #   ECHO_FIXTURE             echo-fixture.py path (default alongside this script)
 #   HARNESS_PROBE_BIN        probe path (default alongside this script)
+#   MUSE_GATE_SHIM             muse-shaped CLI vehicle for the probe's gate
+#                            run (default alongside this script;
+#                            GitHub #1715 — the golden image deliberately
+#                            does not bake the real muse CLI, so the gate
+#                            drives this stdlib-only shim instead)
 #   HARNESS_GATE_ECHO_LOG    echo log path (default /tmp/harness-gate-echo.log)
 #   HARNESS_GATE_ECHO_PORT   echo fixture port (default 0 = ephemeral)
-# The probe reads its own env (PROBE_PROXY, PROBE_MUSE_BIN,
-# PROBE_CONFIRMD_URL) directly; export those around this script to
-# override them.
+# The probe reads its own env (PROBE_PROXY, PROBE_CONFIRMD_URL) directly;
+# export those around this script to override them. PROBE_MUSE_BIN is
+# always set by this script (to the shipped gate shim above): the gate's
+# vehicle is not an external dependency.
 set -euo pipefail
 # The installer appends to the allow files via tee: without a sane umask a
 # missing allow file would be created 0666&~umask (world-writable SSRF
@@ -132,6 +138,12 @@ SUDO_PREFIX="${SUDO_PREFIX-sudo -u swapd}"
 HERE="$(dirname "$0")"
 ECHO_FIXTURE="${ECHO_FIXTURE:-$HERE/echo-fixture.py}"
 HARNESS_PROBE_BIN="${HARNESS_PROBE_BIN:-$HERE/harness-auth-probe}"
+# GitHub #1715: the golden-image recipe deliberately does NOT bake the real
+# muse CLI (operator/account bound), so the gate drives this stdlib-only
+# shim as the probe's CLI vehicle. The probe reads PROBE_MUSE_BIN itself;
+# the installer forces it here so the gate's vehicle is a shipped repo
+# file, never an ambient `muse` that may or may not exist.
+MUSE_GATE_SHIM="${MUSE_GATE_SHIM:-$HERE/muse-gate-shim.py}"
 ECHO_LOG="${HARNESS_GATE_ECHO_LOG:-/tmp/harness-gate-echo.log}"
 ECHO_PORT="${HARNESS_GATE_ECHO_PORT:-0}"
 
@@ -153,6 +165,10 @@ if [ ! -x "$ECHO_FIXTURE" ]; then
 fi
 if [ ! -x "$HARNESS_PROBE_BIN" ]; then
     echo "install-gate-fixture: probe not executable: $HARNESS_PROBE_BIN (HARNESS_PROBE_BIN)" >&2
+    exit 2
+fi
+if [ ! -x "$MUSE_GATE_SHIM" ]; then
+    echo "install-gate-fixture: gate shim not executable: $MUSE_GATE_SHIM (MUSE_GATE_SHIM)" >&2
     exit 2
 fi
 
@@ -322,9 +338,12 @@ echo "install-gate-fixture: verifying with the probe (gate mode)"
 # External cap is 15s -- deliberately looser than the probe docstring's
 # 10s contract line: headroom for slow boxes. The probe's own budgets
 # are 6s (CLI vehicle) + 3s (confirmd), so 10s would leave ~1s of margin.
+# PROBE_MUSE_BIN is forced to the shipped gate shim (GitHub #1715): the
+# gate must never depend on an ambient `muse` binary.
 PROBE_MODE=gate \
 PROBE_BASE_URL="http://127.0.0.1:${port}" \
 PROBE_ECHO_LOG="$ECHO_LOG" \
 PROBE_EXPECTED_SWAPPED="$FIXTURE_DUMMY" \
 PROBE_KEY_NAME="$KEY_NAME" \
+PROBE_MUSE_BIN="$MUSE_GATE_SHIM" \
     timeout 15 "$HARNESS_PROBE_BIN" </dev/null

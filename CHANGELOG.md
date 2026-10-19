@@ -125,6 +125,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   O_EXCL/0600 so a pre-planted symlink can fail loud instead of
   redirecting the write, and a stale temp from a crashed run is unlinked
   and retried once. (#1735)
+- The golden-image build gate's final verification step can no longer pass
+  as specified: it required the real muse CLI, which the image recipe
+  deliberately does not bake. The gate now drives a minimal stdlib-only
+  vehicle that proves the same credential-swap path through the
+  inference proxy, so the automatable gate is green without baking the
+  operator-bound CLI. (#1736)
 - A box whose release-gating files were unreadable or malformed crashed
   the box-side gate query with a traceback instead of failing closed to
   frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII

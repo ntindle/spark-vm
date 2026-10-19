@@ -561,8 +561,12 @@ def main(argv=None):
 
     muse_path = shutil.which(muse_bin)
     if not muse_path:
-        return die(EXIT_ENV, f"muse CLI not found as {muse_bin!r} — the image "
-                             "must bake the CLI before this probe can pass.")
+        return die(EXIT_ENV, f"muse CLI not found as {muse_bin!r} — no CLI "
+                             "vehicle: gate mode drives the shipped gate shim "
+                             "(harness/muse-gate-shim.py, GitHub #1715; the "
+                             "golden image deliberately does not bake the "
+                             "real CLI), and provision mode requires the real "
+                             "CLI on PATH. Set PROBE_MUSE_BIN to the vehicle.")
 
     if args.mode == "gate":
         base_url = os.environ.get("PROBE_BASE_URL")

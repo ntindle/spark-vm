@@ -27,7 +27,13 @@
 # Deliberately NOT baked (provision/first-boot scope, not the recipe):
 #  - muse CLI + muse-job plugin approval: the install is operator/account
 #    bound (user-authorized --yolo, bills the user's Meta pay-as-you-go);
-#    the gate procedure's interactive gate validates the claim.
+#    the gate procedure's interactive gate validates the claim. The
+#    AUTOMATABLE build gate (step #17 below) proves the inference-proxy
+#    swap path without the real CLI: install-gate-fixture.sh drives the
+#    probe with the stdlib-only gate shim harness/muse-gate-shim.py as the
+#    CLI vehicle (PROBE_MUSE_BIN; GitHub #1715) — the shim is gate-scratch,
+#    never a tenant vehicle, and baking the real CLI here would contradict
+#    the pay-as-you-go billing boundary.
 #  - the swapd CA: generated per tenant at first boot; the private key is
 #    never baked (manifest baked[] claim; the baked-secrets scan enforces it).
 #  - tenant agent users: the recipe bakes the /etc/skel skeleton + a locked
@@ -176,6 +182,10 @@ RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
 # the interactive gate (GOLDEN_IMAGE_GATE_PROCEDURE.md step 1) starts from a
 # known state. The fixture credential value is the public dummy string
 # GATE-FIXTURE-DUMMY-NOT-A-SECRET — it is baked into the repo on purpose.
+# The installer drives the probe's gate run with the stdlib-only gate shim
+# (harness/muse-gate-shim.py via PROBE_MUSE_BIN; GitHub #1715), so the
+# automatable gate proves the inference-proxy swap path without the real
+# muse CLI the recipe deliberately does not bake.
 RUN /opt/sparkvm/harness/install-gate-fixture.sh
 
 # --- image manifest (the D-P1 artifact) --------------------------------------

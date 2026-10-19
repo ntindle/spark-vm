@@ -247,9 +247,11 @@ stub confirmd.
 
 - The probe routes the CLI through the inference proxy via `HTTPS_PROXY`
   env (forward-mode mitmdump + per-host registry matching). Whether the
-  Muse CLI honors proxy env vars is proven by the gate-mode integration
-  run: if it does not, no records reach the echo log and the probe fails
-  closed naming the routing attempted — investigate, do not work around.
+  vehicle honors proxy env vars is proven by the gate-mode integration
+  run (build time: the shipped gate shim `harness/muse-gate-shim.py`,
+  GitHub #1715; interactive/provision: the real muse CLI): if it does
+  not, no records reach the echo log and the probe fails closed naming
+  the routing attempted — investigate, do not work around.
 - In `provision` mode the `Bearer` wire shape is asserted implicitly
   (the provider accepted the swapped key); the explicit assertion lives
   in `gate` mode via the echo log.
