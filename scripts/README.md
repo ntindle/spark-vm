@@ -175,6 +175,7 @@ never drift from what's on disk.
 | `test_readme_inventories.py` | this README's gate-steps + test inventory (this table) |
 | `test_readme_test_count_pins.py` | README/docs "(N tests)" claims ↔ test-file function counts |
 | `test_readme_layout_paths.py` | README repo-layout table path existence + file/dir kind |
+| `test_relay_wiring_tick_doc.py` | wiring-tick operator doc pins (CLI flags/report keys/exit codes/verbatim notes vs `hosted/relay_tenant_wiring.py`) |
 | `test_sentinel_s2_doc.py` | SENTINEL_TELEMETRY_SURFACES.md S2 row ↔ swap.log writer shapes |
 | `test_self_update.py` | `self_update.py` read-only toolset inventory |
 | `test_site_branding.py` | `site/` brand-logo assets + wiring (issue #852) |

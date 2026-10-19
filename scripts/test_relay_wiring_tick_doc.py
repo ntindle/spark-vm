@@ -84,6 +84,17 @@ def _main_fn(tree):
     raise AssertionError("main() not found in relay_tenant_wiring.py")
 
 
+# The doc's flag table rows look like `| `--flag ...` | ... |` — a prose
+# mention of a flag elsewhere in the doc does not count as documenting
+# it in the table.
+FLAG_TABLE_ROW_RE = re.compile(r"^\|\s*`(--[a-z0-9-]+)", re.M)
+
+
+def _doc_flag_table_flags(doc):
+    """Flags named as rows of the doc's flag table (prose mentions don't count)."""
+    return set(FLAG_TABLE_ROW_RE.findall(doc))
+
+
 def _code_flags():
     """The --flags registered via add_argument in main(), AST-based."""
     main = _main_fn(_module_ast())
@@ -127,9 +138,11 @@ def test_doc_flags_match_cli_flags():
         "doc's flag set %s != main()'s add_argument set %s"
         % (sorted(CLI_FLAGS), sorted(code_flags))
     )
-    doc = _doc()
-    for flag in CLI_FLAGS:
-        assert flag in doc, "doc never documents CLI flag %s" % flag
+    table_flags = _doc_flag_table_flags(_doc())
+    assert set(CLI_FLAGS) == table_flags, (
+        "doc's flag TABLE %s != main()'s add_argument set %s — prose mentions don't count"
+        % (sorted(table_flags), sorted(code_flags))
+    )
 
 
 def test_doc_report_keys_match_code():
