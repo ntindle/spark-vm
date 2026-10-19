@@ -64,7 +64,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   affected credential explicitly). A hung credential operation now fails
   with a proper error response instead of dropping the connection
   silently.
-  (#TBD)
+  (#1752)
 - Gate query now reports an honest per-component wave for canary-stage
   rollouts: the displayed wave is the box's own assignment pin (empty
   when the box has no pin), instead of a hash-derived wave number naming
