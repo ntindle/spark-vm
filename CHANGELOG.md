@@ -51,6 +51,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- The CI guide's job list is now pinned to the workflow itself: a new
+  contributor-docs check fails if the job table in the CI reference drifts
+  from the actual jobs (a new job without a table row, or a stale row for a
+  removed job), so the merge-gate docs can't go silently stale. (#1727)
 - Pinned the design for the relay-liveness auto cadence driver: a
   vision-vs-state analysis of #1711's remainder — one clock (drive
   cadence = probe cadence), drive-only consumption with loud stale-probe

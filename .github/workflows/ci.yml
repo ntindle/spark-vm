@@ -274,24 +274,25 @@ jobs:
     # (P138): scripts/test_docs_index_coverage.py lives in the python suite,
     # so without this carve-out a new docs/*.md file without an index row
     # would land with the coverage invariant unwatched. The doc-inventory
-    # pins ride the same carve-out: test_ci_md_link_excludes.py and
-    # test_contributing_ci_gates.py compare doc claims against CI sources
-    # of truth, and a docs-only PR hand-editing those inventory blocks
-    # would otherwise land with the guard skipped. All three are
-    # stdlib-only, so the pytest-only install below suffices.
+    # pins ride the same carve-out: test_ci_md_link_excludes.py,
+    # test_contributing_ci_gates.py, and test_ci_docs_job_inventory.py
+    # compare doc claims against CI sources of truth, and a docs-only PR
+    # hand-editing those inventory blocks would otherwise land with the
+    # guard skipped. All four are stdlib-only, so the pytest-only install
+    # below suffices.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, SHA-pinned
         with:
           python-version: "3.12"
-      # The test imports only stdlib (os, re), but pytest itself is not on
-      # the runner image — install just it (not the whole requirements-test
-      # set, which this test never needs).
+      # The tests import only the standard library, but pytest itself
+      # is not on the runner image — install just it (not the whole
+      # requirements-test set, which these tests never need).
       - name: install pytest
         run: pip install pytest
       - name: docs-index coverage + doc-inventory pins
-        run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py -q
+        run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py -q
 
   markdown-links:
     name: markdown link check
