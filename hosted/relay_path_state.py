@@ -578,8 +578,17 @@ def map_reading(*, probe_outcome, journal_state):
     )
 
 
-def relay_path_state(vm_id, *, now=None, history=None, journal_timeout_s=None):
+def relay_path_state(vm_id, *, now=None, history=None, journal_timeout_s=None,
+                     probe_record=None):
     """``relay_path_state(vm_id)`` — the §5 producer reading.
+
+    ``probe_record`` threads an already-fetched newest probe record
+    through (``maybe_probe`` passes its own ``latest_probe`` result —
+    or, on the probed path, the record it just wrote — so the reading
+    no longer re-reads the whole history file for the probe half,
+    #1730). A non-dict record, or a record for a different vm, fails
+    open to the normal ``latest_probe`` re-read; the caller contract is
+    a record for this vm in the store's schema.
 
     Composes the probe history (flapping check) with the passive
     journal. Returns a JSON-serializable dict::
@@ -604,7 +613,14 @@ def relay_path_state(vm_id, *, now=None, history=None, journal_timeout_s=None):
         now = time.time()
     path = history if history is not None else history_path()
 
-    probe_record = latest_probe(vm_id, path=path)
+    if not (
+        isinstance(probe_record, dict)
+        and probe_record.get("vm_id") == vm_id
+    ):
+        # Caller had no usable record (or none for this vm) — read the
+        # history as before. A mismatched record fails open to the
+        # honest re-read, never to a stale cross-vm answer.
+        probe_record = latest_probe(vm_id, path=path)
     probe_outcome = probe_record["outcome"] if probe_record else None
 
     journal_state = None
@@ -701,11 +717,12 @@ def maybe_probe(
         wedge_notes.append(
             "probe history unreadable (wedged lock): %s" % exc)
 
-    def _compose_reading():
+    def _compose_reading(probe_record=None):
         try:
             return relay_path_state(
                 vm_id, now=now, history=path,
                 journal_timeout_s=journal_timeout_s,
+                probe_record=probe_record,
             )
         except HistoryLockError as exc:
             wedge_notes.append(
@@ -727,14 +744,14 @@ def maybe_probe(
         cadence=cadence,
     )
     if not should:
-        reading = _compose_reading()
+        reading = _compose_reading(probe_record)
         return {
             "probed": False,
             "reason": _reason(why),
             "reading": reading,
         }
     if bundle is None:
-        reading = _compose_reading()
+        reading = _compose_reading(probe_record)
         return {
             "probed": False,
             "reason": _reason(
@@ -749,8 +766,24 @@ def maybe_probe(
         pinned_fingerprint=bundle["pinned_fingerprint"],
         provider_state_fn=provider_state_fn,
     )
+    fresh_record = None
     try:
         _record_outcome(path, vm_id, result.outcome, result.detail, now=now)
+        # The record we just wrote, in the store's exact schema —
+        # threading it to the reading skips relay_path_state's whole
+        # history re-read (#1730). Only when the outcome survives the
+        # OUTCOMES filter _iter_history applies: a record the store
+        # read would skip must not reach the reading through the
+        # back door. On write failure fresh_record stays None and the
+        # reading re-reads honestly (the old record — nothing was
+        # recorded, same as before).
+        if result.outcome in relay_dial_prober.OUTCOMES:
+            fresh_record = {
+                "ts": now,
+                "vm_id": vm_id,
+                "outcome": result.outcome,
+                "elapsed_ms": result.detail.get("elapsed_ms"),
+            }
     except OSError as exc:
         # Security N2: ELOOP is an active-integrity signal (something
         # planted a symlink at the history path), distinct from ENOSPC —
@@ -762,7 +795,7 @@ def maybe_probe(
         )
         why = "%s; WARNING: probe history unwritable (%s)%s — this probe " \
             "will not inform flapping" % (why, exc, hint)
-    reading = _compose_reading()
+    reading = _compose_reading(fresh_record)
     return {
         "probed": True,
         "reason": _reason(why),

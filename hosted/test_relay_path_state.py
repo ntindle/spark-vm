@@ -1091,3 +1091,116 @@ def test_tick_under_history_wedge_does_not_raise(history, monkeypatch):
     finally:
         holder.terminate()
         holder.join(10)
+
+
+# ---------------------------------------------------------------------------
+# #1730 — threaded probe record (skip relay_path_state's history re-read)
+# ---------------------------------------------------------------------------
+
+
+def test_relay_path_state_uses_threaded_probe_record_without_reread(
+    history, journal
+):
+    rps._record_outcome(history, VM, prober.PATH_OK, {"elapsed_ms": 12}, now=NOW)
+    record = rps.latest_probe(VM, path=history)
+    rl.emit_frame(**_frame())
+
+    def boom(vm_id, path=None):
+        raise AssertionError(
+            "history must not be re-read when a record is threaded"
+        )
+
+    real = rps.latest_probe
+    rps.latest_probe = boom
+    try:
+        reading = rps.relay_path_state(
+            VM, now=NOW, history=history, probe_record=record
+        )
+    finally:
+        rps.latest_probe = real
+    assert reading["probe"] == prober.PATH_OK
+    assert reading["state"] == "ok"
+
+
+def test_relay_path_state_mismatched_probe_record_fails_open_to_reread(
+    history, journal
+):
+    rps._record_outcome(history, VM, prober.PATH_OK, {"elapsed_ms": 12}, now=NOW)
+    record = rps.latest_probe(VM, path=history)
+    other = dict(record, vm_id="vm-other")
+    rl.emit_frame(**_frame())
+    reading = rps.relay_path_state(
+        VM, now=NOW, history=history, probe_record=other
+    )
+    assert reading["probe"] == prober.PATH_OK  # honest re-read won
+
+
+def test_maybe_probe_not_due_threads_record_to_reading(history, journal):
+    _record(history, [prober.PATH_OK], ts=NOW - 10)
+    rl.emit_frame(**_frame())
+
+    calls = []
+    real = rps.latest_probe
+
+    def counting(vm_id, path=None):
+        calls.append(vm_id)
+        return real(vm_id, path=path)
+
+    rps.latest_probe = counting
+    try:
+        out = rps.maybe_probe(
+            VM,
+            provider_state_fn=lambda: "running",
+            has_post_live_arc=True,
+            bundle={"relay_host": "h", "relay_port": 1,
+                    "pinned_fingerprint": "SHA256:eA"},
+            now=NOW,
+            history=history,
+            cadence=300,  # not due — skips the network
+        )
+    finally:
+        rps.latest_probe = real
+    assert out["probed"] is False
+    assert out["reading"]["probe"] == prober.PATH_OK
+    assert calls == [VM], (
+        "exactly one latest_probe read (maybe_probe's); the reading must "
+        "reuse it for its probe half"
+    )
+
+
+def test_maybe_probe_probed_path_threads_fresh_record(history, journal):
+    rl.emit_frame(**_frame())
+
+    def fake_probe(vm_id, *, relay_host, relay_port, pinned_fingerprint,
+                   provider_state_fn):
+        return _FakeResult(prober.PATH_OK)
+
+    real_probe = prober.probe
+    prober.probe = fake_probe
+    calls = []
+    real_lp = rps.latest_probe
+
+    def counting(vm_id, path=None):
+        calls.append(vm_id)
+        return real_lp(vm_id, path=path)
+
+    rps.latest_probe = counting
+    try:
+        out = rps.maybe_probe(
+            VM,
+            provider_state_fn=lambda: "running",
+            has_post_live_arc=True,
+            bundle={"relay_host": "h", "relay_port": 1,
+                    "pinned_fingerprint": "SHA256:eA"},
+            now=NOW,
+            history=history,
+        )
+    finally:
+        prober.probe = real_probe
+        rps.latest_probe = real_lp
+    assert out["probed"] is True
+    assert out["reading"]["probe"] == prober.PATH_OK
+    assert calls == [VM], (
+        "probed path: the reading must use the just-written record for "
+        "its probe half, not re-read the history"
+    )

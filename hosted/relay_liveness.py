@@ -40,6 +40,13 @@ Design decisions (all per the design doc, no improvisation):
   control plane, and the operator laptop, like ``tenant_status.py``.
   The idle threshold is 5 minutes without bytes (design §2: a real
   cadence-friendly number, not a product promise).
+- Journal reads are RAM-bounded: the scan walks each generation
+  tail-first in fixed-size chunks, holding O(chunk) bytes (#1730) —
+  the query no longer materializes the whole (up to 64 MiB per
+  generation) file on every call, while yielding the same
+  newest-first frames for every writer-produced line (one deliberate
+  lone-``\r`` difference from the old text-mode read, documented on
+  ``_read_lines_newest_first``).
 
 Slice boundaries: R2 wires the dial prober (active instrument, hands
 this journal the identity-marker discriminator it already enforces);
@@ -399,6 +406,56 @@ def emit_frame(*, timeout_s=None, **fields):
     return "journaled"
 
 
+# Reverse-scan chunk size — the journal reader holds O(chunk) bytes
+# while walking a generation tail-first, never the whole file (#1730).
+_REVERSE_CHUNK_BYTES = 64 * 1024
+
+
+def _read_lines_newest_first(f):
+    """Yield the raw (bytes) lines of an open binary file, newest first.
+
+    Reads tail-first in fixed-size chunks and reassembles lines that
+    straddle a chunk boundary, so the reader's memory stays O(chunk)
+    even for a 64 MiB generation — the old ``reversed(f.readlines())``
+    materialized the entire file on every ``relay_session_liveness()``
+    call, i.e. once per box per tick (#1730). Line content matches the
+    old read, newest-first, for every line the journal writer can
+    produce: a torn trailing line (reader racing the writer's fsync)
+    comes out as a leading fragment whose JSON parse fails and is
+    skipped, same as before; a file not ending in a newline yields its
+    last line intact; multibyte UTF-8 sequences split across a chunk
+    boundary are reassembled before any decode, so the errors="replace"
+    decode the caller applies behaves identically. One deliberate
+    difference: the reader splits on ``\n`` only, while the old
+    text-mode read also treated a lone ``\r`` as a line boundary
+    (universal-newline translation). The journal writer (``json.dumps``
+    + ``"\n"``) can never emit a raw ``\r`` — it is JSON-escaped — so
+    this only affects hand-edited or corrupted lines, which stay
+    skipped-as-corrupt either way.
+    """
+    f.seek(0, os.SEEK_END)
+    pos = f.tell()
+    fragment = b""
+    while pos > 0:
+        size = min(_REVERSE_CHUNK_BYTES, pos)
+        pos -= size
+        f.seek(pos)
+        chunk = f.read(size)
+        lines = (chunk + fragment).split(b"\n")
+        if pos > 0:
+            # lines[0] is the head fragment of a line whose tail we
+            # already yielded — hold it for the next (earlier) chunk.
+            fragment = lines[0]
+            complete = lines[1:]
+        else:
+            # The file's head: every line is complete, including the
+            # true first line (the no-trailing-newline case).
+            fragment = b""
+            complete = lines
+        for line in reversed(complete):
+            yield line
+
+
 def _iter_frames(path):
     """Yield (frame, generation) newest-first across the journal and its
     rotated generations. Each file is read newest-row-first so the first
@@ -407,17 +464,22 @@ def _iter_frames(path):
     never fatal — the query degrades, it does not crash. Undecodable
     bytes decode as replacement characters (a hand-edit or disk-level
     corruption can't crash the query; such a line never parses as JSON
-    and is skipped like any other corrupt line)."""
+    and is skipped like any other corrupt line). The scan is
+    RAM-bounded: generations are walked tail-first in fixed-size
+    chunks, holding O(chunk) bytes, never the whole file (#1730). Line
+    splitting is on ``\n`` only — see ``_read_lines_newest_first`` for
+    the one deliberate lone-``\r`` difference from the old text-mode
+    read."""
     gens = [""] + [".%d" % g for g in range(1, MAX_ROTATED + 1)]
     for gen in gens:
         fname = path + gen
         try:
-            f = open(fname, "r", encoding="utf-8", errors="replace")
+            f = open(fname, "rb")
         except FileNotFoundError:
             continue
         with f:
-            for line in reversed(f.readlines()):
-                line = line.strip()
+            for raw in _read_lines_newest_first(f):
+                line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 try:
