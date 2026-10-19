@@ -30,8 +30,9 @@
 #   4. docs index coverage   (pytest scripts/test_docs_index_coverage.py
 #                             scripts/test_ci_md_link_excludes.py
 #                             scripts/test_contributing_ci_gates.py
-#                             scripts/test_ci_docs_job_inventory.py — the
-#                             CI job's exact four-file invocation; runs on
+#                             scripts/test_ci_docs_job_inventory.py
+#                             scripts/test_relay_wiring_tick_doc.py — the
+#                             CI job's exact five-file invocation; runs on
 #                             every PR like CI, docs-only included)
 #   5. shellcheck            (severity=error over the CI job's shell-file
 #                             selection on the whole checkout — replicates

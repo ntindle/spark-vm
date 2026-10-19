@@ -79,7 +79,7 @@ events in order — names with kwargs rendered (`relay-down(...)`,
 
 Only the anchor's reading is ever applied to a tenant arc. Every other
 box's reading is observed for the operator surface and never touches the
-record — their slots report `events: []` with a note. Three notes you
+record — their slots report `events: []` with a note. Four notes you
 will see, verbatim:
 
 - Non-anchor box (healthy read):
