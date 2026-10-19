@@ -204,7 +204,10 @@ why, or someone will wire it up early:
   tenant can forge `succeeded` events to promote a bad release, or forged
   `failed` events to halt a good one. Tenant-fleet gates require box-identity
   attestation on every event the gate consumes. The operator estate (trusted
-  boxes, one operator) starts without it.
+  boxes, one operator) starts without it. The mechanism ships in
+  `fleet/attest.py` (#1516 S3 slice 1): gates consume through
+  `attest.gate_consumable_events` — box-origin G17 events only;
+  controller-origin records are the controller's own authority.
 - **Never interrupt an arc:** scheduled updates do not interrupt running
   tenant arcs and the session clock is unaffected by updates (decided for
   G11/G12). The controller must schedule around arcs: wave membership is

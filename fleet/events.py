@@ -378,11 +378,12 @@ def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
 
     `keyring` maps box_id -> 32-byte ed25519 pubkey (see
     attest.load_box_keys); None means the legacy estate with no keys
-    pinned — every row stays unattested. Rows carrying an `attestation`
-    member are verified once per row (before the deploy-ok fan-out, so
-    all fanned events share the row's verdict): a valid signature
-    stamps `attested: True`; anything else stays `attested: False`
-    with a note.
+    pinned — every row stays unattested. Attestation is verified for
+    every object row, *before* the shape gates below: a row carrying an
+    `attestation` member with a bad signature gets the loud forgery
+    note even when the row's shape is unknown or local-only (those
+    rows still produce no events). A valid signature stamps
+    `attested: True`; anything else stays `attested: False`.
     """
     events = []
     local_noops = 0
@@ -393,6 +394,15 @@ def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
         if not isinstance(row, dict):
             notes.append("skipped non-object audit line")
             continue
+        # #1516 S3: verify the row's attestation claim before the shape
+        # gates, so a forged signature is the loud forgery signal even
+        # on rows that produce no event (unknown shapes, local-only
+        # rows). Legacy rows (no attestation member) verify silently;
+        # the deploy-ok fan-out below inherits one verdict per row.
+        attested, attest_note = attest.verify_attestation(
+            keyring, box_id, row)
+        if attest_note is not None:
+            notes.append(attest_note)
         event, result = row.get("event"), row.get("result")
         if not isinstance(event, str) or not isinstance(result, str):
             notes.append("skipped audit line with non-string event/result")
@@ -408,12 +418,6 @@ def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
                          % (_clean_text(event), _clean_text(result)))
             continue
         kind, outcome = translated
-        # #1516 S3: verify the row's attestation claim once per row, so
-        # the deploy-ok fan-out below inherits one verdict per row.
-        attested, attest_note = attest.verify_attestation(
-            keyring, box_id, row)
-        if attest_note is not None:
-            notes.append(attest_note)
         if shape == ("deploy", "ok"):
             # Fan-out: one event per component in the plural `components`
             # value; the verbatim plural rides along as `subcomponents`

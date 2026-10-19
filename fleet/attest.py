@@ -11,13 +11,22 @@ module is the mechanism.
 
 Design (pinned):
 
-  - **Primitive: the box's ed25519 identity key.** No new identity
-    system is invented (the trust doc's S2 precedent). A hosted tenant
-    box signs with the ed25519 key #844's pairing ceremony generated
-    for it (box-local keygen, proof-of-possession at pairing); an
-    operator-estate box signs with its provisioned key. The mechanism
-    is key-agnostic — it verifies against whatever pubkey the store
-    pins for the box_id.
+  - **Primitive: the box's ed25519 identity key — held BELOW the
+    tenant.** No new identity system is invented (the trust doc's S2
+    precedent), but the key's *custody* is the load-bearing decision of
+    this slice, not a wiring detail: under the trust model's §3 frame
+    ("the tenant holds root inside the guest"), any guest-readable key
+    is tenant-readable, so a hosted tenant box MUST sign with a key
+    held in the layer below (the provisioner / host agent). The #844
+    pairing key is explicitly disqualified as a signing key: it lives
+    at `~sparkpair/.config/spark-pair/enrollment.json` inside the guest
+    filesystem, so a root tenant could exfiltrate the seed and mint
+    *attested* forgeries — a forgery-laundering mechanism wearing T2's
+    clothes. An operator-estate box signs with its provisioned key.
+    The mechanism itself is key-agnostic — it verifies against whatever
+    pubkey the store pins for the box_id — so selecting and
+    provisioning the layer-below key is the producer lane's acceptance
+    criterion.
   - **What is signed: the raw row, bound to box_id.** The signature
     covers the canonical bytes of ``{"box_id": box_id, "row":
     <row minus the attestation member>}``. Raw audit rows do not carry
@@ -35,9 +44,11 @@ Design (pinned):
     The signer signs these exact bytes; the collector re-serializes the
     parsed row the same way. JSON round-trips are value-stable under
     this form (numbers/strings/bools/null survive loads->dumps
-    identically), so a row written by `format_attested_row` always
-    verifies. Rows written by foreign serializers are out of contract:
-    use the box-side helper.
+    identically), and verification re-canonicalizes the parsed *values*
+    — so key order, whitespace, and indentation of the written line
+    are irrelevant; only value-changing serializers break
+    verification. `format_attested_row` is the box-side contract: use
+    it rather than hand-rolling the line.
   - **Registry: write-once `<store>/box-keys.json`.** `pin_box_key`
     pins box_id -> 32-byte ed25519 pubkey with the operator-pin
     discipline from fleet/register.py: idempotent re-pin of the same
@@ -152,8 +163,12 @@ def format_attested_row(seed, box_id, row):
 
 # --- Verification (collector side; never raises) ----------------------------
 
-def _hex_bytes(text, want_len, what):
-    """Parse lowercase hex, or return None (never raises)."""
+def _hex_bytes(text, want_len):
+    """Parse hex into bytes, or return None (never raises).
+
+    Case- and surrounding-whitespace-tolerant (the fingerprint
+    normalization precedent): the canonical pinned form is lowercase.
+    """
     if not isinstance(text, str):
         return None
     t = text.strip().lower()
@@ -177,7 +192,7 @@ def verify_row(pubkey_bytes, box_id, row, sig_hex):
     if (not isinstance(pubkey_bytes, (bytes, bytearray))
             or len(pubkey_bytes) != 32):
         return False
-    sig = _hex_bytes(sig_hex, _SIG_HEX_LEN, "sig")
+    sig = _hex_bytes(sig_hex, _SIG_HEX_LEN)
     if sig is None:
         return False
     try:
@@ -202,6 +217,9 @@ def verify_attestation(keyring, box_id, row):
         claimed fingerprint disagrees with the pinned key (metadata
         wrongness, not inauthenticity — the signature is authoritative).
     """
+    if not isinstance(row, dict):
+        return False, ("attestation checked on a non-object row for box "
+                        "%r; event logged unattested" % (box_id,))
     att = row.get(ATTESTATION_MEMBER)
     if att is None:
         return False, None
@@ -267,7 +285,7 @@ def load_box_keys(store_dir):
         if not isinstance(rec, dict):
             return None, ("box-key registry %s: record for %r is not an "
                           "object (integrity failure)" % (path, box_id))
-        pub = _hex_bytes(rec.get("pubkey"), _PUBKEY_HEX_LEN, "pubkey")
+        pub = _hex_bytes(rec.get("pubkey"), _PUBKEY_HEX_LEN)
         if pub is None:
             return None, ("box-key registry %s: record for %r has no "
                           "64-hex pubkey (integrity failure)"
@@ -288,9 +306,11 @@ def pin_box_key(store_dir, box_id, pubkey_hex):
     """
     if not isinstance(box_id, str) or not box_id:
         return None, "box_id must be a non-empty string"
-    pub = _hex_bytes(pubkey_hex, _PUBKEY_HEX_LEN, "pubkey")
+    pub = _hex_bytes(pubkey_hex, _PUBKEY_HEX_LEN)
     if pub is None:
-        return None, "pubkey must be 64 lowercase hex chars (32 bytes)"
+        return None, ("pubkey must be 64 hex chars (32 bytes; case and "
+                       "surrounding whitespace are tolerated and "
+                       "normalized)")
     if not os.path.isdir(store_dir):
         return None, "store dir %s does not exist" % (store_dir,)
     from events import journal_lock  # lazy: events.py imports this module
@@ -364,6 +384,12 @@ def gate_consumable_events(events):
     this function — the first gate builder (G15 controller) inherits
     the attestation requirement instead of rediscovering it. Until a
     gate exists, the rule is pinned here and at the ingest.
+
+    Scope: box-origin G17 events. Controller-origin records (e.g. the
+    controller's own freeze-hold events) are the controller's
+    authority, not box self-report — a future gate must not apply
+    this filter to the whole journal blindly, or it will silently
+    drop the controller's own voice.
     """
     return [e for e in events
             if isinstance(e, dict) and e.get("attested") is True]

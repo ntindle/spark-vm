@@ -328,9 +328,16 @@ registry (`fleet box-key pin/show`) and journals `attested: true` only
 on a valid signature. A bad signature on a claiming row is the forgery
 signal (loudest collector note); unsigned rows stay `attested: false`
 (the legacy log-only path). The T2 consume-gate rule ships as code:
-consuming gates read only attested rows. Remaining: box-side signing at
-emit time (the deploy agent stamps rows — the producer lane), the
-hosted plane-side key source, and the G15 gate itself.
+consuming gates read only attested rows. Remaining: (1) the producer
+lane — the deploy agent stamps rows at emit time, with the custody
+acceptance that the hosted tenant signing key is held in the layer
+below (provisioner/host agent); guest-resident keys, including the
+pairing key, do not answer T2 (a root tenant could exfiltrate them);
+(2) the hosted plane-side key source; (3) the G15 gate itself;
+(4) the box-key rotation ceremony — no rotate/unpin path yet,
+deliberate for slice 1 since no production keys are pinned; under T2
+key compromise is an expected event, so rotation must land before the
+first tenant gate.
 
 - **Sink:** boxes push events to the control plane (or the plane pulls —
   S2's transport decision); the push endpoint is built on the provisioned

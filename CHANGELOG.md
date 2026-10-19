@@ -51,13 +51,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
-- Fleet update events: boxes can now sign their update rows with their
+- Fleet update events: boxes can now sign their update rows with a
   device identity key, and the collector verifies each signature before
   journaling the event as attested — so a future rollout gate can trust
   that a "deploy succeeded" report really came from the box it names,
-  instead of taking every journaled row at face value. Unsigned rows
-  keep working exactly as before (logged, never trusted by gates).
-  (#TBD)
+  instead of taking every journaled row at face value. The signing key
+  has to live outside the tenant's reach (a key the tenant could read
+  proves nothing — the producer lane must pin layer-below custody);
+  unsigned rows keep working exactly as before (logged, never trusted
+  by gates). (#TBD)
 - Waitlist: the waitlist durability analysis is refreshed to current
   main — the four unrepaired funnel crash windows are re-verified, the
   per-flow token commit/consume ordering policy is now documented in the

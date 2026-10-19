@@ -16,6 +16,7 @@ if FLEET not in sys.path:
     sys.path.insert(0, FLEET)
 import attest  # noqa: E402
 import events  # noqa: E402  (ingest half)
+import inventory  # noqa: E402  (CLI wiring)
 
 # Deterministic test seeds — never real keys.
 SEED_A = bytes(range(32))
@@ -124,15 +125,25 @@ def test_sign_row_rejects_bad_inputs():
 
 def test_format_attested_row_line_roundtrip():
     # The exact emitted line must parse and verify: the canonical form
-    # is byte-stable through the collector's loads->dumps.
-    line = attest.format_attested_row(SEED_A, BOX, _row())
-    assert line.endswith("\n") and "\n" not in line.strip()
-    parsed = json.loads(line)
-    att = parsed["attestation"]
-    assert attest.verify_row(_pub(SEED_A), BOX, parsed, att["sig"])
-    # Re-serializing the parsed row reproduces the signed envelope.
-    assert (attest.envelope_bytes(BOX, parsed)
-            == attest.envelope_bytes(BOX, _row()))
+    # is byte-stable through the collector's loads->dumps — probed
+    # across unicode, floats, nesting, and big ints, not just ASCII.
+    variants = [
+        _row(),
+        _row(note="déploié ✓ — naïve café"),
+        _row(load_avg=1.5, uptime_s=1e6),
+        _row(detail={"nested": [1, "two", None, True],
+                     "big": 10 ** 40}),
+        _row(empty_obj={}, empty_list=[]),
+    ]
+    for row in variants:
+        line = attest.format_attested_row(SEED_A, BOX, row)
+        assert line.endswith("\n") and "\n" not in line.strip()
+        parsed = json.loads(line)
+        att = parsed["attestation"]
+        assert attest.verify_row(_pub(SEED_A), BOX, parsed, att["sig"])
+        # Re-serializing the parsed row reproduces the signed envelope.
+        assert (attest.envelope_bytes(BOX, parsed)
+                == attest.envelope_bytes(BOX, row))
 
 
 # --- Registry ---------------------------------------------------------------
@@ -228,6 +239,15 @@ def _signed_row(seed=SEED_A, box=BOX, **fields):
     return row
 
 
+def test_verify_attestation_non_dict_row_never_raises():
+    # The "never raises" contract holds even for non-dict rows (the
+    # ingest filters these first; the guard is for future callers).
+    attested, note = attest.verify_attestation(_keyring(), BOX,
+                                               "not-a-dict")
+    assert attested is False
+    assert note is not None
+
+
 def test_verify_attestation_legacy_row_is_silent():
     attested, note = attest.verify_attestation(_keyring(), BOX, _row())
     assert attested is False
@@ -319,6 +339,43 @@ def test_ingest_without_keyring_stays_legacy():
     assert any("no box key pinned" in n for n in notes)
 
 
+def test_ingest_verifies_attestation_before_shape_gate():
+    # A forged signature on a row the shape gate drops is STILL the
+    # forgery signal: verification runs before the shape gates, so the
+    # loud note lands even though no event is journaled.
+    row = _row(event="bogus", result="nonsense")
+    row["attestation"] = attest.sign_row(SEED_A, BOX, row)
+    row["attestation"]["sig"] = "ff" * 64  # well-formed, wrong
+    evs, noops, notes = events.canonicalize_audit_rows(
+        [row], BOX, "2026-10-19T07:05:00Z", keyring=_keyring())
+    assert evs == [] and noops == 0
+    assert any("ATTESTATION SIGNATURE INVALID" in n for n in notes)
+
+
+def test_ingest_local_only_row_with_forged_sig_still_noted():
+    # Local-only rows (check/noop) stay local — but a forged
+    # attestation claim on one is still journaled loudly.
+    row = {"ts": "2026-10-19T07:00:00Z", "event": "check",
+           "result": "noop"}
+    row["attestation"] = attest.sign_row(SEED_A, BOX, row)
+    row["attestation"]["sig"] = "ff" * 64
+    evs, noops, notes = events.canonicalize_audit_rows(
+        [row], BOX, "2026-10-19T07:05:00Z", keyring=_keyring())
+    assert evs == [] and noops == 1  # still local-only
+    assert any("ATTESTATION SIGNATURE INVALID" in n for n in notes)
+
+
+def test_ingest_valid_sig_on_unknown_shape_is_quiet_but_eventless():
+    # The mirror case: a VALID signature on a dropped shape verifies
+    # silently — no forgery note, still no event.
+    row = _row(event="bogus", result="nonsense")
+    row["attestation"] = attest.sign_row(SEED_A, BOX, row)
+    evs, noops, notes = events.canonicalize_audit_rows(
+        [row], BOX, "2026-10-19T07:05:00Z", keyring=_keyring())
+    assert evs == [] and noops == 0
+    assert not any("ATTESTATION" in n for n in notes)
+
+
 def test_collect_box_events_passes_keyring(tmp_path):
     box_dir = tmp_path / "tower"
     box_dir.mkdir()
@@ -329,6 +386,90 @@ def test_collect_box_events_passes_keyring(tmp_path):
     assert len(evs) == 1
     assert evs[0]["attested"] is True
     assert notes == []
+
+
+# --- CLI (fleet box-key pin/show) --------------------------------------------
+
+def _cli_store(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    return str(store)
+
+
+def test_cli_box_key_pin_show_roundtrip(tmp_path, capsys):
+    store = _cli_store(tmp_path)
+    pub_hex = _pub(SEED_A).hex()
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--box-id", BOX, "--pubkey", pub_hex]) == 0
+    out = capsys.readouterr().out
+    assert "pinned box key" in out and BOX in out
+    assert inventory.main(["box-key", "show", "--store", store,
+                           "--box-id", BOX]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(BOX + ": SHA256:")
+    # Idempotent re-pin converges.
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--box-id", BOX, "--pubkey", pub_hex]) == 0
+
+
+def test_cli_box_key_pin_different_key_fails_closed(tmp_path):
+    store = _cli_store(tmp_path)
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--box-id", BOX,
+                           "--pubkey", _pub(SEED_A).hex()]) == 0
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--box-id", BOX,
+                           "--pubkey", _pub(SEED_B).hex()]) == 2
+
+
+def test_cli_box_key_missing_args(tmp_path):
+    store = _cli_store(tmp_path)
+    # Missing --box-id / --pubkey: clean exit 2, not a traceback.
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--pubkey", _pub(SEED_A).hex()]) == 2
+    assert inventory.main(["box-key", "pin", "--store", store,
+                           "--box-id", BOX]) == 2
+    # Missing --store: argparse itself exits 2.
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        inventory.main(["box-key", "pin", "--box-id", BOX,
+                        "--pubkey", _pub(SEED_A).hex()])
+    assert exc.value.code == 2
+
+
+def test_cli_box_key_show_corrupt_registry(tmp_path):
+    store = _cli_store(tmp_path)
+    with open(os.path.join(store, attest.BOX_KEYS_NAME), "w",
+              encoding="utf-8") as fh:
+        fh.write("{corrupt")
+    assert inventory.main(["box-key", "show", "--store", store,
+                           "--box-id", BOX]) == 2
+    # show on an unknown box: exit 0, "no box key pinned".
+    store2 = tmp_path / "store2"
+    store2.mkdir()
+    assert inventory.main(["box-key", "show", "--store", str(store2),
+                           "--box-id", BOX]) == 0
+
+
+def test_collect_fails_closed_on_corrupt_registry(tmp_path):
+    # The shipped fail-closed: a corrupt box-key registry fails the
+    # whole collect (exit 2) rather than silently journaling every
+    # event unattested — and no event lines land.
+    estate = tmp_path / "estate" / BOX
+    estate.mkdir(parents=True)
+    (estate / "audit-tail.jsonl").write_text(
+        json.dumps(_row()) + "\n", encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir()
+    with open(store / attest.BOX_KEYS_NAME, "w",
+              encoding="utf-8") as fh:
+        fh.write("{corrupt")
+    code = inventory.main(["collect", "--estate", str(tmp_path / "estate"),
+                           "--store", str(store)])
+    assert code == 2
+    events_path = store / "events.jsonl"
+    assert (not events_path.exists()
+            or events_path.read_text(encoding="utf-8") == "")
 
 
 # --- T2 rule ----------------------------------------------------------------

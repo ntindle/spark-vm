@@ -447,8 +447,12 @@ row bound to the box id; a bad signature on a row that claims
 attestation is journaled with the loudest collector note (the forgery
 signal). Rows with no signature stay `attested: false` — the legacy
 log-only path. Still to come: the deploy agent signing rows at emit
-time (the producer lane), the hosted plane-side key source, and the
-G15 gate actually consuming through the attested filter.
+time (the producer lane — with the custody acceptance that the hosted
+tenant signing key lives in the layer below, never guest-side; the
+pairing key is disqualified, since a root tenant could exfiltrate it);
+the hosted plane-side key source; the box-key rotation ceremony (no
+rotate/unpin path yet — deliberate for slice 1); and the G15 gate
+actually consuming through the attested filter.
 
 ### Sizing the audit tail
 
