@@ -129,7 +129,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
   textual, so it now matches text files only (binary values in the
   credential stores are still caught byte-exact), and inert test keys
   shipped inside third-party libraries are covered by narrow, reviewed
-  path exclusions instead of failing the image. (#1779)
+  path exclusions instead of failing the image. The workflow's
+  gate-record step runs again too — `build-image.sh` was missing its
+  executable bit in git (exit 126), so the gate-record skeleton could
+  never be emitted. (#1779)
 - muse-job approvals: the approvals listing and the supervisor's approval
   payload now read both pending planes (tool approvals and user-input
   prompts) in one round-trip instead of two — so the two lists can no
