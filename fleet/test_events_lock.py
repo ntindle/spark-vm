@@ -26,6 +26,7 @@ suite.
 import json
 import multiprocessing
 import os
+import errno
 import signal
 import sys
 import tempfile
@@ -454,3 +455,28 @@ def test_journal_mutation_fails_loud_on_wedged_lock(tmp_path, monkeypatch):
     assert "journal.lock" in err and "SIGSTOP" in err, err
     # Nothing was journaled unsynchronized behind the wedge.
     assert not os.path.exists(os.path.join(store, "events.jsonl"))
+
+
+def test_journal_lock_rejects_planted_symlink(tmp_path):
+    """#1755: a pre-planted symlink at <store>/journal.lock fails loud as
+    JournalLockError (ELOOP from O_NOFOLLOW) instead of silently moving
+    the flock onto the plant target (lock-desync / lock-DoS)."""
+    store = str(tmp_path / "store")
+    os.makedirs(store)
+    target = tmp_path / "plant-target.txt"
+    target.write_text("not the lock")
+    os.symlink(target, os.path.join(store, "journal.lock"))
+    try:
+        with events.journal_lock(store, timeout_s=1):
+            pass
+    except events.JournalLockError as exc:
+        # The OSError is chained as __context__ (raise without `from`).
+        # Assert on errno, not the message: os.strerror(ELOOP) is
+        # locale-dependent (LC_MESSAGES), errno is not.
+        ctx = exc.__context__
+        assert isinstance(ctx, OSError) and ctx.errno == errno.ELOOP, exc
+    else:
+        raise AssertionError("planted symlink at journal.lock did not "
+                             "fail loud")
+    # The plant target is untouched: no flock was ever taken on it.
+    assert target.read_text() == "not the lock"

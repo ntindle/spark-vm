@@ -261,9 +261,20 @@ def _locked(path: str):
     swap_addon) plus concurrent threads inside each. Atomic os.replace
     alone does not prevent a stale read-modify-write from silently
     dropping a subscription. The lock is a `<path>.lock` sidecar.
+
+    #1755: the lock sidecar opens with O_NOFOLLOW — a pre-planted
+    symlink at the lock path fails loud as OSError (ELOOP) instead of
+    silently moving the flock onto another file (lock-desync /
+    lock-DoS). Mirrors the #1740 hardening on the hosted relay locks.
     """
     lock_path = path + ".lock"
-    with open(lock_path, "a+b") as lf:
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        lf = os.fdopen(fd, "r+b")
+    except BaseException:
+        os.close(fd)
+        raise
+    with lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
             yield

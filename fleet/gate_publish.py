@@ -488,10 +488,22 @@ class _LedgerLock:
     and a --rotation-complete can never interleave their load->modify->save
     and silently lose each other's update. Any future writer of the ledger
     must take the same lock (see fleet/README.md "Key rotation &
-    retirement")."""
+    retirement").
+
+    #1755: the lockfile opens with O_NOFOLLOW — a pre-planted symlink at
+    the lock path fails loud as OSError (ELOOP) instead of silently
+    moving the flock onto another file (lock-desync / lock-DoS).
+    Mirrors the #1740 hardening on the hosted relay locks.
+    """
 
     def __init__(self, log_path: str):
-        self._lf = open(log_path + ".lock", "w")
+        fd = os.open(log_path + ".lock",
+                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            self._lf = os.fdopen(fd, "r+b")
+        except BaseException:
+            os.close(fd)
+            raise
         try:
             fcntl.flock(self._lf.fileno(), fcntl.LOCK_EX)
         except BaseException:

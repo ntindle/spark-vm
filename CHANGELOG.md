@@ -108,6 +108,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   operator state directory, so the practical risk was low — this closes
   the read/write asymmetry.
   Closes #1740. Closes #1741. (#1756)
+- The same symlink-plant hardening now covers the lock files outside
+  the hosted lane: the push-notification subscription lock, the proxy
+  summons-journal lock, the fleet event-journal lock, and the key-rotation
+  ledger lock all refuse symlinked paths (fail loud, never follow) instead
+  of letting a pre-planted link silently move an exclusive lock onto
+  another file. Planting such a link already required write access to the
+  respective state directory, so the practical risk was low. Refs #1755
+  (the remaining lock sites land in following slices). (#1761)
 
 ### Changed
 - Relay-liveness wiring internals hardened at the module boundary: the
