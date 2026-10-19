@@ -129,7 +129,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   hermetic tests. (#1781)
 - Setup guide: the audit-log line illustrations now show the current field
   set — including `ip=` and `tenant=` — instead of the older four-field
-  shape that predates them. (#TBD)
+  shape that predates them. (#1782)
 - Golden-image build gate: the image recipe now starts the inference
   credential-swapping proxy during the build before running its gate
   verification — previously the proxy was never running at build time, so
