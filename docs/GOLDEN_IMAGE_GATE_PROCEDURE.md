@@ -265,6 +265,14 @@ Triage a failed installer run from its captured output:
 - **Installer exit 3 (fixture startup):** the echo fixture failed to
   start. Diagnose from the captured stderr the installer prints; do not
   proceed without the fixture.
+- **Probe gate mode, confirmd leg:** gate mode checks confirmd itself
+  answering on `127.0.0.1:8443` after the swap proof. In the recipe's
+  gate RUN the RUN itself starts a throwaway confirmd (loopback bind,
+  fresh self-signed cert, scratch approvals dir — see the Dockerfile
+  gate-RUN comment); a standalone installer run outside that context
+  needs a confirmd listening on the loopback port first, or this leg
+  fails with `ConnectionRefused` on `:8443` — that is a gate-environment
+  failure, not an image defect.
 
 Any nonzero installer exit is **no-gate**: the gate did not run. But the
 classes differ — environment/setup failures are fixed and the gate

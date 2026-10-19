@@ -118,7 +118,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
   verification — previously the proxy was never running at build time, so
   the gate's end-to-end swap proof failed and no release since the gate
   was added could pass it. The gate-time proxy runs with the same
-  credential-isolation setup as the deployed service. The container's
+  credential-isolation setup as the deployed service. The gate also
+  starts a throwaway confirmd (loopback only, fresh self-signed cert,
+  scratch approvals dir — all torn down in the same build step) because
+  the probe's gate mode checks the approvals path too. The container's
   runtime proxy setup is also corrected to carry that same isolation, so
   the inference port can no longer serve as an unintended second copy of
   the main proxy. (#1779)

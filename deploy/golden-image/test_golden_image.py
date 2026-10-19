@@ -373,6 +373,52 @@ def test_gate_run_is_single_docker_instruction():
         "missing its backslash continuation"
 
 
+def test_gate_run_starts_throwaway_confirmd():
+    """The probe's gate mode runs check_confirmd (confirmd itself answering
+    on 127.0.0.1:8443 with its 403 self-peer shape) after the swap proof —
+    so the gate RUN must start confirmd at build time too, or the gate
+    fails with ConnectionRefused exactly like the proxy did before the
+    inference-proxy fix. The confirmd is throwaway: loopback bind, a fresh
+    self-signed cert (never the production cert path), a scratch approvals
+    dir (never the real one), and the EXIT trap kills it and removes the
+    gate dir."""
+    block = _gate_run_block()
+    assert "CONFIRM_BIND=127.0.0.1" in block
+    assert "/home/swapd/confirmd.py" in block
+    # throwaway cert minted fresh in the RUN — the production CONFIRM_CERT
+    # default must never appear in the gate RUN
+    assert "openssl req -x509" in block
+    assert 'CONFIRM_CERT="$gate_dir/cert.crt"' in block
+    assert "CONFIRM_CERT=/home/swapd/confirmd/cert.crt" not in block
+    # scratch approvals dir — never the real one
+    assert 'CONFIRM_DIR="$gate_dir/approvals"' in block
+    assert "CONFIRM_DIR=/home/swapd/approvals" not in block
+    # readiness is a real TLS handshake on 8443, not a bare TCP connect
+    # (confirmd defers the handshake out of the accept loop)
+    assert "8443" in block
+    assert "ssl.SSLContext" in block
+    assert "CERT_NONE" in block
+    # teardown: killed on EXIT and the gate dir removed with it
+    assert 'kill "$confirmd_pid"' in block
+    assert "rm -rf /home/swapd/.mitmproxy /tmp/confirmd-gate" in block
+
+
+def test_gate_tooling_installs_openssl():
+    """The gate RUN mints confirmd's throwaway TLS cert with openssl — the
+    OS layer must install it explicitly rather than assuming it from the
+    base image."""
+    text = _dockerfile_text()
+    start = text.find("RUN apt-get update")
+    assert start != -1, "no apt-get OS layer in the Dockerfile"
+    lines = text[start:].splitlines()
+    body = []
+    for line in lines:
+        body.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    assert "openssl" in "\n".join(body)
+
+
 # --- daemon set (supervisord.conf) ----------------------------------------------
 
 
