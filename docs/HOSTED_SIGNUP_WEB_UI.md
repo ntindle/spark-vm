@@ -262,7 +262,11 @@ Screens, in order:
    back of the confirmed queue, no re-confirmation needed — never "your
    invite expired, start over."
 1. **Account** — email + magic link (no password to phish — H3 §5; the
-   magic link establishes the session, it is not a re-verification).
+   magic link establishes the session, it is not a re-verification). The
+   session is TTL-bound — one hour from mint; an expired session reads as
+   a stale cookie (`401`) and the signup flow mints a fresh session
+   (lifetime definition: `TENANT_STATUS_ENDPOINT.md` § "Session lifetime
+   (#1783)").
    Signup pre-fills the owner email from the waitlist entry and **skips
    email re-verification** (reachability already proven —
    `WAITLIST_OPERATIONS.md` §8, PR #68); it does not skip identity linking.
@@ -415,8 +419,13 @@ internet.
 | endpoint | method | notes |
 |---|---|---|
 | `/signup/claim` | GET / POST | signed invite link. GET renders the claim screen (pre-filled owner email from the waitlist entry, plan/card summary) — never changes state, so a scanner fetching the link cannot claim anything. POST performs the claim: token as form field, idempotent, emits the `claimed` event (`FUNNEL_MEASUREMENT.md` §3.4, PR #99) with `ref` = the waitlist row id, creates the tenant shell, proceeds to §5 screen 1. |
-| `/signup/magic` | GET / POST | magic-link callback (screen 1). GET renders a "Continue as `<owner>`" button page — never changes state (the mail-scanner threat: a scanner must not consume the single-use token). POST consumes the token, opens the magic-link session, proceeds to screen 2. |
-| `/tenant/status` | GET | H3 §5: the Muse polls with its linked (approved) ed25519 key, signing requests per H3 §4; the signup page polls the same endpoint. Auth: human side = the magic-link session cookie (the status page meta-refreshes inside it); Muse side = its linked key (m2m). Renders the §6 status mapping (`provisioning` / `live`, later `suspended` / `waking`), never the raw H3 enum without the mapping. |
+| `/signup/magic` | GET / POST | magic-link callback (screen 1). GET renders a "Continue as `<owner>`" button page — never changes state (the mail-scanner threat: a scanner must not consume the single-use token). POST consumes the token, opens the magic-link session (TTL-bound — one
+hour from mint; lifetime definition: `TENANT_STATUS_ENDPOINT.md` §
+"Session lifetime (#1783)"), proceeds to screen 2. |
+| `/tenant/status` | GET | H3 §5: the Muse polls with its linked (approved) ed25519 key, signing requests per H3 §4; the signup page polls the same endpoint. Auth: human side = the magic-link session cookie — TTL-bound, one hour
+from mint; an expired session reads as a stale cookie (`401`) per
+`TENANT_STATUS_ENDPOINT.md` § "Session lifetime (#1783)" (the status page
+meta-refreshes inside it); Muse side = its linked key (m2m). Renders the §6 status mapping (`provisioning` / `live`, later `suspended` / `waking`), never the raw H3 enum without the mapping. |
 
 ## 8. Phased build plan
 
