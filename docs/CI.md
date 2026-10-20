@@ -64,6 +64,7 @@ release-compare-url
 severitydaily.com
 techstartups.com
 termsquad.com
+the-decoder.com
 theregister.com
 tvgreport.com
 wowza.com
