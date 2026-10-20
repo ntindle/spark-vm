@@ -20,13 +20,25 @@ helper edit that weakens selection fails loudly instead of moving the
 goalposts with it.
 
 Non-vacuity (each verified by neutering a scratch copy of the helper,
-never the worktree — every neuter below fails exactly its test, and only
-its test):
-- drop "*.sh" from the helper's pattern tuple -> pass-1 pin fails
+never the worktree — every neuter below fails its named test; some also
+fail others, which is expected where fixtures share the `*.sh` pattern
+and is not enumerated exhaustively):
+- drop "*.sh" from the helper's pattern tuple ->
+  test_pass1_name_patterns_match_action fails (verified: four more fail
+  too — test_excludes, test_main_nul_delimited_contract,
+  test_symlinks_never_selected, test_pass2_requires_dotless_and_executable
+  — all pin `*.sh` fixtures)
 - widen the shebang class to [abkz] -> the zsh mirror-gap test fails
 - flip one hex digit in the helper docstring's SHA -> the SHA pin fails
-- delete the ".go" exclude -> the exclude test fails
-- break the pass-2 exec-bit gate -> the pass-2 contract test fails
+- replace the end-anchored `.go` exclude with a substring check
+  (".go" in rel) -> test_excludes fails (foo.go/run.sh wrongly dropped);
+  honesty note: DELETING the exclude fails nothing — no selectable file
+  can end in .go (no pass-1 pattern matches it, pass 2 requires dotless)
+  — so the exclude is textual-parity-only, pinned by review, not by
+  behavior
+- break the pass-2 exec-bit gate -> test_pass2_requires_dotless_and_executable
+  fails (also test_pass1_name_patterns_match_action — its non-executable
+  Makefile negative control with `#!/bin/sh` would then select)
 """
 
 import io
@@ -36,8 +48,9 @@ import stat
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from ci_shellcheck_files import ci_shellcheck_files, main
+import pytest
 
+from ci_shellcheck_files import ci_shellcheck_files, main
 _HERE = Path(__file__).resolve().parent
 REPO_ROOT = _HERE.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -221,6 +234,38 @@ def test_non_utf8_first_line_still_selected(tmp_path):
     _write(tmp_path, "binish", b"#!/bin/sh \xff\xfe binary tail\n", executable=True)
     selected = {Path(p).name for p in ci_shellcheck_files(tmp_path)}
     assert "binish" in selected
+
+
+def test_name_case_sensitivity(tmp_path):
+    """find's -name is case-sensitive (fnmatch, not -iname); the helper
+    uses fnmatchcase to match. PROBE.SH must not select."""
+    _write(tmp_path, "PROBE.SH", "#!/bin/sh\n")
+    selected = {Path(p).name for p in ci_shellcheck_files(tmp_path)}
+    assert "PROBE.SH" not in selected
+
+
+def test_unreadable_file_skipped(tmp_path):
+    """An unreadable dotless executable takes the helper's `except
+    OSError: continue` branch (the action's `head | grep` silently skips
+    it the same way). Cannot occur in CI checkouts; skipped where the
+    chmod is ineffective (root reads through permission bits)."""
+    if os.geteuid() == 0:
+        pytest.skip("chmod 000 is ineffective as root")
+    p = _write(tmp_path, "locked", "#!/bin/sh\n", executable=True)
+    p.chmod(0)
+    try:
+        selected = {Path(f).name for f in ci_shellcheck_files(tmp_path)}
+    finally:
+        p.chmod(0o755)
+    assert "locked" not in selected
+
+
+def test_main_empty_selection_emits_nothing(tmp_path, capsys):
+    """The `if files:` guard: with nothing selected, main() prints
+    nothing (no trailing NUL) and returns 0 — the xargs -r contract."""
+    rc = main(["ci_shellcheck_files.py", str(tmp_path)])
+    assert rc == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_main_nul_delimited_contract(tmp_path):
