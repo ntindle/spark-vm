@@ -167,8 +167,58 @@ def shard_matrix():
     }
 
 
+def pytest_cmd(shard):
+    """The exact pytest command CI's python-tests-shard job runs for one shard.
+
+    Contributor-local pre-push confidence: print exactly what the CI shard
+    job executes (`python3 -m pytest -q ${{ matrix.dirs }}` in
+    `.github/workflows/ci.yml`, dirs space-joined) without running the
+    ~40-minute serial full suite. The selection comes from this same
+    SHARDS inventory, so the emitted command cannot drift from CI's matrix.
+    The sudo install-safety root tests are a CI step on the proxy shard,
+    not part of the pytest selection — the root_tests note says where that
+    command lives (CONTRIBUTING.md) instead of duplicating it.
+    """
+    dirs = SHARDS.get(shard)
+    if dirs is None:
+        valid = ", ".join(sorted(SHARDS))
+        print(
+            f"ci_shard_plan --pytest-cmd: unknown shard {shard!r} "
+            f"(valid: {valid})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if "proxy" in dirs:
+        # The root_tests flag in shard_matrix() is derived from the
+        # inventory ("proxy" in dirs) rather than hardcoded — same
+        # derivation here, so renaming the shard can never silently
+        # drop the note.
+        print(
+            "ci_shard_plan --pytest-cmd: note: this shard also runs the "
+            "install-safety root tests under sudo in CI — see CONTRIBUTING.md "
+            "\"One more thing that isn't a separate check\" for the command",
+            file=sys.stderr,
+        )
+    print("python3 -m pytest -q " + " ".join(dirs))
+
+
 def main():
-    if "--check" in sys.argv[1:]:
+    argv = sys.argv[1:]
+    if "--pytest-cmd" in argv:
+        # Local shard replica: print CI's exact pytest selection for one
+        # shard. A bare `--pytest-cmd` with no shard name fails closed.
+        idx = argv.index("--pytest-cmd")
+        rest = argv[idx + 1 :]
+        if not rest:
+            print(
+                "ci_shard_plan --pytest-cmd: missing shard name "
+                f"(valid: {', '.join(sorted(SHARDS))})",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        pytest_cmd(rest[0])
+        return
+    if "--check" in argv:
         # Bijection enforcement for the CI plan job: fails the job (and
         # therefore the aggregate gate) if the inventory drifts. Must stay
         # stdlib-only — the plan job runs it with nothing installed.

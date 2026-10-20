@@ -106,7 +106,21 @@ in a shell where the venv is not activated — re-activate first.
 local gate's changed-paths check keeps reading your tree correctly.
 
 To run one component's suite: `python3 -m pytest <dir>` from the repo
-root (e.g. `python3 -m pytest proxy`).
+root (e.g. `python3 -m pytest proxy`). To run exactly the selection one of
+CI's five `python tests` shards runs — the ~40-minute serial suite is split
+into parallel shards, and a shard's selection can span several directories —
+ask the shard inventory for the command instead of reconstructing it:
+
+```bash
+python3 scripts/ci_shard_plan.py --pytest-cmd <shard>
+```
+
+That prints CI's exact pytest selection for the shard (`python3 -m pytest
+-q` over the shard's directories, straight from the inventory
+`.github/workflows/ci.yml` consumes), so your local run and the CI shard
+job prove the same suites. Valid shard names are listed in
+`scripts/ci_shard_plan.py` (`shard-unit`, `shard-components`,
+`shard-integration`, `shard-harness`, `shard-deploy`).
 
 ### Parallel runs
 
