@@ -37,7 +37,13 @@ from tenant_status import (
     TransitionError,
     _CORRUPT_LATCH_RANK,
     _DUMMY_VERIFY_KEY,
+    _QUARANTINE_KIND_BOX,
+    _QUARANTINE_KIND_ENVELOPE,
+    _QUARANTINE_KIND_HOLD,
     _effective_rank,
+    _find_quarantine_signal,
+    _hold_quarantine_entry,
+    _quarantine_entry_kind,
     _quarantine_surface,
     apply_event,
     canonical_poll_message,
@@ -2266,6 +2272,99 @@ def test_reserved_signal_key_squatted_by_real_box(store, store_path):
     persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
     assert "#last_reported" in persisted["boxes"]
     assert persisted["boxes"]["#last_reported"]["code"] == "live"
+
+
+def test_suffix_squat_box_id_not_treated_as_envelope_signal(store, store_path):
+    # Security P92 re-confirm: box ids are free-form, so a hostile id can
+    # squat a reserved key's SUFFIX ("#boxes/2") — the very key shape
+    # _reserve_quarantine_key itself mints. Prefix inference would then
+    # misclassify the squatter as the envelope signal and replace the
+    # whole boxes container with its raw. Marker classification must not.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#boxes/2": _healthy_box_dict(code=42),
+    }
+    _write_raw(store_path, _raw_with_boxes(boxes=boxes))
+    rec = store.get("tnt_1784")
+    assert set(rec.boxes) == {"ok"}
+    assert set(rec.quarantined) == {"#boxes/2"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    # The container survives intact: the squatter's raw is one entry, not
+    # the container itself.
+    assert set(persisted["boxes"]) == {"ok", "#boxes/2"}
+    assert persisted["boxes"]["ok"]["code"] == "live"
+    assert persisted["boxes"]["#boxes/2"]["code"] == 42
+    # The quarantine re-derives on the next load — evidence is not lost.
+    rec2 = store.get("tnt_1784")
+    assert set(rec2.quarantined) == {"#boxes/2"}
+
+
+def test_suffix_squat_box_id_not_treated_as_hold_signal(store, store_path):
+    # Same discipline for the hold signal: a bad box squatting
+    # "#last_reported/2" must not have its raw persisted as last_reported.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#last_reported/2": _healthy_box_dict(code=42),
+    }
+    raw = _raw_with_boxes(
+        boxes=boxes,
+        last_reported={
+            "code": "live",
+            "status_updated_at": "2026-10-19T00:00:00Z",
+            "detail": None,
+        },
+    )
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_1784")
+    assert set(rec.quarantined) == {"#last_reported/2"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert set(persisted["boxes"]) == {"ok", "#last_reported/2"}
+    assert persisted["boxes"]["#last_reported/2"]["code"] == 42
+    # last_reported is the store's own snapshot, never the squatter's raw.
+    assert persisted["last_reported"]["code"] == "live"
+    assert persisted["last_reported"]["status_updated_at"] == (
+        "2026-10-19T00:00:00Z"
+    )
+
+
+def test_hold_recompute_keeps_suffix_squat_box_evidence(store, store_path):
+    # The _save_record stale-hold cleanup deletes only hold signals —
+    # a bad box squatting "#last_reported/2" is box evidence, not a
+    # signal, and survives the recompute.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#last_reported/2": _healthy_box_dict(code=42),
+    }
+    _write_raw(store_path, _raw_with_boxes(
+        boxes=boxes, last_reported={"code": "bogus"}))
+    rec = store.get("tnt_1784")
+    assert set(rec.quarantined) == {"#last_reported/2", "#last_reported"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    # The corrupt hold's signal is healed away; the squatter's evidence
+    # is not.
+    assert set(persisted["boxes"]) == {"ok", "#last_reported/2"}
+    assert persisted["last_reported"]["code"] == "live"
+
+
+def test_quarantine_kind_marker_classification(store, store_path):
+    # The classifiers are marker-based, never prefix-based: a signal
+    # entry is found by its kind marker even at a suffixed key, and an
+    # unmarked (or garbage-marked) entry is never a signal — the
+    # fail-closed default.
+    assert _quarantine_entry_kind({}) == _QUARANTINE_KIND_BOX
+    assert _quarantine_entry_kind(
+        {"_quarantine_kind": "evil"}) == _QUARANTINE_KIND_BOX
+    entry = _hold_quarantine_entry({"code": "bogus"}, "nope")
+    assert _quarantine_entry_kind(entry) == _QUARANTINE_KIND_HOLD
+    m = {"#last_reported/2": entry, "#boxes": {
+        "_quarantine_kind": _QUARANTINE_KIND_BOX, "raw": {}}}
+    assert _find_quarantine_signal(
+        m, _QUARANTINE_KIND_HOLD) == "#last_reported/2"
+    assert _find_quarantine_signal(
+        m, _QUARANTINE_KIND_ENVELOPE) is None
 
 
 def test_quarantine_surface_scrubs_latched(store, store_path):

@@ -950,7 +950,13 @@ class TenantRecord:
     # pre-#1464 suspension-valued-``latched`` shape, plus #1784's
     # generalization: any construction failure, and non-dict entries);
     # the reserved ``#``-prefixed keys carry the non-box signals (a
-    # corrupt §8 hold snapshot, a corrupt boxes envelope). Every entry
+    # corrupt §8 hold snapshot, a corrupt boxes envelope) and are
+    # claimed via ``_reserve_quarantine_key`` with suffixing on
+    # real-box-id collision. Signal-vs-box classification is by the
+    # per-entry ``_quarantine_kind`` marker ("box"/"hold"/"envelope"),
+    # never by key prefix — box ids are free-form and can squat a
+    # reserved key's suffix shape (``#boxes/2``), so prefix inference
+    # would misclassify such an entry as a signal. Every entry
     # is the VERBATIM persisted value (never rewritten, never served);
     # the store persists it back unchanged, so the quarantine is
     # re-derived — never sticky — on every load and no evidence is lost.
@@ -1067,6 +1073,7 @@ class TenantStore:
                 # Not a box dict at all (JSON allows any value here) —
                 # quarantine it; there is nothing to construct.
                 quarantined[box_id] = {
+                    "_quarantine_kind": _QUARANTINE_KIND_BOX,
                     "code": None,
                     "latched": None,
                     "raw": b,
@@ -1098,6 +1105,7 @@ class TenantStore:
                 latched = b.get("latched")
                 if latched is not None and latched in SUSPENSION_CODES:
                     quarantined[box_id] = {
+                        "_quarantine_kind": _QUARANTINE_KIND_BOX,
                         "code": b.get("code"),
                         "latched": latched,
                         "raw": dict(b),
@@ -1114,6 +1122,7 @@ class TenantStore:
                 # #1509 discipline). Only Exception is caught —
                 # KeyboardInterrupt/SystemExit still propagate.
                 quarantined[box_id] = {
+                    "_quarantine_kind": _QUARANTINE_KIND_BOX,
                     "code": b.get("code"),
                     "latched": b.get("latched"),
                     "raw": dict(b),
@@ -1132,6 +1141,7 @@ class TenantStore:
                     quarantined, boxes, _BOXES_QUARANTINE_KEY
                 )
             ] = {
+                "_quarantine_kind": _QUARANTINE_KIND_ENVELOPE,
                 "code": None,
                 "latched": None,
                 "raw": envelope_raw,
@@ -1165,8 +1175,8 @@ class TenantStore:
         # whole container — re-derivation source and operator evidence,
         # like the #1509 box raws. (There are no healthy arcs to serve
         # when the envelope itself was corrupt.)
-        envelope_key = _find_reserved_quarantine_key(
-            rec.quarantined, _BOXES_QUARANTINE_KEY
+        envelope_key = _find_quarantine_signal(
+            rec.quarantined, _QUARANTINE_KIND_ENVELOPE
         )
         if envelope_key is not None:
             boxes = rec.quarantined[envelope_key]["raw"]
@@ -1194,7 +1204,7 @@ class TenantStore:
             # hold's raw round-trips through last_reported below, the
             # envelope's through the container above.
             for box_id, q in rec.quarantined.items():
-                if _is_reserved_quarantine_key(box_id):
+                if _is_signal_quarantine_entry(q):
                     continue
                 raw_q = q["raw"]
                 boxes[box_id] = dict(raw_q) if isinstance(raw_q, dict) else raw_q
@@ -1203,8 +1213,8 @@ class TenantStore:
         # re-derives the quarantine signal from it, so the signal never
         # goes silent across a save. A heal — the _save_record recompute,
         # which pops the signal — naturally supersedes it.
-        hold_key = _find_reserved_quarantine_key(
-            rec.quarantined, _HOLD_QUARANTINE_BOX_ID
+        hold_key = _find_quarantine_signal(
+            rec.quarantined, _QUARANTINE_KIND_HOLD
         )
         return {
             "stage": rec.stage,
@@ -1274,7 +1284,9 @@ class TenantStore:
             # hold — clear its quarantine signal(s); the fresh snapshot
             # supersedes the corrupt cache.
             for key in [
-                k for k in rec.quarantined if _is_hold_quarantine_key(k)
+                k
+                for k, e in rec.quarantined.items()
+                if _is_hold_quarantine_entry(e)
             ]:
                 del rec.quarantined[key]
         doc["tenants"][tenant_id] = self._from_record(rec)
@@ -1413,6 +1425,16 @@ _REASON_LEGACY_SUSPENSION_LATCH = (
 )
 
 
+_QUARANTINE_KIND_BOX = "box"
+"""Kind marker: a quarantined bad box arc, keyed by its box id."""
+
+_QUARANTINE_KIND_HOLD = "hold"
+"""Kind marker: the corrupt-§8-hold quarantine signal entry."""
+
+_QUARANTINE_KIND_ENVELOPE = "envelope"
+"""Kind marker: the corrupt-boxes-envelope quarantine signal entry."""
+
+
 def _reserve_quarantine_key(
     quarantined: Dict[str, dict], boxes: Dict[str, "BoxArc"], base: str
 ) -> str:
@@ -1430,34 +1452,48 @@ def _reserve_quarantine_key(
     return key
 
 
-def _is_hold_quarantine_key(key: str) -> bool:
-    """#1784: whether a quarantine-map key is a hold signal (or its suffix)."""
-    return key == _HOLD_QUARANTINE_BOX_ID or key.startswith(
-        _HOLD_QUARANTINE_BOX_ID + "/"
+def _quarantine_entry_kind(entry: dict) -> str:
+    """#1784: the kind marker of a quarantine-map entry.
+
+    Classification is marker-based, never key-prefix-based. Box ids are
+    free-form (box-chosen at enrollment, #1466), so a hostile id can
+    squat a reserved key's SUFFIX (``#boxes/2``) — the very key shape
+    ``_reserve_quarantine_key`` itself mints — and prefix inference
+    would then misclassify the squatter as a signal (the envelope find
+    would even replace the whole boxes container with the squatter's
+    raw; Security P92 re-confirm). Unmarked entries default to
+    ``"box"`` — the fail-closed direction: nothing unmarked is ever
+    treated as a hold/envelope signal.
+    """
+    kind = entry.get("_quarantine_kind")
+    if kind in (_QUARANTINE_KIND_HOLD, _QUARANTINE_KIND_ENVELOPE):
+        return kind
+    return _QUARANTINE_KIND_BOX
+
+
+def _is_hold_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is the corrupt-hold signal."""
+    return _quarantine_entry_kind(entry) == _QUARANTINE_KIND_HOLD
+
+
+def _is_envelope_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is the corrupt-envelope signal."""
+    return _quarantine_entry_kind(entry) == _QUARANTINE_KIND_ENVELOPE
+
+
+def _is_signal_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is a reserved signal (not a box)."""
+    return _is_hold_quarantine_entry(entry) or _is_envelope_quarantine_entry(
+        entry
     )
 
 
-def _is_boxes_quarantine_key(key: str) -> bool:
-    """#1784: whether a quarantine-map key is an envelope signal (or suffix)."""
-    return key == _BOXES_QUARANTINE_KEY or key.startswith(
-        _BOXES_QUARANTINE_KEY + "/"
-    )
-
-
-def _is_reserved_quarantine_key(key: str) -> bool:
-    """#1784: whether a quarantine-map key is a reserved signal key."""
-    return _is_hold_quarantine_key(key) or _is_boxes_quarantine_key(key)
-
-
-def _find_reserved_quarantine_key(
-    quarantined: Dict[str, dict], base: str
+def _find_quarantine_signal(
+    quarantined: Dict[str, dict], kind: str
 ) -> Optional[str]:
-    """#1784: the map key holding a reserved signal (base or suffixed)."""
-    if base in quarantined:
-        return base
-    prefix = base + "/"
-    for key in quarantined:
-        if key.startswith(prefix):
+    """#1784: the map key holding the quarantine signal of the given kind."""
+    for key, entry in quarantined.items():
+        if _quarantine_entry_kind(entry) == kind:
             return key
     return None
 
@@ -1490,6 +1526,7 @@ def _hold_usability_error(hold: object) -> Optional[str]:
 def _hold_quarantine_entry(hold: object, err: str) -> dict:
     """#1784: the quarantine entry for a corrupt §8 hold snapshot."""
     return {
+        "_quarantine_kind": _QUARANTINE_KIND_HOLD,
         "code": hold.get("code") if isinstance(hold, dict) else None,
         "latched": None,
         "raw": hold,  # verbatim — the operator's triage evidence
