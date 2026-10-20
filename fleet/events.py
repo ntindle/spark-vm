@@ -123,11 +123,12 @@ def _alert_scan_window_s():
     return max(horizons)
 
 # Outcome vocabulary closed by the design (§2). The S1 producer emits
-# only the subset with a legacy producer; started/superseded/deferred-arc
-# are S2/S3-forward outcomes with no legacy producer. skipped-frozen
+# only the subset with a legacy producer; started/superseded are
+# S2/S3-forward outcomes with no legacy producer. skipped-frozen
 # gained its producer in #1630's first slice (the release gate's verdicts,
-# audited by deploy/auto-deploy.sh); deferred-arc still awaits box-side
-# arc-awareness machinery.
+# audited by deploy/auto-deploy.sh); deferred-arc gained its producer in
+# #1630's second slice (box-side arc-awareness: deploy/auto-deploy.sh
+# audits check/deferred-arc when an active arc defers a permitted update).
 _KIND_OUTCOME = ("check", "deploy", "rollback")
 
 
@@ -220,6 +221,14 @@ _TRANSLATE = {
     # event for no-signal, only the local status line.
     ("check", "fleet-freeze"): ("check", "skipped-frozen"),
     ("check", "wave-not-live"): ("check", "skipped-frozen"),
+    # G18 §3 / #1808: never-interrupt-an-arc. A box with an active arc
+    # defers its permitted update until the arc ends — the deferral is
+    # emitted as deferred-arc, so the controller's gates see a deferral,
+    # not a failure (deploy/auto-deploy.sh audits this from cmd_deploy
+    # via the shared arc probes in deploy/arc_probe.sh, #532's
+    # definition of an active arc). The outcome row keeps the reserved
+    # name: deferred-arc was already the vocabulary's word for this.
+    ("check", "deferred-arc"): ("check", "deferred-arc"),
     ("deploy", "precheck-fail"): ("deploy", "precheck-fail"),
     ("deploy", "gate-fail"): ("deploy", "precheck-fail"),
     ("deploy", "snapshot-fail"): ("deploy", "precheck-fail"),

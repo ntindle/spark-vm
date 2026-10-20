@@ -3,6 +3,7 @@
 Run from the repo root:  python3 -m pytest deploy/test_auto_deploy.py -q
 """
 
+import getpass
 import os
 import re
 import socket
@@ -3277,3 +3278,255 @@ def test_check_updater_drift_warns_on_gate_hook_change(tmp_path):
     assert "gate_hook" in r.stderr, \
         "the stale warning must name the hook script that advanced"
     assert "re-run './deploy/auto-deploy.sh init'" in r.stderr
+
+
+# --- arc-awareness: never-interrupt-an-arc (G15 §6, #1808) -------------------
+# The box-side update path defers a permitted update while an arc (an
+# active agent session) is live, auditing check/deferred-arc — the G17
+# legacy producer for deferred-arc, mirroring the #1630 first slice
+# (skipped-frozen) pattern. "Active arc" is #532's definition via the
+# shared deploy/arc_probe.sh primitives.
+
+
+def _arc_fixture(tmp_path, tmux_sessions=(), registry_states=(), users=None):
+    """Pinned deploy fixture + arc-probe env.
+
+    tmux_sessions: session names the fake TMUX_BIN prints (a `mjob-*`
+    name reads as an active arc). registry_states: job-record states
+    written to the fixture home's muse-job registry (non-terminal reads
+    as active). users: TOOLSET_AGENT_USERS value (default: current user,
+    so the identity switch is a no-op and the probes run in-test).
+    Returns (env, base, mid, state, fixture_home).
+    """
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    bindir = tmp_path / "arcbin"
+    bindir.mkdir(exist_ok=True)
+    fake_tmux = bindir / "tmux"
+    lines = ["#!/bin/bash"]
+    lines += ['printf "%s\\n" "%s"' % (s, s) for s in tmux_sessions]
+    fake_tmux.write_text("\n".join(lines) + "\n")
+    fake_tmux.chmod(0o755)
+    home = tmp_path / "fakehome"
+    if registry_states:
+        jobs = home / ".local" / "share" / "muse-job" / "jobs"
+        jobs.mkdir(parents=True)
+        for i, st in enumerate(registry_states):
+            (jobs / ("job%d.json" % i)).write_text('{"state": "%s"}' % st)
+    env = dict(env, TMUX_BIN=str(fake_tmux),
+               TOOLSET_AGENT_USERS=(users if users is not None
+                                    else getpass.getuser()),
+               ARC_FIXTURE_HOME=str(home))
+    return env, base, mid, docs_only, state, str(home)
+
+
+_ARC_DEPLOY_STUBS = (
+    "run_gates() { return 0; }; snapshot_component() { return 0; }; "
+    "install_component() { echo SHOULD_NOT_RUN; return 0; }; "
+    "reload_and_enable() { return 0; }; restart_component_services() { return 0; }; "
+    "health_check() { return 0; }; record_extra_inputs() { return 0; }; "
+    "extra_inputs_changed() { return 1; }; "
+)
+
+
+def _arc_deploy_bash(base, mid):
+    return ("set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+            "pending_range() { echo \"%s %s\"; return 0; }; " % (base, mid)
+            + _ARC_DEPLOY_STUBS +
+            "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc")
+
+
+def test_arc_state_tmux_active(tmp_path):
+    """_arc_state returns 0 when a live mjob-* tmux session exists."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, tmux_sessions=("mjob-test",))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "if _arc_state; then rc=0; else rc=$?; fi; echo ARC_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    assert "ARC_RC=0" in r.stdout, r.stdout + r.stderr
+    assert "arc active" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def test_arc_state_registry_active(tmp_path):
+    """_arc_state returns 0 when a non-terminal muse-job record exists
+    (tmux half clean). _user_home is stubbed to the fixture home — the
+    registry probe itself is the real shared primitive."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, registry_states=("active",))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "_user_home() { printf '%s' \"$ARC_FIXTURE_HOME\"; }; "
+                 "if _arc_state; then rc=0; else rc=$?; fi; echo ARC_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    assert "ARC_RC=0" in r.stdout, r.stdout + r.stderr
+
+
+def test_arc_state_idle(tmp_path):
+    """_arc_state returns 1 when neither probe sees live work."""
+    env, base, mid, docs_only, state, home = _arc_fixture(
+        tmp_path, registry_states=("done", "closed", "killed"))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "_user_home() { printf '%s' \"$ARC_FIXTURE_HOME\"; }; "
+                 "if _arc_state; then rc=0; else rc=$?; fi; echo ARC_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    assert "ARC_RC=1" in r.stdout, r.stdout + r.stderr
+
+
+def test_arc_state_scan_failure(tmp_path):
+    """_arc_state returns 2 (scan failed) for an unsafe agent-user name —
+    a scan failure is not an arc, and must stay distinguishable."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, users="-bad")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "if _arc_state; then rc=0; else rc=$?; fi; echo ARC_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    assert "ARC_RC=2" in r.stdout, r.stdout + r.stderr
+
+
+def test_deploy_defers_on_tmux_arc(tmp_path):
+    """An active tmux arc defers the permitted update: quiet rc=0, a
+    check/deferred-arc audit row, watermark untouched, no alert, and the
+    install path never runs."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, tmux_sessions=("mjob-test",))
+    r = run_bash(_arc_deploy_bash(base, mid), env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert "SHOULD_NOT_RUN" not in out, "deploy ran despite the active arc"
+    assert (state / "deployed-commit").read_text().strip() == base, \
+        "deferred tick must not advance the watermark"
+    assert not (state / "last-failure").exists(), \
+        "deferred-arc is not a failure — no alert may fire"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"deferred-arc"' in audit, audit
+    assert '"result":"ok"' not in audit, \
+        "deferred tick must not audit an 'ok' deploy: " + audit
+    assert '"result":"precheck-fail"' not in audit, audit
+
+
+def test_deploy_defers_on_registry_arc(tmp_path):
+    """Same deferral via the registry half (tmux clean): the deferral is
+    probe-agnostic."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, registry_states=("blocked",))
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "_user_home() { printf '%%s' \"$ARC_FIXTURE_HOME\"; }; "
+        "pending_range() { echo \"%s %s\"; return 0; }; " % (base, mid)
+        + _ARC_DEPLOY_STUBS +
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert "SHOULD_NOT_RUN" not in out, "deploy ran despite the active arc"
+    assert (state / "deployed-commit").read_text().strip() == base
+    assert not (state / "last-failure").exists()
+    audit = (state / "audit.log").read_text()
+    assert '"result":"deferred-arc"' in audit, audit
+
+
+def test_deploy_fails_closed_on_arc_scan_failure(tmp_path):
+    """A failed arc scan is not an arc: the tick fails closed and loud —
+    check/precheck-fail (existing vocabulary), an alert, rc=1 — and must
+    NOT audit deferred-arc."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, users="-bad")
+    r = run_bash(_arc_deploy_bash(base, mid), env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=1" in r.stdout, out
+    assert (state / "last-failure").exists(), "scan failure never alerted"
+    assert (state / "deployed-commit").read_text().strip() == base
+    audit = (state / "audit.log").read_text()
+    assert '"result":"precheck-fail"' in audit, audit
+    assert '"result":"deferred-arc"' not in audit, \
+        "a scan failure must never masquerade as an arc deferral: " + audit
+
+
+def test_deploy_proceeds_when_idle(tmp_path):
+    """Control: with no live arc the permitted update deploys normally —
+    'ok' audited, watermark advances, no deferred-arc row."""
+    env, base, mid, docs_only, state, home = _arc_fixture(
+        tmp_path, registry_states=("done",))
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "_user_home() { printf '%%s' \"$ARC_FIXTURE_HOME\"; }; "
+        "pending_range() { echo \"%s %s\"; return 0; }; " % (base, mid)
+        + _ARC_DEPLOY_STUBS +
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert (state / "deployed-commit").read_text().strip() == mid, \
+        "idle tick must advance the watermark: " + out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"ok"' in audit, audit
+    assert '"result":"deferred-arc"' not in audit, audit
+
+
+def test_pull_only_tick_exempt_from_arc_check(tmp_path):
+    """QA blocker 1: the pull-only path is exempt from the arc check — a
+    docs-only tick during an active arc must advance the watermark and
+    audit pull-only, never deferred-arc (nothing restarts, nothing to
+    defer). Guards the comment's placement claim against future moves of
+    the arc check above the pull-only branch."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, tmux_sessions=("mjob-test",))
+    # Watermark at mid: the pending range (mid -> docs_only) is docs-only.
+    (state / "deployed-commit").write_text(mid + "\n")
+    # Steady-state extra-inputs digest (as in the pull-only control test),
+    # so the #302 forced path cannot synthesize a range here.
+    swapd = tmp_path / "swapd"
+    env = dict(env, SWAPD_HOME=str(swapd))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs proxy",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert (state / "deployed-commit").read_text().strip() == docs_only, \
+        "pull-only tick must still advance the watermark: " + out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"pull-only"' in audit, audit
+    assert '"result":"deferred-arc"' not in audit, \
+        "pull-only tick must not audit a deferral: " + audit
+    assert "active arc" not in out, \
+        "the arc check must not run on the pull-only path: " + out
+
+
+def test_gate_deferral_takes_precedence_over_arc_check(tmp_path):
+    """QA blocker 2: a gate verdict keeps its skipped-frozen row when an
+    arc is also active — the arc check never runs when the gate already
+    deferred (the gate's decision stands)."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path, tmux_sessions=("mjob-test",))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "pending_range() { echo \"verdict=fleet-freeze\"; return 2; }; "
+                 + _ARC_DEPLOY_STUBS +
+                 "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"fleet-freeze"' in audit, audit
+    assert '"result":"deferred-arc"' not in audit, \
+        "gate-deferred tick must not also audit a deferral: " + audit
+    assert "active arc" not in out, \
+        "the arc check must not run on a gate-deferred tick: " + out
+
+
+def test_deploy_fails_closed_on_probe_level_scan_failure(tmp_path):
+    """QA blocker 3: a genuine probe-level rc=2 (identity-switch failure
+    in _tmux_sessions_for_user, not the unsafe-name early refusal) takes
+    the same fail-closed path — alert + check/precheck-fail + rc=1, never
+    deferred-arc."""
+    env, base, mid, docs_only, state, home = _arc_fixture(tmp_path)
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "_tmux_sessions_for_user() { return 2; }; "
+                 "pending_range() { echo \"%s %s\"; return 0; }; " % (base, mid)
+                 + _ARC_DEPLOY_STUBS +
+                 "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=1" in r.stdout, out
+    assert (state / "last-failure").exists(), "scan failure never alerted"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"precheck-fail"' in audit, audit
+    assert '"result":"deferred-arc"' not in audit, \
+        "a probe-level scan failure must never masquerade as an arc deferral: " + audit

@@ -14,8 +14,9 @@ health checks, rollback, and an audit trail.
   manual `proxy/deploy.sh`; the timer automates it, it does not widen it. Do
   not enable this on a box whose `main` branch accepts merges you wouldn't run.
 - **The timer runs the installed copy** at `/home/ntindle/.sparkvm-deploy/bin/`,
-  never the repo checkout. `auto-deploy.sh init` copies the script and
-  `components.conf` there from the checkout; re-running `init` refreshes them.
+  never the repo checkout. `auto-deploy.sh init` copies the script,
+  `components.conf`, the shared arc-probe library (`arc_probe.sh`), and the
+  gate helpers there from the checkout; re-running `init` refreshes them.
   A writer with checkout-only access therefore cannot rewire the updater's own
   code or config. Treat `init` (reinstall) as a privileged step — review the
   checkout diff before re-running it.

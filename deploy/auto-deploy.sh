@@ -42,7 +42,10 @@
 # BIN_DIR, SYSTEMD_DIR, SYSTEMD_USER_DIR, CRED_UI_INSTALL_DIR,
 # UPDATER_COMPONENTS_CONF, SPARKVM_LEGACY_OPERATOR_CHECKOUT,
 # SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run file ops without
-# sudo), PINNED_UPSTREAM.
+# sudo), PINNED_UPSTREAM, TMUX_BIN (tmux binary for the arc-awareness
+# probe), TOOLSET_AGENT_USERS (space-separated agent uids whose live
+# sessions count as an active arc; default ntindle — same default as the
+# toolset updater's idle gate).
 
 set -euo pipefail
 set -o pipefail
@@ -102,6 +105,14 @@ EXTRA_INPUTS_HASH_MAX_BYTES=1048576
 # install_paths reference them.
 # shellcheck source=components.conf
 source "$UPDATER_COMPONENTS_CONF"
+
+# Active-arc probes (never-interrupt-an-arc, G15 §6 / #1808): the shared
+# read-only probe library — the same "live agent work" definition the
+# toolset updater's idle gate uses (#532), so an active arc means the
+# same thing in both lanes. Functions only, no main dispatcher; see
+# deploy/arc_probe.sh for the sourcing contract.
+# shellcheck source=arc_probe.sh
+source "$SCRIPT_DIR/arc_probe.sh"
 
 # --- helpers -----------------------------------------------------------------
 
@@ -904,6 +915,10 @@ cmd_init() {
         git clone "$PINNED_UPSTREAM" "$UPDATER_REPO"
     fi
     install -m 0755 "$SCRIPT_DIR/auto-deploy.sh" "$INSTALLED_BIN/auto-deploy.sh"
+    # G15 §6 / #1808: the never-interrupt-an-arc check sources the shared
+    # probe library — the installed copy must carry it, or the source line
+    # fails outright under `set -e` and every tick dies before deploying.
+    install -m 0644 "$SCRIPT_DIR/arc_probe.sh" "$INSTALLED_BIN/arc_probe.sh"
     # extra_inputs_hash() reads host-side inputs through this helper at the
     # deploy privilege (sudo_run); the installed copy must carry it, or the
     # digest read fails outright and the tick retries without converging.
@@ -1120,6 +1135,65 @@ gate_permits_touch() {
         return 1
     fi
     return 0
+}
+
+# --- arc-awareness (never-interrupt-an-arc, G15 §6 / #1808) ------------------
+# _arc_state — is an arc (an active agent session) live on this box?
+# Prints nothing; returns 0 when an arc is ACTIVE, 1 when the box is idle,
+# 2 when the scan itself FAILED (identity-switch impossible or a probe
+# errored — fail-closed upstream).
+#
+# "Active arc" is exactly #532's definition, via the shared probe
+# primitives in deploy/arc_probe.sh: live `mjob-*` tmux sessions or
+# non-terminal muse-job registry records for any user in
+# TOOLSET_AGENT_USERS (default ntindle — the same default as the toolset
+# updater's idle gate). Unlike _jobs_active's conflated fail-closed bit,
+# this reports the three states separately: a scan failure is NOT an arc,
+# and auditing it as deferred-arc would lie to the controller about a
+# wave slot that never got pushed (see cmd_deploy).
+_arc_state() {
+    local user home sessions reg rc rc2 probed=0
+    local -a users
+    IFS=$' \t\n' read -ra users <<< "${TOOLSET_AGENT_USERS:-ntindle}" || true
+    for user in "${users[@]}"; do
+        probed=1
+        case "$user" in
+            ''|-*|.*|*[!A-Za-z0-9_.-]*)
+                log "arc probe: refusing unsafe agent user name: $user"
+                return 2 ;;
+        esac
+        home="$(_user_home "$user")"
+        if [ -z "$home" ]; then
+            log "arc probe: no such user $user — skipping (no jobs possible)"
+            continue
+        fi
+        # Probe 1: tmux sessions on the user's own server.
+        sessions=""; rc=0
+        sessions="$(_tmux_sessions_for_user "$user")" || rc=$?
+        if [ "$rc" = "2" ]; then
+            log "arc probe: cannot probe tmux as $user — scan failed (fail-closed)"
+            return 2
+        fi
+        if printf '%s\n' "$sessions" | grep -q '^mjob-'; then
+            log "arc probe: live mjob-* tmux session for $user — arc active"
+            return 0
+        fi
+        # Probe 2: muse-job registry (v2-proof, same as the idle gate).
+        reg=""; rc2=0
+        reg="$(_registry_busy "$home/muse-jobs")" || rc2=$?
+        if [ "$rc2" = "2" ]; then
+            log "arc probe: cannot scan muse-job registry for $user — scan failed (fail-closed)"
+            return 2
+        fi
+        if [ -n "$reg" ]; then
+            log "arc probe: live job record(s) for $user: $(printf '%s' "$reg" | tr '\n' ' ')"
+            return 0
+        fi
+    done
+    if [ "$probed" = "0" ]; then
+        log "arc probe: TOOLSET_AGENT_USERS is empty — no users probed, the box is idle"
+    fi
+    return 1
 }
 
 pending_range() {
@@ -1473,6 +1547,33 @@ cmd_deploy() {
         write_version "$pnv"
         audit 'deploy' ',"result":"pull-only","from":"'"$old"'","to":"'"$new"'","to_version":"'"$pnv"'","from_version":"'"$pov"'"'
         return 0
+    fi
+    # Never-interrupt-an-arc (G15 §6 / #1808): the deploy below restarts
+    # services, which is arc-interrupting. A box with an active arc defers
+    # its permitted update until the arc ends — the deferral is emitted as
+    # deferred-arc (G18 §3), so the controller's gates see a deferral, not
+    # a failure. Gate deferrals keep their skipped-frozen rows (this check
+    # never runs when the gate already deferred); the pull-only path above
+    # is exempt (a watermark advance with no component changes restarts
+    # nothing). The next tick re-evaluates. Expedited does NOT mean
+    # arc-interrupting — even a critical CVE waits for the arc boundary —
+    # so this check has no bypass.
+    local arc_rc=0
+    _arc_state || arc_rc=$?
+    if [ "$arc_rc" = "0" ]; then
+        log "active arc — deferring $old -> $new until the arc ends (never-interrupt-an-arc, #1808)"
+        audit 'check' ',"result":"deferred-arc"'
+        return 0
+    elif [ "$arc_rc" = "2" ]; then
+        # The scan itself failed: we cannot see whether an arc is active.
+        # Fail closed and loud — a scan failure is not an arc, so it must
+        # not audit deferred-arc (that would lie to the controller about
+        # a wave slot that never got pushed). check/precheck-fail is the
+        # existing vocabulary for "a gate refused before any mutation";
+        # the G17 stuck-precheck rule pages after its threshold.
+        alert "arc-activity scan failed — cannot verify no arc is active"
+        audit 'check' ',"result":"precheck-fail"'
+        return 1
     fi
     # Components sharing an install unit deploy together (proxy+confirm share
     # deploy.sh, which installs both unconditionally).
