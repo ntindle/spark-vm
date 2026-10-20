@@ -128,7 +128,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   own clock, so the served timestamp moves only when the served status
   actually changes. The signed-request replay note also names the
   multi-process replay case it previously covered only for restarts.
-  (#TBD)
+  (#1789)
 - Tenant onboarding status no longer goes dark when one box's stored
   record is malformed: any entry that fails to load is quarantined with
   its error surfaced to the operator while the tenant keeps serving
