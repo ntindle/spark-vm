@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -476,3 +477,119 @@ def test_dispatch_refuses_symlinked_log(cli, monkeypatch):
     assert cli._dispatch_recover_worker("my-job") is False
     assert spawned == []
     assert open(decoy).read() == "not the log"  # never written through
+
+
+# --- O_NONBLOCK + regular-file hardening (#1804) ------------------------------
+
+
+def _run_open_guarded(fn, timeout_s=10):
+    """Run an open-path callable in a daemon thread with a timeout.
+
+    Pristine (pre-#1804) code blocks forever opening a reader-less FIFO
+    at the lock/log path; the guard turns that hang into a test failure
+    instead of wedging the suite. Fixed code fails the open fast, so
+    the thread always finishes well inside the timeout.
+    """
+    q = queue.Queue()
+
+    def _target():
+        try:
+            q.put(("ok", fn()))
+        except BaseException as e:  # noqa: BLE001 -- re-raised below
+            q.put(("err", e))
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    try:
+        kind, value = q.get(timeout=timeout_s)
+    except queue.Empty:
+        pytest.fail("open hung on a planted FIFO: the #1804 fail-fast "
+                    "open did not refuse it")
+    if kind == "err":
+        raise value
+    return value
+
+
+def test_recover_global_lock_refuses_fifo(cli):
+    # A planted FIFO at the global lock path must fail the open fast
+    # (ENXIO from O_NONBLOCK, or the fstat regular-file check for a
+    # reader-bearing FIFO) instead of hanging the detached recover
+    # worker with no timeout.
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    os.mkfifo(cli._recover_global_lock_path())
+    with pytest.raises(OSError):
+        _run_open_guarded(lambda: cli._recover_global_lock().__enter__())
+
+
+def test_recover_per_slug_lock_refuses_fifo(cli):
+    # Same plant at the per-slug `with_lock` path.
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    os.mkfifo(os.path.join(cli.JOBS_DIR, ".dead-1.lock"))
+    with pytest.raises(OSError):
+        _run_open_guarded(lambda: cli.with_lock("dead-1", lambda: "ran"))
+
+
+def test_dispatch_refuses_fifo_log(cli, monkeypatch):
+    # A planted FIFO at the recovery log path must fail the dispatch
+    # fast (False) instead of wedging the whole 15-minute watchdog pass
+    # on the log open; the pass reports needs-attention, no worker
+    # spawned.
+    spawned = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or None)
+    logp = cli._recover_log_path("my-job")
+    os.makedirs(os.path.dirname(logp), exist_ok=True)
+    os.mkfifo(logp)
+    assert _run_open_guarded(
+        lambda: cli._dispatch_recover_worker("my-job")) is False
+    assert spawned == []
+
+
+def test_recover_global_lock_refuses_reader_bearing_fifo(cli):
+    # fstat branch of _nofollow_regular_opener (#1804): O_NONBLOCK
+    # alone does NOT refuse a FIFO with a reader, so hold one open and
+    # require the regular-file check to fail the open fast. The
+    # match="non-regular" pins that it is the fstat branch refusing,
+    # not the ENXIO path. Deterministic: with a reader held, even
+    # unhardened code opens without hanging, so a regression fails
+    # cleanly instead of wedging the suite.
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    path = cli._recover_global_lock_path()
+    os.mkfifo(path)
+    rfd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with pytest.raises(OSError, match="non-regular"):
+            _run_open_guarded(lambda: cli._recover_global_lock().__enter__())
+    finally:
+        os.close(rfd)
+
+
+def test_recover_per_slug_lock_refuses_reader_bearing_fifo(cli):
+    # Same reader-bearing plant at the per-slug `with_lock` path.
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    path = os.path.join(cli.JOBS_DIR, ".dead-1.lock")
+    os.mkfifo(path)
+    rfd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with pytest.raises(OSError, match="non-regular"):
+            _run_open_guarded(lambda: cli.with_lock("dead-1", lambda: "ran"))
+    finally:
+        os.close(rfd)
+
+
+def test_dispatch_refuses_reader_bearing_fifo_log(cli, monkeypatch):
+    # A reader-bearing FIFO at the recovery log path must fail the
+    # dispatch (False), not silently serialize on / spawn through it.
+    spawned = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or None)
+    logp = cli._recover_log_path("my-job")
+    os.makedirs(os.path.dirname(logp), exist_ok=True)
+    os.mkfifo(logp)
+    rfd = os.open(logp, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        assert _run_open_guarded(
+            lambda: cli._dispatch_recover_worker("my-job")) is False
+        assert spawned == []
+    finally:
+        os.close(rfd)

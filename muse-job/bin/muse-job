@@ -749,14 +749,16 @@ def _phase_msp_occupancy_note(slug, live):
 def with_lock(slug, fn):
     os.makedirs(JOBS_DIR, exist_ok=True)
     lockp = os.path.join(JOBS_DIR, f".{slug}.lock")
-    # O_NOFOLLOW (the recover worker's `_nofollow_opener`): a symlinked
-    # lock path fails (ELOOP) instead of being followed -- and "w" would
-    # have truncated the link target, so following is never safe here.
-    # Threat model: these dirs are user-private, so the planter is a
-    # same-uid partially-trusted actor (another agent on the box, a
-    # compromised job session) or a stale operator symlink -- this is
-    # confused-deputy hardening, not a cross-user boundary.
-    with open(lockp, "w", opener=_nofollow_opener) as lf:
+    # `_nofollow_regular_opener` (#1804): a symlinked lock path fails
+    # (ELOOP) instead of being followed -- and "w" would have truncated
+    # the link target, so following is never safe here -- while a
+    # planted FIFO fails fast (ENXIO / fstat regular check) instead of
+    # hanging the lock open with no timeout. Threat model: these dirs
+    # are user-private, so the planter is a same-uid partially-trusted
+    # actor (another agent on the box, a compromised job session) or a
+    # stale operator symlink -- this is confused-deputy hardening, not a
+    # cross-user boundary.
+    with open(lockp, "w", opener=_nofollow_regular_opener) as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             return fn()
@@ -3457,6 +3459,42 @@ def _nofollow_opener(path, flags):
     return os.open(path, flags | os.O_NOFOLLOW)
 
 
+def _nofollow_regular_opener(path, flags):
+    """os.open that refuses symlinks AND non-regular files (issue #1804),
+    for use as an open() opener.
+
+    Builds on `_nofollow_opener`'s contract, for the same fail-closed-
+    loud handling: `O_NOFOLLOW` refuses symlinks (ELOOP) and `O_NONBLOCK`
+    refuses a reader-less planted FIFO (ENXIO) instead of hanging the
+    open -- the #23 H5 class the hooks already defend against. O_NONBLOCK
+    alone does not refuse a FIFO *with* a reader (or a device, or any
+    other non-regular file swapped in), so the opened fd is fstat-checked
+    and any non-regular target is refused fail-closed: the fd is closed
+    and OSError raised, so no non-regular file ever reaches a caller.
+    The check rides the opened fd itself, so there is no check-then-open
+    TOCTOU window. After the check passes the fd is normalized back to
+    blocking (O_NONBLOCK existed only to dodge the hang at open()); a
+    regular-file caller then behaves exactly as with `_nofollow_opener`.
+
+    Callers fail closed on the raised OSError, same as the ELOOP path.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(
+                "refusing non-regular file at %r: locks and recovery logs "
+                "must be regular files" % (path,))
+    except BaseException:
+        os.close(fd)
+        raise
+    # Normalize back to blocking: regular-file reads/writes/flock behave
+    # identically with or without O_NONBLOCK, but blocking preserves the
+    # exact pre-#1804 semantics for the normal case.
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+    return fd
+
+
 class _recover_global_lock:
     """The recovery serialization lock (issue #41).
 
@@ -3473,20 +3511,22 @@ class _recover_global_lock:
     which is the same serialization the old inline code got from the
     serial watchdog pass.
 
-    The lock file opens with O_NOFOLLOW: a symlinked lock path fails
-    the open (ELOOP) instead of serializing on someone else's file, and
-    cmd_recover turns that into a loud `needs-attention` rather than
-    running recovery unserialized. Threat model: these dirs are
-    user-private, so the planter is a same-uid partially-trusted actor
-    (another agent on the box, a compromised job session) or a stale
-    operator symlink -- confused-deputy hardening, not a cross-user
-    boundary.
+    The lock file opens with `_nofollow_regular_opener` (#1804):
+    a symlinked lock path fails the open (ELOOP) instead of serializing
+    on someone else's file, and a planted FIFO at the lock path fails
+    fast (ENXIO via O_NONBLOCK, or the fstat regular-file check) instead
+    of hanging the detached worker with no timeout. cmd_recover turns
+    either into a loud `needs-attention` rather than running recovery
+    unserialized. Threat model: these dirs are user-private, so the
+    planter is a same-uid partially-trusted actor (another agent on the
+    box, a compromised job session) or a stale operator symlink --
+    confused-deputy hardening, not a cross-user boundary.
     """
 
     def __enter__(self):
         os.makedirs(JOBS_DIR, exist_ok=True)
         self._lf = open(_recover_global_lock_path(), "w",
-                        opener=_nofollow_opener)
+                        opener=_nofollow_regular_opener)
         fcntl.flock(self._lf, fcntl.LOCK_EX)
         return self
 
@@ -3517,13 +3557,15 @@ def _dispatch_recover_worker(slug):
     loudly (`needs-attention`) and the next pass retries, because the
     tmux session is still dead. Returns True on spawn, False otherwise.
 
-    The log opens with O_NOFOLLOW: a symlinked log path fails the open
-    instead of letting a planted link steer the worker's output
-    somewhere else; the failure returns False like any other dispatch
-    failure.
+    The log opens with `_nofollow_regular_opener` (#1804): a symlinked
+    log path fails the open instead of letting a planted link steer the
+    worker's output somewhere else, and a planted FIFO at the log path
+    fails fast instead of wedging the whole 15-minute watchdog pass;
+    the failure returns False like any other dispatch failure.
     """
     try:
-        logf = open(_recover_log_path(slug), "a", opener=_nofollow_opener)
+        logf = open(_recover_log_path(slug), "a",
+                    opener=_nofollow_regular_opener)
     except OSError:
         return False
     try:

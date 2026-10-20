@@ -126,6 +126,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- The browser driver's gesture action now caps `max_points` at 10,000:
+  the parameter was validated as a positive integer with no upper
+  bound, so a hostile value could push a naive backend into
+  pre-allocating a giant point buffer. No legitimate gesture needs more
+  than low-thousands of points. Closes #1797. (#1816)
 - The relay auto-driver's per-tenant last-tick watermarks now flow through a
   single write path: the sweep's one locked read-modify-write per sweep.
   The older per-tenant write helper had been dead code since that
@@ -252,6 +257,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- The `muse-job recover` lock/log opens now also refuse planted FIFOs:
+  the same three opens the symlink-plant hardening covered (global
+  recovery lock, per-job recovery log, shared per-slug lock) open with
+  `O_NONBLOCK` plus a regular-file check, so a pre-created FIFO at any
+  of the three paths fails fast and loud instead of hanging the detached
+  worker -- or, for the log path, wedging the whole 15-minute watchdog
+  pass -- with no timeout. A refused open fails closed exactly like the
+  refused symlink: `needs-attention`, next watch pass retries.
+  Closes #1804. (#1816)
 - The `muse-job recover` worker's global recovery lock and per-job
   recovery log now open with `O_NOFOLLOW`, as does the shared per-slug
   lock (`with_lock`) the worker takes next: a symlinked lock or log path

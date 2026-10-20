@@ -673,8 +673,23 @@ def test_gesture_params():
                "gesture": "circle", "max_points": 0}]),
         "bad_params",
     )
+    # #1797: max_points is pinned at MAX_GESTURE_POINTS -- a hostile
+    # value must not reach the backend.
+    expect_code(
+        call([{"action": "gesture", "instruction": "i",
+               "gesture": "circle", "max_points": P.MAX_GESTURE_POINTS + 1}]),
+        "bad_params",
+    )
+    expect_code(
+        call([{"action": "gesture", "instruction": "i",
+               "gesture": "circle", "max_points": 10**30}]),
+        "bad_params",
+    )
     P.validate_call(call([{"action": "gesture", "instruction": "i",
                            "gesture": "circle", "click_hold_ms": 400}]))
+    P.validate_call(call([{"action": "gesture", "instruction": "i",
+                           "gesture": "circle",
+                           "max_points": P.MAX_GESTURE_POINTS}]))
 
 
 def test_timeout_ms_bounds():

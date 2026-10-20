@@ -36,9 +36,10 @@ Validation rules enforced here, beyond the fixed vocabulary:
 - post-navigation rule: after ``goto``, only an exact-text ``wait`` or
   ref-free ``look`` / ``get_text`` / ``get_html`` / ``state`` may follow
   in the same array
-- durations are capped at ``MAX_TIMEOUT_MS`` and the actions array at
-  ``MAX_ACTIONS_PER_CALL`` — a compromised orchestrator cannot wedge
-  the driver or DoS it with a giant array
+- durations are capped at ``MAX_TIMEOUT_MS``, the actions array at
+  ``MAX_ACTIONS_PER_CALL``, and ``gesture.max_points`` at
+  ``MAX_GESTURE_POINTS`` — a compromised orchestrator cannot wedge
+  the driver or DoS it with a giant array or a giant point buffer
 - an action with no ``timeout_ms`` gets ``DEFAULT_TIMEOUT_MS`` (30 s) —
   absent never means "no timeout"; the call budget sums effective
   timeouts, so every potentially-blocking action contributes (#1452)
@@ -138,6 +139,15 @@ MAX_PARAM_LEN = 1_048_576
 
 #: Hard cap on upload.grant_ids entries (same rationale).
 MAX_GRANT_IDS = 64
+
+#: Hard ceiling on gesture.max_points: a hostile value could make a
+#: naive backend pre-allocate a point buffer per the parameter -- a
+#: memory wedge the protocol layer exists to prevent. No legitimate
+#: gesture needs more than low-thousands of points, so this is a pin,
+#: not a judgment call left to the backend (contrast scroll.pixels,
+#: which is uncapped by documented design because a single scroll's
+#: work is bounded by the page regardless of the count).
+MAX_GESTURE_POINTS = 10_000
 
 #: Cumulative per-call duration budget: timeout_ms + wait.time_ms +
 #: gesture.click_hold_ms summed over the whole array. Per-action caps
@@ -347,6 +357,12 @@ def _v_gesture(params):
                     "timeout_too_large",
                     "gesture.click_hold_ms exceeds MAX_TIMEOUT_MS (%d)"
                     % MAX_TIMEOUT_MS,
+                )
+            if key == "max_points" and value > MAX_GESTURE_POINTS:
+                raise ProtocolError(
+                    "bad_params",
+                    "gesture.max_points exceeds MAX_GESTURE_POINTS (%d)"
+                    % MAX_GESTURE_POINTS,
                 )
     if "motion_profile" in params and not is_nonempty_str(
         params["motion_profile"]
