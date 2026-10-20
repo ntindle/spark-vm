@@ -42,7 +42,7 @@ hosted per-tenant instantiation) still holds.
   finding closes.
 - **D-GC-3:** #1630's acceptance stands as written (hook leg emits
   `skipped-frozen` / `deferred-arc` per G18 §7, or the design corpus
-  records deferral with an explicit owner). The 4/6 convergence does
+  records deferral with an explicit owner). The 3/6 convergence does
   not weaken it: a consumer inferring gate silence from those outcomes
   still counts only silence today.
 - **D-GC-4:** #1633 remains the single owner of the operator-estate S2
