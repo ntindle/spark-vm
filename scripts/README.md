@@ -122,6 +122,9 @@ keep the project's contribution rituals from drifting:
 - `test_ci_shard_plan.py` — the shard inventory
   (`ci_shard_plan.py` — the single source CI's `python-tests` matrix
   fans out from) is a bijection with the real suite.
+- `test_ci_shard_pytest_cmd.py` — the inventory's local pytest-command
+  emitter (`--pytest-cmd`) prints CI's exact per-shard selection, fails
+  closed on bad input, and keeps the plan module stdlib-only.
 - `test_docs_index_coverage.py` — every doc under `docs/` is linked from
   `docs/README.md`.
 - `test_lint_changelog_ritual.py` / `test_ci_md_link_excludes.py` —
@@ -151,6 +154,7 @@ never drift from what's on disk.
 | `test_ci_md_link_excludes.py` | `docs/CI.md` link-check exclusion inventory |
 | `test_ci_md_suite_inventory.py` | CI python-tests suite inventory |
 | `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
+| `test_ci_shard_pytest_cmd.py` | shard inventory's local pytest-command emitter (`--pytest-cmd`): CI-verbatim per-shard selection, fail-closed inputs, stdlib-only |
 | `test_ci_shellcheck_files.py` | `ci_shellcheck_files.py` shellcheck file-selection contract (vs the pinned action) |
 | `test_contributing_ci_gates.py` | `CONTRIBUTING.md` merge-gate check list |
 | `test_contributing_suites.py` | `CONTRIBUTING.md` test-suite inventory |
