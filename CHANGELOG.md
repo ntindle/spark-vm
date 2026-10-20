@@ -129,7 +129,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   live-capable after approval). Both docstrings now name the verdict
   codes that truly never rewrite and call out the `approved` exception.
   Found by the 20261019-1829 arch deep-read, which also filed
-  #1783/#1784/#1785/#1786. (#TBD)
+  #1783/#1784/#1785/#1786. (#1787)
 - Fleet gate-stale alert rule test coverage: the emit-time-fallback
   path (boxes whose gate timestamp is missing or unparseable still
   count toward the fleet-outage quorum, and the alert marks their ages
