@@ -127,11 +127,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   anti-tarpit deadline — resolution runs in a worker thread under the
   connect budget, so a wedged resolver can no longer freeze a probe
   past its deadline; budget expiry reports the relay leg defective.
-  (#TBD)
+  (#1799)
 - Tenant status: a session record carrying a non-string session token
   (e.g. from a hand-edited store file) now fails closed to
   "unauthorized" instead of raising an internal error out of the auth
-  path. (#TBD)
+  path. (#1799)
 - Hosted signup docs: the magic-link session is now documented as
   TTL-bound — one hour from mint — everywhere the signup flow spec says
   the magic link "establishes the session" (`HOSTED_SIGNUP_WEB_UI.md` §5
