@@ -215,6 +215,9 @@ class TestMainBranchRuleset(unittest.TestCase):
         # (fail-fast: false + explicit result check), so the gate is not
         # weakened. The `shard plan` job IS required: it is a real check
         # CI defines, skipped-neutral on docs-only diffs like the rest.)
+        # (docs 20261020-0529: the new `markdown-tables` CI job ("markdown
+        # table lint" check) joins the required set — a wrapped table row
+        # silently kills the rendered doc, so the lint gates the merge.)
         self.assertEqual(
             ci_job_check_names(CI_YML) - matrix_check_templates(CI_YML),
             {
@@ -226,6 +229,7 @@ class TestMainBranchRuleset(unittest.TestCase):
                 "changed-paths gate",
                 "docs index coverage",
                 "shard plan",
+                "markdown table lint",
             },
         )
         # Exactly one matrix template exists, and it is the known shard

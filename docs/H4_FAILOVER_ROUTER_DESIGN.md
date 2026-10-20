@@ -53,19 +53,8 @@ taxonomy already names the recoverable ones:
 |---|---|---|
 | `WAKE_TIMEOUT` (wake accepted, still in flight) | Poll and retry in place | rec 2: the wake is still in flight, not failed |
 | `WAKE_FAILED` (attempt ended, box back in `SUSPENDED`) | Retry `dial()` in place | rec 2: the box is *back in SUSPENDED* — the failure is diagnosed, not a provider outage |
-| `status()` reports `FAILED` and a `dial()` probe does **not**
-  raise `ErrorKind.TERMINAL` | Leave recovery to the driver | The
-  driver still accepts recovery: its own `FAILED → PROVISIONING`
-  self-retry is driver-internal (the transition table's
-  `FAILED → PROVISIONING` is a *driver-reported* move, not a
-  router-driven action). The router does not drive it; if the
-  driver's self-retry fails, the next probe raises `TERMINAL`. |
-| A `dial()` probe on a `FAILED` box raises
-  `ErrorKind.TERMINAL` ("verb refused: … failed where the driver
-  declines retry") | **Fail over** | `TERMINAL` is the
-  machine-readable declined-retry verdict — the contract-level
-  equivalent of Epho's "provider is not very reliable", no
-  heuristics needed. |
+| `status()` reports `FAILED` and a `dial()` probe does **not** raise `ErrorKind.TERMINAL` | Leave recovery to the driver | The driver still accepts recovery: its own `FAILED → PROVISIONING` self-retry is driver-internal (the transition table's `FAILED → PROVISIONING` is a *driver-reported* move, not a router-driven action). The router does not drive it; if the driver's self-retry fails, the next probe raises `TERMINAL`. |
+| A `dial()` probe on a `FAILED` box raises `ErrorKind.TERMINAL` ("verb refused: … failed where the driver declines retry") | **Fail over** | `TERMINAL` is the machine-readable declined-retry verdict — the contract-level equivalent of Epho's "provider is not very reliable", no heuristics needed. |
 | `PROVISION_FAILED` after the driver's own retries | **Fail over** to the next provider | Provision is per-provider; nothing on this box ever existed |
 | `Health.DEGRADED` | No action (monitoring only) | Degraded is orthogonal to lifecycle; a degraded box is still the tenant's box |
 | Provider-level outage (mgmt endpoint down, region-wide failure — detected at the control plane, not via `status()`) | **Fail over** | `status()` itself is unreachable; in-place recovery is undefined |

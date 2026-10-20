@@ -34,13 +34,19 @@
 #                             scripts/test_relay_wiring_tick_doc.py — the
 #                             CI job's exact five-file invocation; runs on
 #                             every PR like CI, docs-only included)
-#   5. shellcheck            (severity=error over the CI job's shell-file
+#   5. markdown table lint (python3 scripts/docs_table_lint.py — the CI
+#                             markdown-tables job's W1 check; wrapped table
+#                             rows silently kill the rendered table, and the
+#                             docs-only diffs that need it most are exactly
+#                             the ones that skip the python suite, so the
+#                             lint runs here on every invocation)
+#   6. shellcheck            (severity=error over the CI job's shell-file
 #                             selection on the whole checkout — replicates
 #                             the standalone shellcheck CI job, which has
 #                             no docs-only carve-out)
-#   6. python tests          (python3 -m pytest, unless docs-only or --quick)
-#   7. markdown link check   (no local equivalent — named, not run)
-#   8. PNG screenshot smoke  (./scripts/png-smoke.sh — pinned; named, not run)
+#   7. python tests          (python3 -m pytest, unless docs-only or --quick)
+#   8. markdown link check   (no local equivalent — named, not run)
+#   9. PNG screenshot smoke  (./scripts/png-smoke.sh — pinned; named, not run)
 #
 # Environment:
 #   LOCAL_GATE_NO_CD=1  — do not cd to the repo root first (tests use this
@@ -143,20 +149,23 @@ plan_only() {
 local-gate plan (nothing executed):
   1. shard plan            — python3 scripts/ci_shard_plan.py --check
   2. changelog ritual lint — python3 scripts/lint-changelog-ritual.py
-  3. changed-paths gate    — docs-only diffs skip step 6, exactly like CI
+  3. changed-paths gate    — docs-only diffs skip step 7, exactly like CI
                              (evaluated before any step that writes to the
                              tree)
   4. docs index coverage   — python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
                              (CI's exact five-file invocation; runs on every
                              PR like CI, docs-only included)
-  5. shellcheck            — severity=error over the CI job's shell-file
+  5. markdown table lint  — python3 scripts/docs_table_lint.py (CI's
+                             markdown-tables job: W1 wrapped table rows;
+                             runs on every invocation, docs-only included)
+  6. shellcheck            — severity=error over the CI job's shell-file
                              selection on the whole checkout (like CI's
                              standalone job; skipped loudly if shellcheck
                              is not installed)
-  6. python tests          — python3 -m pytest (skipped on --quick or docs-only)
-  7. markdown link check   — no local equivalent (see CONTRIBUTING.md); check
+  7. python tests          — python3 -m pytest (skipped on --quick or docs-only)
+  8. markdown link check   — no local equivalent (see CONTRIBUTING.md); check
                              the CI run on your PR instead
-  8. PNG screenshot smoke test — ./scripts/png-smoke.sh (pinned playwright;
+  9. PNG screenshot smoke test — ./scripts/png-smoke.sh (pinned playwright;
                              named, not run — see CONTRIBUTING.md)
 EOF
 }
@@ -198,6 +207,13 @@ step "docs index coverage"
 python3 -m pytest scripts/test_docs_index_coverage.py \
   scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py \
   scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
+
+step "markdown table lint"
+# The CI `markdown-tables` job's exact check: W1 — every GFM table row on
+# exactly one line. A docs-only diff introducing a wrapped row would pass
+# the suite-skip path with a silently broken table, so this runs on every
+# invocation, docs-only included.
+python3 "$SCRIPT_DIR/docs_table_lint.py"
 
 step "shellcheck (severity=error, CI job selection)"
 if ! command -v shellcheck >/dev/null 2>&1; then
