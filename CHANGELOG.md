@@ -51,6 +51,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- The shellcheck file-selection helper is now pinned by tests: `ci_shellcheck_files.py` (the single source of truth shared by the CI shellcheck job and `local-gate.sh`) gets a 14-test battery covering the pass-1 name/profile patterns, the pass-2 shebang/executable rules, the `.git`/`*.go`/`mvnw` excludes, symlink parity, the NUL-delimited output contract, and a docstring↔`ci.yml` SHA-sync check — so the local selection can never silently drift from what CI lints. (#1794)
 - Gate-channel rollout lane convergence pin: the 2026-10-17 operator-estate vision is checked against current main — the toolset gate cap (#1629), the fleet-scoped correlated-gate-stale page (#1631), and the #1632 verification closure are all in place, so the lane is 3/6 converged; the G17 legacy-producer (#1630), the G15 S2 operator tooling + wave assignment (#1633), and the hosted per-tenant remainders (#1634) are re-verified still open. (#1793)
 - Fleet update-rollout lane convergence pin: the September rollout
   vision (reframed by the tenant-plane pivot) is checked against
