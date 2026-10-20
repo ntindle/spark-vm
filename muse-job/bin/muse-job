@@ -3434,6 +3434,174 @@ def cmd_resume(args, _from_watch=False):
     return 0
 
 
+def _recover_global_lock_path():
+    return os.path.join(JOBS_DIR, ".recover.lock")
+
+
+class _recover_global_lock:
+    """The recovery serialization lock (issue #41).
+
+    One flock file for the whole jobs dir. Recover workers take it BEFORE
+    the per-slug lock; watch/steer/status/close never take it, so the
+    lock ordering (global -> per-slug) is total and cannot deadlock.
+
+    Why it exists: watch dispatches one detached `muse-job recover`
+    worker per dead job. Without serialization, two workers from the same
+    pass could both clear the #804 one-phase-job bar before either
+    session goes live and resurrect two phase-* jobs concurrently -- the
+    exact 2026-10-01 stampede the bar was built to prevent. With the
+    global lock the workers run the bar+resume section one at a time,
+    which is the same serialization the old inline code got from the
+    serial watchdog pass.
+    """
+
+    def __enter__(self):
+        os.makedirs(JOBS_DIR, exist_ok=True)
+        self._lf = open(_recover_global_lock_path(), "w")
+        fcntl.flock(self._lf, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            fcntl.flock(self._lf, fcntl.LOCK_UN)
+        finally:
+            self._lf.close()
+        return False
+
+
+def _recover_log_path(slug):
+    # The detached worker's stdout/stderr land here (appended). The watch
+    # pass stays silent-fast; the outcome (`recovered` / `deferred` /
+    # `needs-attention`) is auditable per job without slowing the pass.
+    d = os.path.join(METADATA_DIR, "recoveries")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{slug}.log")
+
+
+def _dispatch_recover_worker(slug):
+    """Detach a `muse-job recover <slug>` worker (issue #41).
+
+    Same detach shape as the MSP supervisor spawn: a new session (immune
+    to the watchdog's own teardown), stdin from /dev/null, stdout/stderr
+    appended to the per-job recovery log. Never raises: a dispatch
+    failure must not fail the watchdog pass -- the pass reports it
+    loudly (`needs-attention`) and the next pass retries, because the
+    tmux session is still dead. Returns True on spawn, False otherwise.
+    """
+    try:
+        logf = open(_recover_log_path(slug), "a")
+    except OSError:
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "recover", slug],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            cwd=os.path.expanduser("~"),
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        logf.close()
+
+
+def cmd_recover(args):
+    """Recover one dead-tmux job out-of-band (issue #41).
+
+    This is the body `watch` used to run inline inside `watch_one`'s
+    per-job lock: the #5 state re-check, the #804 one-phase-job bar
+    (with the #1131 re-check inside cmd_resume), then
+    `cmd_resume(_from_watch=True)`. Running it here -- in a detached
+    worker dispatched by watch, or by hand -- keeps the watchdog pass
+    O(seconds) per job: cmd_resume's 15s sleep and its up-to-~2min
+    fallback (probe sleeps + 90s session re-discovery + steer) no longer
+    stretch the serial pass or hold the per-job lock hostage from the
+    pass.
+
+    Deduplication: after taking the locks, the worker re-checks tmux
+    liveness. A worker that finds the session already alive (a sibling
+    worker or a manual `muse-job resume` won the race) exits quietly --
+    the next watch pass sees a healthy job and emits nothing. No pidfile
+    marker: cmd_resume is time-bounded, so a stuck worker cannot pile up
+    faster than the watchdog cadence, and the liveness re-check makes
+    any overlap a quiet no-op.
+
+    MSP jobs are refused: the MSP transport has its own recovery ladder
+    (msp_recovery); watch never routes MSP jobs here.
+    """
+    slug = args.slug
+    try:
+        job = load_job(slug)
+    except Exception as e:
+        print(json.dumps({"job": slug, "signal": "needs-attention",
+                          "detail": f"recover: cannot load job record: {e}"}),
+              flush=True)
+        return 1
+    if _msp_transport(job):
+        print(json.dumps({"job": slug, "signal": "needs-attention",
+                          "detail": "muse-job recover is for tmux-transport "
+                          "jobs; MSP jobs recover via the MSP recovery "
+                          "ladder (issue #227)"}), flush=True)
+        return 1
+    events = []
+
+    def go():
+        # Under the per-slug lock (inside the global recovery lock).
+        # Re-check liveness: a sibling worker or a manual resume may have
+        # revived the session while this worker waited on the locks.
+        if tmux_alive(slug):
+            return "already-alive"
+        # Issue #5: re-check immediately before recovering. The operator
+        # may have killed or closed the job between the watch pass's
+        # dispatch and this worker's lock acquisition -- never
+        # auto-recover a deliberately killed job.
+        try:
+            fresh = load_job(slug)
+        except Exception:
+            fresh = None
+        if fresh is None or fresh.get("state") not in ("active", "blocked"):
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "tmux dead and the job left the "
+                           "monitored states (operator may have killed or "
+                           "closed it); not auto-recovering"})
+            return "done"
+        # Issue #804: one-phase-job-at-a-time rule (user 2026-10-01).
+        # Same pinned signal and detail the watch's inline pre-check
+        # emitted (watchers grep for it).
+        if _phase_concurrency_bars_resume(slug):
+            events.append({"job": slug, "signal": "deferred",
+                           "detail": _PHASE_DEFERRED_DETAIL})
+            return "done"
+        try:
+            cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
+            events.append({"job": slug, "signal": "recovered",
+                           "detail": "tmux was dead; resumed session"})
+        except _PhaseConcurrencyDeferred:
+            # Issue #1131: the re-check inside cmd_resume fired -- a
+            # sibling went live in the check-then-act window. Same pinned
+            # detail as the pre-check with the suffix naming the re-check;
+            # the next watch pass retries.
+            events.append({"job": slug, "signal": "deferred",
+                           "detail": _PHASE_DEFERRED_DETAIL +
+                           " (re-check inside cmd_resume fired; next "
+                           "pass retries)"})
+        except Exception as e:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"tmux dead and resume failed: {e}"})
+        return "done"
+
+    with _recover_global_lock():
+        outcome = with_lock(slug, go)
+    if outcome == "already-alive":
+        return 0
+    for e in events:
+        print(json.dumps(e), flush=True)
+    return 0
+
+
 def cmd_close(args):
     def go():
         # Serialized on the per-slug lock: without it a close racing a
@@ -3532,12 +3700,22 @@ def cmd_watch(args):
         now = time.time()
 
         if not st["tmux_alive"]:
-            # One recovery attempt.
+            # Issue #41: the recovery attempt below used to run inline
+            # here -- cmd_resume sleeps 15s and its fallback runs up to
+            # ~2min (probe sleeps + 90s session re-discovery + steer),
+            # all inside the per-job lock inside the serial watchdog
+            # pass. One dead job stretched the 15-minute pass by minutes
+            # and blocked steer/status for that job. The slow part now
+            # runs in a detached `muse-job recover` worker; this pass
+            # only runs the fast gates (#5, #804) and records the
+            # dispatch. The dead-TUI banner/trust recoveries further down
+            # stay inline: the banner recovery is bounded at 60s and the
+            # trust answer is one pane round-trip.
             # Issue #5: the gate above was checked before the (slow)
-            # job_status probes -- re-check immediately before recovering.
+            # job_status probes -- re-check immediately before dispatching.
             # A watch pass already inside watch_one when `kill` (or `close`)
-            # lands must not start a multi-minute auto-recovery of a
-            # deliberately killed job.
+            # lands must not dispatch a recovery of a deliberately killed
+            # job.
             try:
                 fresh = load_job(slug)
             except Exception:
@@ -3563,23 +3741,19 @@ def cmd_watch(args):
                 events.append({"job": slug, "signal": "deferred",
                                "detail": _PHASE_DEFERRED_DETAIL})
                 return
-            try:
-                cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
-                events.append({"job": slug, "signal": "recovered",
-                               "detail": "tmux was dead; resumed session"})
-            except _PhaseConcurrencyDeferred:
-                # Issue #1131: the re-check inside cmd_resume fired -- a
-                # sibling went live in the check-then-act window. Same
-                # pinned detail as the pre-check above (watchers grep for
-                # it) with a suffix naming the re-check; the next watch
-                # pass retries.
-                events.append({"job": slug, "signal": "deferred",
-                               "detail": _PHASE_DEFERRED_DETAIL +
-                               " (re-check inside cmd_resume fired; next "
-                               "pass retries)"})
-            except Exception as e:
+            if _dispatch_recover_worker(slug):
+                events.append({"job": slug, "signal": "needs-recovery",
+                               "detail": "tmux dead; dispatched a background "
+                               "`muse-job recover` worker (issue #41) -- "
+                               "the `recovered` / `deferred` / "
+                               "`needs-attention` outcome lands in the "
+                               "per-job recovery log at " +
+                               _recover_log_path(slug)})
+            else:
                 events.append({"job": slug, "signal": "needs-attention",
-                               "detail": f"tmux dead and resume failed: {e}"})
+                               "detail": "tmux dead and the background "
+                               "recovery worker failed to spawn; the next "
+                               "watch pass retries"})
             return
 
         # Dead-TUI detection: tmux is up but the Muse session inside it has
@@ -6542,6 +6716,12 @@ def build_parser():
     s = sub.add_parser("resume", help="recover a dead tmux session")
     s.add_argument("slug")
     s.set_defaults(fn=cmd_resume)
+
+    s = sub.add_parser("recover", help="recover a dead tmux session out-of-band "
+                       "(issue #41: the detached worker `watch` dispatches; "
+                       "also runnable by hand)")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_recover)
 
     s = sub.add_parser("close", help="archive the job, remove its worktree")
     s.add_argument("slug")

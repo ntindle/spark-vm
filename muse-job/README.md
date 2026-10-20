@@ -9,7 +9,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 
 | Path | What it is |
 |---|---|
-| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch/approvals/decide/answer`. Single-file Python, stdlib only. |
+| `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/recover/close/watch/approvals/decide/answer`. Single-file Python, stdlib only. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the default transport (the #228 cutover has landed). |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
@@ -47,6 +47,30 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
   session `mjob-<slug>` running interactive `muse --yolo`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 - Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
+
+### Out-of-band dead-session recovery (issue #41)
+
+A dead tmux session used to be recovered inline inside the watchdog
+pass: `watch` called `cmd_resume` directly, whose 15s sleep plus the
+up-to-~2min fallback (probe sleeps, 90s session re-discovery, steer) ran
+inside the per-job lock inside the serial pass — one dead job stretched
+the 15-minute pass by minutes and blocked `steer`/`status` for that job.
+
+Recovery is now out-of-band. The pass only runs the fast gates (the #5
+"was the job killed mid-pass" re-check, the #804 one-phase-job bar) and
+then emits a `needs-recovery` signal and detaches a `muse-job recover
+<slug>` worker (new session, stdio to the per-job log at
+`~/.local/share/muse-job/jobs/recoveries/<slug>.log`). The worker performs
+the exact old recovery body — same gates, same `recovered` / `deferred`
+/ `needs-attention` signals, same `_from_watch` provenance — under a
+global recovery lock taken before the per-job lock, so workers from one
+pass serialize and the #804 bar keeps its anti-stampede property across
+the async boundary. A worker that finds the session already alive
+(a sibling worker or a manual `resume` won the race) exits quietly.
+`recover` refuses MSP jobs: the MSP transport has its own recovery
+ladder. The dead-TUI banner/trust recoveries stay in the pass (the
+banner recovery is bounded at 60s; the trust answer is one pane
+round-trip).
 
 ### Detached per-turn supervisor (issue #1129)
 

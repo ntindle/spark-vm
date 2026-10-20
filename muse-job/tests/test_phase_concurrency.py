@@ -164,29 +164,40 @@ def test_watch_defers_barred_phase_job(cli, monkeypatch, capsys):
     assert resumed == []  # no resurrection attempt
 
 
-def test_watch_recovers_unbarred_phase_job(cli, monkeypatch, capsys):
+def test_watch_dispatches_recover_for_unbarred_phase_job(cli, monkeypatch,
+                                                          capsys):
+    # Issue #41: watch no longer resumes inline -- the unbarred job gets a
+    # dispatched `muse-job recover` worker and a `needs-recovery` signal.
     _make_job(cli, "phase-dead")
     _dead_tmux_watch(cli, monkeypatch, live_slugs=())
     resumed = []
     monkeypatch.setattr(cli, "cmd_resume", lambda a, **k: resumed.append(a) or 0)
+    dispatched = []
+    monkeypatch.setattr(cli, "_dispatch_recover_worker",
+                        lambda s: dispatched.append(s) or True)
     events = _watch_events(cli, capsys)
     by_job = {e["job"]: e for e in events}
-    assert by_job["phase-dead"]["signal"] == "recovered"
-    assert len(resumed) == 1
+    assert by_job["phase-dead"]["signal"] == "needs-recovery"
+    assert dispatched == ["phase-dead"]
+    assert resumed == []  # no inline resume inside the pass
 
 
-def test_watch_still_recovers_non_phase_job(cli, monkeypatch, capsys):
-    # The policy is phase-only: other jobs recover even while a phase-*
+def test_watch_dispatches_recover_for_non_phase_job(cli, monkeypatch, capsys):
+    # The policy is phase-only: other jobs dispatch even while a phase-*
     # job is live.
     _make_job(cli, "worker-1")
     _bare_dir(cli, "phase-live")
     _dead_tmux_watch(cli, monkeypatch, live_slugs=("phase-live",))
     resumed = []
     monkeypatch.setattr(cli, "cmd_resume", lambda a, **k: resumed.append(a) or 0)
+    dispatched = []
+    monkeypatch.setattr(cli, "_dispatch_recover_worker",
+                        lambda s: dispatched.append(s) or True)
     events = _watch_events(cli, capsys)
     by_job = {e["job"]: e for e in events}
-    assert by_job["worker-1"]["signal"] == "recovered"
-    assert len(resumed) == 1
+    assert by_job["worker-1"]["signal"] == "needs-recovery"
+    assert dispatched == ["worker-1"]
+    assert resumed == []
 
 
 def test_watch_killed_midpass_reports_needs_attention(cli, monkeypatch, capsys):
@@ -215,26 +226,28 @@ def test_watch_killed_midpass_reports_needs_attention(cli, monkeypatch, capsys):
     assert resumed == []
 
 
-def test_watch_two_dead_phase_jobs_serialize(cli, monkeypatch, capsys):
-    # No live sibling at pass start: the first dead phase job (sorted
-    # order) recovers, and its fresh session bars the second -- the bar
-    # serializes same-pass recovery instead of stampeding.
+def test_watch_dispatches_both_dead_phase_jobs(cli, monkeypatch, capsys):
+    # No live sibling at pass start: the pass cannot know which worker
+    # will win the race, so BOTH dispatch. The #804 anti-stampede moved
+    # to the workers: they serialize on the global recovery lock, and
+    # the loser's bar check sees the winner's live session and defers
+    # (see test_recover_decouple's concurrent-worker test). The bar still
+    # fires inline in the pass when a sibling is ALREADY live.
     _make_job(cli, "phase-a")
     _make_job(cli, "phase-b")
     monkeypatch.setattr(cli, "job_status", lambda job, slug: {"tmux_alive": False})
-    live = set()
-    monkeypatch.setattr(cli, "tmux_alive", lambda s: s in live)
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
     resumed = []
-    def fake_resume(a, **k):
-        resumed.append(a.slug)
-        live.add(a.slug)  # resume brings the tmux session up synchronously
-        return 0
-    monkeypatch.setattr(cli, "cmd_resume", fake_resume)
+    monkeypatch.setattr(cli, "cmd_resume", lambda a, **k: resumed.append(a) or 0)
+    dispatched = []
+    monkeypatch.setattr(cli, "_dispatch_recover_worker",
+                        lambda s: dispatched.append(s) or True)
     events = _watch_events(cli, capsys)
     by_job = {e["job"]: e for e in events}
-    assert by_job["phase-a"]["signal"] == "recovered"
-    assert by_job["phase-b"]["signal"] == "deferred"
-    assert resumed == ["phase-a"]
+    assert by_job["phase-a"]["signal"] == "needs-recovery"
+    assert by_job["phase-b"]["signal"] == "needs-recovery"
+    assert sorted(dispatched) == ["phase-a", "phase-b"]
+    assert resumed == []
 
 
 # --- issue #1131: re-check inside cmd_resume ---------------------------------
@@ -288,62 +301,6 @@ def test_cmd_resume_watch_path_recovers_when_unbarred(cli, monkeypatch, capsys):
     rc = cli.cmd_resume(argparse.Namespace(slug="phase-dead"), _from_watch=True)
     assert rc == 0
     assert ran and ran[0][:2] == ("tmux", "new-session")
-
-
-def test_watch_maps_recheck_deferral_to_deferred_signal(cli, monkeypatch, capsys):
-    # The watch's pre-check passed; cmd_resume's re-check fired. The watch
-    # emits `deferred` (retry on a later pass), not `needs-attention`.
-    _make_job(cli, "phase-dead")
-    _dead_tmux_watch(cli, monkeypatch, live_slugs=())
-
-    def boom(a, **k):
-        raise cli._PhaseConcurrencyDeferred("race fired")
-
-    monkeypatch.setattr(cli, "cmd_resume", boom)
-    events = _watch_events(cli, capsys)
-    by_job = {e["job"]: e for e in events}
-    assert by_job["phase-dead"]["signal"] == "deferred"
-    # The pinned detail string is reused verbatim (watchers grep for it),
-    # with a suffix naming the re-check.
-    assert by_job["phase-dead"]["detail"] == (
-        cli._PHASE_DEFERRED_DETAIL +
-        " (re-check inside cmd_resume fired; next pass retries)")
-
-
-def test_watch_recheck_fires_on_midpass_sibling_start(cli, monkeypatch, capsys):
-    # Issue #1131, the actual race, end to end through the REAL cmd_watch
-    # + REAL cmd_resume (faking only tmux_alive as a flip-flop, plus run,
-    # trust-prompt, sleep, and the path/uuid helpers): the watch pre-check
-    # sees no live sibling, the sibling goes live in the check-then-act
-    # window, and the re-check defers instead of over-admitting -- no tmux
-    # session is created.
-    _make_job(cli, "phase-dead", session_uuid="uuid-1")
-    _bare_dir(cli, "phase-live")
-    calls = {"n": 0}
-
-    def flip_flop(slug):
-        # First scan (the watch pre-check): nobody live. Every scan after:
-        # the sibling went live in the window.
-        calls["n"] += 1
-        return slug == "phase-live" and calls["n"] > 1
-
-    monkeypatch.setattr(cli, "tmux_alive", flip_flop)
-    monkeypatch.setattr(cli, "job_status",
-                        lambda job, slug: {"tmux_alive": False})
-    ran = []
-    monkeypatch.setattr(cli, "run",
-                        lambda *a, **k: ran.append(a) or
-                        types.SimpleNamespace(stdout=b"pane"))
-    monkeypatch.setattr(cli, "_answer_trust_prompt", lambda s: None)
-    monkeypatch.setattr(cli, "trusted_job_paths",
-                        lambda s, j: ("/tmp/w", "/repos/x", "job/s"))
-    monkeypatch.setattr(cli, "session_bound_to_workdir", lambda u, w: True)
-    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    events = _watch_events(cli, capsys)
-    by_job = {e["job"]: e for e in events}
-    assert by_job["phase-dead"]["signal"] == "deferred"
-    assert by_job["phase-dead"]["detail"].startswith(cli._PHASE_DEFERRED_DETAIL)
-    assert ran == []  # the re-check fired before any tmux session existed
 
 
 # --- issue #1132: MSP-side phase occupancy ------------------------------------
