@@ -2,9 +2,10 @@
 
 **The alert contract an owner sees for their box** — pinned to main
 `f6bdaa7` (2026-10-14 20:55 CDT) for all in-repo claims; every in-repo
-claim below was verified against that tree this turn. Issue numbers are
+claim below was verified against that tree this turn, except the #1809
+seq-gap class (pinned 2026-10-20 against main `9ad58784` in §2). Issue numbers are
 GitHub references as of 2026-10-14 (state verified via direct GET this
-turn for every issue named). Doc-first; honesty rules apply
+turn for every issue named), except #1809 (2026-10-20). Doc-first; honesty rules apply
 (`docs/POSITIONING.md`): everything below is **current state and work to
 do**, not promises. The hosted product is not live, and no hosted box has
 been provisioned by this lane.
@@ -177,33 +178,54 @@ restart the box (the shipper's per-surface counters live plane-side;
 a box restart touches none of them and only adds noise). Observation,
 not a work order (O5). **The suppression rule (the #1809 acceptance
 criterion):** only *unaccounted* epoch resets page. An accounted
-restart — the shipper's new-epoch announcement arriving inside the
-intake window (whose length the intake spec sets), or the intake's
-own restart journal for a deliberate intake restart — is a journal
-event, never an alert: a deliberate restart is an accounted event,
-not a hole. A discontinuity that
+restart is one the intake can positively account for — the
+accounting channels are the #1349 intake spec's to design (the
+candidates: a shipper new-epoch announcement record inside the
+intake window, or the intake's own restart journal for deliberate
+intake restarts); neither exists in any spec today. Until that spec
+names them, the intake must treat every epoch reset it cannot
+positively account for as unaccounted: an accounted restart is a
+journal event, never an alert, but "accounted" is proven by the
+intake, never assumed. A discontinuity that
 self-heals inside the same intake window never pages either; it
 lands in the digest row only. What pages is the persistent,
 unaccounted hole: once per (tenant, surface, epoch) — the D13-style
 generation keying, so a reconnect under a new epoch re-arms honestly —
-with a quiet period before the same gap can page again (the intake
-spec, not this doc, sets the duration; the lane's F7 4-hour shape is
-the precedent). The suppression rule never swallows an unaccounted
+with a quiet period that the intake spec sets (the lane's F7 4-hour
+shape is the precedent) governing only a NEW epoch's first page after
+a gap page — the F7 shape: debounce across epoch turnover, never a
+second page for the same (tenant, surface, epoch), which D57's
+page-once forbids for the row's 90-day lifetime (D94). The suppression
+rule never swallows an unaccounted
 hole; accounted restarts and self-healed blips are the only silences,
 and both are journaled. **Surface:** a trail-health chip on the
 plane/box card while a gap is open (fast and always visible, like the
 `Stale` chip); a push page only for the persistent gap, routed through
-the #990 boundary like every other page (O6 — D10 budgets, D57
-page-once dedup on the (tenant, surface, epoch) key, D61 audit apply
-by construction, not by the slice remembering them); the gap's
-duration, affected surfaces, and discontinuity count as a digest row.
+the #990 boundary like every other page (O6) — with one boundary
+extension the #1349 intake spec must ship first. This is the taxonomy's
+first tenant-scoped (non-box) alert class, and the boundary as built
+keys pages per box only (owner scope exists solely for the digest
+vehicle): `PAGING_EVENT_KINDS` has no `seq_gap` kind and
+`event_key_for` raises on any non-digest kind with `box_id=None`. The
+intake spec must add the `seq_gap` kind with the digest's owner-scope
+shape (`box_id=None`, `box_col=''`, owner-only D10 reservation, D54
+digest coalescing on budget exhaustion); only then do D57 page-once
+dedup on the (tenant, surface, epoch) key and D61 audit rows fall out
+by construction. Passing an arbitrary tenant box's id to dodge the
+extension is wrong: the page would key per box (one page per box for
+a single plane-side gap) and consume that box's D10 budget for a plane
+event; the gap's duration, affected surfaces, and discontinuity count
+as a digest row.
 The push mapper does not exist yet (no `on_seq_gap` in
 `hosted/push_events.py` — the #1349 intake spec owns the mapper
-alongside the raiser, mirroring the #1614 caller-wiring split). **Both
-modes:** in self-hosted mode the operator plane is local/absent and
-the envelope channel collapses to the local estate read path (the
-G21 pattern, per the #1349 convergence's pointer note) — the class
-collapses to the local intake's equivalent, same suppression rule.
+alongside the raiser, mirroring the #1614 caller-wiring split).
+**Hosted-only until the intake spec says otherwise:** the class is
+defined on the tenant-plane → operator-plane shipment (D-25-3); in
+self-hosted mode there is no operator plane and no cross-plane
+shipment, so the signal has no referent here. A self-hosted
+local-journal continuity check would be a different class (the G17 S1
+Rule 5 / #1006 shape on the fleet side), owned by a different spec —
+this doc does not claim it.
 
 ## 3. Channel matrix
 
@@ -271,8 +293,9 @@ all shipped in the #990 boundary and the #1062 mapping layer:
 - **O7 — seq-gap pages are fail-visible, never fail-silent.** The
   suppression rule's only silences are accounted restarts and
   self-healed blips — both journaled, neither pageable. An unaccounted
-  hole always surfaces (chip at minimum); the quiet period bounds
-  re-fire, never first-fire. The class exists so D-25-3's "the trail
+  hole always surfaces (chip at minimum); the quiet period debounces
+  a new epoch's first page, never a same-tuple re-fire (D57 forbids
+  that); it bounds re-fire, never first-fire. The class exists so D-25-3's "the trail
   has a hole" has an owner-visible slot the day the intake ships.
 
 ## 6. What this does not claim
