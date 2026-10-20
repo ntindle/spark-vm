@@ -121,6 +121,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Tenant status: during a relay outage, approval and verdict events
+  arriving mid-suspension used to nudge the box's "last updated"
+  timestamp even though the status shown didn't change — timestamp-keyed
+  pollers saw motion that wasn't there. Those events now advance their
+  own clock, so the served timestamp moves only when the served status
+  actually changes. The signed-request replay note also names the
+  multi-process replay case it previously covered only for restarts.
+  (#TBD)
 - Tenant onboarding status no longer goes dark when one box's stored
   record is malformed: any entry that fails to load is quarantined with
   its error surfaced to the operator while the tenant keeps serving

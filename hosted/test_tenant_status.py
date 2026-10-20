@@ -662,6 +662,105 @@ def test_relay_failure_reentry_bumps_timestamp_on_detail_change(monkeypatch):
     assert arc.status_updated_at == "2026-09-29T11:00:00Z"
 
 
+# ---------------------------------------------------------------------------
+# #1786 — the suspension's served status_updated_at moves only when its
+# served body moves; latch-routed events advance the latch's own clock
+# (latched_status_updated_at) instead of the shared field.
+
+
+def _suspended_arc(monkeypatch, **kw):
+    """A relay-suspended arc with a deterministic clock.
+
+    Suspension enters at 10:01:00Z; the caller re-points _now_iso before
+    each subsequent event. kw overrides the live-arc fixture (e.g.
+    code="approved" for the rejected-latch-event test).
+    """
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:00:00Z")
+    kw.setdefault("code", "live")
+    arc = _arc(status_updated_at="2026-09-29T09:55:00Z",
+               provider_running=True, relay_reachable=True, **kw)
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:01:00Z")
+    apply_event(arc, "relay-failure", detail="relay-down")
+    assert arc.code == "connection-unreachable"
+    assert arc.latched == kw["code"]
+    return arc
+
+
+def test_1786_latch_routed_event_keeps_served_suspension_timestamp(monkeypatch):
+    # The issue's own repro shape: a latch-routed event must not move
+    # the suspension's served (code, detail, status_updated_at).
+    arc = _suspended_arc(monkeypatch)
+    assert arc.status_updated_at == "2026-09-29T10:01:00Z"
+    # The latch's own clock starts at the arc's update time at entry.
+    assert arc.latched_status_updated_at == "2026-09-29T09:55:00Z"
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:02:00Z")
+    apply_event(arc, "approval-filed", check="gate-1")
+    assert arc.code == "connection-unreachable"
+    assert arc.detail == "relay-down"
+    assert arc.status_updated_at == "2026-09-29T10:01:00Z"
+    # ...while the latch advanced on its own clock.
+    assert arc.latched == "waiting-on-approval"
+    assert arc.latched_detail == "filed-approval: gate-1"
+    assert arc.latched_status_updated_at == "2026-09-29T10:02:00Z"
+
+
+def test_1786_rejected_latch_event_restores_suspension_state(monkeypatch):
+    # approved is arc-terminal, so approval-filed from the latch is
+    # illegal: the recursive raise must leave the suspension — and the
+    # latch's clock — exactly as they were (fail-closed).
+    arc = _suspended_arc(monkeypatch, code="approved")
+    before = (arc.code, arc.detail, arc.status_updated_at,
+              arc.latched, arc.latched_detail, arc.latched_status_updated_at)
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:02:00Z")
+    with pytest.raises(TransitionError):
+        apply_event(arc, "approval-filed", check="gate-1")
+    assert (arc.code, arc.detail, arc.status_updated_at,
+            arc.latched, arc.latched_detail,
+            arc.latched_status_updated_at) == before
+
+
+def test_1786_relay_recovered_clears_latch_clock(monkeypatch):
+    arc = _suspended_arc(monkeypatch)
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:02:00Z")
+    apply_event(arc, "approval-filed", check="gate-1")
+    assert arc.latched_status_updated_at == "2026-09-29T10:02:00Z"
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:03:00Z")
+    apply_event(arc, "relay-recovered")
+    assert arc.code == "waiting-on-approval"
+    assert arc.latched is None
+    assert arc.latched_status_updated_at == ""
+    # The served body changed (suspension -> latch), so the fresh bump
+    # is licensed by bump-iff-served-body-changed.
+    assert arc.status_updated_at == "2026-09-29T10:03:00Z"
+
+
+def test_1786_latched_status_updated_at_persists_through_store(store, monkeypatch):
+    arc = _suspended_arc(monkeypatch)
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:02:00Z")
+    apply_event(arc, "approval-filed", check="gate-1")
+    rec = _tenant(tenant_id="tnt_1786", boxes={"box-1": arc})
+    store.create(rec)
+    loaded = store.get("tnt_1786")
+    assert loaded.boxes["box-1"].latched_status_updated_at == \
+        "2026-09-29T10:02:00Z"
+
+
+def test_1786_pre_fix_persisted_record_loads_without_latch_clock():
+    # Records persisted before the field existed omit the key — the
+    # constructor default ("") heals them on load.
+    raw = {"boxes": {"box-1": {"created_at": "2026-09-29T10:00:00Z",
+                               "status_updated_at": "2026-09-29T10:01:00Z"}}}
+    rec = TenantStore._to_record("tnt_1786", raw)
+    assert rec.boxes["box-1"].latched_status_updated_at == ""
+
+
 def test_relay_down_hold_matrix():
     # QA-3a/3b: relay-down is boolean-only on terminal/operator codes,
     # on box-unhealthy, and while already suspended (no-op on code, latch,
