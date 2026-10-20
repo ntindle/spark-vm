@@ -300,6 +300,12 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _now_plus_iso(seconds: float) -> str:
+    # A future instant in the same UTC Z-format the writers emit — the
+    # expiry form for TTL-bound auth material (#1783).
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
+
+
 # ---------------------------------------------------------------------------
 # #1466 — endpoint-side detail scrub. ``detail`` is a human-rendered field
 # (the signup page serves it per §3), but producer/box-controlled
@@ -992,6 +998,12 @@ class TenantRecord:
     stage: int = 1  # signup-funnel stage; the endpoint serves stage >= 2 only
     approvals_url: Optional[str] = None  # minted once at stage 2, G8 rule 1
     session_token: Optional[str] = None  # magic-link session (signup page)
+    # #1783: the session token's TTL, as an ISO-8601 UTC instant
+    # (the ``_now_iso`` Z-format). Fail-closed: ``None`` — or an
+    # unparseable/past instant — means the session is dead, never live.
+    # Pre-fix records carry no key and heal to ``None`` on load: their
+    # forever-bearer tokens stop authenticating.
+    session_expires_at: Optional[str] = None
     muse_public_key: Optional[str] = None  # linked ed25519 key (OpenSSH line)
     muse_id: Optional[str] = None
     deleted: bool = False
@@ -1213,6 +1225,7 @@ class TenantStore:
             stage=raw.get("stage", 1),
             approvals_url=raw.get("approvals_url"),
             session_token=raw.get("session_token"),
+            session_expires_at=raw.get("session_expires_at"),
             muse_public_key=raw.get("muse_public_key"),
             muse_id=raw.get("muse_id"),
             deleted=raw.get("deleted", False),
@@ -1276,6 +1289,7 @@ class TenantStore:
             "stage": rec.stage,
             "approvals_url": rec.approvals_url,
             "session_token": rec.session_token,
+            "session_expires_at": rec.session_expires_at,
             "muse_public_key": rec.muse_public_key,
             "muse_id": rec.muse_id,
             "deleted": rec.deleted,
@@ -1305,9 +1319,17 @@ class TenantStore:
         return sorted(self._load()["tenants"].keys())
 
     def find_by_session_token(self, token: str) -> Optional[TenantRecord]:
+        # #1783: the session is TTL-bound. A token match with a missing,
+        # unparseable, or past ``session_expires_at`` authenticates
+        # nobody — the caller serves 401. Fail-closed: pre-fix records
+        # (token, no expiry) are dead sessions, never grandfathered.
+        now = time.time()
         for tenant_id, raw in self._load()["tenants"].items():
             stored = raw.get("session_token")
             if stored and hmac.compare_digest(stored, token):
+                expires = created_epoch(raw.get("session_expires_at"))
+                if expires is None or expires <= now:
+                    return None
                 return self._to_record(tenant_id, raw)
         return None
 
@@ -1416,12 +1438,25 @@ class TenantStore:
         return self._mutate(tenant_id, _fn)
 
     # -- auth material ----------------------------------------------------
+    # #1783: the magic-link session is TTL-bound, not a forever-bearer.
+    # One hour covers the first-ten-minutes onboarding arc (the human
+    # answers in <= 30 minutes in slow trials per FIRST_TEN_MINUTES_SPEC,
+    # and the approval can complete asynchronously after) plus margin.
+    # Single-live-token discipline is unchanged: re-minting overwrites
+    # both the token and its expiry.
+    SESSION_TOKEN_TTL_S = 3600
+
     def mint_session_token(self, tenant_id: str) -> str:
-        """Issue the magic-link session's opaque token (operator/signup flow)."""
+        """Issue the magic-link session's opaque token (operator/signup flow).
+
+        The token lives ``SESSION_TOKEN_TTL_S`` from mint; afterwards
+        ``find_by_session_token`` stops authenticating it (401).
+        """
         token = secrets.token_hex(32)
 
         def _fn(rec: TenantRecord) -> None:
             rec.session_token = token
+            rec.session_expires_at = _now_plus_iso(self.SESSION_TOKEN_TTL_S)
 
         self._mutate(tenant_id, _fn)
         return token
@@ -1819,7 +1854,8 @@ class TenantStatusService:
         Precedence: a present ``session`` cookie is tried first; only when
         no cookie is present does the signed-request side run. (A stale
         cookie therefore yields 401 even with a valid signature — the
-        caller retries without the cookie.)
+        caller retries without the cookie. #1783: an expired magic-link
+        session reads as a stale cookie here — 401, re-mint via signup.)
         """
         # Side 1: magic-link session cookie (signup page).
         cookie = headers.get("cookie", "")

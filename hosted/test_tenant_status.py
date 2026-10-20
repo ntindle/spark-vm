@@ -43,10 +43,12 @@ from tenant_status import (
     _effective_rank,
     _find_quarantine_signal,
     _hold_quarantine_entry,
+    _now_plus_iso,
     _quarantine_entry_kind,
     _quarantine_surface,
     apply_event,
     canonical_poll_message,
+    created_epoch,
     human_key_for,
     live_entry_ready,
     scrub_detail,
@@ -112,6 +114,16 @@ class _RecordingVerify:
 
 def _service(store, verify=_stub_verify):
     return TenantStatusService(store, verify)
+
+
+def _live_session(store, tenant_id, token):
+    # #1783: hand-set a LIVE magic-link session — the token AND a future
+    # expiry, mirroring mint_session_token's contract. (A token alone is
+    # a dead session: find_by_session_token fail-closes on it.)
+    rec = store.get(tenant_id)
+    rec.session_token = token
+    rec.session_expires_at = _now_plus_iso(TenantStore.SESSION_TOKEN_TTL_S)
+    store.save(rec)
 
 
 def _signed_headers(tenant_id, ts=None):
@@ -1257,8 +1269,9 @@ def test_empty_candidate_set_holds_last_reported(store):
 
 
 def test_endpoint_serves_hold_after_box_deletion(store):
-    rec = _tenant(session_token="sess-abc")
+    rec = _tenant()
     store.create(rec)
+    _live_session(store, "tnt_test1", "sess-abc")
     rec2 = store.get("tnt_test1")
     rec2.boxes = {}
     store.save(rec2)
@@ -1270,9 +1283,10 @@ def test_endpoint_serves_hold_after_box_deletion(store):
 
 
 def test_404_no_boxes_and_no_hold(store):
-    rec = _tenant(session_token="sess-abc")
+    rec = _tenant()
     rec.boxes = {}
     store.create(rec)  # last_reported stays None — nothing to hold
+    _live_session(store, "tnt_test1", "sess-abc")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-abc"})
     assert status == 404 and body["error"] == "no_servable_tenant_record"
@@ -1283,9 +1297,10 @@ def test_404_no_boxes_and_no_hold(store):
 
 
 def _seeded(store):
-    rec = _tenant(session_token="sess-abc", muse_public_key="ssh-ed25519 AAAAtest")
+    rec = _tenant(muse_public_key="ssh-ed25519 AAAAtest")
     store.create(rec)
-    return rec
+    _live_session(store, "tnt_test1", "sess-abc")
+    return store.get("tnt_test1")
 
 
 def test_401_with_no_credential(store):
@@ -1365,16 +1380,18 @@ def test_stale_cookie_short_circuits_before_signed_side(store):
 
 
 def test_404_pre_stage_2_with_valid_cookie(store):
-    rec = _tenant(stage=1, approvals_url=None, session_token="sess-abc")
+    rec = _tenant(stage=1, approvals_url=None)
     store.create(rec)
+    _live_session(store, "tnt_test1", "sess-abc")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-abc"})
     assert status == 404 and body["error"] == "no_servable_tenant_record"
 
 
 def test_404_deleted_tenant(store):
-    rec = _tenant(session_token="sess-abc", deleted=True)
+    rec = _tenant(deleted=True)
     store.create(rec)
+    _live_session(store, "tnt_test1", "sess-abc")
     status, _ = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-abc"})
     assert status == 404
@@ -1387,6 +1404,90 @@ def test_200_both_auth_sides(store):
     assert status == 200 and body["status"] == "provisioning"
     status, body = svc.handle_get("/tenant/status", _signed_headers("tnt_test1"))
     assert status == 200 and body["status"] == "provisioning"
+
+
+# ---------------------------------------------------------------------------
+# #1783 — magic-link session is TTL-bound, not a forever-bearer
+
+
+def test_mint_session_token_sets_one_hour_expiry(store):
+    store.create(_tenant())
+    token = store.mint_session_token("tnt_test1")
+    rec = store.get("tnt_test1")
+    assert rec.session_token == token
+    assert rec.session_expires_at is not None
+    expires = created_epoch(rec.session_expires_at)
+    assert expires is not None
+    skew = expires - time.time()
+    # minted expiry ~TTL in the future (bounded above too — not 1970, not 2099)
+    assert 3590 < skew < 3610
+    # a freshly minted token authenticates
+    assert store.find_by_session_token(token) is not None
+
+
+def test_session_token_expiry_survives_round_trip(store, store_path):
+    store.create(_tenant())
+    token = store.mint_session_token("tnt_test1")
+    persisted = json.load(open(store_path))["tenants"]["tnt_test1"]
+    assert persisted["session_expires_at"] == store.get("tnt_test1").session_expires_at
+    assert store.find_by_session_token(token) is not None
+
+
+def test_expired_session_token_denied(store):
+    # #1783: an expired token authenticates nobody — 401, re-mint via signup.
+    store.create(_tenant())
+    token = store.mint_session_token("tnt_test1")
+    rec = store.get("tnt_test1")
+    rec.session_expires_at = _now_plus_iso(-1)  # one second ago
+    store.save(rec)
+    assert store.find_by_session_token(token) is None
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=%s" % token})
+    assert status == 401 and body["error"] == "unauthorized"
+
+
+def test_pre_fix_session_without_expiry_denied(store):
+    # #1783 fail-closed: a pre-fix record (token, no expiry key) is a dead
+    # session — never grandfathered into the new world.
+    store.create(_tenant())
+    token = store.mint_session_token("tnt_test1")
+    raw = json.load(open(store.path))["tenants"]["tnt_test1"]
+    del raw["session_expires_at"]
+    raw["session_token"] = token
+    doc = json.load(open(store.path))
+    doc["tenants"]["tnt_test1"] = raw
+    json.dump(doc, open(store.path, "w"))
+    assert store.find_by_session_token(token) is None
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=%s" % token})
+    assert status == 401 and body["error"] == "unauthorized"
+
+
+def test_malformed_session_expiry_denied(store):
+    # #1783 fail-closed: a hand-corrupted expiry is not a live session —
+    # unparseable reads as expired, never as immortal.
+    store.create(_tenant())
+    token = store.mint_session_token("tnt_test1")
+    for bad in ("not-a-time", "2099-13-99T99:99:99Z", "", 42, None):
+        rec = store.get("tnt_test1")
+        rec.session_expires_at = bad
+        store.save(rec)
+        assert store.find_by_session_token(token) is None, bad
+
+
+def test_remint_refreshes_session_token_and_expiry(store):
+    # The single-live-token discipline: re-minting replaces the token AND
+    # its expiry; the old token stops authenticating immediately.
+    store.create(_tenant())
+    token1 = store.mint_session_token("tnt_test1")
+    token2 = store.mint_session_token("tnt_test1")
+    rec = store.get("tnt_test1")
+    assert token2 != token1
+    # the expiry is TTL-bound on the re-mint too (same-second re-mint may
+    # share the 1s-resolution instant — the property is that it is live)
+    assert created_epoch(rec.session_expires_at) > time.time()
+    assert store.find_by_session_token(token1) is None
+    assert store.find_by_session_token(token2) is not None
 
 
 def test_404_unknown_path(store):
@@ -1731,9 +1832,7 @@ def test_all_corrupt_tenant_404s_with_quarantine_signal(store, store_path):
     # No healthy arcs and no hold: fail-closed 404, but never
     # bricked-silent — the quarantine signal rides on the 404 body.
     _write_raw(store_path, _legacy_corrupt_raw())
-    rec = store.get("tnt_legacy")
-    rec.session_token = "sess-quar"
-    store.save(rec)
+    _live_session(store, "tnt_legacy", "sess-quar")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-quar"})
     assert status == 404
@@ -1754,9 +1853,7 @@ def test_quarantine_signal_rides_the_hold_path(store, store_path):
         "detail": "live: ok",
     }
     _write_raw(store_path, raw)
-    rec = store.get("tnt_legacy")
-    rec.session_token = "sess-hold"
-    store.save(rec)
+    _live_session(store, "tnt_legacy", "sess-hold")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-hold"})
     assert status == 200
@@ -2299,8 +2396,7 @@ def test_corrupt_hold_dropped_with_quarantine_signal(store, store_path):
     (entry,) = rec.quarantined.values()
     assert "#last_reported" in rec.quarantined
     assert "not a §2 status code" in entry["reason"]
-    rec.session_token = "sess-hold1784"
-    store.save(rec)
+    _live_session(store, "tnt_1784", "sess-hold1784")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-hold1784"})
     assert status == 404
@@ -2381,8 +2477,7 @@ def test_corrupt_hold_round_trips_verbatim_without_arcs(store, store_path):
     assert set(rec2.quarantined) == {"#last_reported"}
     assert rec2.quarantined["#last_reported"]["raw"] == ["not", "a", "dict"]
     # And the 404 still rides the signal after the save→load cycle.
-    rec2.session_token = "sess-rt"
-    store.save(rec2)
+    _live_session(store, "tnt_1784", "sess-rt")
     status, body = _service(store).handle_get(
         "/tenant/status", {"cookie": "session=sess-rt"})
     assert status == 404

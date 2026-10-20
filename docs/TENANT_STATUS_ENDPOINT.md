@@ -45,6 +45,13 @@ of status inputs; this endpoint is the *reader*.
     is no tenant selector on this endpoint — identity is
     credential-derived — so the 404 case fires only for the caller's own
     tenant being unservable.
+  - **Session lifetime (#1783):** the magic-link session is TTL-bound —
+    minted with a one-hour expiry covering the onboarding arc (the human
+    answers in ≤30 minutes even in slow trials) plus margin. An expired
+    session reads as a stale cookie: `401`, and the signup flow mints a
+    fresh session. Records minted before this change carry no expiry and
+    authenticate nobody — their tokens stopped working when the change
+    shipped; re-minting (one live token per tenant) is the recovery.
   - **Anti-replay (#1465):** the signed-request side is single-use inside the
     300 s freshness window. Every `(tenant_id, ts, signature)` triple that
     passes verification is recorded in a per-process replay ledger; an

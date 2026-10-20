@@ -221,6 +221,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- Tenant onboarding magic-link sessions are now TTL-bound (one hour):
+  an expired session cookie returns `401` instead of authenticating
+  indefinitely, and sessions minted before this change no longer
+  authenticate at all (re-minting issues a fresh session). (#1791)
 - Operator surfaces (the fleet journal and the relay tick journal) now
   strip Unicode variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF) --
   invisible code points that can alter how adjacent text renders. The
