@@ -22,9 +22,13 @@ pin the two together:
     module's string constants — the runtime strings the operator sees,
     with the parser's implicit-concatenation folding applied (a
     reworded note fails);
-(f) the doc must name the open tracker (#1711) and the five unbuilt
+(f) the doc must name the open tracker (#1711) and all five
     auto-cadence slices (#1721-#1725) — the doc is honest about what is
-    manual today, not aspirational.
+    manual today, not aspirational. Three slices have since shipped
+    (#1721 S1 driver module, #1723 S3 systemd packaging, #1725 S5 probe
+    loop); the doc's "manual today" claim holds because the timer stays
+    disabled until #1724, the probe loop is unscheduled, and #1722 is
+    still open.
 
 Needle-based on the doc side, AST on the code side. Stdlib-only. Run
 from the repo root: `python3 -m pytest scripts/test_relay_wiring_tick_doc.py`.
@@ -63,10 +67,13 @@ NOTE_FRAGMENTS = (
     "reading not applied; next tick re-selects and converges",
 )
 
-# Open work the doc is honest about: the auto-cadence tracker and its
-# five build slices, all unbuilt.
+# Work the doc is honest about: the open auto-cadence tracker (#1711)
+# and all five build slices, whose shipped/open state the doc carries in
+# its operating-discipline section. #1721 (S1 driver module), #1723
+# (S3 systemd packaging) and #1725 (S5 probe loop) have shipped; #1722
+# and #1724 remain open.
 OPEN_TRACKER = "#1711"
-OPEN_SLICES = ("#1721", "#1722", "#1723", "#1724", "#1725")
+SLICES = ("#1721", "#1722", "#1723", "#1724", "#1725")
 
 
 def _doc():
@@ -195,5 +202,5 @@ def test_doc_notes_are_verbatim():
 def test_doc_names_open_work():
     doc = _doc()
     assert OPEN_TRACKER in doc, "doc lost the open auto-cadence tracker %s" % OPEN_TRACKER
-    for sl in OPEN_SLICES:
-        assert sl in doc, "doc lost the unbuilt auto-cadence slice %s" % sl
+    for sl in SLICES:
+        assert sl in doc, "doc lost the auto-cadence slice %s" % sl
