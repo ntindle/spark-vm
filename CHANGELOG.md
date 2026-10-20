@@ -240,6 +240,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- The `muse-job recover` worker's global recovery lock and per-job
+  recovery log now open with `O_NOFOLLOW`, as does the shared per-slug
+  lock (`with_lock`) the worker takes next: a symlinked lock or log path
+  fails the open instead of serializing on someone else's file, steering
+  the worker's output through a planted link, or -- worst case --
+  truncating the link target through the lock's `"w"` open. A refused
+  lock fails closed and loud -- a machine-readable `needs-attention`
+  event instead of a traceback, with the next watch pass retrying. (#1805)
 - Tenant onboarding magic-link sessions are now TTL-bound (one hour):
   an expired session cookie returns `401` instead of authenticating
   indefinitely, and sessions minted before this change no longer
