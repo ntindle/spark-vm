@@ -341,3 +341,42 @@ boundary end to end.
 
 Run the tests: `python3 -m pytest hosted/test_push_enqueue_async.py`
 from the repo root.
+
+## vend_rate_limit.py — per-box mint rate limiter (#1405)
+
+The mechanism behind the contract's §2.2 rate-limit sentence
+(`docs/CREDENTIAL_VEND_CONTRACT.md`): a D1-backed token bucket, one
+per `(box_id)`, capacity 10 mints / 300 s / box (D105 — at the §2.3
+minimum TTL the legitimate cadence is already ~1 mint / 300 s / name,
+so the bucket only ever fires on abuse loops; the point is bounding
+the D1 write amplification of a compromised box, not throttling
+tenants). The take is one atomic single-statement UPDATE — refill
+(capped at capacity, float dust snapped with `ROUND(..., 6)`) and
+spend under the `>= 1.0` gate — so concurrent takers serialize in the
+writer and the bucket can never over-spend (D106 keeps the
+first-mint INSERT race from double-spending too). Denied takes get an
+advisory `retry_after_s` for the 429's `Retry-After`; emitting the 429
+at the endpoint is #890's scope. Fail-closed typing: non-`str`
+`box_id` raises `TypeError` before any SQL runs.
+
+`vend_rate_limit_async.py` is the async plane port against the
+worker's async `_D1` — droppable into `worker.py` verbatim
+(stdlib-only, no sync-module imports, `_to_py`/`_run_changes`
+inlined with source citations, the D-PP-1/D-PP-2 pattern). The sync
+module stays the harness and test truth.
+
+Tested by `test_vend_rate_limit.py` (10 tests, neutering-verified
+non-vacuous): first-mint allowed, capacity exhaustion with
+hand-computed `retry_after_s`, refill over time with the idle cap,
+per-box isolation (interleaved-budget shape — the exhaust-then-probe
+shape was blind to cross-box theft), a 20-thread race proving the
+bucket never over-spends, fail-closed typing, `retry_after_s`
+rounding up at non-integral quotients, and the advisory hint shrinking
+as time passes. Conformance by `test_vend_rate_limit_async.py` (5 tests):
+every scenario runs against both the sync truth and the async port
+over a worker-faithful `_D1` shim and asserts identical outcomes plus
+hand-computed expectations — the shim mirrors the worker's
+`success + meta.changes` shape, so port-shape mistakes fail loud.
+
+Run the tests: `python3 -m pytest hosted/test_vend_rate_limit.py hosted/test_vend_rate_limit_async.py`
+from the repo root.

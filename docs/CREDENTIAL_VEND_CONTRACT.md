@@ -273,8 +273,20 @@ manifest: names in the manifest are vended; anything else is listed in
 response shape is identical either way.
 
 `names` is capped at 64 entries (`400` beyond); the plane additionally
-rate-limits mints per box (`429` — precedent: the pairing 50-pending cap
-in `CONTROL_PLANE_API_REFERENCE.md`).
+rate-limits mints per box with a D1-backed token bucket — capacity 10
+mints per 300 s per `box_id` (D105; `hosted/vend_rate_limit.py`, async
+plane port `hosted/vend_rate_limit_async.py`, droppable into
+`worker.py` verbatim). The take is one atomic single-statement UPDATE
+(D106 keeps the first-mint INSERT race from double-spending); the #890
+endpoint answers a denied take with `429` + `Retry-After:
+<retry_after_s>` (the hint is advisory — the denial is the airtight
+part). The bucket only ever fires on abuse
+loops: at the §2.3 minimum TTL the legitimate cadence is already ~1
+mint per 300 s per name, so no legitimate box is throttled — the bound
+is on the D1 write amplification of a compromised box minting in a
+tight loop. (Precedent note, kept honest: the pairing 50-pending cap
+in `CONTROL_PLANE_API_REFERENCE.md` is a *count* cap, not a rate
+limit — issue #1405.)
 
 Response (plane → box), `200`:
 
@@ -378,6 +390,15 @@ vend_audit(id INTEGER PRIMARY KEY, at TEXT, box_id TEXT, name TEXT,
            result TEXT /* ok | refused | revoked_box | error */,
            ttl_seconds INT, tenant_id TEXT /* reserved, NULL in the
            per-tenant-box shape — §7 */);
+
+-- Per-box mint rate-limiter state (D105, issue #1405; §2.2). The
+-- #890 endpoint migration creates this table; the in-repo
+-- hosted/vend_rate_limit.py ensure_schema() is the test truth.
+-- No-DELETE invariant: rows are never deleted — a deleted row
+-- resurrects as a full bucket on the next take (fail-open).
+vend_rate_limit(box_id TEXT PRIMARY KEY,
+                tokens REAL /* current bucket level, fractional refill */,
+                updated_at INTEGER /* unix seconds of the last refill */);
 ```
 
 ### 2.5 Server-side audit (G50.6)
