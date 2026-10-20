@@ -584,6 +584,11 @@ def _suspend_on_relay_down(arc: BoxArc, detail: Optional[str]) -> None:
     if arc.code in _LIVENESS_DEMOTE_CODES:
         arc.latched = arc.code
         arc.latched_detail = arc.detail
+        # #1786: the latch's own update time is the arc's update time at
+        # entry — captured before the suspension's _touch below (the
+        # fourth latch-creation site alongside relay-failure,
+        # operator-mark-stuck, and maintenance-started).
+        arc.latched_status_updated_at = arc.status_updated_at
         _touch(arc, "connection-unreachable", detail=detail)
 
 
@@ -644,17 +649,22 @@ def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
         saved_code, saved_detail, saved_updated_at = (
             arc.code, arc.detail, arc.status_updated_at
         )
+        pre_latch = (arc.latched, arc.latched_detail)
         arc.code, arc.detail = arc.latched, arc.latched_detail
         try:
             apply_event(arc, event, **kw)
         finally:
+            # #1786: detect the latch's advance by its BODY, not by the
+            # second-resolution clock — a same-second advance must still
+            # record. All routed handlers are validate-before-mutate
+            # (no direct arc.code/arc.detail assignments), so on the
+            # reject path the body compare is exactly equal and the
+            # latch-entry value is kept. The clock compare stays as
+            # belt-and-braces for a touch-only path that never
+            # materialized.
+            latch_advanced = (arc.code, arc.detail) != pre_latch
             arc.latched, arc.latched_detail = arc.code, arc.detail
-            # #1786: record the latch's own advance only when the
-            # recursive call actually moved its clock — on a rejected
-            # event (raise before any _touch) the field keeps the
-            # latch-entry value rather than inheriting the suspension's
-            # served timestamp.
-            if arc.status_updated_at != saved_updated_at:
+            if latch_advanced or arc.status_updated_at != saved_updated_at:
                 arc.latched_status_updated_at = arc.status_updated_at
             arc.code, arc.detail = saved_code, saved_detail
             arc.status_updated_at = saved_updated_at

@@ -752,6 +752,80 @@ def test_1786_latched_status_updated_at_persists_through_store(store, monkeypatc
         "2026-09-29T10:02:00Z"
 
 
+def test_1786_relay_down_entry_sets_latch_clock(monkeypatch):
+    # Engineering B1: the R3 production path (relay-down event) creates
+    # the latch through _suspend_on_relay_down, not relay-failure — the
+    # latch clock must be set there too, never left "" while a latch is
+    # held.
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:00:00Z")
+    arc = _arc(code="live", provider_running=True, relay_reachable=True,
+               status_updated_at="2026-09-29T09:55:00Z")
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:01:00Z")
+    apply_event(arc, "relay-down", detail="relay")
+    assert arc.code == "connection-unreachable"
+    assert arc.latched == "live"
+    assert arc.latched_status_updated_at == "2026-09-29T09:55:00Z"
+
+
+def test_1786_same_second_latch_advance_still_records(monkeypatch):
+    # Engineering B2: _now_iso is second-resolution — a suspension entry
+    # and a latch advance in the same wall-clock second must still
+    # record the advance (body-based detection, not clock compare).
+    monkeypatch.setattr(tenant_status, "_now_iso",
+                        lambda: "2026-09-29T10:01:00Z")
+    arc = _arc(code="live", provider_running=True, relay_reachable=True,
+               status_updated_at="2026-09-29T09:55:00Z")
+    apply_event(arc, "relay-failure", detail="relay-down")
+    apply_event(arc, "approval-filed", check="gate-1")  # same second
+    assert arc.status_updated_at == "2026-09-29T10:01:00Z"  # served: stable
+    assert arc.latched == "waiting-on-approval"
+    assert arc.latched_status_updated_at == "2026-09-29T10:01:00Z"
+
+
+def test_1786_all_latch_clear_paths_reset_latch_clock(monkeypatch):
+    # Engineering B3: every latch exit resets the latch clock with the
+    # latch — not just relay-recovered.
+    def _stuck_arc():
+        arc = _arc(code="live", provider_running=True, relay_reachable=True,
+                   status_updated_at="2026-09-29T09:55:00Z")
+        apply_event(arc, "operator-mark-stuck")
+        assert arc.latched == "live"
+        assert arc.latched_status_updated_at == "2026-09-29T09:55:00Z"
+        return arc
+
+    def _maintenance_arc():
+        arc = _arc(code="live", provider_running=True, relay_reachable=True,
+                   status_updated_at="2026-09-29T09:55:00Z")
+        apply_event(arc, "maintenance-started", operation="scheduled-update")
+        assert arc.latched == "live"
+        assert arc.latched_status_updated_at == "2026-09-29T09:55:00Z"
+        return arc
+
+    arc = _stuck_arc()
+    apply_event(arc, "stuck-cleared")
+    assert arc.latched is None
+    assert arc.latched_status_updated_at == ""
+
+    arc = _maintenance_arc()
+    apply_event(arc, "maintenance-completed")
+    assert arc.latched is None
+    assert arc.latched_status_updated_at == ""
+
+    arc = _maintenance_arc()
+    apply_event(arc, "maintenance-failed", check="img-pull")
+    assert arc.code == "box-unhealthy"
+    assert arc.latched is None
+    assert arc.latched_status_updated_at == ""
+
+    arc = _stuck_arc()
+    apply_event(arc, "operator-reprovision")
+    assert arc.code == "provisioning"
+    assert arc.latched is None
+    assert arc.latched_status_updated_at == ""
+
+
 def test_1786_pre_fix_persisted_record_loads_without_latch_clock():
     # Records persisted before the field existed omit the key — the
     # constructor default ("") heals them on load.
