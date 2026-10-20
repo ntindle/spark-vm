@@ -54,8 +54,13 @@ python3 ~/.local/share/spark-vm/cred-ui/cred-ui.py --print-token
 
 Paste it once per browser session (the page keeps it in
 `sessionStorage` — a tab's lifetime, never a cookie, never a URL). To
-replace it: `cred-ui.py --rotate-token`, then
-`systemctl --user restart cred-ui`, then paste the new one.
+replace it: `cred-ui.py --rotate-token`, then paste the new one. The
+rotate command signals the running service to reload (SIGHUP) and
+verifies the server adopted the new token, warning loudly if it didn't;
+a 60-second watchdog re-reads the token store as a fail-safe. If the
+store stays unreadable the server fails closed (all API auth denied)
+after five minutes rather than honoring a possibly-revoked token
+indefinitely (issue #1751).
 
 Developers: set `CRED_UI_TOKEN_FILE` to keep the old behavior — a local
 `0600` token file at the path you name (dev machines, CI, and the test
