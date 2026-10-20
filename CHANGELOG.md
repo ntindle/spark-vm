@@ -51,7 +51,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
-- Gate-channel rollout lane convergence pin: the 2026-10-17 operator-estate vision is checked against current main — the toolset gate cap (#1629), the fleet-scoped correlated-gate-stale page (#1631), and the #1632 verification closure are all in place, so the lane is 4/6 converged; the G17 legacy-producer (#1630), the G15 S2 operator tooling + wave assignment (#1633), and the hosted per-tenant remainders (#1634) are re-verified still open. (#TBD)
+- Gate-channel rollout lane convergence pin: the 2026-10-17 operator-estate vision is checked against current main — the toolset gate cap (#1629), the fleet-scoped correlated-gate-stale page (#1631), and the #1632 verification closure are all in place, so the lane is 3/6 converged; the G17 legacy-producer (#1630), the G15 S2 operator tooling + wave assignment (#1633), and the hosted per-tenant remainders (#1634) are re-verified still open. (#TBD)
 - Fleet update-rollout lane convergence pin: the September rollout
   vision (reframed by the tenant-plane pivot) is checked against
   everything shipped since — staged waves, per-plane inventory,

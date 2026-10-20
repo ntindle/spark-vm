@@ -26,12 +26,12 @@ hosted per-tenant instantiation) still holds.
 | F-GR-2 — G17 S2 mapping rows, no legacy producer (#1630) | UNBUILT | **OPEN, unchanged.** `fleet/events.py:126-127` still declares `skipped-frozen` / `deferred-arc` as "S2/S3-forward outcomes with no legacy producer". D-GR-2 stands: vocabulary not reopened; #1630 is a producer-build issue. |
 | F-GR-3 — fifth alert rule, correlated gate-stale (#1631) | UNBUILT | **SHIPPED.** `fleet/inventory.py:993` fires the fleet-scoped `correlated-gate-stale` page from the collector's answer-age field (D-GR-3 honored — NOT the event stream). Issue closed. |
 | F-GR-4 — operator sees gate staleness in `fleet status` (#1632) | UNBUILT | **CLOSED BY VERIFICATION.** The D-GA-2 decision (`docs/ROLLOUT_ALERT_STACK_GAP_2026-10-17.md`, adversarially reviewed Product + Architecture, 2026-10-17) amended the acceptance: no new `fleet status` command is owed — per-box gate-stale folds into the alert board as per-box detail beneath the `correlated-gate-stale` page, verified on main against `fleet events watch`, the G21 console alert board, and `/fleet/alerts`; the last contradicting doc line (`fleet/README.md:142`) was truth-repaired (PR #1790, merged 2026-10-19). Issue closed. |
-| F-GR-5 — G15 S2: operator tooling + wave assignment (#1633) | UNBUILT | **OPEN, unchanged.** `fleet/gate_publish.py` carries only the S1a document fields (`--freeze`, `key_id` dual-accept) — no `freeze`/`unfreeze`/`promote`/`halt` CLI surface; `fleet/api.py:666-668` `/fleet/waves` still returns the reserved shape ("unavailable until G15 S2"); `fleet/events.py:340` still `"rollout": None,  # G15 S2 assigns waves`. |
+| F-GR-5 — G15 S2: operator tooling + wave assignment (#1633) | UNBUILT | **OPEN, unchanged.** `fleet/gate_publish.py` carries only the S1a document fields (`--freeze`, `key_id` dual-accept) — no `freeze`/`unfreeze`/`promote`/`halt` CLI surface; `fleet/api.py:666-668` `/fleet/waves` still returns the reserved shape ("unavailable until G15 S2"); `fleet/events.py:422` still `"rollout": None,  # G15 S2 assigns waves`. |
 | F-GR-6 — G15 S3 hosted remainders (#1634) | UNBUILT | **OPEN, unchanged** (track: hosted-product): per-tenant gate documents, per-tenant waves (H11), hot-standby publisher, no-consent-gate (G13 §1/T4). D-GR-4 cross-references stand. |
 
 ## Decisions pinned by this convergence
 
-- **D-GC-1:** the operator-estate rollout lane is 4/6 converged. The
+- **D-GC-1:** the operator-estate rollout lane is 3/6 converged. The
   three resolved findings are closed through their trackers (#1629,
   #1631, #1632) — no re-verification duty is owed again on these rows;
   the next convergence pin starts from the two open findings.
