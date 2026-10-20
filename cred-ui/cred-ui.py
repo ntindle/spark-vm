@@ -204,11 +204,6 @@ def _token_path():
     return override
 
 
-def _read_token_file(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-
 def _read_validated_token_file(path):
     """Shared read-and-validate primitive for the local-file backend
     (issue #1751 round 2): ONE read path for the startup load and the
