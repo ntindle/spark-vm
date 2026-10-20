@@ -15,11 +15,13 @@ bar before either session goes live and resurrect two phase-* jobs
 concurrently.
 """
 import argparse
+import gzip
 import importlib.machinery
 import importlib.util
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -593,3 +595,101 @@ def test_dispatch_refuses_reader_bearing_fifo_log(cli, monkeypatch):
         assert spawned == []
     finally:
         os.close(rfd)
+
+
+# --- recovery-log archival on close (#1800) ----------------------------------
+
+def _git_fake_close(monkeypatch, cli, work):
+    """Fake cli.run: the derived worktree is registered; git succeeds.
+
+    gzip calls delegate to the real binary so the close-time log
+    archival is exercised for real.
+    """
+    def fake_run(*argv, **kw):
+        if argv and argv[0] == "gzip":
+            return subprocess.run(list(argv), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        class P:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        if "worktree" in argv and "list" in argv:
+            P.stdout = (f"worktree {work}\n\nbranch "
+                        f"refs/heads/job/demo\n").encode()
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+
+
+def _make_closeable_job(cli, slug="demo"):
+    jd = os.path.join(cli.JOBS_DIR, slug)
+    os.makedirs(jd, exist_ok=True)
+    pristine = os.path.join(cli.REPOS_DIR, "demo-repo")
+    os.makedirs(pristine, exist_ok=True)
+    job = {"slug": slug, "pristine": pristine,
+           "worktree": os.path.join(jd, "work"),
+           "branch": f"job/{slug}", "state": "active",
+           "started_at": time.time() - 60}
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
+    with open(cli.job_json_path(slug), "w") as f:
+        json.dump(job, f)
+    return jd, job
+
+
+def test_close_archives_recovery_log_with_job(cli, monkeypatch):
+    # #1800: close moves recoveries/<slug>.log into the job dir, where
+    # the existing log archival gzips it -- the closed job's recovery
+    # audit trail is kept, and it is swept with the closed job dir.
+    jd, _ = _make_closeable_job(cli)
+    _git_fake_close(monkeypatch, cli, os.path.join(jd, "work"))
+    monkeypatch.setattr(cli, "_kill_process_tree", lambda slug: [])
+    logp = cli._recover_log_path("demo")
+    with open(logp, "w") as f:
+        f.write("recovered\n")
+    cli.cmd_close(argparse.Namespace(slug="demo"))
+    assert not os.path.exists(logp)
+    archived = os.path.join(jd, "recoveries.log.gz")
+    assert os.path.isfile(archived)
+    assert gzip.open(archived, "rt").read() == "recovered\n"
+
+
+def test_close_gzips_recovery_log_without_job_dir(cli, monkeypatch):
+    # #1800 / #1153: the job dir was removed by hand -- close still
+    # bounds the recovery log by gzipping it in place (the sweeper's
+    # 30-day bound covers the rest).
+    pristine = os.path.join(cli.REPOS_DIR, "demo-repo")
+    os.makedirs(pristine, exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
+    job = {"slug": "demo", "pristine": pristine, "state": "active",
+           "started_at": time.time() - 60}
+    with open(cli.job_json_path("demo"), "w") as f:
+        json.dump(job, f)
+    # The job dir is gone, but the derived worktree registration check
+    # still runs against the pristine repo.
+    _git_fake_close(monkeypatch, cli,
+                    os.path.join(cli.JOBS_DIR, "demo", "work"))
+    monkeypatch.setattr(cli, "_kill_process_tree", lambda slug: [])
+    logp = cli._recover_log_path("demo")
+    with open(logp, "w") as f:
+        f.write("recovered\n")
+    cli.cmd_close(argparse.Namespace(slug="demo"))
+    assert not os.path.exists(logp)
+    assert gzip.open(logp + ".gz", "rt").read() == "recovered\n"
+
+
+def test_close_leaves_symlinked_recovery_log_alone(cli, monkeypatch):
+    # A symlinked recovery log is not moved into the job dir (fail
+    # closed, like the #1804 dispatch hardening).
+    jd, _ = _make_closeable_job(cli)
+    _git_fake_close(monkeypatch, cli, os.path.join(jd, "work"))
+    monkeypatch.setattr(cli, "_kill_process_tree", lambda slug: [])
+    logp = cli._recover_log_path("demo")
+    decoy = os.path.join(os.path.dirname(logp), "decoy.log")
+    with open(decoy, "w") as f:
+        f.write("not the log")
+    os.symlink(decoy, logp)
+    cli.cmd_close(argparse.Namespace(slug="demo"))
+    assert os.path.islink(logp)
+    assert not os.path.exists(os.path.join(jd, "recoveries.log"))
+    assert not os.path.exists(os.path.join(jd, "recoveries.log.gz"))
+    assert open(decoy).read() == "not the log"

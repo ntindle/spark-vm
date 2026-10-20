@@ -32,6 +32,11 @@ SESSIONS = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 # sweep prunes it with the closed job, gated on the dir actually being
 # gone, so `muse-job log` never renders a ghost journal for a swept job.
 JOURNALS = os.path.join(HOME, ".local", "share", "muse-job", "journals")
+# Issue #1800: per-job recovery logs (recoveries/<slug>.log[.gz]) -- the
+# detached recover worker's stdout/stderr. Closed jobs archive theirs
+# into the job dir at close (swept with it above); this is the bound
+# for the rest.
+RECOVERIES = os.path.join(METADATA, "recoveries")
 WARN_PCT = 85
 KILL_PCT = 93
 PRUNE_CLOSED_AFTER_DAYS = 7
@@ -85,6 +90,25 @@ def read_job_record(slug):
         except (OSError, ValueError):
             continue
     return None
+
+
+def active_job_slugs():
+    """Slugs of non-closed jobs -- their recovery logs must never be
+    pruned (issue #1800; same posture as active_session_uuids: a live
+    job's audit trail survives regardless of mtime)."""
+    slugs = set()
+    if not os.path.isdir(JOBS):
+        return slugs
+    for slug in os.listdir(JOBS):
+        d = read_job_record(slug)
+        if d is None:
+            continue
+        try:
+            if d.get("state") in ("active", "blocked"):
+                slugs.add(slug)
+        except Exception:
+            continue
+    return slugs
 
 
 def active_session_uuids():
@@ -176,6 +200,14 @@ def main():
                 skip = {u + ext for u in active_session_uuids()
                         for ext in (".jsonl", ".json")}
                 prune_old(d, PRUNE_EVENTS_AFTER_DAYS * 86400, skip)
+        # Issue #1800: bound the recoveries dir -- closed jobs archive
+        # theirs into the job dir at close, so anything left here is a
+        # leftover (record gone, job dir removed by hand) or a live
+        # job's idle log. Never prune a live job's log.
+        if os.path.isdir(RECOVERIES):
+            skip = {s + ext for s in active_job_slugs()
+                    for ext in (".log", ".log.gz")}
+            prune_old(RECOVERIES, PRUNE_EVENTS_AFTER_DAYS * 86400, skip)
     # Emergency breaker: close (not kill -- kill only ends the tmux session
     # and frees ~0 bytes) the largest active job(s) until disk is back under
     # KILL_PCT, no active jobs remain, or the per-run cap is hit.

@@ -128,10 +128,26 @@ by the library functions. The smoke CLI below prints results to stdout
 answers are withheld unless ``--show-secrets`` is passed explicitly)
 and warns on stderr on every invocation. ``TrustPolicy`` values are not
 secret, but the ANSWERS they gate may be -- never log them.
+
+Classification binding (#1772): ``userInput/answer`` carries no
+server-side race guard the way ``approval/decide`` carries
+``currentRequirementId`` -- a re-issued prompt can slip different
+question *text* under the same ``userInputId`` between the operator's
+classification and the send, and the operator's exactly-one-of
+classification (trust prompt vs not) was made against the superseded
+text. ``prompt_content_hash`` binds a classification to the exact
+prompt content it was made against; ``answer_user_input`` /
+``answer_trust_prompt`` accept it as ``expected_prompt_hash``, re-read
+the pending prompt immediately before sending, and fail closed
+(MSPApprovalError, nothing sent) when the prompt vanished or its
+content changed. The hash is derived from prompt text the operator
+already sees, so it is not secret -- it rides in the redacted
+``list-pending`` output so an operator can carry it into ``answer``.
 """
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -521,6 +537,89 @@ def looks_like_trust_prompt(prompt):
     return any(m in haystack for m in _TRUST_MARKERS)
 
 
+def prompt_content_hash(prompt):
+    """Bind an operator classification to the exact prompt content.
+
+    SHA-256 (hex) over the canonical JSON of ``[user_input_id,
+    tool_name, [[question_id, mode, prompt_text, options,
+    min_selections, max_selections, header], ...]]`` with questions in
+    wire order (order is classified, so it is positional). Any re-issue
+    that changes the question *text* or the tool name (same ids, same
+    shapes -- the cases the wire's shape validation cannot catch)
+    changes the hash, so a classification made against the superseded
+    prompt no longer binds. ``tool_name`` is covered because the trust
+    routing the classification protects scans it
+    (``looks_like_trust_prompt``).
+
+    The hash is NOT secret: it is derived from prompt text the operator
+    already sees, and rides in the redacted ``list-pending`` output so
+    the operator can carry it into ``answer``. Raises ValueError for a
+    non-UserInputPrompt or unserializable content (fail loud).
+    """
+    if not isinstance(prompt, UserInputPrompt):
+        raise ValueError(
+            f"prompt must be a UserInputPrompt, got {type(prompt).__name__}"
+        )
+    raw = prompt.raw if isinstance(prompt.raw, dict) else {}
+    tool_name = raw.get("toolName")
+    if not isinstance(tool_name, str):
+        tool_name = ""
+    canonical = [
+        prompt.user_input_id,
+        tool_name,
+        [[q.question_id, q.mode, q.prompt_text, list(q.options),
+          q.min_selections, q.max_selections, q.header]
+         for q in prompt.questions],
+    ]
+    try:
+        payload = json.dumps(canonical, sort_keys=True,
+                             separators=(",", ":"), ensure_ascii=True)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"cannot hash userInput {prompt.user_input_id!r}: "
+            f"unserializable prompt content ({e})"
+        ) from e
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _reverify_prompt_content(host, session_id, prompt, expected_hash):
+    """Re-read the pending prompt and fail closed unless it still matches.
+
+    The classification binding's enforcement point: called immediately
+    before ``userInput/answer`` is sent. Re-reads
+    ``approval/listPending`` and compares the fresh prompt's
+    ``prompt_content_hash`` against ``expected_hash`` (the hash of the
+    content the operator classified against). Raises MSPApprovalError --
+    sending nothing -- when the prompt vanished between classification
+    and answer, or when it was re-issued with different content. A
+    matching hash means the pending prompt was content-identical to the
+    classified one at re-read time -- the binding narrows the race
+    window from classification-to-send down to the single re-read→send
+    gap (client-side only: unlike ``approval/decide``'s
+    ``currentRequirementId``, ``userInput/answer`` has no server-side
+    enforcement), so the already-validated answers still describe it
+    exactly.
+    """
+    fresh_prompts = list_pending_user_inputs(host, session_id)
+    fresh = next((p for p in fresh_prompts
+                  if p.user_input_id == prompt.user_input_id), None)
+    if fresh is None:
+        raise MSPApprovalError(
+            f"userInput {prompt.user_input_id!r} is no longer pending: "
+            f"it vanished between classification and answer -- refusing "
+            f"to answer blind"
+        )
+    fresh_hash = prompt_content_hash(fresh)
+    if fresh_hash != expected_hash:
+        raise MSPApprovalError(
+            f"userInput {prompt.user_input_id!r} was re-issued between "
+            f"classification and answer: its content no longer matches "
+            f"what the operator classified -- refusing to answer "
+            f"(fail closed; re-classify the current prompt and answer "
+            f"again)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Client calls
 # ---------------------------------------------------------------------------
@@ -798,7 +897,8 @@ def _validate_answer(question, answer):
     return wire
 
 
-def answer_user_input(host, session_id, prompt, answers, *, command_id=None):
+def answer_user_input(host, session_id, prompt, answers, *,
+                      command_id=None, expected_prompt_hash=None):
     """Answer every question of an open prompt; return the result dict.
 
     ``answers`` is a list of dicts, one per question, each with
@@ -810,18 +910,38 @@ def answer_user_input(host, session_id, prompt, answers, *, command_id=None):
     (see _validate_answer); mismatches fail loud here, never on the
     wire. ``command_id`` defaults to a fresh UUIDv7 per call.
 
+    ``expected_prompt_hash`` is the classification binding (#1772): the
+    ``prompt_content_hash`` of the exact prompt content the operator
+    classified (trust prompt vs not) against. When given, the pending
+    prompt is re-read from ``approval/listPending`` immediately before
+    sending and the send is refused (MSPApprovalError, nothing sent)
+    when the prompt vanished or its content changed -- narrowing the
+    race window where a re-issued prompt slips different text under the
+    same ``userInputId`` from classification-to-send down to the single
+    re-read→send gap. Client-side only: unlike ``approval/decide``'s
+    ``currentRequirementId``, ``userInput/answer`` has no server-side
+    enforcement. When None (the legacy default), no re-read happens
+    and the answer goes out against ``prompt`` as before.
+
     This is the operator-driven primitive: calling it IS the decision to
     answer. For the auto-answer path (trust prompts answered without a
     human in the loop), use ``answer_trust_prompt``, which additionally
     requires an explicit ``TrustPolicy`` opt-in.
 
     Raises ValueError for client-side validation failures,
-    MSPApprovalError on result drift.
+    MSPApprovalError on result drift or a failed classification binding.
     """
     _check_session_id(session_id)
     if not isinstance(prompt, UserInputPrompt):
         raise ValueError(
             f"prompt must be a UserInputPrompt, got {type(prompt).__name__}"
+        )
+    if expected_prompt_hash is not None and (
+            not isinstance(expected_prompt_hash, str)
+            or not expected_prompt_hash):
+        raise ValueError(
+            "expected_prompt_hash must be a non-empty string, got "
+            f"{type(expected_prompt_hash).__name__}"
         )
     if not isinstance(answers, list) or not answers:
         raise ValueError(
@@ -859,6 +979,13 @@ def answer_user_input(host, session_id, prompt, answers, *, command_id=None):
             f"unanswered questions {missing!r}: userInput/answer must "
             f"answer every question"
         )
+    if expected_prompt_hash is not None:
+        # The classification binding: re-read AFTER all local
+        # validation, immediately before the send, so the window a
+        # re-issue can slip through is as narrow as one listPending
+        # round-trip.
+        _reverify_prompt_content(host, session_id, prompt,
+                                 expected_prompt_hash)
     cid = (check_command_id(command_id) if command_id is not None
            else new_command_id())
     params = {
@@ -898,7 +1025,7 @@ def _require_trust_policy(policy):
 
 
 def answer_trust_prompt(host, session_id, prompt, answers, *, policy,
-                        command_id=None):
+                        command_id=None, expected_prompt_hash=None):
     """Auto-answer a trust prompt ONLY with an explicit opt-in policy.
 
     This is the auto-answer entry point (the #211-carried decision, see
@@ -914,10 +1041,13 @@ def answer_trust_prompt(host, session_id, prompt, answers, *, policy,
 
     Answers are validated exactly as in ``answer_user_input``; on
     success delegates to it and returns its result dict.
+    ``expected_prompt_hash`` is the #1772 classification binding,
+    threaded through verbatim.
     """
     _require_trust_policy(policy)
     return answer_user_input(host, session_id, prompt, answers,
-                             command_id=command_id)
+                             command_id=command_id,
+                             expected_prompt_hash=expected_prompt_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -1036,11 +1166,20 @@ def _redacted_approval(a):
 
 
 def _redacted_prompt(p):
-    """Operator-safe summary of a UserInputPrompt (structure, no answers)."""
+    """Operator-safe summary of a UserInputPrompt (structure, no answers).
+
+    ``promptHash`` is the #1772 classification binding: the content
+    hash of the exact prompt shown here. An operator who classifies this
+    prompt (trust prompt vs not) passes the hash to ``answer
+    --expected-prompt-hash`` so the answer is refused if the prompt is
+    re-issued with different content before the send. The hash is not
+    secret -- it is derived from the text already shown.
+    """
     return {
         "userInputId": p.user_input_id,
         "sessionId": p.session_id,
         "looksLikeTrustPrompt": looks_like_trust_prompt(p),
+        "promptHash": prompt_content_hash(p),
         "questions": [
             {"questionId": q.question_id, "mode": q.mode,
              "header": q.header, "prompt": q.prompt_text,
@@ -1129,6 +1268,14 @@ def main(argv):
                           "answer it directly (the operator's explicit "
                           "classification; required because the CLI cannot "
                           "reliably classify prompts itself)")
+    p_answer.add_argument("--expected-prompt-hash", default=None,
+                          help="bind this answer to the exact prompt "
+                          "content the operator classified (the "
+                          "promptHash from list-pending); the answer is "
+                          "refused if the prompt was re-issued with "
+                          "different content (#1772). Without it, the "
+                          "answer binds to the prompt re-read just before "
+                          "sending.")
     add_serve(p_answer)
 
     args = ap.parse_args(argv)
@@ -1205,13 +1352,29 @@ def main(argv):
                          "classification: --trust-policy-opt-in (this IS "
                          "a trust prompt) or --classified-not-trust-prompt "
                          "(this is NOT a trust prompt)")
+            # #1772 classification binding: bind to the operator's
+            # hash when given, else to the prompt just re-read -- the
+            # prompt is re-read once more immediately before the send
+            # and the answer is refused on any content change.
+            expected_hash = args.expected_prompt_hash
+            if expected_hash is not None and not re.fullmatch(
+                    r"[0-9a-f]{64}", expected_hash):
+                ap.error("--expected-prompt-hash must be a 64-char "
+                         "lowercase hex sha256 digest (see promptHash in "
+                         "the list-pending output)")
+            if expected_hash is None:
+                expected_hash = prompt_content_hash(prompt)
             if trust_opt_in:
                 policy = TrustPolicy(auto_answer_trust=True)
                 result = answer_trust_prompt(host, session_id, prompt,
-                                             answers, policy=policy)
+                                             answers, policy=policy,
+                                             expected_prompt_hash=
+                                             expected_hash)
             else:
                 result = answer_user_input(host, session_id, prompt,
-                                           answers)
+                                           answers,
+                                           expected_prompt_hash=
+                                           expected_hash)
             if args.show_secrets:
                 out = {"result": result, "answers": answers}
             else:

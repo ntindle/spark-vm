@@ -3725,6 +3725,30 @@ def _close(slug):
     # (worktree add -b would otherwise fail: branch already exists).
     run("git", "-C", pristine, "branch", "-D", branch, check=False)
     jd = job_dir(slug)
+    # Issue #1800: the per-job recovery log lives outside the job dir
+    # (recoveries/<slug>.log) and nothing ever pruned it. Archive it
+    # with the closed job: move it into the job dir before the log
+    # archival below, so it is gzipped with the rest and swept with the
+    # closed job dir (7 days). A missing job dir (#1153) keeps the
+    # in-place gzip; the sweeper's 30-day bound covers the rest. A
+    # symlinked log path is left alone (fail closed, like the #1804
+    # dispatch hardening).
+    rlog = _recover_log_path(slug)
+    if os.path.isdir(jd):
+        try:
+            dst = os.path.join(jd, "recoveries.log")
+            if (os.path.isfile(rlog) and not os.path.islink(rlog)
+                    and not os.path.exists(dst)):
+                os.rename(rlog, dst)
+                # The islink check above races the rename: re-check the
+                # destination -- a swapped-in link is unlinked, never
+                # gzipped (gzip follows symlinks).
+                if os.path.islink(dst):
+                    os.unlink(dst)
+        except OSError:
+            pass
+    elif os.path.isfile(rlog) and not os.path.islink(rlog):
+        run("gzip", "-f", rlog, check=False)
     if os.path.isdir(jd):
         tmpd = os.path.join(jd, "tmp")
         shutil.rmtree(tmpd, ignore_errors=True)
@@ -5809,11 +5833,19 @@ def _prompt_public(p):
     Questions render so the operator can compose answers; answers are
     NEVER printed (they may carry secrets -- the trust-prompt answer to
     a workspace-trust question is exactly such a value).
+
+    ``promptHash`` is the #1772 classification binding: the content hash
+    of the exact prompt shown here. An operator who classifies this
+    prompt passes the hash to ``answer --expected-prompt-hash`` so the
+    answer is refused if the prompt is re-issued with different content
+    before the send. The hash is not secret -- it is derived from the
+    text already shown.
     """
     msp_approval = _msp_approval()
     return {
         "userInputId": p.user_input_id,
         "looksLikeTrustPrompt": msp_approval.looks_like_trust_prompt(p),
+        "promptHash": msp_approval.prompt_content_hash(p),
         "questions": [
             {"questionId": q.question_id,
              "mode": q.mode,
@@ -5938,6 +5970,9 @@ def _msp_render_approval_listing(args, pub_approvals, pub_prompts,
               f"--user-input-id {p['userInputId']} "
               f"--answers '[{{\"questionId\": ..., ...}}]' "
               f"--classified-not-trust-prompt|--trust-policy-opt-in")
+        print(f"  bind:   ... --expected-prompt-hash {p['promptHash']} "
+              f"(refuses if the prompt was re-issued with different "
+              f"content; #1772)")
     if not args.show_secrets:
         print("(redacted; pass --show-secrets to print raw wire params)")
     return 0
@@ -6083,14 +6118,30 @@ def cmd_answer(args):
         answers = json.loads(args.answers)
     except ValueError as e:
         raise RuntimeError(f"--answers is not valid JSON: {e}")
+    # #1772 classification binding: the operator classifies the prompt
+    # they SAW (the approvals listing shows its promptHash); the answer
+    # is refused unless the prompt still has that exact content at send
+    # time. Without the flag, the binding is to the prompt just re-read
+    # below -- closing the window between that re-read and the send.
+    # getattr: the real argparse always sets the default; test
+    # namespaces built by hand may not.
+    expected_hash = getattr(args, "expected_prompt_hash", None)
+    if expected_hash is not None and not re.fullmatch(r"[0-9a-f]{64}",
+                                                      expected_hash):
+        raise RuntimeError("--expected-prompt-hash must be a 64-char "
+                           "lowercase hex sha256 digest (see promptHash "
+                           "in the approvals listing)")
     fields = {"user_input_id": args.user_input_id, "answers": answers,
-              "trust": trust_opt_in}
+              "trust": trust_opt_in, "prompt_hash": expected_hash}
     if _msp_supervisor_alive(slug):
         # Issue #1372 slice 2: route through the supervisor like decide.
         # The trust classification (the exactly-one-of choice validated
         # above) travels with the request -- the drain refuses to answer
         # anything unclassified, so the no-gate primitive is never
-        # reachable from the queue path.
+        # reachable from the queue path. The classification binding
+        # (prompt_hash) travels too and is verified at drain time, so a
+        # prompt re-issued while queued cannot slip past the operator's
+        # classification.
         return _msp_decide_via_supervisor(args, "answer", fields)
 
     def go(host):
@@ -6102,11 +6153,16 @@ def cmd_answer(args):
                 f"no pending user input {args.user_input_id!r} on job "
                 f"{slug} (pending: "
                 f"{[p.user_input_id for p in prompts]!r})")
+        bound = (expected_hash
+                 if expected_hash is not None
+                 else msp_approval.prompt_content_hash(prompt))
         if trust_opt_in:
             policy = msp_approval.TrustPolicy(auto_answer_trust=True)
             return msp_approval.answer_trust_prompt(
-                host, sid, prompt, answers, policy=policy)
-        return msp_approval.answer_user_input(host, sid, prompt, answers)
+                host, sid, prompt, answers, policy=policy,
+                expected_prompt_hash=bound)
+        return msp_approval.answer_user_input(host, sid, prompt, answers,
+                                              expected_prompt_hash=bound)
 
     try:
         result = _msp_call(slug, job, go)
@@ -6570,18 +6626,31 @@ def _msp_supervisor_answer(msp_approval, host, sid, entry):
     TrustPolicy(opt-in); the library re-checks the policy itself, so
     the gate holds twice. Returns the key-whitelisted ack (answers are
     never echoed -- they may be secrets).
+
+    ``prompt_hash`` (the #1772 classification binding, queued by
+    ``cmd_answer`` from the operator's ``--expected-prompt-hash``) is
+    verified at drain time: the answer is refused when the prompt was
+    re-issued with different content while it sat in the queue. A
+    missing binding (older queued entries) keeps the legacy behavior.
     """
     trust = entry.get("trust")
+    prompt_hash = entry.get("prompt_hash")
+    if prompt_hash is not None and not isinstance(prompt_hash, str):
+        raise msp_approval.MSPApprovalError(
+            "queued answer: bad prompt_hash (expected a hex digest "
+            "string or nothing)")
     if trust is True:
         policy = msp_approval.TrustPolicy(auto_answer_trust=True)
 
         def use(prompt, answers):
             return msp_approval.answer_trust_prompt(
-                host, sid, prompt, answers, policy=policy)
+                host, sid, prompt, answers, policy=policy,
+                expected_prompt_hash=prompt_hash)
     elif trust is False:
         def use(prompt, answers):
-            return msp_approval.answer_user_input(host, sid, prompt,
-                                                  answers)
+            return msp_approval.answer_user_input(
+                host, sid, prompt, answers,
+                expected_prompt_hash=prompt_hash)
     else:
         raise msp_approval.MSPApprovalError(
             "queued answer carries no trust classification (refusing: "
@@ -6874,6 +6943,16 @@ def build_parser():
     s.add_argument("--classified-not-trust-prompt", action="store_true",
                    help="declare this is NOT a trust prompt and answer it "
                    "directly")
+    s.add_argument("--expected-prompt-hash", default=None,
+                   help="bind this answer to the exact prompt content the "
+                   "operator classified (the promptHash shown by the "
+                   "approvals listing); the answer is refused if the "
+                   "prompt was re-issued with different content (#1772). "
+                   "Without it, a directly-sent answer binds to the "
+                   "prompt re-read just before sending; an answer queued "
+                   "behind a busy supervisor is sent unbound -- always "
+                   "pass the flag from the listing's bind: line when the "
+                   "supervisor holds the session.")
     s.set_defaults(fn=cmd_answer)
 
     s = sub.add_parser("trust", help="adopt the standing trust-workspace "

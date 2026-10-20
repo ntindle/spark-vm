@@ -404,6 +404,26 @@ the recorded #211 decision forbids auto-answering trust prompts on
 heuristic absence alone, because a trust prompt need not contain the
 word "trust".
 
+**Classification binding (#1772).** The operator's classification is
+bound to the exact prompt content it was made against: the prompt is
+re-read just before the answer is sent, and the send is refused --
+loudly, with nothing on the wire -- if the prompt was re-issued with
+different question text (or vanished) since classification. A re-issued
+prompt keeps the same ids and shapes, so nothing else could catch the
+swap. Client-side only: the binding narrows the race window from
+classification-to-send down to the single re-read→send gap -- unlike
+`approval/decide`'s `currentRequirementId`, `userInput/answer` has no
+server-side enforcement.
+The approvals listing shows the binding hash for each prompt, and
+`muse-job answer` accepts it as `--expected-prompt-hash` (copy it from
+the listing's `bind:` line): pass it whenever the classification was
+made against an earlier listing -- and always pass it when the
+supervisor holds the session. An answer queued behind a busy
+supervisor without the flag is sent unbound (legacy behavior); it is
+verified at drain time only when the flag is present. Without the flag,
+a directly-sent answer still binds to the prompt re-read just before
+sending.
+
 **Held sessions.** While the job's supervisor holds the session (the
 whole turn, including the blocked states), `approvals` lists through
 the supervisor's already-open host (read-only queue-drain +
