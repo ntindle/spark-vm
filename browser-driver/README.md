@@ -28,7 +28,7 @@ stdlib-only:
   The protocol layer deliberately never reads it: no deployment
   assumption (same-box proxy included) is cemented behind the
   interface.
-- `test_bdrive_protocol.py` — 81 hermetic tests, wired into the root
+- `test_bdrive_protocol.py` — 109 hermetic test functions, wired into the root
   `pytest.ini`.
 
 Wire format of a call:
