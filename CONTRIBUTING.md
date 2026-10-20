@@ -193,7 +193,7 @@ you get only the subtree's tests. Always run the suite from the root so
 
 ### The merge gate, locally
 
-`python3 -m pytest` is most of what CI checks, but not all of it — seven
+`python3 -m pytest` is most of what CI checks, but not all of it — eight
 more CI checks gate the merge, and a PR that is green locally can still go
 red on CI if you skip the ones you can run. The one-shot way to run them:
 
@@ -204,7 +204,7 @@ red on CI if you skip the ones you can run. The one-shot way to run them:
 It runs the shard-plan check, the changelog ritual lint, the changed-paths
 evaluation (docs-only diffs skip the python suite, like CI — your
 uncommitted changes count as code, so the suite still runs until you
-commit them), docs index coverage, shellcheck severity=error over the CI
+commit them), docs index coverage, the markdown table lint, shellcheck severity=error over the CI
 job's shell-file selection on the whole checkout, and then the full python suite — failing on the
 first failure.
 `./scripts/local-gate.sh --quick` runs only the cheap checks (no suite);
@@ -233,6 +233,7 @@ PNG screenshot smoke test
 changelog ritual lint
 changed-paths gate
 docs index coverage
+markdown table lint
 <!-- gate-checks:end -->
 
 ```bash
@@ -264,6 +265,14 @@ python3 scripts/lint-changelog-ritual.py
 # vs hosted/relay_tenant_wiring.py), so the old one-file invocation is NOT
 # what CI runs — run all five files to replicate it.
 python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
+```
+
+```bash
+# `markdown table lint` (same W1 gate as the CI `markdown-tables` job:
+# every GFM table row on exactly one line — a wrapped continuation line
+# silently kills the rendered table):
+python3 scripts/docs_table_lint.py
+python3 -m pytest scripts/test_docs_table_lint.py -q
 ```
 
 The remaining three — `shellcheck`, the PNG screenshot smoke test, and the

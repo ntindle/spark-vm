@@ -8,13 +8,14 @@ rituals honest.
 ## The merge gate: `local-gate.sh`
 
 [`CONTRIBUTING.md`](../CONTRIBUTING.md)'s "merge gate, locally" section
-points here. One command runs the six locally-replicable CI checks in
+points here. One command runs the seven locally-replicable CI checks in
 order — the shard-plan check, the changelog ritual lint, the changed-paths
 evaluation (docs-only diffs skip the test suite like CI does; uncommitted
-changes count as code), docs index coverage, shellcheck severity=error over
+changes count as code), docs index coverage, the markdown table lint,
+shellcheck severity=error over
 the CI job's shell-file selection on the whole checkout (like CI's
 standalone job — no docs-only carve-out), then the full test suite — stopping at the first
-failure. (CI's merge gate is eight checks; the two the script can't run —
+failure. (CI's merge gate is nine checks; the two the script can't run —
 the markdown link check and the PNG screenshot smoke test — are named in
 its output, not run.)
 
@@ -30,6 +31,7 @@ shard plan
 changelog ritual lint
 changed-paths gate
 docs index coverage
+markdown table lint
 shellcheck (severity=error, CI job selection)
 python tests
 <!-- gate-steps:end -->
@@ -107,6 +109,21 @@ numbers the funnel docs prescribe.
 per connection, so a peer that opens connections and never finishes them
 is a resource-exhaustion vector; this one caps it.
 
+## Markdown tables: `docs_table_lint.py`
+
+`docs_table_lint.py` is the W1 wrapped-table-row lint for the markdown
+docs: a GFM table row must live on exactly one line, and a wrapped
+continuation (a row line whose next line does not start with `|`) silently
+kills the rendered table — the fragment becomes a paragraph and the row's
+cell is truncated. It scans `docs/**/*.md` plus the repo-root guides,
+skips fenced code blocks, and only treats delimiter-adjacent `|`-lines as
+tables (prose lines that merely start with `|` are not tables). Exit 0
+clean, 1 with `path:line: W1 ...` findings. Stdlib-only; CI runs it as the
+`markdown-tables` job on every PR (docs-only included), and
+`local-gate.sh` runs it as its own step. Pinned by
+`test_docs_table_lint.py` (every behavioral branch neuter-verified,
+including a self-enforcing pin that the tree is lint-clean).
+
 ## The pin tests: `test_*.py`
 
 These are the regression net for the tooling itself — and the tests that
@@ -163,6 +180,7 @@ never drift from what's on disk.
 | `test_cut_release.py` | `cut-release.sh` release tooling |
 | `test_deploy_gate_tests_coverage.py` | `deploy/components.conf` gate test-file registration |
 | `test_docs_index_coverage.py` | `docs/` index coverage |
+| `test_docs_table_lint.py` | `docs_table_lint.py` W1 wrapped-table-row lint (neuter-verified; tree-clean pin) |
 | `test_frontdoor_deploy.py` | sparkvm.dev front-door deploy (H28) |
 | `test_funnel_metrics.py` | `funnel_metrics.py` waitlist funnel queries |
 | `test_hosted_owner_alerting_doc.py` | HOSTED_OWNER_ALERTING.md alert classes ↔ push-lane mapping surface |

@@ -4,7 +4,7 @@
 Two drift classes, both cheap to introduce by accident in a component
 whose whole job is keeping the project's rituals honest:
 
-1. **Gate-step names** — scripts/README.md documents local-gate.sh's six
+1. **Gate-step names** — scripts/README.md documents local-gate.sh's seven
    checks in prose, but the script's actual `step "..."` names are free
    text echoed to the terminal. A step renamed in the script (or a step
    added without a docs touch) silently desyncs the README's description.
@@ -59,13 +59,13 @@ def _script_step_names():
 
 
 def test_readme_gate_steps_match_local_gate():
-    """The README's six documented steps are exactly local-gate.sh's, in
+    """The README's seven documented steps are exactly local-gate.sh's, in
     run order (order is contractual — the gate executes them in this
     sequence and the README describes them "in order")."""
     documented = _readme_gate_steps()
-    assert len(documented) == 6, (
-        "gate-steps inventory drift: expected the six merge-gate steps, "
-        "got %d: %s — if a seventh step was deliberately added, update "
+    assert len(documented) == 7, (
+        "gate-steps inventory drift: expected the seven merge-gate steps, "
+        "got %d: %s — if an eighth step was deliberately added, update "
         "the gate-steps block in scripts/README.md (and this pin) to "
         "match" % (len(documented), documented)
     )

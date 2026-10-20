@@ -46,7 +46,7 @@ def test_inventory_every_item_named_in_gate_script():
     """Each merge-gate check is run by local-gate.sh or explicitly excluded
     as having no local equivalent."""
     items = read_gate_checks_block()
-    assert len(items) == 8, f"inventory drift: {items}"
+    assert len(items) == 9, f"inventory drift: {items}"
     script = GATE.read_text().lower()
     for item in items:
         if item == "markdown link check":
@@ -344,6 +344,11 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
     # step runs and the absence is fatal). (issue #1379 follow-up fix)
     shutil.copy(str(REPO_ROOT / "scripts" / "ci_shellcheck_files.py"),
                 str(tmp / "scripts" / "ci_shellcheck_files.py"))
+    # The markdown-table-lint step runs the real linter against the scratch
+    # tree (docs-only, no tables — exits 0), so the scratch repo needs the
+    # real script, not a stub.
+    shutil.copy(str(REPO_ROOT / "scripts" / "docs_table_lint.py"),
+                str(tmp / "scripts" / "docs_table_lint.py"))
     git("add", ".")
     git("commit", "-qm", "base")
     base = git("rev-parse", "HEAD").stdout.strip()
@@ -361,12 +366,13 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
 
 
 def test_plan_mode_lists_every_step_without_running():
-    """--plan must print all eight steps and exit 0 without executing."""
+    """--plan must print all nine steps and exit 0 without executing."""
     out = subprocess.run(
         ["bash", str(GATE), "--plan"],
         capture_output=True, text=True, env={**os.environ, "LOCAL_GATE_NO_CD": "1"})
     assert out.returncode == 0, out.stderr
     for step in ("shard plan", "changelog ritual lint", "docs index coverage",
+                 "markdown table lint",
                  "shellcheck", "changed-paths gate", "python tests",
                  "markdown link check", "PNG screenshot smoke"):
         assert step in out.stdout, f"--plan omits step: {step}"
@@ -384,6 +390,7 @@ def test_plan_mode_lists_every_step_without_running():
         assert f in plan_line("docs index coverage"), \
             f"--plan's docs-index line omits {f}"
     assert "shellcheck" in plan_line("shellcheck")
+    assert "docs_table_lint.py" in plan_line("markdown table lint")
     assert "python3 -m pytest" in plan_line("python tests")
 
 

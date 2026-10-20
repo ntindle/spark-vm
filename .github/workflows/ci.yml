@@ -294,6 +294,20 @@ jobs:
       - name: docs-index coverage + doc-inventory pins
         run: python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
 
+  markdown-tables:
+    name: markdown table lint
+    timeout-minutes: 15
+    # Always runs, even on docs-only diffs where python-tests is skipped
+    # (P138): a wrapped table row (W1) silently kills the rendered table —
+    # GFM requires every row on exactly one line — and the python suite's
+    # pin test for the linter would be skipped on exactly the diffs that
+    # need it. Stdlib-only, no installs needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+      - name: wrapped table rows (W1)
+        run: python3 scripts/docs_table_lint.py
+
   markdown-links:
     name: markdown link check
     runs-on: ubuntu-latest
