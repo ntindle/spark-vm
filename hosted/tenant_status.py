@@ -518,7 +518,13 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
     provider no longer supports (#1462). Everywhere else the flip is
     boolean-only: at ``provisioning`` the arc holds per rule 1(a)
     (reachability failure waits for the driver's terminal report), and
-    terminal/operator codes are never rewritten.
+    the verdict codes (``human-denied``, ``human-drop-off``,
+    ``policy-misfire``, ``no-gated-action`` — a verdict already ended
+    the arc) are never rewritten. ``approved`` is the deliberate
+    exception: it is terminal for rule-1 *selection*, but a liveness
+    flip still demotes it — the arc stays live-capable after approval,
+    so a dead provider surfaces ``box-unhealthy`` instead of a ``live``
+    code the dead provider no longer supports.
     """
     if arc.code in _LIVENESS_DEMOTE_CODES:
         _move(arc, "box-unhealthy", detail="box-unhealthy: provider-dead")
@@ -576,8 +582,11 @@ def _re_evaluate_latch_on_exit(arc: BoxArc) -> bool:
     latch preserved for a later ``relay-recovered``. The provider input
     is checked first (a dead box wins over a down relay); the relay
     input is checked second (a down relay at exit means the honest code
-    is the suspension, not the latch). Terminal latches are restored
-    as-is — a verdict already ended the arc. This is the exit-time
+    is the suspension, not the latch). Verdict latches are restored
+    as-is — a verdict already ended the arc. (``approved`` is not a
+    verdict for this purpose: terminal for rule-1 selection, but still
+    live-capable, so a dead provider demotes it via the check above
+    rather than restoring it.) This is the exit-time
     backstop to :func:`_demote_on_provider_death`'s flip-time latch
     update: together they also heal pre-fix persisted records whose
     latch predates the flip-time update.
