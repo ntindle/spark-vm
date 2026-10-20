@@ -31,6 +31,7 @@ import pytest
 from hosted import relay_auto_driver as driver
 from hosted import relay_path_state as rps
 from hosted import relay_tenant_wiring as wiring
+from hosted import relay_tick_sidecar as sidecar
 from hosted import tenant_status as ts
 
 NOW = 1790000000.0  # fixed tick instant for deterministic watermarks/ids
@@ -848,14 +849,19 @@ def test_bulk_watermark_single_write_per_sweep(tmp_path, monkeypatch):
     })
     wm = str(tmp_path / "wm.json")
     writes = []
-    real_write = driver._atomic_write_json_0600
+    # Factoring note (#1725): the atomic sidecar write lives in the
+    # shared hosted.relay_tick_sidecar module now; the driver's
+    # _atomic_write_json_0600 is an alias. The behavior pin (exactly
+    # one sidecar write per sweep) is unchanged — only the patch
+    # target follows the code.
+    real_write = sidecar.atomic_write_json_0600
 
     def counting_write(path, obj):
         if os.path.abspath(path) == os.path.abspath(wm):
             writes.append(path)
         return real_write(path, obj)
 
-    monkeypatch.setattr(driver, "_atomic_write_json_0600", counting_write)
+    monkeypatch.setattr(sidecar, "atomic_write_json_0600", counting_write)
     summary = driver.tick_all_tenants(
         store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
         latest_probe_fn=_fresh_probe,
@@ -998,7 +1004,7 @@ def test_bulk_watermark_mid_sweep_corruption_noted_on_disk(tmp_path, monkeypatch
         fh.write("{not json")
     estate = tmp_path / "estate"
     estate.mkdir()
-    real_read = driver._read_watermark_marks
+    real_read = sidecar.read_sidecar_marks
     calls = []
 
     def scripted_read(path):
@@ -1007,7 +1013,7 @@ def test_bulk_watermark_mid_sweep_corruption_noted_on_disk(tmp_path, monkeypatch
             return {}, False  # pre-loop hint: clean
         return real_read(path)  # bulk write's fresh read: corrupt
 
-    monkeypatch.setattr(driver, "_read_watermark_marks", scripted_read)
+    monkeypatch.setattr(sidecar, "read_sidecar_marks", scripted_read)
     summary = driver.tick_all_tenants(
         store, watermark_path=wm, journal_store_dir=str(estate),
         read_fn=lambda vm_id: _ok(), now=NOW,
@@ -1043,14 +1049,14 @@ def test_bulk_watermark_write_failure_notes_every_tenant(tmp_path, monkeypatch):
         "tnt-b": [_arc("box-b")],
     })
     wm = str(tmp_path / "wm.json")
-    real_write = driver._atomic_write_json_0600
+    real_write = sidecar.atomic_write_json_0600
 
     def failing_write(path, obj):
         if os.path.abspath(path) == os.path.abspath(wm):
             raise OSError("disk full (test)")
         return real_write(path, obj)
 
-    monkeypatch.setattr(driver, "_atomic_write_json_0600", failing_write)
+    monkeypatch.setattr(sidecar, "atomic_write_json_0600", failing_write)
     summary = driver.tick_all_tenants(
         store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
         latest_probe_fn=_fresh_probe,

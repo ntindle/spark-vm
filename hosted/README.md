@@ -70,11 +70,45 @@ The relay-liveness tenant wiring never self-drives: one explicit
 anchor selection, and stale-reachability resync, and prints the tick
 report as JSON (exit 0; exit 1 with the error on stderr — a broken
 instrument is loud, never silent). At most one tick per box at a time
-(D-RL34-7 — the drive decision documented in the module docstring;
-no auto cadence driver exists, and #1711 tracks the future one).
+(D-RL34-7 — the drive decision documented in the module docstring).
+`--tick` is the manual/override path; the auto-cadence drivers are
+`relay_auto_driver.py` (drive, S1) and `relay_probe_driver.py`
+(probe, S5) — see below.
 
 Drive one tick: `python3 -m hosted.relay_tenant_wiring --store
 /path/tenants.json --tick TENANT_ID`.
+
+## relay_probe_driver.py — the probe-cadence driver (S5, #1725)
+
+The probe half of the relay-liveness auto-cadence story
+(`docs/RELAY_LIVENESS_AUTO_CADENCE_GAP_ANALYSIS.md`): once scheduled
+and given a bundle supplier, it ticks every tenant's live anchor
+through `relay_path_state.maybe_probe` on the shared
+`RELAY_PROBE_CADENCE_S` cadence, so the wiring driver stops ticking
+against permanently stale probe history. **Status: ships unscheduled**
+— the scheduled entrypoint + timer (the S1/S3 pattern) and the
+bundle-supplier wiring are open follow-up slices; until they land,
+the wiring driver's loud "stale probe history" notes remain the
+steady state by design, and the probe tick's own LOUD "wire a bundle
+supplier" note is the forcing function.
+
+Probe bundles are caller-supplied per probe via a `bundle_fn` seam —
+never persisted, never invented by the loop (D-RL2-3); a due tick
+with no bundle is noted loud, not failed. The supplier contract:
+`bundle_fn(tenant_id, vm_id) -> {"relay_host", "relay_port",
+"pinned_fingerprint"} | None`, called after anchor selection on every
+due tick; raising fails that tenant's tick loud (never the sweep).
+The loop stands down observably when the box's provider reads
+`suspended`/`destroyed` or no post-`live` arc exists (D-RL2-2), and
+one tenant's broken supplier fails loud without wedging the sweep
+(D-AC-3). Each tick writes a probe watermark
+(`<store>.relay-probe-watermarks.json`, distinct from the drive
+watermark) and a `relay-probe` fleet-journal note — the loop's own
+observability, so a dead probe loop reads as probe trouble, not
+driver trouble. The watermark sidecar, journal-note, and note-scrub
+machinery shared with the S1 auto-driver lives in the public
+`hosted/relay_tick_sidecar.py` module (extracted behavior-identical
+from `relay_auto_driver.py`).
 
 ## push_crypto.py — Web Push content-encoding crypto (RFC 8291), stdlib-only
 
