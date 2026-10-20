@@ -83,7 +83,7 @@ proves the Python plane worker can do in-worker Web Push sending with no
 JS interop and no C extensions. Implements ECDH P-256, HKDF-SHA-256,
 AES-128-GCM, and RFC 6979 deterministic ECDSA (for VAPID JWTs, RFC 8292)
 in pure Python, and pins every step against the RFC 8291 section 5 /
-Appendix A worked example in `test_push_crypto.py` (28 tests).
+Appendix A worked example in `test_push_crypto.py` (30 tests).
 
 Result: validated — one full send (ephemeral keygen + ECDH + KDF +
 AES-GCM + VAPID sign, 200 B payload) costs ~38 ms on the loop's dev VM,

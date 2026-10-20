@@ -13,6 +13,8 @@ import time
 import pytest
 
 from hosted.push_crypto import (
+    _GX,
+    _GY,
     _N,
     _P,
     _on_curve,
@@ -25,6 +27,7 @@ from hosted.push_crypto import (
     ecdsa_verify,
     encrypt_push_message,
     generate_keypair,
+    public_key_from_private,
     validate_peer_public_key,
     validate_private_key,
     vapid_authorization_header,
@@ -448,3 +451,40 @@ def test_public_key_validators():
                 b"\xff" * 32, n_bytes):  # 0, 2^256-1, and N itself
         with pytest.raises(ValueError):
             validate_private_key(bad)
+
+
+def test_public_key_from_private_roundtrip():
+    # Known-answer: the RFC 8291 Appendix A sender keypair pins that the
+    # derivation reproduces the public half, not just any consistent pair.
+    assert public_key_from_private(AS_PRIVATE) == AS_PUBLIC
+    priv, pub = generate_keypair()
+    assert public_key_from_private(priv) == pub
+    # Fail-closed: non-bytes and bad keys raise ValueError, never TypeError.
+    for bad in ("not-bytes", None, b"short", b"\x00" * 32,
+                _N.to_bytes(32, "big")):
+        with pytest.raises(ValueError):
+            public_key_from_private(bad)
+    # Valid scalar boundaries: d=1 -> G, d=N-1 -> -G (exact encodings).
+    g_enc = b"\x04" + _GX.to_bytes(32, "big") + _GY.to_bytes(32, "big")
+    neg_g_enc = (b"\x04" + _GX.to_bytes(32, "big")
+                 + (_P - _GY).to_bytes(32, "big"))
+    assert public_key_from_private(b"\x00" * 31 + b"\x01") == g_enc
+    assert public_key_from_private((_N - 1).to_bytes(32, "big")) == neg_g_enc
+
+
+def test_vapid_authorization_header_rejects_mismatched_keypair():
+    # Issue #1823: a private key from one keypair and the public key of
+    # another must fail closed — the minted header could never verify at
+    # the push service, so minting it would only move the failure to a
+    # 4xx far from the misconfiguration.
+    priv, _pub = generate_keypair()
+    _priv2, pub2 = generate_keypair()
+    with pytest.raises(ValueError, match="does not match"):
+        vapid_authorization_header(
+            vapid_private_key=priv, vapid_public_key=pub2,
+            audience="https://push.example.net", expires_at=1893456000)
+    # Regression: the check must not reject a genuinely matched pair.
+    value = vapid_authorization_header(
+        vapid_private_key=priv, vapid_public_key=public_key_from_private(priv),
+        audience="https://push.example.net", expires_at=1893456000)
+    assert value.startswith("vapid t=")

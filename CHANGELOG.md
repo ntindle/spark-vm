@@ -260,6 +260,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- Push notifications now refuse to send with a mismatched VAPID keypair: the sender fails closed at send time if the configured VAPID public key does not correspond to the private key, instead of minting an authorization header no push service could verify and failing every delivery with a 4xx far from the misconfigured key. Closes #1823. (#1827)
 - The `muse-job` MSP supervisor launch lock now also refuses planted
   FIFOs: the last same-class site the lock hardening (#1803/#1805) and
   the recover-worker hardening (#1804) left behind opens with

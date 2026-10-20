@@ -13,6 +13,8 @@ Public API (sender side only -- the plane never decrypts):
 
 - :func:`generate_keypair` -- fresh P-256 keypair (ephemeral sender keys,
   VAPID identity).
+- :func:`public_key_from_private` -- the 65-octet uncompressed public key
+  for a P-256 private key (keypair-consistency checks).
 - :func:`ecdh_shared_secret` -- RFC 8291 section 3.1 shared secret.
 - :func:`derive_push_keys` -- the full RFC 8291 section 3.3/3.4 pipeline:
   shared secret -> PRK_key -> IKM -> PRK -> (CEK, nonce).
@@ -49,13 +51,15 @@ Security posture (read before reusing):
 
 Performance posture (measured 2026-10-18 on the loop dev VM):
 
-- One send's crypto costs ~83 ms wall clock: ``encrypt_push_message``
+- One send's crypto costs ~118 ms wall clock: ``encrypt_push_message``
   ~69 ms for a 200 B payload (one P-256 ECDH scalar mult plus HKDF and
-  AES-GCM) and ``vapid_sign`` ~14 ms (one ECDSA sign).  The sync send
-  loop calls ``send_push`` serially, so a burst of N queued pushes is
-  N x ~83 ms of uninterrupted worker CPU with no budget, concurrency,
-  or backpressure signal.  The S1 in-worker-vs-separate-service decision
-  (issue #967) still needs a burst budget: see issue #1679.
+  AES-GCM), ``vapid_sign`` ~14 ms (one ECDSA sign), and ~35 ms for the
+  VAPID keypair-consistency check in ``vapid_authorization_header``
+  (issue #1823).  The sync send loop calls ``send_push`` serially, so a
+  burst of N queued pushes is N x ~118 ms of uninterrupted worker CPU
+  with no budget, concurrency, or backpressure signal.  The S1
+  in-worker-vs-separate-service decision (issue #967) still needs a
+  burst budget: see issue #1679.
 """
 
 from __future__ import annotations
@@ -192,6 +196,20 @@ def generate_keypair() -> tuple[bytes, bytes]:
     uncompressed).  Uses :mod:`secrets` (CSPRNG)."""
     d = secrets.randbelow(_N - 1) + 1
     return d.to_bytes(32, "big"), _encode_uncompressed_point(_scalar_mult(d, _G))
+
+
+def public_key_from_private(private_key: bytes) -> bytes:
+    """The 65-octet uncompressed P-256 public key for a 32-octet private
+    key: ``d * G``.  Fail-closed on any invalid input (same contract as
+    :func:`validate_private_key`).  Costs one scalar multiplication
+    (~35 ms on the loop dev VM).  The in-repo call site is per-send
+    inside :func:`vapid_authorization_header`; direct callers doing
+    their own admission checks should call it once per keypair, not in
+    a per-byte path."""
+    if not isinstance(private_key, bytes):
+        raise ValueError("private key must be bytes")
+    d = _check_private_key(private_key)
+    return _encode_uncompressed_point(_scalar_mult(d, _G))
 
 
 def ecdh_shared_secret(private_key: bytes, peer_public_key: bytes) -> bytes:
@@ -583,8 +601,22 @@ def vapid_authorization_header(*, vapid_private_key: bytes, vapid_public_key: by
     """The ``Authorization`` header value for a push request:
     ``vapid t=<jwt>, k=<uncompressed VAPID public key, base64url>``.
     ``now`` threads the caller's reference clock into vapid_sign's
-    fail-closed expiry comparison (see vapid_sign)."""
+    fail-closed expiry comparison (see vapid_sign).
+
+    Issue #1823: a VAPID private/public pair that does not match can
+    never succeed — the push service rejects the JWT because the
+    signature cannot verify against the advertised ``k`` — so this
+    function fails closed and raises ``ValueError`` instead of minting a
+    header that would die with a 4xx far from the misconfiguration that
+    caused it (same philosophy as vapid_sign's expired-exp refusal,
+    issue #1680).  The consistency check costs one P-256 scalar
+    multiplication on top of the signing cost."""
     _decode_uncompressed_point(vapid_public_key)  # fail fast on a bad key
+    if public_key_from_private(vapid_private_key) != vapid_public_key:
+        raise ValueError(
+            "vapid_authorization_header: VAPID public key does not match "
+            "the private key — refusing to mint a header no push service "
+            "could verify")
     jwt = vapid_sign(vapid_private_key=vapid_private_key, audience=audience,
                      expires_at=expires_at, subject=subject, now=now)
     return f"vapid t={jwt}, k={_b64url(vapid_public_key)}"
