@@ -27,7 +27,7 @@ been provisioned by this lane.
 
 ## 1. The alert classes
 
-An owner's box can demand their attention in eight ways. Each class below
+An owner's box can demand their attention in nine ways. Each class below
 names its source signal, its page/digest/chip behavior, and whether it
 exists today or lives in an open issue.
 
@@ -41,6 +41,7 @@ exists today or lives in an open issue.
 | token-expiry warning | sweep watcher pass → `on_token_expiry_warning` | push page, once per token generation | Advance notice, not a dashboard fix: the box's hourly auto-rotation has failed; a 401 in the rotate output means re-pair, a 403 means the box clock is off | shipped (#1062) |
 | provisioned, never paired | provision record + attestation-token TTL, plane-side | nothing | Owner action when #1214 ships: [TBD] | open — #1214 |
 | phone-home died, heartbeat still fresh | `phone_home_events` DO journal terminal closes + valid token + fresh heartbeat, plane-side | nothing | Owner action when #1489 ships: [TBD] | open — #1489 |
+| seq-gap, sentinel transport health | operator-plane intake (D-25-3, `docs/FLEET_CONSUMPTION_G25G26_GAP_ANALYSIS.md`): per-surface seq discontinuity or an epoch reset the intake cannot account for on the tenant-plane → operator-plane shipment | nothing — intake unbuilt (#1349 item 3), surfacing spec'd here | Owner action: check the box is alive first (the `Stale` chip); a dead box explains the hole. If the box is healthy, the hole is in the plane shipment path — flag it to the operator and treat the gap window as unaudited; do not restart the box to "fix" it (the shipper counters are plane-side, a box restart touches none of them) | open — #1809 (this doc is the surfacing spec); raiser #1349 item 3 |
 
 ## 2. Per-class detail
 
@@ -148,6 +149,59 @@ during clean generation bumps — the box reconnects with generation+1 —
 so only the no-reconnect-after-close window should page, not every
 close.
 
+**Seq-gap, sentinel transport health (#1809 — pinned 2026-10-20 against
+main `9ad58784`; the rest of this doc keeps its 2026-10-14 pin).** The
+signal is D-25-3's (`docs/FLEET_CONSUMPTION_G25G26_GAP_ANALYSIS.md`):
+the tenant plane ships its journals to the operator plane on
+per-surface monotonic counters with restart epochs, and the
+operator-plane intake raises a seq-gap alert on any per-surface seq
+discontinuity and on epoch resets it cannot account for — the
+sentinel's first rule is "the trail has a hole", not a signature
+check. The intake itself is unbuilt (#1349 item 3); this section specs
+only where the alert surfaces and what the owner does, so the intake
+has a taxonomy slot to fire into when it ships. **Why the owner sees
+it:** the hole is in the operator's audit trail *for the owner's
+plane* — metering inputs ride the same envelope (G26), so a gap can
+mean under-counted usage, and nobody can vouch for what the owner's
+box did inside the gap window. Fail-visible is the point (D-25-3): a
+hole the owner never sees is the exact failure the decision was
+written to prevent. **Owner action:** check the box is alive first —
+the dashboard's `Stale` chip (liveness stays heartbeat-only, O1); a
+dead box explains the hole and the stale-box class already owns it.
+If the box is healthy, the hole is in the plane shipment path: the
+owner cannot fix it from the dashboard, so the action is to flag it
+to the operator and treat the gap window as unaudited — never to
+restart the box (the shipper's per-surface counters live plane-side;
+a box restart touches none of them and only adds noise). Observation,
+not a work order (O5). **The suppression rule (the #1809 acceptance
+criterion):** only *unaccounted* epoch resets page. An accounted
+restart — the shipper's new-epoch announcement arriving inside the
+intake window, or the intake's own restart journal for a deliberate
+intake restart — is a journal event, never an alert: a deliberate
+restart is an accounted event, not a hole. A discontinuity that
+self-heals inside the same intake window never pages either; it
+lands in the digest row only. What pages is the persistent,
+unaccounted hole: once per (tenant, surface, epoch) — the D13-style
+generation keying, so a reconnect under a new epoch re-arms honestly —
+with a quiet period before the same gap can page again (the intake
+spec, not this doc, sets the duration; the lane's F7 4-hour shape is
+the precedent). The suppression rule never swallows an unaccounted
+hole; accounted restarts and self-healed blips are the only silences,
+and both are journaled. **Surface:** a trail-health chip on the
+plane/box card while a gap is open (fast and always visible, like the
+`Stale` chip); a push page only for the persistent gap, routed through
+the #990 boundary like every other page (O6 — D10 budgets, D57
+page-once dedup on the (tenant, surface, epoch) key, D61 audit apply
+by construction, not by the slice remembering them); the gap's
+duration, affected surfaces, and discontinuity count as a digest row.
+The push mapper does not exist yet (no `on_seq_gap` in
+`hosted/push_events.py` — the #1349 intake spec owns the mapper
+alongside the raiser, mirroring the #1614 caller-wiring split). **Both
+modes:** in self-hosted mode the operator plane is local/absent and
+the envelope channel collapses to the local estate read path (the
+G21 pattern, per the #1349 convergence's pointer note) — the class
+collapses to the local intake's equivalent, same suppression rule.
+
 ## 3. Channel matrix
 
 | Class | Dashboard chip | Push page | Digest |
@@ -160,10 +214,11 @@ close.
 | token-expiry warning | — | yes, once per token generation (only when the sweep is driven) | — |
 | never paired | nothing | nothing | nothing |
 | phone-home died, fresh heartbeat | nothing | nothing | nothing |
+| seq-gap (transport health) | trail-health chip while a gap is open (spec'd — intake unbuilt) | no — mapper unwired (intake unbuilt #1349) | gap duration + surfaces + discontinuity count (spec'd) |
 
-The two `nothing` rows are the doc's honest gap: an owner today sees
+The three `nothing` rows are the doc's honest gap: an owner today sees
 only what #1062's six shipped mappings page plus the dashboard's
-heartbeat-only chips. #1214 and #1489 own closing them.
+heartbeat-only chips. #1214, #1489, and #1809 own closing them.
 
 ## 4. Anti-spam and dedup discipline
 
@@ -210,6 +265,12 @@ all shipped in the #990 boundary and the #1062 mapping layer:
   #1214, or #1614 page is an `enqueue_page` call like the other mappings
   — D10 budgets, D57 dedup, and D61 audit apply by construction, not by
   the slice remembering to add them.
+- **O7 — seq-gap pages are fail-visible, never fail-silent.** The
+  suppression rule's only silences are accounted restarts and
+  self-healed blips — both journaled, neither pageable. An unaccounted
+  hole always surfaces (chip at minimum); the quiet period bounds
+  re-fire, never first-fire. The class exists so D-25-3's "the trail
+  has a hole" has an owner-visible slot the day the intake ships.
 
 ## 6. What this does not claim
 
@@ -243,3 +304,4 @@ all shipped in the #990 boundary and the #1062 mapping layer:
 | #1489 | phone-home died, heartbeat fresh | open (p3) |
 | #1214 | provisioned, never paired | open (p3) |
 | #999 | `phone_home_events` DO journal (the #1489 signal source; its upstream is #958's S4b socket lifecycle) | shipped |
+| #1809 | seq-gap / transport-health taxonomy class (this doc is the surfacing spec; decisions O7, suppression rule, channel matrix row) | open (p3 — the raiser is #1349 item 3, still unbuilt) |
