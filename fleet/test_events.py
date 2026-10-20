@@ -80,6 +80,9 @@ def ts(minutes_ago):
 TRANSLATION_CASES = [
     # (audit event, result, extra fields, expected kind, expected outcome)
     ("check", "precheck-fail", {}, "check", "precheck-fail"),
+    # G18 §3 / #1630: the release gate's verdicts -> skipped-frozen.
+    ("check", "fleet-freeze", {}, "check", "skipped-frozen"),
+    ("check", "wave-not-live", {}, "check", "skipped-frozen"),
     ("deploy", "precheck-fail", {"from": COMMIT_A, "to": COMMIT_B},
      "deploy", "precheck-fail"),
     ("deploy", "gate-fail", {"from": COMMIT_A, "to": COMMIT_B,

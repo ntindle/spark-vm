@@ -123,8 +123,11 @@ def _alert_scan_window_s():
     return max(horizons)
 
 # Outcome vocabulary closed by the design (§2). The S1 producer emits
-# only the subset with a legacy producer; started/superseded/deferred-arc/
-# skipped-frozen are S2/S3-forward outcomes with no legacy producer.
+# only the subset with a legacy producer; started/superseded/deferred-arc
+# are S2/S3-forward outcomes with no legacy producer. skipped-frozen
+# gained its producer in #1630's first slice (the release gate's verdicts,
+# audited by deploy/auto-deploy.sh); deferred-arc still awaits box-side
+# arc-awareness machinery.
 _KIND_OUTCOME = ("check", "deploy", "rollback")
 
 
@@ -207,6 +210,16 @@ def _read_jsonl_file(path):
 _TRANSLATE = {
     ("check", "noop"): ("check", "noop"),
     ("check", "precheck-fail"): ("check", "precheck-fail"),
+    # G18 §3 / #1630: the release gate's verdicts. A frozen fleet
+    # (operator-set freeze flag) or a not-live wave is a gate-determined
+    # skip, not a box failure — the outcome vocabulary's reserved
+    # `skipped-frozen` row finally has its legacy producer
+    # (deploy/auto-deploy.sh audits these from pending_range and the
+    # #1294 forced path). no-signal and invocation failures carry no
+    # verdict and keep their existing shapes — the design produces no
+    # event for no-signal, only the local status line.
+    ("check", "fleet-freeze"): ("check", "skipped-frozen"),
+    ("check", "wave-not-live"): ("check", "skipped-frozen"),
     ("deploy", "precheck-fail"): ("deploy", "precheck-fail"),
     ("deploy", "gate-fail"): ("deploy", "precheck-fail"),
     ("deploy", "snapshot-fail"): ("deploy", "precheck-fail"),

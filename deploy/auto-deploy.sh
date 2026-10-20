@@ -958,6 +958,14 @@ check_updater_drift() {
 # Prints the (possibly capped) sha on stdout. Return codes: 0 = range may
 # proceed (capped or unmanaged); 1 = nothing to do (the permitted max is
 # already deployed); 2 = frozen/refusal, do not proceed.
+# Gate-determined non-proceed outcomes print a `verdict=<name>` line on
+# stdout instead of a sha (G18 §3, #1630): `fleet-freeze` when the operator
+# set the freeze flag, `wave-not-live` when this box's wave is not live.
+# No verdict for no-signal (unverifiable gate): the design produces no
+# event for no-signal, only the local status line. Callers (pending_range)
+# re-emit the verdict so the audit trail names the gate's verdict instead
+# of collapsing into a generic noop/precheck-fail; stdout stays
+# machine-readable either way.
 # A box with no gate keys provisioned is gate-UNMANAGED (pre-G18 behavior,
 # warns once per tick): the fail-closed contract binds boxes the operator
 # provisioned (box_id + keys, G18 §5 install step), not boxes that never
@@ -985,7 +993,7 @@ gate_cap() {
         echo "$new"
         return 0
     fi
-    local state gstate repo_max
+    local state gstate repo_max reason
     if ! state="$(python3 "$GATE_QUERY" state)"; then
         # gate_query exits 0 even on no-signal (it prints state=frozen); a
         # nonzero exit is an invocation failure, not a gate verdict.
@@ -995,7 +1003,16 @@ gate_cap() {
     gstate="$(printf '%s\n' "$state" | sed -n 's/^state=//p')"
     repo_max="$(printf '%s\n' "$state" | sed -n 's/^repo_max=//p')"
     if [ "$gstate" != "live" ]; then
+        reason="$(printf '%s\n' "$state" | sed -n 's/^reason=//p')"
         log "ERROR: gate state is '${gstate:-unknown}' — fleet frozen, refusing deploy (fail closed, G18 §4)"
+        # G18 §3 / #1630: an operator-intended freeze gets a verdict line
+        # (fleet-freeze -> skipped-frozen) so the audit trail names the
+        # gate, not a box failure. no-signal (unverifiable gate) gets NO
+        # verdict — the design produces no event for no-signal, only the
+        # local status line — so it keeps the fail-closed alert path below.
+        if [ "$reason" = "freeze flag set" ]; then
+            echo "verdict=fleet-freeze"
+        fi
         return 2
     fi
     if [ -z "$repo_max" ]; then
@@ -1015,6 +1032,10 @@ gate_cap() {
         # incident: return 1 (nothing to do), not 2. A missing permit bit
         # fails safe the same way.
         log "gate: this box's wave is not live for repo (repo_permitted=${repo_permitted:-missing}) — nothing to do"
+        # G18 §3 / #1630: the staging skip gets a verdict line
+        # (wave-not-live -> skipped-frozen) so the audit trail names the
+        # gate instead of collapsing into an up-to-date noop.
+        echo "verdict=wave-not-live"
         return 1
     fi
     if [ -n "$old" ] && git -C "$UPDATER_REPO" merge-base --is-ancestor "$repo_max" "$old" 2>/dev/null; then
@@ -1056,10 +1077,11 @@ gate_cap() {
 # proceed (gate unmanaged — no keys installed — or live with this box's
 # wave permitted); returns 1 — defer, stay quiet — when the gate says
 # staging (repo_permitted != true) or frozen (state != live). stdout
-# carries nothing; chatter goes through log() (stderr). A live gate at
-# the deployed watermark ("already deployed") returns 0: version flow
-# says nothing to do, but the box is not frozen, so host-side input
-# redeploys at the permitted version may still proceed.
+# carries only `verdict=<name>` lines on the defer paths (G18 §3, #1630 —
+# same vocabulary as gate_cap); chatter goes through log() (stderr). A
+# live gate at the deployed watermark ("already deployed") returns 0:
+# version flow says nothing to do, but the box is not frozen, so host-side
+# input redeploys at the permitted version may still proceed.
 gate_permits_touch() {
     if [ ! -f "$GATE_QUERY" ]; then
         # Unmanaged (pre-G18 behavior): no gate to consult.
@@ -1071,7 +1093,7 @@ gate_permits_touch() {
         # fail-closed contract binds provisioned boxes, not these.
         return 0
     fi
-    local state gstate repo_permitted
+    local state gstate repo_permitted reason
     if ! state="$(python3 "$GATE_QUERY" state)"; then
         log "ERROR: gate_query failed to run — deferring extra-inputs forced deploy (fail closed, #1294)"
         return 1
@@ -1079,7 +1101,14 @@ gate_permits_touch() {
     gstate="$(printf '%s\n' "$state" | sed -n 's/^state=//p')"
     repo_permitted="$(printf '%s\n' "$state" | sed -n 's/^repo_permitted=//p')"
     if [ "$gstate" != "live" ]; then
+        reason="$(printf '%s\n' "$state" | sed -n 's/^reason=//p')"
         log "gate state is '${gstate:-unknown}' — fleet frozen, deferring extra-inputs forced deploy (fail closed, #1294)"
+        # G18 §3 / #1630: operator-intended freeze gets a verdict line
+        # (fleet-freeze -> skipped-frozen); no-signal gets none (no event
+        # per the design, only the local status line).
+        if [ "$reason" = "freeze flag set" ]; then
+            echo "verdict=fleet-freeze"
+        fi
         return 1
     fi
     if [ "$repo_permitted" != "true" ]; then
@@ -1087,6 +1116,7 @@ gate_permits_touch() {
         # a frozen fleet that relies on the gate to hold boxes still must
         # not see service restarts via the forced path.
         log "gate: this box's wave is not live for repo (repo_permitted=${repo_permitted:-missing}) — deferring extra-inputs forced deploy (#1294)"
+        echo "verdict=wave-not-live"
         return 1
     fi
     return 0
@@ -1121,6 +1151,10 @@ pending_range() {
         # means everything the gate permits, not everything upstream has.
         local capped rc
         if capped="$(gate_cap "" "$new")"; then rc=0; else rc=$?; fi
+        # Gate-determined outcomes arrive as verdict=<name> on stdout
+        # (rc≠0); re-emit on pending_range's stdout — unused on rc≠0
+        # today — so cmd_deploy audits the honest row (G18 §3, #1630).
+        case "$capped" in verdict=*) printf '%s\n' "$capped";; esac
         [ "$rc" -eq 1 ] && return 1
         [ "$rc" -eq 2 ] && return 2
         new="$capped"
@@ -1149,6 +1183,10 @@ pending_range() {
     # as pending_range's own callers).
     local capped rc
     if capped="$(gate_cap "$old" "$new")"; then rc=0; else rc=$?; fi
+    # Gate-determined outcomes arrive as verdict=<name> on stdout (rc≠0);
+    # re-emit on pending_range's stdout — unused on rc≠0 today — so
+    # cmd_deploy audits the honest row (G18 §3, #1630).
+    case "$capped" in verdict=*) printf '%s\n' "$capped";; esac
     [ "$rc" -eq 1 ] && return 1
     [ "$rc" -eq 2 ] && return 2
     new="$capped"
@@ -1170,19 +1208,26 @@ cmd_check() {
         # watermark (the gate's verdict stands), so claiming a forced
         # redeploy here would lie (Architecture review).
         if [ ! -f "$BLOCKED_COMMIT" ]; then
-            local wmark ec gate_touch=0
+            local wmark ec gate_touch=0 touch_verdict=""
             wmark="$(cat "$WATERMARK" 2>/dev/null || echo "")"
             if [ -n "$wmark" ]; then
                 # #1294: deploy consults the gate before synthesizing the
                 # forced range — evaluate once here so check reports the
                 # deferral, not a redeploy, on a staged/frozen gate.
-                if gate_permits_touch; then gate_touch=1; fi
+                if touch_verdict="$(gate_permits_touch)"; then gate_touch=1; fi
                 for ec in "${COMPONENTS[@]}"; do
                     if extra_inputs_changed "$ec"; then
                         if [ "$gate_touch" -eq 1 ]; then
                             log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
                         else
-                            log "up-to-date, but host-side inputs changed for $ec — deploy would defer the forced redeploy (gate staging/frozen, #1294)"
+                            case "$touch_verdict" in
+                            verdict=wave-not-live|verdict=fleet-freeze)
+                                log "up-to-date, but host-side inputs changed for $ec — deploy would defer the forced redeploy (gate ${touch_verdict#verdict=}, #1294)"
+                                ;;
+                            *)
+                                log "up-to-date, but host-side inputs changed for $ec — deploy would defer the forced redeploy (gate staging/frozen, #1294)"
+                                ;;
+                            esac
                         fi
                     fi
                 done
@@ -1271,7 +1316,7 @@ cmd_deploy() {
     # failure just retries on the next tick.
     migrate_legacy_cred_ui_checkout_artifact || \
         log "legacy cred-ui checkout artifact migration failed; will retry next tick"
-    local range rc old new range_synthesized=0 FORCED_LIST=""
+    local range rc old new range_synthesized=0 FORCED_LIST="" touch_verdict=""
     # Same set -e trap as in cmd_check: the `if` captures the return code.
     if range="$(pending_range)"; then rc=0; else rc=$?; fi
     if [ "$rc" -eq 1 ]; then
@@ -1281,6 +1326,18 @@ cmd_deploy() {
         if [ -f "$BLOCKED_COMMIT" ]; then
             return 0
         fi
+        case "$range" in
+        verdict=wave-not-live)
+            # The release gate — not the repo — said "nothing to do"
+            # (this box's wave is not live). Audit the verdict, not a
+            # generic noop: a staged box must be distinguishable from an
+            # up-to-date one (G18 §3, #1630). The gate's verdict stands —
+            # no extra-inputs scan (the forced path would defer through
+            # gate_permits_touch anyway); the next tick re-evaluates.
+            audit 'check' ',"result":"wave-not-live"'
+            return 0
+            ;;
+        esac
         old="$(cat "$WATERMARK" 2>/dev/null || echo "")"
         if [ -z "$old" ]; then
             # A watermark-less box reaches this branch only when the gate
@@ -1317,15 +1374,35 @@ cmd_deploy() {
         # passes through pending_range, so a staging/frozen gate would
         # otherwise be bypassed. Defer (stay quiet, next tick retries) until
         # the gate permits, like the watermark-less guard above.
-        if ! gate_permits_touch; then
+        if ! touch_verdict="$(gate_permits_touch)"; then
             log "gate staging/frozen — deferring extra-inputs forced deploy until the gate permits"
-            audit 'check' ',"result":"noop"'
+            # G18 §3 / #1630: audit the gate's verdict, not a generic
+            # noop — a staged/frozen box must be distinguishable from an
+            # up-to-date one.
+            case "$touch_verdict" in
+            verdict=wave-not-live|verdict=fleet-freeze)
+                audit 'check' ',"result":"'"${touch_verdict#verdict=}"'"'
+                ;;
+            *)
+                audit 'check' ',"result":"noop"'
+                ;;
+            esac
             return 0
         fi
         new="$old"
         range_synthesized=1
         log "host-side inputs changed with no new commits — deploying changed components at $new"
     elif [ "$rc" -ne 0 ]; then
+        case "$range" in
+        verdict=fleet-freeze)
+            # Operator-intended freeze: the audit row is the signal, not
+            # an alert — the box is not failing (G18 §3, #1630). no-signal
+            # and invocation failures carry no verdict and keep the
+            # fail-closed alert path below.
+            audit 'check' ',"result":"fleet-freeze"'
+            return 1
+            ;;
+        esac
         alert "pre-deploy check failed"
         audit 'check' ',"result":"precheck-fail"'
         return 1

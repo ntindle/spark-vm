@@ -124,6 +124,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Release-gate skips are now visible in the audit trail: when the release
+  gate holds a box back (operator-set freeze, or the box's wave not live),
+  the tick audits the gate's verdict instead of a generic
+  up-to-date/failure row, so a frozen or staged fleet reads as the gate's
+  decision rather than a box problem. (#1807)
 - Relay dial prober: DNS resolution is now covered by the probe's
   anti-tarpit deadline — resolution runs in a worker thread under the
   connect budget, so a wedged resolver can no longer freeze a probe
