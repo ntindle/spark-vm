@@ -125,7 +125,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   record is malformed: any entry that fails to load is quarantined with
   its error surfaced to the operator while the tenant keeps serving
   over its healthy boxes, and a corrupt held-status snapshot is dropped
-  at load instead of crashing the endpoint. (#TBD)
+  at load instead of crashing the endpoint. (#1784)
 - Tenant-status doc accuracy: `_demote_on_provider_death` and
   `_re_evaluate_latch_on_exit` both claimed terminal codes are never
   rewritten by liveness flips, but `approved` — a `TERMINAL_CODES`
