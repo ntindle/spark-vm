@@ -2779,10 +2779,10 @@ def cmd_upload_filings(args):
 # Unknown/reserved frame types are logged loudly and ignored, never
 # acted on, never fatal to the daemon.
 #
-# NOTE: the plane half (#958, one Durable Object per box) is not built
-# yet — the upgrade endpoint is unserved, so expect `upgrade failed`
-# retries with backoff until it lands. Validated against a stub harness
-# only (pairing/test_phone_home.py); live-plane acceptance is #960.
+# NOTE: the plane half (#958, one Durable Object per box) is deployed live
+# to sparkvm-control — `upgrade failed` retries now indicate a live-plane
+# or network failure, not an unbuilt endpoint. Validated against a stub
+# harness (pairing/test_phone_home.py); live-plane acceptance is #960.
 #
 # Liveness: the #864 heartbeat stays the ONLY liveness signal (spec §8).
 # This client never writes last_heartbeat.json; a socket the plane
@@ -4476,8 +4476,9 @@ def main(argv=None):
                                       "the control plane (daemon: reconnects "
                                       "per docs/PHONE_HOME_WIRE_PROTOCOL.md; "
                                       "the #864 heartbeat stays the only "
-                                      "liveness signal; plane half #958 not "
-                                      "built yet — expect upgrade retries)")
+                                      "liveness signal; plane half #958 is "
+                                      "deployed live — upgrade failures "
+                                      "indicate a live-plane/network issue)")
     s.set_defaults(fn=_phone_home_main)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
