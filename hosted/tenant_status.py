@@ -944,13 +944,23 @@ class TenantRecord:
     muse_id: Optional[str] = None
     deleted: bool = False
     boxes: Dict[str, BoxArc] = field(default_factory=dict)
-    # #1509: load-quarantined box arcs — corrupt-by-construction records
-    # a pre-#1464 build persisted (suspension-valued ``latched``), split
-    # out of ``boxes`` at load so they are never served or selected. The
-    # entries are the VERBATIM persisted dicts (never rewritten, never
-    # served); the store persists them back unchanged, so the quarantine
-    # is re-derived — never sticky — on every load and no evidence is
-    # lost. The endpoint signals the quarantine in the response body.
+    # #1509/#1784: load-quarantined entries — records that failed
+    # construction at load, split out of the served set so they are never
+    # served or selected. Keyed by box id for bad box arcs (the #1509
+    # pre-#1464 suspension-valued-``latched`` shape, plus #1784's
+    # generalization: any construction failure, and non-dict entries);
+    # the reserved ``#``-prefixed keys carry the non-box signals (a
+    # corrupt §8 hold snapshot, a corrupt boxes envelope) and are
+    # claimed via ``_reserve_quarantine_key`` with suffixing on
+    # real-box-id collision. Signal-vs-box classification is by the
+    # per-entry ``_quarantine_kind`` marker ("box"/"hold"/"envelope"),
+    # never by key prefix — box ids are free-form and can squat a
+    # reserved key's suffix shape (``#boxes/2``), so prefix inference
+    # would misclassify such an entry as a signal. Every entry
+    # is the VERBATIM persisted value (never rewritten, never served);
+    # the store persists it back unchanged, so the quarantine is
+    # re-derived — never sticky — on every load and no evidence is lost.
+    # The endpoint signals the quarantine in the response body.
     quarantined: Dict[str, dict] = field(default_factory=dict)
     # §8 G7 rule 1: when the leading box is deleted pre-live with no other
     # candidates, the endpoint holds the last reported code with detail
@@ -1031,35 +1041,121 @@ class TenantStore:
     def _to_record(tenant_id: str, raw: dict) -> TenantRecord:
         boxes: Dict[str, BoxArc] = {}
         quarantined: Dict[str, dict] = {}
-        for box_id, b in raw.get("boxes", {}).items():
-            # #1509: a record persisted by a pre-#1464 build can carry a
-            # suspension-valued latch — corrupt by construction. Quarantine
-            # the arc (exclude it from the served/selected set) instead of
-            # bricking the whole tenant at load with the #1464 constructor
-            # raise: the tenant serves again over its healthy arcs, and the
-            # quarantine is signaled in the response body (the only
-            # operator-visible channel — this endpoint serves JSON only
-            # and log_message is silenced). The raw entry is preserved
-            # VERBATIM in the quarantine map — never rewritten (the
-            # garbage latch is the operator's triage evidence), never
-            # served — and _from_record persists it back unchanged, so the
-            # quarantine is re-derived, never sticky, on every load. Heal
-            # was deliberately rejected: setting latched=None fabricates
-            # a suspension with no latch, which relay-recovered can never
-            # exit (TransitionError) — a silently unrecoverable state —
-            # and read-path rewriting would destroy the only evidence.
-            # Scope is surgical to the #1509 shape (suspension-valued
-            # latch): anything else that fails construction still raises
-            # (#1510 covers the post-construction code-shape residual).
-            latched = b.get("latched")
-            if latched is not None and latched in SUSPENSION_CODES:
+        # #1784: the boxes envelope itself can be corrupt — a non-dict
+        # .items() would AttributeError and brick the whole tenant at
+        # load, the same failure mode one level up (Engineering round-1
+        # B1). Quarantine the container instead; iteration proceeds over
+        # {}. The verbatim container round-trips on save (re-derivation
+        # source + operator evidence, the #1509 discipline).
+        boxes_raw = raw.get("boxes", {})
+        # A None envelope is corrupt (not merely absent) — track it with
+        # an explicit flag, since the corrupt value itself may be None.
+        envelope_corrupt = not isinstance(boxes_raw, dict)
+        if envelope_corrupt:
+            envelope_raw = boxes_raw
+            boxes_raw = {}
+        # #1784: a hand-corrupted §8 hold snapshot must not KeyError in
+        # status_response's hold path. Validate at load and drop to
+        # None; the quarantine signal carries the reason. The corrupt raw
+        # round-trips verbatim through last_reported itself on save (the
+        # #1509 discipline) — never through the boxes map — so no
+        # reserved signal key can collide with a real box id in the
+        # store, and no real box is ever mistaken for hold evidence
+        # (Security round-1 B1).
+        last_reported = raw.get("last_reported")
+        hold_err = _hold_usability_error(last_reported)
+        hold_raw = None
+        if hold_err is not None:
+            hold_raw = last_reported
+            last_reported = None
+        for box_id, b in boxes_raw.items():
+            if not isinstance(b, dict):
+                # Not a box dict at all (JSON allows any value here) —
+                # quarantine it; there is nothing to construct.
                 quarantined[box_id] = {
-                    "code": b.get("code"),
-                    "latched": latched,
-                    "raw": dict(b),
+                    "_quarantine_kind": _QUARANTINE_KIND_BOX,
+                    "code": None,
+                    "latched": None,
+                    "raw": b,
+                    "reason": (
+                        "box entry is not a JSON object (got %s); "
+                        "quarantined at load" % type(b).__name__
+                    ),
                 }
                 continue
-            boxes[box_id] = BoxArc(box_id=box_id, **b)
+            try:
+                # #1509: a record persisted by a pre-#1464 build can carry a
+                # suspension-valued latch — corrupt by construction.
+                # Quarantine the arc (exclude it from the served/selected
+                # set) instead of bricking the whole tenant at load with
+                # the #1464 constructor raise: the tenant serves again
+                # over its healthy arcs, and the quarantine is signaled
+                # in the response body (the only operator-visible
+                # channel — this endpoint serves JSON only and
+                # log_message is silenced). The raw entry is preserved
+                # VERBATIM in the quarantine map — never rewritten (the
+                # garbage latch is the operator's triage evidence), never
+                # served — and _from_record persists it back unchanged, so
+                # the quarantine is re-derived, never sticky, on every
+                # load. Heal was deliberately rejected: setting
+                # latched=None fabricates a suspension with no latch,
+                # which relay-recovered can never exit (TransitionError)
+                # — a silently unrecoverable state — and read-path
+                # rewriting would destroy the only evidence.
+                latched = b.get("latched")
+                if latched is not None and latched in SUSPENSION_CODES:
+                    quarantined[box_id] = {
+                        "_quarantine_kind": _QUARANTINE_KIND_BOX,
+                        "code": b.get("code"),
+                        "latched": latched,
+                        "raw": dict(b),
+                        "reason": _REASON_LEGACY_SUSPENSION_LATCH,
+                    }
+                    continue
+                boxes[box_id] = BoxArc(box_id=box_id, **b)
+            except Exception as exc:
+                # #1784: anything else that fails construction is
+                # quarantined too — one bad box dict must never deny the
+                # tenant's healthy arcs again. The reason names the
+                # construction error (the served surface scrubs and
+                # bounds it); the raw entry round-trips verbatim (the
+                # #1509 discipline). Only Exception is caught —
+                # KeyboardInterrupt/SystemExit still propagate.
+                quarantined[box_id] = {
+                    "_quarantine_kind": _QUARANTINE_KIND_BOX,
+                    "code": b.get("code"),
+                    "latched": b.get("latched"),
+                    "raw": dict(b),
+                    "reason": (
+                        "box arc failed construction and was quarantined "
+                        "at load: %s: %s" % (type(exc).__name__, exc)
+                    ),
+                }
+        # Reserve the in-memory signal keys LAST, with full knowledge of
+        # the box/box-quarantine keyspace: a real box id squatting a
+        # reserved key gets a suffixed signal key, never silent
+        # destruction.
+        if envelope_corrupt:
+            quarantined[
+                _reserve_quarantine_key(
+                    quarantined, boxes, _BOXES_QUARANTINE_KEY
+                )
+            ] = {
+                "_quarantine_kind": _QUARANTINE_KIND_ENVELOPE,
+                "code": None,
+                "latched": None,
+                "raw": envelope_raw,
+                "reason": (
+                    "tenant boxes map is not a JSON object (got %s); "
+                    "quarantined at load" % type(envelope_raw).__name__
+                ),
+            }
+        if hold_raw is not None:
+            quarantined[
+                _reserve_quarantine_key(
+                    quarantined, boxes, _HOLD_QUARANTINE_BOX_ID
+                )
+            ] = _hold_quarantine_entry(hold_raw, hold_err)
         return TenantRecord(
             tenant_id=tenant_id,
             stage=raw.get("stage", 1),
@@ -1070,30 +1166,56 @@ class TenantStore:
             deleted=raw.get("deleted", False),
             boxes=boxes,
             quarantined=quarantined,
-            last_reported=raw.get("last_reported"),
+            last_reported=last_reported,
         )
 
     @staticmethod
     def _from_record(rec: TenantRecord) -> dict:
-        boxes = {
-            box_id: {
-                "created_at": a.created_at,
-                "code": a.code,
-                "status_updated_at": a.status_updated_at,
-                "detail": a.detail,
-                "latched": a.latched,
-                "latched_detail": a.latched_detail,
-                "provider_running": a.provider_running,
-                "relay_reachable": a.relay_reachable,
-                "session": a.session,
+        # #1784: a quarantined boxes ENVELOPE round-trips verbatim as the
+        # whole container — re-derivation source and operator evidence,
+        # like the #1509 box raws. (There are no healthy arcs to serve
+        # when the envelope itself was corrupt.)
+        envelope_key = _find_quarantine_signal(
+            rec.quarantined, _QUARANTINE_KIND_ENVELOPE
+        )
+        if envelope_key is not None:
+            boxes = rec.quarantined[envelope_key]["raw"]
+        else:
+            boxes = {
+                box_id: {
+                    "created_at": a.created_at,
+                    "code": a.code,
+                    "status_updated_at": a.status_updated_at,
+                    "detail": a.detail,
+                    "latched": a.latched,
+                    "latched_detail": a.latched_detail,
+                    "provider_running": a.provider_running,
+                    "relay_reachable": a.relay_reachable,
+                    "session": a.session,
+                }
+                for box_id, a in rec.boxes.items()
             }
-            for box_id, a in rec.boxes.items()
-        }
-        # #1509: quarantined entries round-trip VERBATIM — they are the
-        # operator's evidence and the re-derivation source on the next
-        # load; the in-memory split is never persisted as such.
-        for box_id, q in rec.quarantined.items():
-            boxes[box_id] = dict(q["raw"])
+            # #1509: quarantined entries round-trip VERBATIM — they are the
+            # operator's evidence and the re-derivation source on the next
+            # load; the in-memory split is never persisted as such.
+            # #1784: the raw evidence may be a non-dict (a non-JSON-object
+            # box entry) — verbatim means the value itself, not
+            # dict(value). Reserved signal keys are skipped here: the
+            # hold's raw round-trips through last_reported below, the
+            # envelope's through the container above.
+            for box_id, q in rec.quarantined.items():
+                if _is_signal_quarantine_entry(q):
+                    continue
+                raw_q = q["raw"]
+                boxes[box_id] = dict(raw_q) if isinstance(raw_q, dict) else raw_q
+        # #1784: a dropped corrupt hold round-trips verbatim through
+        # last_reported itself (the #1509 discipline): the next load
+        # re-derives the quarantine signal from it, so the signal never
+        # goes silent across a save. A heal — the _save_record recompute,
+        # which pops the signal — naturally supersedes it.
+        hold_key = _find_quarantine_signal(
+            rec.quarantined, _QUARANTINE_KIND_HOLD
+        )
         return {
             "stage": rec.stage,
             "approvals_url": rec.approvals_url,
@@ -1101,7 +1223,11 @@ class TenantStore:
             "muse_public_key": rec.muse_public_key,
             "muse_id": rec.muse_id,
             "deleted": rec.deleted,
-            "last_reported": rec.last_reported,
+            "last_reported": (
+                rec.quarantined[hold_key]["raw"]
+                if hold_key is not None
+                else rec.last_reported
+            ),
             "boxes": boxes,
         }
 
@@ -1154,6 +1280,15 @@ class TenantStore:
                 "status_updated_at": reported.status_updated_at,
                 "detail": detail,
             }
+            # #1784: the recompute heals a previously-dropped corrupt
+            # hold — clear its quarantine signal(s); the fresh snapshot
+            # supersedes the corrupt cache.
+            for key in [
+                k
+                for k, e in rec.quarantined.items()
+                if _is_hold_quarantine_entry(e)
+            ]:
+                del rec.quarantined[key]
         doc["tenants"][tenant_id] = self._from_record(rec)
         self._save(doc)
 
@@ -1252,6 +1387,158 @@ class TenantStore:
 # §3 — response schema
 
 
+_HOLD_QUARANTINE_BOX_ID = "#last_reported"
+"""Reserved in-memory quarantine-map key for a corrupt §8 hold snapshot.
+
+The key is a SIGNAL LABEL only: the corrupt snapshot's verbatim raw
+round-trips through ``last_reported`` itself on save (the #1509
+discipline), never through the boxes map — so the evidence can never be
+mistaken for a box arc and no real box id can collide with it in the
+store. A real box that squats this id is unaffected: it flows through
+the normal box path, and the signal key is suffixed
+(``#last_reported/2``, ...) if the id is already taken.
+"""
+
+_BOXES_QUARANTINE_KEY = "#boxes"
+"""Reserved in-memory quarantine-map key for a corrupt boxes envelope.
+
+Same discipline as the hold: the corrupt container round-trips
+verbatim as the whole ``boxes`` value on save; the key is only the
+served signal's label, suffixed on collision with a real box id.
+"""
+
+_QUARANTINE_REASON_MAX_BYTES = 256
+"""Byte cap for a served quarantine reason (#1784).
+
+Reasons are module-minted but embed construction errors that can carry
+box-controlled bytes (a hostile box id flows into the #1464 message via
+``{box_id!r}``); the served surface scrubs and bounds them like every
+other served string (#1466).
+"""
+
+_REASON_LEGACY_SUSPENSION_LATCH = (
+    "corrupt suspension latch (pre-#1464 persisted record): "
+    "latched must be the non-suspension arc code held at "
+    "suspension/maintenance entry; the arc is excluded "
+    "from selection until the operator clears or repairs "
+    "the record"
+)
+
+
+_QUARANTINE_KIND_BOX = "box"
+"""Kind marker: a quarantined bad box arc, keyed by its box id."""
+
+_QUARANTINE_KIND_HOLD = "hold"
+"""Kind marker: the corrupt-§8-hold quarantine signal entry."""
+
+_QUARANTINE_KIND_ENVELOPE = "envelope"
+"""Kind marker: the corrupt-boxes-envelope quarantine signal entry."""
+
+
+def _reserve_quarantine_key(
+    quarantined: Dict[str, dict], boxes: Dict[str, "BoxArc"], base: str
+) -> str:
+    """#1784: claim an in-memory quarantine-map signal key.
+
+    The reserved ``#``-prefixed keys are signal labels, not box ids; if a
+    real box id squats the base key (box ids are free-form), the signal
+    takes a suffixed key instead of colliding — a squatting box is never
+    dropped or destroyed (Security round-1 B1).
+    """
+    key, n = base, 2
+    while key in quarantined or key in boxes:
+        key = "%s/%d" % (base, n)
+        n += 1
+    return key
+
+
+def _quarantine_entry_kind(entry: dict) -> str:
+    """#1784: the kind marker of a quarantine-map entry.
+
+    Classification is marker-based, never key-prefix-based. Box ids are
+    free-form (box-chosen at enrollment, #1466), so a hostile id can
+    squat a reserved key's SUFFIX (``#boxes/2``) — the very key shape
+    ``_reserve_quarantine_key`` itself mints — and prefix inference
+    would then misclassify the squatter as a signal (the envelope find
+    would even replace the whole boxes container with the squatter's
+    raw; Security P92 re-confirm). Unmarked entries default to
+    ``"box"`` — the fail-closed direction: nothing unmarked is ever
+    treated as a hold/envelope signal.
+    """
+    kind = entry.get("_quarantine_kind")
+    if kind in (_QUARANTINE_KIND_HOLD, _QUARANTINE_KIND_ENVELOPE):
+        return kind
+    return _QUARANTINE_KIND_BOX
+
+
+def _is_hold_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is the corrupt-hold signal."""
+    return _quarantine_entry_kind(entry) == _QUARANTINE_KIND_HOLD
+
+
+def _is_envelope_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is the corrupt-envelope signal."""
+    return _quarantine_entry_kind(entry) == _QUARANTINE_KIND_ENVELOPE
+
+
+def _is_signal_quarantine_entry(entry: dict) -> bool:
+    """#1784: whether a quarantine-map entry is a reserved signal (not a box)."""
+    return _is_hold_quarantine_entry(entry) or _is_envelope_quarantine_entry(
+        entry
+    )
+
+
+def _find_quarantine_signal(
+    quarantined: Dict[str, dict], kind: str
+) -> Optional[str]:
+    """#1784: the map key holding the quarantine signal of the given kind."""
+    for key, entry in quarantined.items():
+        if _quarantine_entry_kind(entry) == kind:
+            return key
+    return None
+
+
+def _hold_usability_error(hold: object) -> Optional[str]:
+    """#1784: ``None`` when the §8 hold snapshot is servable, else why not.
+
+    ``None`` (no snapshot — the normal pre-first-write state) is valid.
+    Anything else must be a dict carrying a §2-vocabulary ``code`` and a
+    non-empty string ``status_updated_at`` — the two fields
+    ``status_response``'s hold path indexes directly. ``detail`` needs no
+    check: the hold path already drops a non-str prior to the bare note.
+    """
+    if hold is None:
+        return None
+    if not isinstance(hold, dict):
+        return "not a JSON object (got %s)" % type(hold).__name__
+    code = hold.get("code")
+    if not isinstance(code, str) or code not in STATUS_CODES:
+        # The isinstance guard comes first: ``in`` on the frozenset
+        # hashes its operand, so an unhashable code would TypeError.
+        return "code %r is not a §2 status code" % (code,)
+    if not hold.get("status_updated_at") or not isinstance(
+        hold.get("status_updated_at"), str
+    ):
+        return "status_updated_at is missing or not a string"
+    return None
+
+
+def _hold_quarantine_entry(hold: object, err: str) -> dict:
+    """#1784: the quarantine entry for a corrupt §8 hold snapshot."""
+    return {
+        "_quarantine_kind": _QUARANTINE_KIND_HOLD,
+        "code": hold.get("code") if isinstance(hold, dict) else None,
+        "latched": None,
+        "raw": hold,  # verbatim — the operator's triage evidence
+        "reason": (
+            "corrupt §8 hold snapshot (last_reported) dropped at load: "
+            + err
+            + "; the endpoint serves no held status until a healthy arc "
+            "is written"
+        ),
+    }
+
+
 def _quarantine_surface(quarantined: Dict[str, dict]) -> List[dict]:
     """#1509: the operator-visible signal for load-quarantined box arcs.
 
@@ -1264,6 +1551,16 @@ def _quarantine_surface(quarantined: Dict[str, dict]) -> List[dict]:
     (#1466), while ``latched`` is a §2 vocabulary code (validated in
     SUSPENSION_CODES before quarantine) and ``code`` is only surfaced
     when it too is a vocabulary code.
+
+    #1784: the map now also holds non-#1509 entries — arcs that failed
+    construction for any other reason, and the reserved ``#``-prefixed
+    signal keys for a corrupt §8 hold snapshot / boxes envelope. Those
+    entries carry their own module-minted ``reason`` (which embeds the
+    construction error, so it may carry box-controlled bytes and is
+    scrubbed + bounded here); ``latched`` on such entries is whatever the
+    corrupt record carried — scrubbed like every other served string, so
+    a hostile latch value cannot ride into the served JSON raw
+    (Security round-1 B2).
     """
     surface = []
     for box_id in sorted(quarantined):
@@ -1273,17 +1570,18 @@ def _quarantine_surface(quarantined: Dict[str, dict]) -> List[dict]:
         # (JSON allows "code": 42) — the isinstance guard keeps the serve
         # path from raising TypeError on it (Engineering round-1 nit).
         code = code if isinstance(code, str) and code in STATUS_CODES else None
+        latched = q.get("latched")
         surface.append(
             {
                 "box_id": scrub_detail(str(box_id), 64),
                 "code": code,
-                "latched": q.get("latched"),
-                "reason": (
-                    "corrupt suspension latch (pre-#1464 persisted record): "
-                    "latched must be the non-suspension arc code held at "
-                    "suspension/maintenance entry; the arc is excluded "
-                    "from selection until the operator clears or repairs "
-                    "the record"
+                "latched": (
+                    scrub_detail(str(latched), 64)
+                    if latched is not None
+                    else None
+                ),
+                "reason": scrub_detail(
+                    str(q.get("reason") or ""), _QUARANTINE_REASON_MAX_BYTES
                 ),
             }
         )

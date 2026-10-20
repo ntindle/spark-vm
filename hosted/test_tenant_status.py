@@ -37,7 +37,13 @@ from tenant_status import (
     TransitionError,
     _CORRUPT_LATCH_RANK,
     _DUMMY_VERIFY_KEY,
+    _QUARANTINE_KIND_BOX,
+    _QUARANTINE_KIND_ENVELOPE,
+    _QUARANTINE_KIND_HOLD,
     _effective_rank,
+    _find_quarantine_signal,
+    _hold_quarantine_entry,
+    _quarantine_entry_kind,
     _quarantine_surface,
     apply_event,
     canonical_poll_message,
@@ -1616,21 +1622,25 @@ def test_quarantine_survives_operator_mutation(store, store_path):
     assert set(store.get("tnt_legacy").quarantined) == {"box-1"}
 
 
-def test_quarantine_scope_is_surgical_to_1509_shape(store, store_path):
-    # The quarantine predicate is the suspension-valued latch ALONE
-    # (QA round-1 correction: a record whose latch is suspension-valued
-    # AND whose code is non-vocabulary is quarantined too — the corrupt
-    # code never reaches the constructor, and the served surface reports
-    # it as code: None, fail-closed; see test_quarantine_both_bad below).
-    # A non-vocabulary code WITHOUT the suspension latch still fails
-    # loud at load — the #1510 residual is not smuggled through this path.
+def test_quarantine_scope_extended_beyond_1509_shape(store, store_path):
+    # #1784 supersedes the old surgical scope: a non-vocabulary code
+    # WITHOUT the suspension latch no longer fails loud at load — it is
+    # quarantined like every other construction failure (fail-closed:
+    # never served, never selected, surfaced as code None). The old
+    # fail-loud expectation ("the #1510 residual is not smuggled through
+    # this path") is retired by the #1784 extension.
     _write_raw(
         store_path,
         _legacy_corrupt_raw(box_id="box-1", code="bogus-not-a-code",
                            latched=None),
     )
-    with pytest.raises(TenantStatusError):
-        store.get("tnt_legacy")
+    rec = store.get("tnt_legacy")  # was: pytest.raises(TenantStatusError)
+    assert rec.boxes == {}
+    q = rec.quarantined["box-1"]
+    assert q["raw"]["code"] == "bogus-not-a-code"
+    assert "not a §2 status code" in q["reason"]
+    (entry,) = _quarantine_surface(rec.quarantined)
+    assert entry["code"] is None
 
 
 def test_quarantine_both_bad_stays_fail_closed(store, store_path):
@@ -1695,12 +1705,16 @@ def test_selection_all_unknown_codes_still_selects(store):
     assert select_reported([arc]).box_id == "box-c1"  # was: KeyError
     # And the write path survives it: _save_record -> select_reported
     # used to raise KeyError before persisting. The record persists with
-    # the mutated code; the NEXT load fails loud at the construction
-    # boundary with the actionable UnknownCodeError — never an opaque
-    # KeyError out of selection.
+    # the mutated code; the NEXT load quarantines the arc at the
+    # construction boundary (#1784 — the old fail-loud-at-load pin is
+    # retired: one bad box dict must never brick the tenant again).
     store.create(_tenant(boxes={"box-c1": arc}, tenant_id="tnt_bad"))
-    with pytest.raises(tenant_status.UnknownCodeError):
-        store.get("tnt_bad")
+    rec = store.get("tnt_bad")
+    assert rec.boxes == {}
+    # The box is quarantined — and so is the §8 hold the create path
+    # minted from the corrupt in-memory arc (non-vocabulary code): the
+    # hold sanitizer catches it at the next load, fail-closed.
+    assert set(rec.quarantined) == {"box-c1", "#last_reported"}
 
 
 def test_latch_swap_path_stays_fail_loud(store):
@@ -2009,3 +2023,361 @@ def test_store_lock_refuses_symlink_plant(store_path, tmp_path):
     with open(victim, encoding="utf-8") as fh:
         assert fh.read() == "victim"
     assert not os.path.lexists(store_path)
+
+
+# ---------------------------------------------------------------------------
+# #1784 — load quarantine for every box dict that fails construction,
+# plus §8 hold-snapshot sanitization.
+#
+# #1509 quarantined only the suspension-valued-latch shape; any other
+# malformed box dict (unhashable latch, missing created_at, unknown
+# code, non-dict entry, non-str detail) still bricked the whole tenant
+# at every read — and a corrupt last_reported KeyError'd in
+# status_response's hold path before the quarantine signal could ride.
+
+
+def _healthy_box_dict(**over):
+    box = {
+        "created_at": "2026-10-19T00:00:00Z",
+        "code": "live",
+        "status_updated_at": "2026-10-19T00:00:00Z",
+        "detail": None,
+        "latched": None,
+        "latched_detail": None,
+        "provider_running": True,
+        "relay_reachable": True,
+        "session": 1,
+    }
+    box.update(over)
+    return box
+
+
+def _raw_with_boxes(tenant_id="tnt_1784", boxes=None, **tenant_over):
+    tenant = {"stage": 2, "approvals_url": "https://approve.example/a/x",
+              "boxes": {} if boxes is None else boxes}
+    tenant.update(tenant_over)
+    return {"version": 1, "tenants": {tenant_id: tenant}}
+
+
+def test_every_construction_failure_quarantines_not_bricks(store, store_path):
+    # The four #1784 cases plus the non-dict / non-str-detail shapes:
+    # the tenant loads, the healthy arc serves, every bad dict is cut
+    # with its construction error as the reason — never a load raise.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "unhashable-latch": _healthy_box_dict(latched=["stuck"]),
+        "missing-created-at": {
+            k: v for k, v in _healthy_box_dict().items()
+            if k != "created_at"
+        },
+        "unknown-code": _healthy_box_dict(code=42),
+        "non-dict-entry": "garbage",
+        "non-str-detail": _healthy_box_dict(detail=42),
+    }
+    _write_raw(store_path, _raw_with_boxes(boxes=boxes))
+    rec = store.get("tnt_1784")  # was: TypeError / UnknownCodeError
+    assert set(rec.boxes) == {"ok"}
+    assert set(rec.quarantined) == {
+        "unhashable-latch", "missing-created-at", "unknown-code",
+        "non-dict-entry", "non-str-detail",
+    }
+    reasons = {k: v["reason"] for k, v in rec.quarantined.items()}
+    assert "unhashable type" in reasons["unhashable-latch"]
+    assert "missing 1 required positional argument: 'created_at'" in reasons[
+        "missing-created-at"]
+    assert "not a §2 status code" in reasons["unknown-code"]
+    assert "not a JSON object" in reasons["non-dict-entry"]
+    assert "scrub_detail requires a str or None" in reasons["non-str-detail"]
+    # Verbatim evidence is preserved for the operator.
+    assert rec.quarantined["unknown-code"]["raw"]["code"] == 42
+    assert rec.quarantined["non-dict-entry"]["raw"] == "garbage"
+    # The healthy arc still serves, with the quarantine signal riding.
+    body = status_response(rec)
+    assert body["status"] == "live"
+    assert len(body["quarantine"]) == 5
+
+
+def test_general_quarantine_surface_bounds_and_scrubs_reason(store, store_path):
+    # The construction error embeds box-controlled bytes (the hostile
+    # code flows into check_code's message via {code!r}); the served
+    # reason must be scrubbed (no C0/C1) and bounded.
+    hostile = "live\x1b[2K\r\n" + "x" * 500
+    _write_raw(store_path, _raw_with_boxes(
+        boxes={"ok": _healthy_box_dict(),
+               "hostile": _healthy_box_dict(code=hostile)}))
+    rec = store.get("tnt_1784")
+    (entry,) = [e for e in _quarantine_surface(rec.quarantined)
+                if "hostile" in e["box_id"]]
+    assert entry["code"] is None  # non-vocabulary code never surfaces raw
+    assert "\x1b" not in entry["reason"] and "\r" not in entry["reason"]
+    assert "\n" not in entry["reason"]
+    assert len(entry["reason"].encode("utf-8")) <= 256
+
+
+def test_corrupt_hold_dropped_with_quarantine_signal(store, store_path):
+    # last_reported without a usable code: dropped to None at load, the
+    # quarantine signal rides the fail-closed 404 (never a KeyError in
+    # the hold path, never bricked-silent).
+    raw = _raw_with_boxes(
+        boxes={}, last_reported={"status_updated_at": "2026-10-19T00:00:00Z"})
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_1784")
+    assert rec.last_reported is None
+    (entry,) = rec.quarantined.values()
+    assert "#last_reported" in rec.quarantined
+    assert "not a §2 status code" in entry["reason"]
+    rec.session_token = "sess-hold1784"
+    store.save(rec)
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=sess-hold1784"})
+    assert status == 404
+    assert body["error"] == "no_servable_tenant_record"
+    (sig,) = body["quarantine"]
+    assert sig["box_id"] == "#last_reported"
+
+
+def test_corrupt_hold_non_dict_and_bad_timestamp(store, store_path):
+    for bad_hold in (["not", "a", "dict"], {"code": "live"},
+                     {"code": "live", "status_updated_at": 42}):
+        _write_raw(store_path, _raw_with_boxes(
+            boxes={}, last_reported=bad_hold))
+        rec = store.get("tnt_1784")
+        assert rec.last_reported is None
+        assert "#last_reported" in rec.quarantined
+
+
+def test_valid_and_absent_hold_untouched(store, store_path):
+    # No hold (pre-first-write) and a valid hold both load cleanly with
+    # no quarantine entries.
+    _write_raw(store_path, _raw_with_boxes(boxes={"ok": _healthy_box_dict()}))
+    rec = store.get("tnt_1784")
+    assert rec.last_reported is None and rec.quarantined == {}
+    _write_raw(store_path, _raw_with_boxes(
+        boxes={}, last_reported={"code": "live",
+                                 "status_updated_at": "2026-10-19T00:00:00Z",
+                                 "detail": "d"}))
+    rec = store.get("tnt_1784")
+    assert rec.last_reported["code"] == "live" and rec.quarantined == {}
+    assert status_response(rec)["status"] == "live"
+
+
+def test_hold_and_box_quarantine_round_trip_verbatim(store, store_path):
+    # The new quarantine entries round-trip verbatim through a save and
+    # re-derive on the next load (the #1509 discipline, extended). Box
+    # raws ride the boxes map; the hold's corrupt raw rides
+    # last_reported itself (never the boxes map — Security round-1 B1).
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "bad": _healthy_box_dict(code=42),
+        "nondict": [1, 2],
+    }
+    _write_raw(store_path, _raw_with_boxes(
+        boxes=boxes, last_reported={"code": "bogus"}))
+    rec = store.get("tnt_1784")
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert "quarantined" not in persisted
+    assert persisted["boxes"]["bad"]["code"] == 42
+    assert persisted["boxes"]["nondict"] == [1, 2]
+    assert "#last_reported" not in persisted["boxes"]
+    # The corrupt hold was dropped at load; the save recomputed a fresh
+    # hold from the healthy arc (the _save_record §8 refresh) and popped
+    # the stale hold signal.
+    assert persisted["last_reported"]["code"] == "live"
+    rec2 = store.get("tnt_1784")
+    assert set(rec2.quarantined) == {"bad", "nondict"}
+    assert set(rec2.boxes) == {"ok"}
+    assert rec2.quarantined["bad"]["raw"]["code"] == 42
+
+
+def test_corrupt_hold_round_trips_verbatim_without_arcs(store, store_path):
+    # No healthy arcs: no heal-recompute happens, so the corrupt hold
+    # raw persists verbatim through last_reported and the signal
+    # re-derives on every load (Security round-1 B3 — never silent
+    # across a save cycle).
+    _write_raw(store_path, _raw_with_boxes(
+        boxes={}, last_reported=["not", "a", "dict"]))
+    rec = store.get("tnt_1784")
+    assert rec.last_reported is None
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert persisted["last_reported"] == ["not", "a", "dict"]
+    assert persisted["boxes"] == {}
+    rec2 = store.get("tnt_1784")
+    assert rec2.last_reported is None
+    assert set(rec2.quarantined) == {"#last_reported"}
+    assert rec2.quarantined["#last_reported"]["raw"] == ["not", "a", "dict"]
+    # And the 404 still rides the signal after the save→load cycle.
+    rec2.session_token = "sess-rt"
+    store.save(rec2)
+    status, body = _service(store).handle_get(
+        "/tenant/status", {"cookie": "session=sess-rt"})
+    assert status == 404
+    (sig,) = body["quarantine"]
+    assert sig["box_id"] == "#last_reported"
+
+
+def test_corrupt_boxes_envelope_quarantines_not_bricks(store, store_path):
+    # Engineering round-1 B1: a non-dict boxes envelope (null, list)
+    # quarantines the container instead of bricking the tenant with
+    # AttributeError out of .items().
+    for bad_envelope in (None, ["box-1"], "garbage"):
+        tenant = {"stage": 2,
+                  "approvals_url": "https://approve.example/a/x",
+                  "boxes": bad_envelope,
+                  "last_reported": {"code": "live",
+                                    "status_updated_at": "2026-10-19T00:00:00Z",
+                                    "detail": "d"}}
+        _write_raw(store_path, {"version": 1, "tenants": {"tnt_1784": tenant}})
+        rec = store.get("tnt_1784")  # was: AttributeError
+        assert rec.boxes == {}
+        (key,) = [k for k in rec.quarantined if k.startswith("#boxes")]
+        assert "not a JSON object" in rec.quarantined[key]["reason"]
+        assert rec.quarantined[key]["raw"] == bad_envelope
+        # The valid hold still serves over the (empty) box set.
+        assert status_response(rec)["status"] == "live"
+
+
+def test_corrupt_envelope_round_trips_verbatim(store, store_path):
+    # The corrupt envelope persists verbatim as the whole boxes value
+    # and re-derives the signal on the next load.
+    tenant = {"stage": 2, "approvals_url": "https://approve.example/a/x",
+              "boxes": None}
+    _write_raw(store_path, {"version": 1, "tenants": {"tnt_1784": tenant}})
+    rec = store.get("tnt_1784")
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert persisted["boxes"] is None
+    rec2 = store.get("tnt_1784")
+    assert any(k.startswith("#boxes") for k in rec2.quarantined)
+
+
+def test_reserved_signal_key_squatted_by_real_box(store, store_path):
+    # Security round-1 B1: a real box enrolled as "#last_reported" is
+    # never dropped or destroyed — it flows through the normal box
+    # path, and the hold signal takes a suffixed key.
+    boxes = {
+        "#last_reported": _healthy_box_dict(),
+        "ok": _healthy_box_dict(),
+    }
+    _write_raw(store_path, _raw_with_boxes(
+        boxes=boxes, last_reported={"code": "bogus"}))
+    rec = store.get("tnt_1784")
+    # The squatting box is a healthy arc, untouched.
+    assert set(rec.boxes) == {"#last_reported", "ok"}
+    hold_keys = [k for k in rec.quarantined if k.startswith("#last_reported")]
+    assert hold_keys == ["#last_reported/2"]
+    # The squatting box survives a save (no silent destruction).
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert "#last_reported" in persisted["boxes"]
+    assert persisted["boxes"]["#last_reported"]["code"] == "live"
+
+
+def test_suffix_squat_box_id_not_treated_as_envelope_signal(store, store_path):
+    # Security P92 re-confirm: box ids are free-form, so a hostile id can
+    # squat a reserved key's SUFFIX ("#boxes/2") — the very key shape
+    # _reserve_quarantine_key itself mints. Prefix inference would then
+    # misclassify the squatter as the envelope signal and replace the
+    # whole boxes container with its raw. Marker classification must not.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#boxes/2": _healthy_box_dict(code=42),
+    }
+    _write_raw(store_path, _raw_with_boxes(boxes=boxes))
+    rec = store.get("tnt_1784")
+    assert set(rec.boxes) == {"ok"}
+    assert set(rec.quarantined) == {"#boxes/2"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    # The container survives intact: the squatter's raw is one entry, not
+    # the container itself.
+    assert set(persisted["boxes"]) == {"ok", "#boxes/2"}
+    assert persisted["boxes"]["ok"]["code"] == "live"
+    assert persisted["boxes"]["#boxes/2"]["code"] == 42
+    # The quarantine re-derives on the next load — evidence is not lost.
+    rec2 = store.get("tnt_1784")
+    assert set(rec2.quarantined) == {"#boxes/2"}
+
+
+def test_suffix_squat_box_id_not_treated_as_hold_signal(store, store_path):
+    # Same discipline for the hold signal: a bad box squatting
+    # "#last_reported/2" must not have its raw persisted as last_reported.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#last_reported/2": _healthy_box_dict(code=42),
+    }
+    raw = _raw_with_boxes(
+        boxes=boxes,
+        last_reported={
+            "code": "live",
+            "status_updated_at": "2026-10-19T00:00:00Z",
+            "detail": None,
+        },
+    )
+    _write_raw(store_path, raw)
+    rec = store.get("tnt_1784")
+    assert set(rec.quarantined) == {"#last_reported/2"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    assert set(persisted["boxes"]) == {"ok", "#last_reported/2"}
+    assert persisted["boxes"]["#last_reported/2"]["code"] == 42
+    # last_reported is the store's own snapshot, never the squatter's raw.
+    assert persisted["last_reported"]["code"] == "live"
+    assert persisted["last_reported"]["status_updated_at"] == (
+        "2026-10-19T00:00:00Z"
+    )
+
+
+def test_hold_recompute_keeps_suffix_squat_box_evidence(store, store_path):
+    # The _save_record stale-hold cleanup deletes only hold signals —
+    # a bad box squatting "#last_reported/2" is box evidence, not a
+    # signal, and survives the recompute.
+    boxes = {
+        "ok": _healthy_box_dict(),
+        "#last_reported/2": _healthy_box_dict(code=42),
+    }
+    _write_raw(store_path, _raw_with_boxes(
+        boxes=boxes, last_reported={"code": "bogus"}))
+    rec = store.get("tnt_1784")
+    assert set(rec.quarantined) == {"#last_reported/2", "#last_reported"}
+    store.save(rec)
+    persisted = json.load(open(store_path))["tenants"]["tnt_1784"]
+    # The corrupt hold's signal is healed away; the squatter's evidence
+    # is not.
+    assert set(persisted["boxes"]) == {"ok", "#last_reported/2"}
+    assert persisted["last_reported"]["code"] == "live"
+
+
+def test_quarantine_kind_marker_classification(store, store_path):
+    # The classifiers are marker-based, never prefix-based: a signal
+    # entry is found by its kind marker even at a suffixed key, and an
+    # unmarked (or garbage-marked) entry is never a signal — the
+    # fail-closed default.
+    assert _quarantine_entry_kind({}) == _QUARANTINE_KIND_BOX
+    assert _quarantine_entry_kind(
+        {"_quarantine_kind": "evil"}) == _QUARANTINE_KIND_BOX
+    entry = _hold_quarantine_entry({"code": "bogus"}, "nope")
+    assert _quarantine_entry_kind(entry) == _QUARANTINE_KIND_HOLD
+    m = {"#last_reported/2": entry, "#boxes": {
+        "_quarantine_kind": _QUARANTINE_KIND_BOX, "raw": {}}}
+    assert _find_quarantine_signal(
+        m, _QUARANTINE_KIND_HOLD) == "#last_reported/2"
+    assert _find_quarantine_signal(
+        m, _QUARANTINE_KIND_ENVELOPE) is None
+
+
+def test_quarantine_surface_scrubs_latched(store, store_path):
+    # Security round-1 B2: a hostile latched value on a non-#1509 entry
+    # must not reach the served surface raw.
+    hostile = "live\x1b[2K\r\nINJECTED"
+    _write_raw(store_path, _raw_with_boxes(boxes={
+        "ok": _healthy_box_dict(),
+        "bad": _healthy_box_dict(latched=hostile, code=42),
+    }))
+    rec = store.get("tnt_1784")
+    (entry,) = [e for e in _quarantine_surface(rec.quarantined)
+                if e["box_id"] == "bad"]
+    assert "\x1b" not in entry["latched"] and "\r" not in entry["latched"]
+    assert "\n" not in entry["latched"]
+    assert len(entry["latched"].encode("utf-8")) <= 64
