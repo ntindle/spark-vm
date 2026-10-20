@@ -1337,3 +1337,25 @@ def test_watch_stillborn_gates_unknown_terminal(cli, fakes):
     assert len(events) == 1
     assert "EVIL" not in events[0]["detail"]
     assert "'unknown'" in events[0]["detail"]
+
+
+def test_msp_launch_lock_refuses_symlink(cli, monkeypatch):
+    # Issue #1803: a symlinked msp-launch lock path must fail the open
+    # (ELOOP) instead of being followed -- "w" would have truncated the
+    # link target. The launcher fails closed and loud: the OSError
+    # propagates, no supervisor forks, the decoy is never truncated.
+    slug = "msplaunchsec"
+    _make_job(cli, slug)
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    decoy = os.path.join(cli.JOBS_DIR, "precious.txt")
+    with open(decoy, "w") as f:
+        f.write("precious data")
+    os.symlink(decoy, os.path.join(cli.JOBS_DIR,
+                                   ".%s.msp-launch.lock" % slug))
+    forks = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: forks.append(a) or None)
+    with pytest.raises(OSError):
+        cli._msp_launch_supervisor(slug)
+    assert forks == [], "no supervisor may fork on a planted lock"
+    assert open(decoy).read() == "precious data"  # never truncated
