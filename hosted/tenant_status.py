@@ -236,6 +236,14 @@ class BoxArc:
     detail: Optional[str] = None
     latched: Optional[str] = None  # arc code at suspension/maintenance entry
     latched_detail: Optional[str] = None  # its detail — restored on recovery
+    latched_status_updated_at: str = ""  # #1786: the latched arc code's
+    # own last-update time. The arc owns a single status_updated_at for
+    # the served suspension AND the latch, so latch-routed events record
+    # their advance here instead of bumping the shared field — the
+    # suspension's served status_updated_at moves only when its served
+    # body moves (bump-iff-served-body-changed). "" when no latch is
+    # held. Persisted via TenantStore._from_record; pre-fix records
+    # load with "" (the constructor default).
     provider_running: bool = False  # §4 live-entry AND-combine inputs
     relay_reachable: bool = False
     session: int = 1  # onboarding session; rule-7 restarts increment
@@ -576,6 +584,11 @@ def _suspend_on_relay_down(arc: BoxArc, detail: Optional[str]) -> None:
     if arc.code in _LIVENESS_DEMOTE_CODES:
         arc.latched = arc.code
         arc.latched_detail = arc.detail
+        # #1786: the latch's own update time is the arc's update time at
+        # entry — captured before the suspension's _touch below (the
+        # fourth latch-creation site alongside relay-failure,
+        # operator-mark-stuck, and maintenance-started).
+        arc.latched_status_updated_at = arc.status_updated_at
         _touch(arc, "connection-unreachable", detail=detail)
 
 
@@ -625,13 +638,36 @@ def apply_event(arc: BoxArc, event: str, **kw) -> BoxArc:
     if arc.code == "connection-unreachable" and event in _SUSPENSION_LATCH_EVENTS:
         if arc.latched is None:
             raise TenantStatusError("connection-unreachable with no latch")
-        saved_code, saved_detail = arc.code, arc.detail
+        # #1786: the arc owns a single status_updated_at for the served
+        # suspension AND the latch. The recursive call advances the latch,
+        # so its _touch lands on the latch's own clock
+        # (latched_status_updated_at) — the suspension's served
+        # status_updated_at is saved and restored, moving only when the
+        # served body moves (bump-iff-served-body-changed). The finally
+        # runs on the recursive raise too, so a rejected latch event
+        # restores the suspension state untouched (fail-closed).
+        saved_code, saved_detail, saved_updated_at = (
+            arc.code, arc.detail, arc.status_updated_at
+        )
+        pre_latch = (arc.latched, arc.latched_detail)
         arc.code, arc.detail = arc.latched, arc.latched_detail
         try:
             apply_event(arc, event, **kw)
         finally:
+            # #1786: detect the latch's advance by its BODY, not by the
+            # second-resolution clock — a same-second advance must still
+            # record. All routed handlers are validate-before-mutate
+            # (no direct arc.code/arc.detail assignments), so on the
+            # reject path the body compare is exactly equal and the
+            # latch-entry value is kept. The clock compare stays as
+            # belt-and-braces for a touch-only path that never
+            # materialized.
+            latch_advanced = (arc.code, arc.detail) != pre_latch
             arc.latched, arc.latched_detail = arc.code, arc.detail
+            if latch_advanced or arc.status_updated_at != saved_updated_at:
+                arc.latched_status_updated_at = arc.status_updated_at
             arc.code, arc.detail = saved_code, saved_detail
+            arc.status_updated_at = saved_updated_at
         return arc
 
     if event == "provider-running":
@@ -707,6 +743,9 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
             )
         arc.latched = arc.code
         arc.latched_detail = arc.detail
+        # #1786: the latch's own update time is the arc's update time at
+        # entry — captured before the suspension's _touch below.
+        arc.latched_status_updated_at = arc.status_updated_at
         _touch(arc, "connection-unreachable", detail=kw.get("detail"))
     elif event == "relay-recovered":
         # Rule 6: re-evaluate from current inputs (returns the updated
@@ -728,6 +767,7 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
             _touch(arc, arc.latched, arc.latched_detail)
         arc.latched = None
         arc.latched_detail = None
+        arc.latched_status_updated_at = ""  # #1786: latch gone
     elif event == "approval-filed":
         # The approval filing event (proxy/confirmd). Detail carries the
         # minute-bound check name (rule 2).
@@ -767,6 +807,9 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
             )
         arc.latched = arc.code
         arc.latched_detail = arc.detail
+        # #1786: the latch's own update time is the arc's update time at
+        # entry — captured before the stuck _touch below.
+        arc.latched_status_updated_at = arc.status_updated_at
         _touch(arc, "stuck", detail=kw.get("detail"))
     elif event == "stuck-cleared":
         # Operator/heuristic clears -> the tenant layer re-evaluates to
@@ -778,6 +821,8 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         if _re_evaluate_latch_on_exit(arc):
             arc.latched = None
             arc.latched_detail = None
+            # #1786: latch gone
+            arc.latched_status_updated_at = ""
     elif event == "maintenance-started":
         # Rule 8: entered only by the control plane's update scheduler /
         # reimage orchestrator (never the provider driver, never the
@@ -800,6 +845,9 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         operation = kw.get("operation", "scheduled-update")
         arc.latched = arc.code
         arc.latched_detail = arc.detail
+        # #1786: the latch's own update time is the arc's update time at
+        # entry — captured before the maintenance _touch below.
+        arc.latched_status_updated_at = arc.status_updated_at
         _touch(arc, "maintenance", detail=f"maintenance: {operation}")
     elif event == "maintenance-completed":
         # Rule 8: on completion the endpoint returns the latched arc code
@@ -813,6 +861,8 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         if _re_evaluate_latch_on_exit(arc):
             arc.latched = None
             arc.latched_detail = None
+            # #1786: latch gone
+            arc.latched_status_updated_at = ""
     elif event == "maintenance-failed":
         # Rule 8: failure during maintenance -> box-unhealthy with detail
         # "maintenance-failed: <check>". The maintenance latch is cleared:
@@ -823,6 +873,7 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         _move(arc, "box-unhealthy", detail=f"maintenance-failed: {check}")
         arc.latched = None
         arc.latched_detail = None
+        arc.latched_status_updated_at = ""  # #1786: latch gone
     elif event == "operator-reprovision":
         # Rule 7: the only legal cross-session moves — box-unhealthy,
         # provisioning-failed, live/approved, or stuck -> provisioning.
@@ -844,6 +895,7 @@ def _apply_arc_event(arc: BoxArc, event: str, **kw) -> None:
         arc.detail = None
         arc.latched = None
         arc.latched_detail = None
+        arc.latched_status_updated_at = ""  # #1786: latch gone
         arc.provider_running = False
         arc.relay_reachable = False
         arc.session += 1
@@ -1189,6 +1241,10 @@ class TenantStore:
                     "detail": a.detail,
                     "latched": a.latched,
                     "latched_detail": a.latched_detail,
+                    # #1786: the latch's own update time — restored on load
+                    # like the rest of the arc; pre-fix records omit the key
+                    # and get the constructor default ("").
+                    "latched_status_updated_at": a.latched_status_updated_at,
                     "provider_running": a.provider_running,
                     "relay_reachable": a.relay_reachable,
                     "session": a.session,
@@ -1723,9 +1779,17 @@ class TenantStatusService:
         # Honest limitation: the ledger is in-memory per process, so a
         # restart clears it and a triple captured just before the restart
         # becomes replayable again for the remainder of its own window —
-        # the residual impact is a <=300s status disclosure, GET-only,
-        # never a state change. A caller-authenticated side (the session
-        # cookie) is unaffected.
+        # and any deployment that fans requests across processes or
+        # isolates (this module names the hosted control plane as a
+        # deployment target) admits the same cross-instance replay for
+        # the rest of the triple's window. The residual impact is
+        # unchanged: a <=300s status disclosure, GET-only, never a state
+        # change — the signature is still verified, so this is a
+        # replay-acceptance question, not an auth bypass. A
+        # caller-authenticated side (the session cookie) is unaffected. If
+        # the hosted plane needs the single-use guarantee to hold
+        # fleet-wide, the ledger wants a durable home (D1 row / Durable
+        # Object keyed by the triple hash with window TTL) — #1785.
         self._seen: Dict[bytes, float] = {}
         self._seen_lock = threading.Lock()
 
