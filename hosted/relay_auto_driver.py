@@ -241,10 +241,10 @@ def _read_watermark_marks(path: str):
     sidecar path raises ``OSError`` with ``errno.ELOOP`` loud (#1741):
     a plant is never restarted-from-empty over.
 
-    Shared by the per-tenant ``_update_watermark`` and the sweep-level
-    bulk write (``_write_watermark_bulk``) — #1739 collapsed N
-    per-tenant read-modify-writes per sweep into one, and both halves
-    of the operation must agree on what "corrupt" means.
+    Feeds the sweep-level bulk write (``_write_watermark_bulk``) — #1739
+    collapsed N per-tenant read-modify-writes per sweep into one, and
+    the pre-loop hint read and the locked merge must agree on what
+    "corrupt" means.
     """
     try:
         marks = _read_sidecar_nofollow(path)
@@ -275,37 +275,6 @@ def _read_watermark_marks(path: str):
     return marks, False
 
 
-def _update_watermark(path: str, tenant_id: str, record: dict) -> bool:
-    """Read-modify-write the watermark sidecar under a sidecar lock.
-
-    Corrupt/unparseable sidecar content restarts from empty — a corrupt
-    watermark is observability damage, never a reason to skip the tick
-    (staleness self-heals: the current tenant record is written fresh).
-
-    Returns True when the sidecar was corrupt/unparseable and history
-    restarted from empty, so the caller can note it LOUD on the record
-    (D-AC-7 fail-visible); False otherwise — a clean read, or a missing
-    file (the normal first run: no history to lose).
-
-    #1741: a symlink at the sidecar path is a plant, not corruption —
-    ELOOP from the O_NOFOLLOW read is re-raised loud (same as the
-    write-path refusal), never restarted-from-empty over.
-    """
-    lock_path = path + ".lock"
-    corrupt = False
-    with _open_sidecar_lock(lock_path) as lf:
-        if fcntl is not None:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-        try:
-            marks, corrupt = _read_watermark_marks(path)
-            marks[tenant_id] = record
-            _atomic_write_json_0600(path, marks)
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-    return corrupt
-
-
 def _write_watermark_bulk(path: str, records: dict, corrupt_note=None,
                           already_noted=False) -> bool:
     """One read-modify-write of the watermark sidecar for a whole sweep.
@@ -318,10 +287,10 @@ def _write_watermark_bulk(path: str, records: dict, corrupt_note=None,
     records — O(N^2) JSON IO on the probe cadence. This is O(N).
 
     Returns True when the sidecar was corrupt/unparseable and history
-    restarted from empty (the same D-AC-7 fail-visible contract as
-    ``_update_watermark`` — the caller notes it LOUD); a missing file
-    is the normal first run, not corruption. A symlink plant raises
-    ``OSError`` with ``errno.ELOOP`` loud (#1741).
+    restarted from empty (D-AC-7 fail-visible — the caller notes it
+    LOUD); a missing file is the normal first run, not corruption.
+    A symlink plant raises ``OSError`` with ``errno.ELOOP`` loud
+    (#1741).
 
     ``corrupt_note`` / ``already_noted`` serve the mid-sweep-corruption
     path: when the fresh read inside this RMW finds a corrupt sidecar

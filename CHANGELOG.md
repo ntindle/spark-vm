@@ -126,6 +126,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- The relay auto-driver's per-tenant last-tick watermarks now flow through a
+  single write path: the sweep's one locked read-modify-write per sweep.
+  The older per-tenant write helper had been dead code since that
+  consolidation, and keeping two paths with subtly different corruption
+  contracts invited future fixes to land in only one of them. (#TBD)
 - Release-gate skips are now visible in the audit trail: when the release
   gate holds a box back (operator-set freeze, or the box's wave not live),
   the tick audits the gate's verdict instead of a generic

@@ -693,7 +693,7 @@ def test_watermark_read_refuses_symlink_plant(tmp_path):
         json.dump({"attacker": {"seed": "poison"}}, fh)
     os.symlink(victim, wm)
     with pytest.raises(OSError, match="refusing to read watermark through symlink"):
-        driver._update_watermark(wm, "tnt-a", {"ok": True})
+        driver._write_watermark_bulk(wm, {"tnt-a": {"ok": True, "notes": []}})
     # The plant never influenced the merge: the victim holds only the
     # attacker's bytes, and the sidecar path is still the plant (no
     # real watermark was written through it).
