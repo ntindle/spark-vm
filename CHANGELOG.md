@@ -133,6 +133,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- A box with a live agent session no longer takes a service-restarting update mid-session: when the scheduled updater finds an active agent session (a live `muse-job` tmux session or a non-terminal job record), it defers the permitted update until the session ends and records the deferral in the audit trail as `deferred-arc` — so the rollout controller reads it as a deferral, not a failure. If the updater can't verify whether a session is live, it fails closed and loud instead of guessing. (#1808)(#1831)
 - Closing a job now archives its per-job recovery log with the closed job instead of leaving it behind to grow without bound: the log is moved into the job directory and compressed with the other logs, so it is swept away with the closed job -- and the disk sweeper now prunes leftover recovery logs older than 30 days (never a live job's). Closes #1800. (#1828)
 - The browser driver's gesture action now caps `max_points` at 10,000:
   the parameter was validated as a positive integer with no upper

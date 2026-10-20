@@ -83,6 +83,8 @@ TRANSLATION_CASES = [
     # G18 §3 / #1630: the release gate's verdicts -> skipped-frozen.
     ("check", "fleet-freeze", {}, "check", "skipped-frozen"),
     ("check", "wave-not-live", {}, "check", "skipped-frozen"),
+    # G18 §3 / #1808: never-interrupt-an-arc -> deferred-arc.
+    ("check", "deferred-arc", {}, "check", "deferred-arc"),
     ("deploy", "precheck-fail", {"from": COMMIT_A, "to": COMMIT_B},
      "deploy", "precheck-fail"),
     ("deploy", "gate-fail", {"from": COMMIT_A, "to": COMMIT_B,
