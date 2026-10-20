@@ -1326,7 +1326,17 @@ class TenantStore:
         now = time.time()
         for tenant_id, raw in self._load()["tenants"].items():
             stored = raw.get("session_token")
-            if stored and hmac.compare_digest(stored, token):
+            # #1792: a hostile hand-crafted record may carry a non-string
+            # session_token (e.g. an int). hmac.compare_digest raises
+            # TypeError on non-str inputs — fail closed to "no match"
+            # (401) instead of 500ing out of the auth path, mirroring the
+            # #1783 expiry discipline. (JSON records can never hold bytes,
+            # so a str-only guard is complete.)
+            if (
+                isinstance(stored, str)
+                and stored
+                and hmac.compare_digest(stored, token)
+            ):
                 expires = created_epoch(raw.get("session_expires_at"))
                 if expires is None or expires <= now:
                     return None

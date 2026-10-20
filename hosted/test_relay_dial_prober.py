@@ -390,6 +390,64 @@ def test_relay_defect_unresolvable_host(fake_relay, monkeypatch):
     assert fake_relay.connections == 0
 
 
+def test_dns_stall_bounded_by_connect_budget(fake_relay, monkeypatch):
+    # #1694: the resolver is the one phase that escaped the deadline.
+    # A 6s-stalled resolver with a 4s probe deadline must return
+    # relay_defect well inside the deadline — the daemon worker thread
+    # is joined on the connect budget (2s here), not on the resolver.
+    def _slow_resolve(*a, **k):
+        time.sleep(6.0)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(prober.socket, "getaddrinfo", _slow_resolve)
+    t0 = time.monotonic()
+    r = prober.probe(
+        **_probe_kwargs(
+            fake_relay, connect_timeout_s=2.0, io_timeout_s=2.0
+        )
+    )
+    elapsed = time.monotonic() - t0
+    assert r.outcome == "relay_defect"
+    assert "dns_resolution_deadline" in r.detail["error"]
+    # The 6s stall must not leak through: the bound is the 2s connect
+    # budget (4s deadline), with headroom for scheduling jitter.
+    assert elapsed < 4.0
+
+
+def test_dns_failure_maps_to_relay_defect(fake_relay, monkeypatch):
+    # #1694: a resolution failure (not just a stall) is still the relay
+    # leg failing — relay_defect per the §3 taxonomy, never a crash.
+    def _failing_resolve(*a, **k):
+        raise socket.gaierror(
+            socket.EAI_NONAME, "Name or service not known"
+        )
+
+    monkeypatch.setattr(prober.socket, "getaddrinfo", _failing_resolve)
+    r = prober.probe(
+        **_probe_kwargs(
+            fake_relay,
+            relay_host="relay-definitely-not-here.invalid",
+        )
+    )
+    assert r.outcome == "relay_defect"
+    assert fake_relay.connections == 0
+
+
+def test_dns_resolver_thread_is_daemon(fake_relay, monkeypatch):
+    # #1694: the worker thread may outlive a wedged resolution, so it
+    # must never block interpreter exit — daemon=True is the pin.
+    real_thread = prober.threading.Thread
+    seen = {}
+
+    def _spy(*a, **k):
+        seen.update(k)
+        return real_thread(*a, **k)
+
+    monkeypatch.setattr(prober.threading, "Thread", _spy)
+    prober.probe(**_probe_kwargs(fake_relay))
+    assert seen.get("daemon") is True
+
+
 def test_box_leg_defect_garbage_banner(fake_relay):
     fake_relay.scenario = "garbage_banner"
     r = prober.probe(**_probe_kwargs(fake_relay))
