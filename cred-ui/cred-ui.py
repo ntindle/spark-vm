@@ -44,13 +44,17 @@ Stdlib only.
 """
 
 import hmac
+import http.client
 import json
 import os
 import re
 import secrets
+import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
@@ -144,7 +148,10 @@ CSRF_VALUE = "1"
 # once (256 bits) and pasted into the browser once per browser session
 # (sessionStorage; never a cookie, never a URL, never logged).
 # `--print-token` shows it for the paste ceremony, `--rotate-token`
-# replaces it (restart the service afterwards).
+# replaces it (issue #1751: the rotate CLI signals the running service to
+# reload via SIGHUP, and a 60-second watchdog re-reads the store as a
+# fail-safe, so no manual restart is needed for the new token to take
+# effect).
 #
 # Placement (issue #964): the token lives under swapd ownership at
 # /home/swapd/ui-token (0600), fetched at startup through the pinned
@@ -200,6 +207,34 @@ def _token_path():
 def _read_token_file(path):
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
+
+
+def _read_validated_token_file(path):
+    """Shared read-and-validate primitive for the local-file backend
+    (issue #1751 round 2): ONE read path for the startup load and the
+    runtime refresh, so the two can never drift. No creation, no posture
+    decision — FileNotFoundError propagates (the caller decides:
+    first-start mint vs missing-at-runtime) and every other failure
+    raises RuntimeError with the startup path's exact messages.
+    UnicodeDecodeError is a ValueError, not an OSError — it is wrapped
+    here so the watchdog's "never raises" contract holds."""
+    _check_token_dir_chain(path)
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise RuntimeError("cannot stat token file %s: %s" % (path, e))
+    if st.st_mode & 0o077:
+        raise RuntimeError(
+            "token file %s is readable by group/other (mode %o); "
+            "refusing to start — fix with: chmod 600 %s"
+            % (path, st.st_mode & 0o777, path))
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except (OSError, ValueError) as e:
+        raise RuntimeError("cannot read token file %s: %s" % (path, e))
 
 
 def _ensure_token_parent(path):
@@ -317,8 +352,8 @@ def _load_or_create_swapd_token():
 def _rotate_swapd_token():
     """Replace the swapd-owned token atomically via the narrow writer,
     then prove the rotation landed by reading back. The running server
-    keeps the old token cached until restart — the operator restarts
-    cred-ui after rotating."""
+    picks the new token up through the SIGHUP signal (issue #1751) —
+    the rotate CLI sends it automatically."""
     token = secrets.token_urlsafe(32)
     _write_swapd_token(token)
     if _read_swapd_token() != token:
@@ -335,23 +370,11 @@ def _load_or_create_token(path=None):
     if _swapd_token_backed():
         return _load_or_create_swapd_token()
     path = path or _token_path()
-    _check_token_dir_chain(path)
     try:
-        st = os.stat(path)
+        token = _read_validated_token_file(path)
     except FileNotFoundError:
-        st = None
-    except OSError as e:
-        raise RuntimeError("cannot stat token file %s: %s" % (path, e))
-    if st is not None:
-        if st.st_mode & 0o077:
-            raise RuntimeError(
-                "token file %s is readable by group/other (mode %o); "
-                "refusing to start — fix with: chmod 600 %s"
-                % (path, st.st_mode & 0o777, path))
-        try:
-            token = _read_token_file(path)
-        except OSError as e:
-            raise RuntimeError("cannot read token file %s: %s" % (path, e))
+        pass  # first start: generate below
+    else:
         if not _TOKEN_RE.match(token):
             raise RuntimeError(
                 "token file %s is empty or malformed; regenerate with "
@@ -384,9 +407,10 @@ def _load_or_create_token(path=None):
 
 
 def _rotate_token(path=None):
-    """Replace the token atomically (0600). The running server keeps
-    the old token cached until restart — the operator restarts cred-ui
-    after rotating."""
+    """Replace the token atomically (0600). The running server picks the
+    new token up through the SIGHUP signal (issue #1751) — the rotate
+    CLI sends it automatically; a 60-second watchdog re-reads the store
+    as a fail-safe when the signal misses."""
     if _swapd_token_backed():
         return _rotate_swapd_token()
     path = path or _token_path()
@@ -409,9 +433,11 @@ def _rotate_token(path=None):
 
 
 def _reset_token_cache():
-    """Test hook: drop the cached token so the next api_token() re-reads."""
-    global _API_TOKEN
+    """Test hook: drop the cached token so the next api_token() re-reads.
+    Also resets the refresh-failure streak (fresh state for tests)."""
+    global _API_TOKEN, _REFRESH_FAIL_STREAK
     _API_TOKEN = None
+    _REFRESH_FAIL_STREAK = 0
 
 
 def api_token():
@@ -419,6 +445,160 @@ def api_token():
     if _API_TOKEN is None:
         _API_TOKEN = _load_or_create_token()
     return _API_TOKEN
+
+
+# Issue #1751: the running server cached the token forever, so a rotated
+# token took effect only after a manual restart — a forgotten restart left
+# the OLD token working indefinitely with no warning. Three mechanisms
+# close the window: (1) the rotate CLI signals the running service
+# (SIGHUP) and then VERIFIES the server actually adopted the new token,
+# warning loudly if it did not; (2) SIGHUP reloads through the same
+# read-only, fail-safe refresh the watchdog uses — never the
+# create-on-absent startup path, so a transient store hiccup can neither
+# mint a surprise token nor blank auth; (3) a slow watchdog re-reads the
+# store and adopts a changed token, healing even a missed signal. The
+# fail-safe is bounded: after _MAX_REFRESH_FAILURES consecutive failed
+# refresh passes the cache is invalidated and auth fails closed (401),
+# because a persistently unreadable store must not honor a
+# possibly-revoked token forever.
+_TOKEN_REFRESH_INTERVAL_S = 60
+_MAX_REFRESH_FAILURES = 5
+_REFRESH_FAIL_STREAK = 0
+
+
+def _read_token_store():
+    """Read-only re-read of the token from its store (no creation, ever).
+    The local-file backend shares _read_validated_token_file with the
+    startup load, so the two read paths cannot drift. Raises RuntimeError
+    on any read failure (FileNotFoundError propagates for the absent
+    case) — the caller decides the failure posture; this function never
+    guesses."""
+    if _swapd_token_backed():
+        token = _read_swapd_token()
+        if token is None:
+            raise RuntimeError(
+                "swapd UI token file is absent during refresh")
+        return token
+    return _read_validated_token_file(_token_path())
+
+
+def _refresh_failed(reason):
+    """One failed refresh pass. Fail-safe first: keep serving the cached
+    token through transient store hiccups (a flapping sudo entry must not
+    brick auth). Fail-closed at the bound: after _MAX_REFRESH_FAILURES
+    consecutive failures the cache is invalidated, so auth 401s via the
+    existing _auth_ok catch until the store is readable again — a
+    persistently unreadable store must not honor a possibly-revoked
+    token indefinitely (Security round 2). Returns "kept" or
+    "failed-closed". Never raises."""
+    global _API_TOKEN, _REFRESH_FAIL_STREAK
+    _REFRESH_FAIL_STREAK += 1
+    if _REFRESH_FAIL_STREAK >= _MAX_REFRESH_FAILURES:
+        _API_TOKEN = None
+        print("cred-ui token refresh: %d consecutive failures — "
+              "invalidating cached token; auth will 401 until the store "
+              "is readable again (%s)"
+              % (_REFRESH_FAIL_STREAK, reason),
+              file=sys.stderr, flush=True)
+        return "failed-closed"
+    print("cred-ui token refresh: %s; keeping cached token "
+          "(failure %d/%d)" % (reason, _REFRESH_FAIL_STREAK,
+                               _MAX_REFRESH_FAILURES),
+          file=sys.stderr, flush=True)
+    return "kept"
+
+
+def _refresh_cached_token():
+    """One refresh pass: re-read the store and adopt a changed token.
+
+    Returns "adopted" when the cache moved, "unchanged" when the store
+    agrees with the cache, "kept" on a transient bad re-read (fail-safe),
+    "failed-closed" once _MAX_REFRESH_FAILURES consecutive passes fail
+    (the cache is invalidated; auth 401s until the store recovers).
+    Never raises."""
+    global _API_TOKEN, _REFRESH_FAIL_STREAK
+    try:
+        stored = _read_token_store()
+    except (OSError, RuntimeError) as e:
+        return _refresh_failed("store re-read failed (%s)" % e)
+    if not _TOKEN_RE.match(stored):
+        return _refresh_failed("store holds a malformed token")
+    _REFRESH_FAIL_STREAK = 0
+    if stored != _API_TOKEN:
+        _API_TOKEN = stored
+        print("cred-ui token refresh: adopted new token from store",
+              file=sys.stderr, flush=True)
+        return "adopted"
+    return "unchanged"
+
+
+def _token_watchdog(stop_event, interval_s=_TOKEN_REFRESH_INTERVAL_S):
+    """Background loop (daemon thread): periodic _refresh_cached_token()
+    passes until stop_event is set. The interval is injectable for tests;
+    production stops it via the finally in main() (abnormal exits rely
+    on the daemon flag)."""
+    while not stop_event.wait(interval_s):
+        _refresh_cached_token()
+
+
+def _install_hup_reload():
+    """SIGHUP reloads the single per-install token through the same
+    read-only, fail-safe refresh the watchdog uses (issue #1751) — never
+    the create-on-absent startup path. Scoped to the per-install token
+    only; a future tenant-identity model (issue #281) gets its own
+    reload contract. Registered only by the serving process (signals
+    fire on the main thread; the CLI modes never install it)."""
+    def _on_hup(_signum, _frame):
+        _refresh_cached_token()
+        print("cred-ui: SIGHUP received, token refresh attempted",
+              file=sys.stderr, flush=True)
+    signal.signal(signal.SIGHUP, _on_hup)
+
+
+def _signal_running_service():
+    """Best-effort: ask systemd to deliver SIGHUP to the running cred-ui
+    user service so it reloads the just-rotated token. Returns True when
+    the signal was accepted; False when there is no running service (or
+    systemctl itself is unavailable) — the rotate is still complete and
+    the token takes effect on the next start (a running server picks it
+    up within the watchdog interval). Never raises: a signaling failure
+    must not fail the rotation itself."""
+    try:
+        p = subprocess.run(
+            ["systemctl", "--user", "kill", "-s", "HUP", "cred-ui"],
+            capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
+def _verify_token_adopted(new_token, timeout_s=8):
+    """Poll the local management API with the NEW bearer <redacted> until
+    the server accepts it — proving the running server actually adopted
+    the rotation — or the deadline passes. Auth is checked before the
+    endpoint logic runs, so 401/403 mean the token was rejected while
+    any other status (200 with a live registry, 500 without one in
+    dev/CI) proves the bearer was accepted. The token travels only in
+    the Authorization header to 127.0.0.1, never in logs. Best-effort:
+    False on any failure (server down, old token still cached)."""
+    deadline = time.monotonic() + timeout_s
+    headers = {"X-Cred-UI": "1", "Authorization": "Bearer " + new_token}
+    while True:
+        try:
+            conn = http.client.HTTPConnection(BIND, PORT, timeout=2)
+            try:
+                conn.request("GET", "/api/creds", headers=headers)
+                resp = conn.getresponse()
+                resp.read()
+                if resp.status not in (401, 403):
+                    return True
+            finally:
+                conn.close()
+        except OSError:
+            pass  # server down or mid-restart; retry until the deadline
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
 
 # --- Validation contract: single-sourced from credlib/credvalidate.py ---
 # (imported above; issue #706). The functions below are the UI's thin
@@ -894,15 +1074,42 @@ def main():
         print(api_token(), flush=True)
         return
     if "--rotate-token" in sys.argv[1:]:
-        _rotate_token()
+        # Issue #1751: the running service no longer needs a manual
+        # restart. Signal it (SIGHUP), then VERIFY it adopted the new
+        # token — a queued signal is not proof (Security round 2). The
+        # server's watchdog heals a missed signal within
+        # _TOKEN_REFRESH_INTERVAL_S.
+        new_token = _rotate_token()
         _reset_token_cache()
-        print("token rotated; restart cred-ui for the new token to take "
-              "effect", flush=True)
+        if _signal_running_service():
+            if _verify_token_adopted(new_token):
+                print("token rotated; running cred-ui service adopted "
+                      "the new token", flush=True)
+            else:
+                print("WARNING: token rotated on disk but the running "
+                      "cred-ui service did not adopt it — the old token "
+                      "may still be valid. Check: journalctl --user -u "
+                      "cred-ui ; then restart cred-ui or re-run "
+                      "--rotate-token", flush=True)
+        else:
+            print("token rotated; no running cred-ui service found to "
+                  "signal — the new token takes effect when cred-ui "
+                  "starts (a running server picks it up within a "
+                  "minute)", flush=True)
         return
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     # Fail fast at startup (not on the first request) if the token file
     # is missing-and-uncreatable, unreadable, or malformed.
     api_token()
+    # Issue #1751: rotation self-heals without a manual restart —
+    # SIGHUP drops the token cache, and a slow watchdog re-reads the
+    # store as a fail-safe against missed signals.
+    _install_hup_reload()
+    _watchdog_stop = threading.Event()
+    _watchdog = threading.Thread(
+        target=_token_watchdog, args=(_watchdog_stop,), daemon=True,
+        name="cred-ui-token-watchdog")
+    _watchdog.start()
     # Issue #471: bounded thread pool — ThreadingHTTPServer spawns one
     # thread per connection, so a local peer slow-lorising the UI could
     # grow the pool without bound. Over-cap connections are closed
@@ -912,7 +1119,12 @@ def main():
     srv = BoundedThreadingHTTPServer((BIND, PORT), Handler)
     print("cred-ui listening on http://%s:%d (localhost only)" % (BIND, PORT), flush=True)
     print("cred-ui version=%s" % SPARKVM_VERSION, flush=True)
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    finally:
+        # Orderly watchdog shutdown (KeyboardInterrupt / service stop);
+        # the daemon flag remains the backstop for abnormal exits.
+        _watchdog_stop.set()
 
 
 if __name__ == "__main__":
