@@ -28,6 +28,12 @@ live wave. `halted`/`draft` and `freeze: true` are never permitted.
 Usage:
     gate_query.py state --box-id box-07
         # key=value lines: state=frozen|live, freeze=, answer_age_s=, ...
+        # The `reason` line's vocabulary is load-bearing: `freeze flag set`
+        # (operator-set freeze) is matched verbatim by
+        # deploy/auto-deploy.sh's gate verdicts (fleet-freeze), while
+        # `no-signal: ...` means the gate is unverifiable and deliberately
+        # carries no verdict. Keep both wordings stable or update the
+        # consumer in the same change.
 
     gate_query.py permitted repo
         # exit 0 if the repo component may converge on this box right now,

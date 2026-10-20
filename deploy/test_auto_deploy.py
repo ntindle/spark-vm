@@ -568,7 +568,12 @@ def test_deploy_forced_synthesis_defers_on_gate_staging(tmp_path):
     assert not (state / "last-failure").exists(), \
         "spurious precheck alert fired on the gate-deferral path"
     audit = (state / "audit.log").read_text()
-    assert '"result":"noop"' in audit, audit
+    # G18 §3 / #1630: the gate-deferred tick audits the gate's verdict,
+    # not a generic noop — a staged box is distinguishable from an
+    # up-to-date one.
+    assert '"result":"wave-not-live"' in audit, audit
+    assert '"result":"noop"' not in audit, \
+        "gate-deferred tick must not audit a generic noop: " + audit
     assert '"result":"ok"' not in audit, \
         "deferred tick must not audit an 'ok' deploy: " + audit
     # check must report the deferral, not a forced redeploy
@@ -579,8 +584,35 @@ def test_deploy_forced_synthesis_defers_on_gate_staging(tmp_path):
         "cmd_check",
         env_extra=env, cwd=REPO)
     out = r.stdout + r.stderr
-    assert "would defer the forced redeploy" in out, out
+    assert "(gate wave-not-live, #1294)" in out, out
     assert "would force-redeploy it" not in out, out
+
+
+def test_deploy_forced_synthesis_defers_on_gate_frozen(tmp_path):
+    """#1294 + G18 §3/#1630: the extra-inputs forced path on a frozen
+    fleet defers with the gate's verdict — `check/fleet-freeze`, no
+    alert, no forced deploy. Mirrors the staging test above."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(base + "\n")
+    _install_fake_gate(state, ["state=frozen", "reason=freeze flag set"])
+    env = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "pending_range() { return 1; }; "          # up-to-date: no verdict
+        "extra_inputs_changed() { return 0; }; "   # host inputs "changed"
+        "install_component() { echo SHOULD_NOT_RUN; return 0; }; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    assert "deferring" in out, out
+    assert "SHOULD_NOT_RUN" not in out, "forced deploy ran on a frozen gate"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"fleet-freeze"' in audit, audit
+    assert '"result":"noop"' not in audit, \
+        "gate-deferred forced tick must not audit a generic noop: " + audit
+    assert not (state / "last-failure").exists(), \
+        "spurious precheck alert fired on the gate-deferral path"
 
 
 def test_gate_permits_touch_verdicts(tmp_path):
@@ -618,6 +650,192 @@ def test_gate_permits_touch_verdicts(tmp_path):
     # gate_query invocation failure fails closed.
     _install_fake_gate(state, [], exit_code=3)
     assert verdict(env_keys) is False
+
+
+# --- gate verdict lines (G18 §3, #1630) ---------------------------------------
+
+def _gate_cap_probe(env_extra):
+    """Run gate_cap against the fixture head; return (rc, stdout)."""
+    return run_bash(
+        "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "new=$(git -C \"$UPDATER_REPO\" rev-parse origin/main); "
+        "if capped=\"$(gate_cap \"\" \"$new\")\"; then rc=0; else rc=$?; fi; "
+        "echo \"RC=$rc\"; echo \"CAPPED<<EOF\"; printf '%s\\n' \"$capped\"; echo EOF",
+        env_extra=env_extra, cwd=REPO)
+
+
+def test_gate_cap_staging_emits_wave_not_live_verdict(tmp_path):
+    """gate_cap: a live gate whose wave is not live (staging) returns 1
+    with `verdict=wave-not-live` on stdout — the G17 `skipped-frozen`
+    producer (G18 §3, #1630)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = _gate_cap_probe(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=wave-not-live" in r.stdout, r.stdout + r.stderr
+
+
+def test_gate_cap_frozen_freeze_flag_emits_fleet_freeze_verdict(tmp_path):
+    """gate_cap: an operator-set freeze returns 2 with
+    `verdict=fleet-freeze` on stdout — the G17 `skipped-frozen` producer
+    (G18 §3, #1630)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=frozen", "reason=freeze flag set"])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = _gate_cap_probe(env_keys)
+    assert "RC=2" in r.stdout, r.stdout + r.stderr
+    assert "verdict=fleet-freeze" in r.stdout, r.stdout + r.stderr
+
+
+def test_gate_cap_frozen_no_signal_emits_no_verdict(tmp_path):
+    """gate_cap: a no-signal freeze (unverifiable gate) returns 2 with NO
+    verdict line — the design produces no event for no-signal, only the
+    local status line, so it keeps the fail-closed alert path (G18 §3)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=frozen",
+                               "reason=no-signal: gate document unreadable"])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = _gate_cap_probe(env_keys)
+    assert "RC=2" in r.stdout, r.stdout + r.stderr
+    assert "verdict=" not in r.stdout, r.stdout + r.stderr
+
+
+def test_pending_range_reemits_gate_verdict(tmp_path):
+    """pending_range: gate-determined outcomes are re-emitted as
+    `verdict=<name>` on stdout (unused on rc!=0 today) so cmd_deploy can
+    audit the honest row (G18 §3, #1630)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+
+    def pending(env_extra):
+        r = run_bash(
+            "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+            "if range=\"$(pending_range)\"; then rc=0; else rc=$?; fi; "
+            "echo \"RC=$rc\"; echo \"RANGE<<EOF\"; printf '%s\\n' \"$range\"; echo EOF",
+            env_extra=env_extra, cwd=REPO)
+        return r
+
+    # Staging gate, no watermark yet: rc=1 with the wave-not-live verdict.
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    r = pending(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=wave-not-live" in r.stdout, r.stdout + r.stderr
+
+    # Operator-set freeze: rc=2 with the fleet-freeze verdict.
+    _install_fake_gate(state, ["state=frozen", "reason=freeze flag set"])
+    r = pending(env_keys)
+    assert "RC=2" in r.stdout, r.stdout + r.stderr
+    assert "verdict=fleet-freeze" in r.stdout, r.stdout + r.stderr
+
+    # Unmanaged box: rc=0, a sha on stdout, no verdict line.
+    r = pending(env)
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert "verdict=" not in r.stdout, r.stdout + r.stderr
+
+
+def test_cmd_deploy_audits_staging_verdict_not_noop(tmp_path):
+    """cmd_deploy: a gate-staging tick audits `check/wave-not-live`, not a
+    generic noop — a staged box must be distinguishable from an up-to-date
+    one (G18 §3, #1630)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env_keys, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=0" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"wave-not-live"' in audit, audit
+    assert '"result":"noop"' not in audit, \
+        "staging tick must not audit a generic noop: " + audit
+    assert not (state / "last-failure").exists(), \
+        "spurious precheck alert fired on the gate-staging path"
+
+
+def test_cmd_deploy_frozen_gate_audits_verdict_no_alert(tmp_path):
+    """cmd_deploy: an operator-intended freeze audits
+    `check/fleet-freeze` with NO alert — the box is not failing, the fleet
+    is frozen (G18 §3, #1630)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=frozen", "reason=freeze flag set"])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env_keys, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"fleet-freeze"' in audit, audit
+    assert '"result":"precheck-fail"' not in audit, \
+        "frozen fleet must not masquerade as a precheck failure: " + audit
+    assert not (state / "last-failure").exists(), \
+        "operator-intended freeze must not raise a precheck alert"
+
+
+def test_cmd_deploy_no_signal_keeps_fail_closed_alert(tmp_path):
+    """cmd_deploy: a no-signal freeze (unverifiable gate) keeps the
+    fail-closed behavior — alert + `check/precheck-fail`, no verdict row
+    (G18 §3: no event for no-signal)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    _install_fake_gate(state, ["state=frozen",
+                               "reason=no-signal: gate document unreadable"])
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+    r = run_bash(
+        "set -e; export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+        env_extra=env_keys, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "DEPLOY_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"precheck-fail"' in audit, audit
+    assert "verdict" not in audit and '"result":"fleet-freeze"' not in audit, \
+        "no-signal must not emit a gate verdict: " + audit
+    assert (state / "last-failure").exists(), \
+        "no-signal freeze must keep the fail-closed alert"
+
+
+def test_gate_permits_touch_prints_verdict(tmp_path):
+    """gate_permits_touch: the defer paths print the same verdict lines as
+    gate_cap on stdout (G18 §3, #1630); invocation failure prints none."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    env_keys = dict(env, SPARKVM_GATE_KEYS="k1=/dev/null")
+
+    def touch(env_extra):
+        r = run_bash(
+            "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+            "if out=\"$(gate_permits_touch)\"; then rc=0; else rc=$?; fi; "
+            "echo \"RC=$rc\"; echo \"OUT<<EOF\"; printf '%s\\n' \"$out\"; echo EOF",
+            env_extra=env_extra, cwd=REPO)
+        return r
+
+    _install_fake_gate(state, ["state=live", "repo_permitted=false",
+                               "repo_max=%s" % base])
+    r = touch(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=wave-not-live" in r.stdout, r.stdout + r.stderr
+
+    _install_fake_gate(state, ["state=frozen", "reason=freeze flag set"])
+    r = touch(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=fleet-freeze" in r.stdout, r.stdout + r.stderr
+
+    _install_fake_gate(state, ["state=frozen",
+                               "reason=no-signal: gate document unreadable"])
+    r = touch(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=" not in r.stdout, r.stdout + r.stderr
+
+    _install_fake_gate(state, [], exit_code=3)
+    r = touch(env_keys)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "verdict=" not in r.stdout, r.stdout + r.stderr
 
 
 def test_status_qualifies_force_redeploy_without_watermark(tmp_path):
