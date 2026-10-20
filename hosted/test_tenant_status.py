@@ -1475,6 +1475,27 @@ def test_malformed_session_expiry_denied(store):
         assert store.find_by_session_token(token) is None, bad
 
 
+def test_non_string_session_token_denied(store, store_path):
+    # #1792: a hostile hand-crafted record carrying a non-string
+    # session_token must fail closed to "no match" (401) — never 500
+    # out of the auth path via compare_digest's TypeError. The expiry
+    # is kept live so the type guard, not the TTL, is what denies.
+    store.create(_tenant())
+    live_expiry = store.get("tnt_test1").session_expires_at or _now_plus_iso(3600)
+    for bad in (42, 4.2, None, True, ["sess-abc"], {"t": "sess-abc"}):
+        doc = json.load(open(store_path))
+        doc["tenants"]["tnt_test1"]["session_token"] = bad
+        doc["tenants"]["tnt_test1"]["session_expires_at"] = live_expiry
+        json.dump(doc, open(store_path, "w"))
+        assert store.find_by_session_token("sess-abc") is None, bad
+        status, body = _service(store).handle_get(
+            "/tenant/status", {"cookie": "session=sess-abc"})
+        assert status == 401 and body["error"] == "unauthorized", bad
+    # the str path is untouched: a real minted token still authenticates
+    token = store.mint_session_token("tnt_test1")
+    assert store.find_by_session_token(token) is not None
+
+
 def test_remint_refreshes_session_token_and_expiry(store):
     # The single-live-token discipline: re-minting replaces the token AND
     # its expiry; the old token stops authenticating immediately.

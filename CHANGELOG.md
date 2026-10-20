@@ -123,6 +123,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Relay dial prober: DNS resolution is now covered by the probe's
+  anti-tarpit deadline — resolution runs in a worker thread under the
+  connect budget, so a wedged resolver can no longer freeze a probe
+  past its deadline; budget expiry reports the relay leg defective.
+  (#1799)
+- Tenant status: a session record carrying a non-string session token
+  (e.g. from a hand-edited store file) now fails closed to
+  "unauthorized" instead of raising an internal error out of the auth
+  path. (#1799)
 - Hosted signup docs: the magic-link session is now documented as
   TTL-bound — one hour from mint — everywhere the signup flow spec says
   the magic link "establishes the session" (`HOSTED_SIGNUP_WEB_UI.md` §5

@@ -73,6 +73,7 @@ import os
 import re
 import socket
 import struct
+import threading
 import time
 from collections import namedtuple
 
@@ -347,6 +348,75 @@ def _parse_string(buf, off):
 # ---------------------------------------------------------------------------
 
 
+def _connect_with_dns_deadline(host, port, start, deadline, connect_timeout_s):
+    """Resolve + TCP connect with the resolver under the connect budget.
+
+    #1694: ``socket.create_connection`` resolves the host through a
+    blocking ``getaddrinfo`` that carries no timeout — a wedged resolver
+    froze the probe past the absolute deadline with no bound (the one
+    phase that escaped the anti-tarpit guarantee). The resolution runs
+    in a daemon worker thread joined on the remaining connect budget;
+    budget expiry raises ``TimeoutError``, which ``probe()`` maps to
+    ``relay_defect`` per the §3 taxonomy ("the relay host unresolvable").
+
+    TCP connect then iterates the resolved addresses first-success-wins
+    through ``socket.create_connection`` on the numeric literal, so the
+    inner ``getaddrinfo`` is DNS-free and the existing connect-failure
+    taxonomy (refused → relay_defect) is unchanged. The daemon thread
+    can linger after a wedged resolution; it holds no probe state and
+    dies with the process — probes run on the R2b cadence, so at most
+    one such thread exists per wedged probe.
+    """
+    budget = min(connect_timeout_s, deadline - time.monotonic())
+    if budget <= 0:
+        raise TimeoutError("connect_budget_exhausted")
+    box = {}
+
+    def _resolve():
+        try:
+            box["addrs"] = socket.getaddrinfo(
+                host, port, type=socket.SOCK_STREAM
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised below verbatim
+            box["exc"] = exc
+
+    resolver = threading.Thread(
+        target=_resolve, daemon=True, name="relay-dns-resolve"
+    )
+    t0 = time.monotonic()
+    resolver.start()
+    resolver.join(budget)
+    res_elapsed = time.monotonic() - t0
+    if resolver.is_alive():
+        # The resolver is wedged past the budget. Report the bound, not
+        # the hang — the daemon thread dies with the process.
+        raise TimeoutError("dns_resolution_deadline")
+    if "exc" in box:
+        # Non-OSError exotic failures (e.g. IDNA) re-raise verbatim,
+        # exactly as create_connection would have propagated them.
+        raise box["exc"]
+    # sockaddr is (ip, port) for v4 and (ip, port, flow, scope) for v6 —
+    # the leading element is the numeric address in both shapes.
+    addrs = list(dict.fromkeys(a[4][0] for a in box.get("addrs", [])))
+    if not addrs:
+        raise socket.gaierror("no addresses resolved")
+    tcp_budget = min(
+        connect_timeout_s - res_elapsed, deadline - time.monotonic()
+    )
+    if tcp_budget <= 0:
+        raise TimeoutError("connect_budget_exhausted")
+    last_err = None
+    for ip in addrs:
+        try:
+            # Numeric literal: the inner getaddrinfo is DNS-free, and the
+            # module-attribute call keeps the test seam
+            # (prober.socket.create_connection) intact.
+            return socket.create_connection((ip, port), timeout=tcp_budget)
+        except OSError as e:
+            last_err = e
+    raise last_err
+
+
 def _detail(vm_id, start, **extra):
     d = {
         "vm_id": vm_id,
@@ -431,7 +501,9 @@ def probe(
 
     # Absolute I/O deadline for the whole probe: the per-recv socket
     # timeout alone lets a trickling server stretch the call one timeout
-    # at a time. _dial enforces this on every recv.
+    # at a time. _dial enforces this on every recv, and the connect
+    # phase — DNS resolution included (#1694) — runs inside the
+    # connect_timeout_s budget.
     deadline = start + connect_timeout_s + io_timeout_s
 
     try:
@@ -483,8 +555,11 @@ def _dial(
     # responding (refused/timed out/unresolvable) -> relay_defect, mapped
     # by probe(). Everything after a successful connect is the box leg:
     # the listener answered, so later failures are box_leg_defect.
-    sock = socket.create_connection(
-        (relay_host, relay_port), timeout=connect_timeout_s
+    # #1694: resolution runs under the connect budget inside
+    # _connect_with_dns_deadline — the blocking getaddrinfo no longer
+    # escapes the deadline.
+    sock = _connect_with_dns_deadline(
+        relay_host, relay_port, start, deadline, connect_timeout_s
     )
     try:
         reader = _Reader(sock, io_timeout_s, deadline)
