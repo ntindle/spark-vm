@@ -4418,18 +4418,23 @@ def _msp_launch_supervisor(slug, prompt=None):
     """
     os.makedirs(JOBS_DIR, exist_ok=True)
     lockp = os.path.join(JOBS_DIR, ".%s.msp-launch.lock" % slug)
-    # O_NOFOLLOW (issue #1803): a symlinked launch-lock path fails the
-    # open (ELOOP) instead of being followed -- and "w" would truncate
-    # the link target, so following is never safe here. The lock is
-    # flock-only (never written through), so a plant is a
-    # serialization-DoS / wrong-file-serialization vector (same
-    # confused-deputy class as the recover worker's lock/log hardening
-    # in #1801). Fail closed and loud: the OSError propagates -- spawn
-    # mirrors the tmux path's cleanup first, steer and resume surface
-    # the traceback -- so a planted lock can never wedge or misdirect
-    # a launch silently. (Shares `_nofollow_opener` with the recover
-    # worker's lock/log hardening, #1805.)
-    with open(lockp, "w", opener=_nofollow_opener) as lf:
+    # O_NOFOLLOW + regular-file check (issues #1803, #1815): a symlinked
+    # launch-lock path fails the open (ELOOP) instead of being
+    # followed -- and "w" would truncate the link target, so following
+    # is never safe here. The opener also refuses planted FIFOs
+    # (O_NONBLOCK fails a reader-less FIFO with ENXIO instead of
+    # hanging the open; the fstat check refuses a reader-bearing FIFO
+    # fail-closed): the #1804 remainder class the recover worker's
+    # three opens already hardened against. The lock is flock-only
+    # (never written through), so a plant is a serialization-DoS /
+    # wrong-file-serialization vector (same confused-deputy class as
+    # the recover worker's lock/log hardening in #1801). Fail closed
+    # and loud: the OSError propagates -- spawn mirrors the tmux
+    # path's cleanup first, steer and resume surface the traceback --
+    # so a planted lock can never wedge or misdirect a launch
+    # silently. (Shares `_nofollow_regular_opener` with the recover
+    # worker's lock/log hardening, #1804.)
+    with open(lockp, "w", opener=_nofollow_regular_opener) as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             return _msp_launch_supervisor_locked(slug, prompt)
