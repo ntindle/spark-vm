@@ -140,8 +140,8 @@ verified.
 S1a enforces the **repo updater only** (the `pending_range()` cap). S1b
 ships the hook-loop status writer below; the toolset `_read_pin` cap
 (`deploy/toolset-update.sh` `_toolset_gate_cap`, #1629) is shipped; the
-per-box gate-stale line folded into the alert board as the per-box detail
-beneath the `correlated-gate-stale` page (D-GA-2, #1631/#1632).
+per-box gate-stale line has been folded into the alert board as per-box
+detail beneath the `correlated-gate-stale` page (D-GA-2, #1631/#1632).
 
 ### The hook loop (S1b, #777)
 
