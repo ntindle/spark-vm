@@ -151,6 +151,7 @@ never drift from what's on disk.
 | `test_ci_md_link_excludes.py` | `docs/CI.md` link-check exclusion inventory |
 | `test_ci_md_suite_inventory.py` | CI python-tests suite inventory |
 | `test_ci_shard_plan.py` | CI shard plan ↔ real suite bijection |
+| `test_ci_shellcheck_files.py` | `ci_shellcheck_files.py` shellcheck file-selection contract (vs the pinned action) |
 | `test_contributing_ci_gates.py` | `CONTRIBUTING.md` merge-gate check list |
 | `test_contributing_suites.py` | `CONTRIBUTING.md` test-suite inventory |
 | `test_contributing_venv.py` | `CONTRIBUTING.md` venv-first install instructions |
