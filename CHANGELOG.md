@@ -51,7 +51,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
-- The owner alert taxonomy gains the sentinel transport-health class: when the tenant-plane → operator-plane shipment intake ships, a seq-gap ("the trail has a hole" — missing telemetry on a per-surface counter, or an epoch reset the intake can't account for) gets a dashboard chip while the gap is open, a push page only for persistent gaps, and a digest row — with the suppression rule that accounted restarts and self-healed blips never page. The intake that raises the alert is still unbuilt; this is the surfacing spec it fires into. (#1809)(#TBD)
+- The owner alert taxonomy gains the sentinel transport-health class: when the tenant-plane → operator-plane shipment intake ships, a seq-gap ("the trail has a hole" — missing telemetry on a per-surface counter, or an epoch reset the intake can't account for) gets a dashboard chip while the gap is open, a push page only for persistent gaps, and a digest row — with the suppression rule that accounted restarts and self-healed blips never page. The intake that raises the alert is still unbuilt; this is the surfacing spec it fires into. (#1809)(#1832)
 
 ### Security
 - The credential-management UI's token rotation no longer needs a manual service restart: the rotate command signals the running service (SIGHUP) and then verifies the server actually adopted the new token, warning loudly if it didn't. A minute-interval watchdog re-reads the token store as a fail-safe; if the store stays unreadable the server fails closed (denies all API auth) after five minutes rather than honoring a possibly-revoked token indefinitely. (#1751)(#1830)
