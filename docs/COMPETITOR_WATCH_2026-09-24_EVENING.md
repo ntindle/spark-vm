@@ -172,7 +172,6 @@ adjacent color, deliberately excluded from the corpus:
   framing explicitly cites rogue AI agents as the driver. Out-of-lane
   (secure browser), adjacent as another datapoint that agent-execution
   risk is now a funded category. Sources:
-  https://northlandnewsradio.com/2026/09/24/ai-startup-island-valued-at-6-4-billion-in-latest-funding-round/,
   https://techstartups.com/2026/09/24/browser-security-startup-island-raises-400m-at-6-4b-valuation-to-defend-against-rogue-ai-agents/
 - **Alibaba — AgentCore + "Agent Native Cloud" roadmap** (snippet-only,
   aiagentstore.ai digest; not fetched): full-stack agentic roadmap —
