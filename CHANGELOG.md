@@ -248,6 +248,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   truncating the link target through the lock's `"w"` open. A refused
   lock fails closed and loud -- a machine-readable `needs-attention`
   event instead of a traceback, with the next watch pass retrying. (#1805)
+- The MSP-transport supervisor launch lock now opens with `O_NOFOLLOW`:
+  a symlinked `.<slug>.msp-launch.lock` fails the launch loudly instead
+  of serializing on someone else's file or truncating the link target
+  through the lock's `"w"` open. Completes the job-lock symlink-plant
+  hardening (the recover worker and shared per-slug lock shipped in
+  #1801's follow-up). (#1806)
 - Tenant onboarding magic-link sessions are now TTL-bound (one hour):
   an expired session cookie returns `401` instead of authenticating
   indefinitely, and sessions minted before this change no longer
