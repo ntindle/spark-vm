@@ -121,6 +121,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Tenant-status doc accuracy: `_demote_on_provider_death` and
+  `_re_evaluate_latch_on_exit` both claimed terminal codes are never
+  rewritten by liveness flips, but `approved` — a `TERMINAL_CODES`
+  member — deliberately demotes to `box-unhealthy` on provider death
+  (its terminality is a rule-1 selection property; the arc stays
+  live-capable after approval). Both docstrings now name the verdict
+  codes that truly never rewrite and call out the `approved` exception.
+  Found by the 20261019-1829 arch deep-read, which also filed
+  #1783/#1784/#1785/#1786. (#1787)
 - Fleet gate-stale alert rule test coverage: the emit-time-fallback
   path (boxes whose gate timestamp is missing or unparseable still
   count toward the fleet-outage quorum, and the alert marks their ages

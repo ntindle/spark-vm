@@ -501,9 +501,12 @@ _SUSPENSION_LATCH_EVENTS = frozenset(
 
 # Post-live arc codes from which a liveness loss demotes/suspends the arc
 # (#1461/#1462): rules 2/3/4 each license box-unhealthy from these, and
-# rule 6 licenses the relay suspension from each. Terminal/operator codes
-# are never rewritten by a liveness flip — a denial, drop-off, or gate
-# verdict already ended the arc.
+# rule 6 licenses the relay suspension from each. Verdict codes
+# (``human-denied``, ``human-drop-off``, ``policy-misfire``,
+# ``no-gated-action``) are never rewritten by a liveness flip — a verdict
+# already ended the arc. ``approved`` is the deliberate exception:
+# terminal for rule-1 selection but live-capable, so a dead provider
+# demotes it and a down relay suspends it.
 _LIVENESS_DEMOTE_CODES = frozenset({"live", "waiting-on-approval", "approved"})
 
 
@@ -518,7 +521,13 @@ def _demote_on_provider_death(arc: BoxArc) -> None:
     provider no longer supports (#1462). Everywhere else the flip is
     boolean-only: at ``provisioning`` the arc holds per rule 1(a)
     (reachability failure waits for the driver's terminal report), and
-    terminal/operator codes are never rewritten.
+    the verdict codes (``human-denied``, ``human-drop-off``,
+    ``policy-misfire``, ``no-gated-action`` — a verdict already ended
+    the arc) are never rewritten. ``approved`` is the deliberate
+    exception: it is terminal for rule-1 *selection*, but a liveness
+    flip still demotes it — the arc stays live-capable after approval,
+    so a dead provider surfaces ``box-unhealthy`` instead of a ``live``
+    code the dead provider no longer supports.
     """
     if arc.code in _LIVENESS_DEMOTE_CODES:
         _move(arc, "box-unhealthy", detail="box-unhealthy: provider-dead")
@@ -550,8 +559,11 @@ def _suspend_on_relay_down(arc: BoxArc, detail: Optional[str]) -> None:
     The relay/cert path is down — that is rule 6's suspension condition,
     not ``box-unhealthy``: a post-``live`` arc enters
     ``connection-unreachable`` with the sub-code in ``detail``. Already
-    suspended, at ``provisioning`` (rule 1(a) hold), terminal/operator,
-    or ``stuck`` / ``maintenance``: boolean flip only.
+    suspended, at ``provisioning`` (rule 1(a) hold), on a verdict code,
+    or ``stuck`` / ``maintenance``: boolean flip only. (``approved`` is
+    not a verdict for this purpose: terminal for rule-1 selection but
+    live-capable, so a down relay suspends it like the other
+    post-``live`` codes.)
 
     ``detail`` carries the producer's §3 sub-code (``relay`` | ``cert`` |
     ``box-leg``) on the R3 wiring path (#1416, D-RL34-4); the sole
@@ -576,8 +588,11 @@ def _re_evaluate_latch_on_exit(arc: BoxArc) -> bool:
     latch preserved for a later ``relay-recovered``. The provider input
     is checked first (a dead box wins over a down relay); the relay
     input is checked second (a down relay at exit means the honest code
-    is the suspension, not the latch). Terminal latches are restored
-    as-is — a verdict already ended the arc. This is the exit-time
+    is the suspension, not the latch). Verdict latches are restored
+    as-is — a verdict already ended the arc. (``approved`` is not a
+    verdict for this purpose: terminal for rule-1 selection, but still
+    live-capable, so a dead provider demotes it via the check above
+    rather than restoring it.) This is the exit-time
     backstop to :func:`_demote_on_provider_death`'s flip-time latch
     update: together they also heal pre-fix persisted records whose
     latch predates the flip-time update.
