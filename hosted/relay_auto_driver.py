@@ -156,8 +156,10 @@ def _stale_probe_note(
 
     Missing, unreadable, or older-than-2x-cadence probe history is
     noted LOUD — the tick drives anyway (drive-only; the probe loop is
-    S5's problem, #1725). Until S5 ships, loud-stale ticks are the
-    steady state by design.
+    S5's problem, #1725). #1725 shipped the probe DRIVER as a module,
+    but nothing schedules probes yet (#1837) — until a scheduled probe
+    source feeds probe history, loud-stale ticks are the steady state
+    by design.
     """
     try:
         probe = latest_probe_fn(vm_id)

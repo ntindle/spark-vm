@@ -145,6 +145,14 @@ as applied.
   empty; prior per-tenant last-tick history lost, staleness self-heals
   from this tick`. A *missing* sidecar (the normal first run) restarts
   from empty silently: no history existed to lose.
+- A wedged sweep never outlives its firing period (#1836): the unit
+  pins `TimeoutStartSec=240s` (inside the 5-minute timer period — a
+  pathology budget, not a latency budget; a healthy sweep finishes in
+  seconds) and `--journal-timeout-s 30` bounds the per-box journal-lock
+  wait to a tick-scale 30s instead of the 300s fleet default. A sweep
+  killed by the timeout leaves no LOUD per-tenant record — the MISSING
+  fresh watermark is the fail-visible signal, read by S4's staleness
+  rule (#1724) exactly as for the wedged-sidecar case above.
 
 ## 6. Trust note
 
