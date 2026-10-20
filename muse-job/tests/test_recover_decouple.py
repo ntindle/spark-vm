@@ -405,3 +405,74 @@ def test_dispatch_never_raises(cli, monkeypatch):
 
     monkeypatch.setattr(cli.subprocess, "Popen", boom)
     assert cli._dispatch_recover_worker("my-job") is False
+
+
+# --- O_NOFOLLOW hardening (Security review carry-over, #1801) ------------------
+
+
+def test_recover_global_lock_refuses_symlink(cli, monkeypatch, capsys):
+    # A symlinked lock path must fail the open (ELOOP) instead of
+    # serializing on someone else's file: the worker fails closed and
+    # loud -- a machine-readable needs-attention, no resume attempted.
+    _make_job(cli, "dead-1")
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    resumed = []
+    monkeypatch.setattr(cli, "cmd_resume",
+                        lambda a, **k: resumed.append(a.slug) or 0)
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    decoy = os.path.join(cli.JOBS_DIR, "decoy.lock")
+    with open(decoy, "w") as f:
+        f.write("not the lock")
+    os.symlink(decoy, cli._recover_global_lock_path())
+    rc = cli.cmd_recover(argparse.Namespace(slug="dead-1"))
+    assert rc == 1
+    assert resumed == []
+    events = _events(capsys)
+    assert len(events) == 1
+    assert events[0]["signal"] == "needs-attention"
+    assert "lock acquisition failed" in events[0]["detail"]
+
+
+def test_recover_per_slug_lock_refuses_symlink(cli, monkeypatch, capsys):
+    # The per-slug lock `with_lock` takes inside the global lock is
+    # hardened too: a planted `.<slug>.lock` symlink must fail the open
+    # (ELOOP) instead of being followed -- "w" would have truncated the
+    # link target. The worker fails closed and loud: needs-attention,
+    # no resume attempted, decoy bytes untouched.
+    _make_job(cli, "dead-1")
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: False)
+    resumed = []
+    monkeypatch.setattr(cli, "cmd_resume",
+                        lambda a, **k: resumed.append(a.slug) or 0)
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    decoy = os.path.join(cli.JOBS_DIR, "precious.txt")
+    with open(decoy, "w") as f:
+        f.write("precious data")
+    os.symlink(decoy, os.path.join(cli.JOBS_DIR, ".dead-1.lock"))
+    rc = cli.cmd_recover(argparse.Namespace(slug="dead-1"))
+    assert rc == 1
+    assert resumed == []
+    assert open(decoy).read() == "precious data"  # never truncated
+    events = _events(capsys)
+    assert len(events) == 1
+    assert events[0]["signal"] == "needs-attention"
+    assert "lock acquisition failed" in events[0]["detail"]
+
+
+def test_dispatch_refuses_symlinked_log(cli, monkeypatch):
+    # A symlinked recovery log must fail the open (ELOOP) instead of
+    # letting a planted link steer the worker's stdout/stderr elsewhere:
+    # the dispatch fails closed like any other dispatch failure, and the
+    # watch pass reports needs-attention (no worker spawned).
+    spawned = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or None)
+    logp = cli._recover_log_path("my-job")
+    os.makedirs(os.path.dirname(logp), exist_ok=True)
+    decoy = os.path.join(os.path.dirname(logp), "decoy.log")
+    with open(decoy, "w") as f:
+        f.write("not the log")
+    os.symlink(decoy, logp)
+    assert cli._dispatch_recover_worker("my-job") is False
+    assert spawned == []
+    assert open(decoy).read() == "not the log"  # never written through

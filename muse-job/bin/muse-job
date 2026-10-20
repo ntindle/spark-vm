@@ -749,7 +749,14 @@ def _phase_msp_occupancy_note(slug, live):
 def with_lock(slug, fn):
     os.makedirs(JOBS_DIR, exist_ok=True)
     lockp = os.path.join(JOBS_DIR, f".{slug}.lock")
-    with open(lockp, "w") as lf:
+    # O_NOFOLLOW (the recover worker's `_nofollow_opener`): a symlinked
+    # lock path fails (ELOOP) instead of being followed -- and "w" would
+    # have truncated the link target, so following is never safe here.
+    # Threat model: these dirs are user-private, so the planter is a
+    # same-uid partially-trusted actor (another agent on the box, a
+    # compromised job session) or a stale operator symlink -- this is
+    # confused-deputy hardening, not a cross-user boundary.
+    with open(lockp, "w", opener=_nofollow_opener) as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             return fn()
@@ -3438,6 +3445,18 @@ def _recover_global_lock_path():
     return os.path.join(JOBS_DIR, ".recover.lock")
 
 
+def _nofollow_opener(path, flags):
+    """os.open that refuses symlinks, for use as an open() opener.
+
+    Using this as `open(path, mode, opener=_nofollow_opener)` keeps the
+    returned file object's `.name` (unlike os.fdopen, which names it by
+    fd) while making the open itself the symlink check: a symlinked
+    path fails with OSError (ELOOP) instead of writing through the
+    link. Callers fail closed on that OSError.
+    """
+    return os.open(path, flags | os.O_NOFOLLOW)
+
+
 class _recover_global_lock:
     """The recovery serialization lock (issue #41).
 
@@ -3453,11 +3472,21 @@ class _recover_global_lock:
     global lock the workers run the bar+resume section one at a time,
     which is the same serialization the old inline code got from the
     serial watchdog pass.
+
+    The lock file opens with O_NOFOLLOW: a symlinked lock path fails
+    the open (ELOOP) instead of serializing on someone else's file, and
+    cmd_recover turns that into a loud `needs-attention` rather than
+    running recovery unserialized. Threat model: these dirs are
+    user-private, so the planter is a same-uid partially-trusted actor
+    (another agent on the box, a compromised job session) or a stale
+    operator symlink -- confused-deputy hardening, not a cross-user
+    boundary.
     """
 
     def __enter__(self):
         os.makedirs(JOBS_DIR, exist_ok=True)
-        self._lf = open(_recover_global_lock_path(), "w")
+        self._lf = open(_recover_global_lock_path(), "w",
+                        opener=_nofollow_opener)
         fcntl.flock(self._lf, fcntl.LOCK_EX)
         return self
 
@@ -3487,9 +3516,14 @@ def _dispatch_recover_worker(slug):
     failure must not fail the watchdog pass -- the pass reports it
     loudly (`needs-attention`) and the next pass retries, because the
     tmux session is still dead. Returns True on spawn, False otherwise.
+
+    The log opens with O_NOFOLLOW: a symlinked log path fails the open
+    instead of letting a planted link steer the worker's output
+    somewhere else; the failure returns False like any other dispatch
+    failure.
     """
     try:
-        logf = open(_recover_log_path(slug), "a")
+        logf = open(_recover_log_path(slug), "a", opener=_nofollow_opener)
     except OSError:
         return False
     try:
@@ -3593,8 +3627,22 @@ def cmd_recover(args):
                            "detail": f"tmux dead and resume failed: {e}"})
         return "done"
 
-    with _recover_global_lock():
-        outcome = with_lock(slug, go)
+    try:
+        with _recover_global_lock():
+            outcome = with_lock(slug, go)
+    except OSError as e:
+        # Fail closed and loud: the locks are the serialization the #804
+        # anti-stampede property rests on, and their opens refuse
+        # symlinks (O_NOFOLLOW). A planted lock path -- or any other
+        # lock-open failure -- must neither run recovery unserialized nor
+        # die as an unreadable traceback: the operator gets the same
+        # machine-readable `needs-attention` the rest of this worker
+        # emits, and the next watch pass retries.
+        print(json.dumps({"job": slug, "signal": "needs-attention",
+                          "detail": "recover: lock acquisition failed "
+                                    "(global/per-slug lock): %s" % e}),
+              flush=True)
+        return 1
     if outcome == "already-alive":
         return 0
     for e in events:
