@@ -47,7 +47,8 @@ notes, in the goal workspace — not part of this repo).
 > flagged-only, reconciling with its header and search stats (13
 > successful searches; 1/1 successful open). The B-lane candidate is
 > a new corpus filing (C89), not a re-fold — the integration
-> records 1 filing + 1 bookkeeping delta, not a mint.
+> records 1 filing + 1 bookkeeping delta; the bookkeeping delta
+> was recorded as a delta, not minted.
 > Corpus-number integrity: last issued C-number C88 (cycle 74); this
 > cycle issues C89.
 
