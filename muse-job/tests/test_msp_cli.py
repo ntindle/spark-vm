@@ -10,7 +10,9 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import queue
 import sys
+import threading
 import time
 import types
 
@@ -1359,3 +1361,74 @@ def test_msp_launch_lock_refuses_symlink(cli, monkeypatch):
         cli._msp_launch_supervisor(slug)
     assert forks == [], "no supervisor may fork on a planted lock"
     assert open(decoy).read() == "precious data"  # never truncated
+
+
+def _run_launch_open_guarded(fn, timeout_s=10):
+    """Run a launch-lock open callable in a daemon thread with a timeout.
+
+    Pristine (pre-#1815) code blocks forever opening a reader-less FIFO
+    at the launch-lock path; the guard turns that hang into a test
+    failure instead of wedging the suite. Fixed code fails the open
+    fast, so the thread always finishes well inside the timeout.
+    """
+    q = queue.Queue()
+
+    def _target():
+        try:
+            q.put(("ok", fn()))
+        except BaseException as e:  # noqa: BLE001 -- re-raised below
+            q.put(("err", e))
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    try:
+        kind, value = q.get(timeout=timeout_s)
+    except queue.Empty:
+        pytest.fail("open hung on a planted FIFO: the #1815 fail-fast "
+                    "open did not refuse it")
+    if kind == "err":
+        raise value
+    return value
+
+
+def test_msp_launch_lock_refuses_fifo(cli, monkeypatch):
+    # Issue #1815: a planted FIFO at the msp-launch lock path must fail
+    # the spawn fast (ENXIO from O_NONBLOCK) instead of hanging the
+    # MSP supervisor spawn with no timeout. The launcher fails closed
+    # and loud: the OSError propagates, no supervisor forks.
+    slug = "msplaunchfifo"
+    _make_job(cli, slug)
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    os.mkfifo(os.path.join(cli.JOBS_DIR, ".%s.msp-launch.lock" % slug))
+    forks = []
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: forks.append(a) or None)
+    with pytest.raises(OSError):
+        _run_launch_open_guarded(lambda: cli._msp_launch_supervisor(slug))
+    assert forks == [], "no supervisor may fork on a planted lock"
+
+
+def test_msp_launch_lock_refuses_reader_bearing_fifo(cli, monkeypatch):
+    # fstat branch of _nofollow_regular_opener (#1815): O_NONBLOCK
+    # alone does NOT refuse a FIFO with a reader, so hold one open and
+    # require the regular-file check to fail the open fast. The
+    # match="non-regular" pins that it is the fstat branch refusing,
+    # not the ENXIO path. Deterministic: with a reader held, even
+    # unhardened code opens without hanging, so a regression fails
+    # cleanly instead of wedging the suite.
+    slug = "msplaunchfifordr"
+    _make_job(cli, slug)
+    os.makedirs(cli.JOBS_DIR, exist_ok=True)
+    path = os.path.join(cli.JOBS_DIR, ".%s.msp-launch.lock" % slug)
+    os.mkfifo(path)
+    rfd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        forks = []
+        monkeypatch.setattr(cli.subprocess, "Popen",
+                            lambda *a, **k: forks.append(a) or None)
+        with pytest.raises(OSError, match="non-regular"):
+            _run_launch_open_guarded(
+                lambda: cli._msp_launch_supervisor(slug))
+        assert forks == [], "no supervisor may fork on a planted lock"
+    finally:
+        os.close(rfd)

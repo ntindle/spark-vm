@@ -258,6 +258,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- The `muse-job` MSP supervisor launch lock now also refuses planted
+  FIFOs: the last same-class site the lock hardening (#1803/#1805) and
+  the recover-worker hardening (#1804) left behind opens with
+  `O_NONBLOCK` plus a regular-file check, so a pre-created FIFO at the
+  `.{slug}.msp-launch.lock` path fails the spawn fast and loud instead
+  of hanging the MSP supervisor spawn with no timeout. A refused open
+  fails closed exactly like the refused symlink: the OSError
+  propagates, no supervisor forks. Closes #1815. (#1818)
 - The `muse-job recover` lock/log opens now also refuse planted FIFOs:
   the same three opens the symlink-plant hardening covered (global
   recovery lock, per-job recovery log, shared per-slug lock) open with
