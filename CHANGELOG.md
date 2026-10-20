@@ -129,7 +129,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and the §7 endpoint table now point at the session-lifetime definition
   in `TENANT_STATUS_ENDPOINT.md`). Previously only the endpoint doc stated
   the expiry, so a reader of the signup spec would assume the session
-  lived forever. (#TBD)
+  lived forever. (#1795)
 - Tenant status: during a relay outage, approval and verdict events
   arriving mid-suspension used to nudge the box's "last updated"
   timestamp even though the status shown didn't change — timestamp-keyed
