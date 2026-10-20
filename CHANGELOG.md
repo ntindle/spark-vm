@@ -265,7 +265,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `.{slug}.msp-launch.lock` path fails the spawn fast and loud instead
   of hanging the MSP supervisor spawn with no timeout. A refused open
   fails closed exactly like the refused symlink: the OSError
-  propagates, no supervisor forks. Closes #1815. (#TBD)
+  propagates, no supervisor forks. Closes #1815. (#1818)
 - The `muse-job recover` lock/log opens now also refuse planted FIFOs:
   the same three opens the symlink-plant hardening covered (global
   recovery lock, per-job recovery log, shared per-slug lock) open with
