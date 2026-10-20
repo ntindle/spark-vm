@@ -129,6 +129,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the release list with no buildable image behind it. (#1779)
 
 ### Fixed
+- Closing a job now archives its per-job recovery log with the closed job instead of leaving it behind to grow without bound: the log is moved into the job directory and compressed with the other logs, so it is swept away with the closed job -- and the disk sweeper now prunes leftover recovery logs older than 30 days (never a live job's). Closes #1800. (#1828)
 - The browser driver's gesture action now caps `max_points` at 10,000:
   the parameter was validated as a positive integer with no upper
   bound, so a hostile value could push a naive backend into
@@ -260,6 +261,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a cohort the box was never in. (#1749)
 
 ### Security
+- Answering a user-input prompt now binds the answer to the exact prompt content the operator classified: the prompt is re-read just before sending, and the answer is refused -- loudly, with nothing sent -- if the prompt was re-issued with different question text (or vanished) since classification. This narrows the race where a re-issued prompt could slip different text under the same prompt id between the operator's trust classification and the send -- from the whole classification-to-send window down to the single re-read→send gap (client-side only; `userInput/answer` has no server-side enforcement like `approval/decide`'s requirement id), protecting the explicit classification the trust policy depends on. The approvals listing shows the binding hash, and `muse-job answer` accepts it as `--expected-prompt-hash`, so an answer queued behind a busy supervisor is verified at drain time too when the flag is passed (without it, a queued answer is sent unbound, as before). Closes #1772. (#1828)
 - Push notifications now refuse to send with a mismatched VAPID keypair: the sender fails closed at send time if the configured VAPID public key does not correspond to the private key, instead of minting an authorization header no push service could verify and failing every delivery with a 4xx far from the misconfigured key. Closes #1823. (#1827)
 - The `muse-job` MSP supervisor launch lock now also refuses planted
   FIFOs: the last same-class site the lock hardening (#1803/#1805) and

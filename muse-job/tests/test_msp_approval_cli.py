@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -267,6 +268,25 @@ def test_approvals_lists_redacted(cli, fakes, capsys):
     assert methods.count("approval/listPending") == 1
 
 
+def test_approvals_listing_shows_binding_hint(cli, fakes, capsys):
+    # #1772: the listing renders the bind: line with the promptHash so
+    # the operator can carry it into `answer --expected-prompt-hash` --
+    # the only discoverable path to the flag on the queue path.
+    slug = "job1"
+    _make_job(cli, slug)
+    rc = cli.cmd_approvals(_ns(slug=slug, json=False, show_secrets=False))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "bind:" in out
+    assert "--expected-prompt-hash" in out
+    m = re.search(r"--expected-prompt-hash ([0-9a-f]{64})", out)
+    assert m is not None
+    # The printed hash is the real binding for the listed prompt.
+    msp_approval = cli._msp_approval()
+    prompt = msp_approval.parse_user_input(copy.deepcopy(PROMPT_WIRE))
+    assert m.group(1) == msp_approval.prompt_content_hash(prompt)
+
+
 def test_approvals_show_heuristic_opt_in(cli, fakes, capsys):
     # Issue #1773: --show-heuristic renders the hint, reworded so its
     # non-authority is impossible to miss.
@@ -468,6 +488,77 @@ def test_answer_trust_opt_in(cli, fakes, capsys):
     body = json.loads(capsys.readouterr().out)
     assert body["userInputId"] == "ui-1"
     assert body["status"] == "accepted"
+
+
+def test_answer_binds_to_reread_prompt_by_default(cli, fakes):
+    # #1772: without --expected-prompt-hash the answer binds to the
+    # prompt just re-read -- the binding performs a second listPending
+    # immediately before the send.
+    slug = "job1"
+    _make_job(cli, slug)
+    answers = json.dumps([
+        {"questionId": "q-trust", "selectedLabel": "Yes, trust it"},
+        {"questionId": "q-free", "freeText": "fine"},
+    ])
+    rc = cli.cmd_answer(_ns(slug=slug, user_input_id="ui-1",
+                            answers=answers, trust_policy_opt_in=False,
+                            classified_not_trust_prompt=True))
+    assert rc == 0
+    calls = fakes.host_calls()
+    assert [m for m, _ in calls].count("approval/listPending") == 2
+    assert len([p for m, p in calls if m == "userInput/answer"]) == 1
+
+
+def test_answer_operator_hash_refuses_reissued_prompt(cli, fakes):
+    # #1772: the operator's classification hash (the approvals
+    # listing's promptHash) is verified against a fresh re-read; a
+    # re-issued prompt fails closed with nothing on the wire.
+    slug = "job1"
+    _make_job(cli, slug)
+    msp_approval = cli._msp_approval()
+    prompt = msp_approval.parse_user_input(copy.deepcopy(PROMPT_WIRE))
+    bound = msp_approval.prompt_content_hash(prompt)
+    answers = json.dumps([
+        {"questionId": "q-trust", "selectedLabel": "Yes, trust it"},
+        {"questionId": "q-free", "freeText": "fine"},
+    ])
+    # Re-issue the prompt on the second listPending: same ids/shapes,
+    # different text -- the wire's shape validation cannot catch this.
+    calls = {"n": 0}
+    orig = fakes.list_pending_result
+
+    def reissuing(params):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            mutated = copy.deepcopy(PROMPT_WIRE)
+            mutated["questions"][0]["question"] = (
+                "Do you trust this workspace? (RE-ISSUED)")
+            return {"approvals": [], "userInputs": [mutated]}
+        return orig(params)
+
+    fakes.list_pending_result = reissuing
+    with pytest.raises(RuntimeError, match="re-issued"):
+        cli.cmd_answer(_ns(slug=slug, user_input_id="ui-1",
+                           answers=answers, trust_policy_opt_in=False,
+                           classified_not_trust_prompt=True,
+                           expected_prompt_hash=bound))
+    sent = [p for m, p in fakes.host_calls() if m == "userInput/answer"]
+    assert sent == []
+
+
+def test_answer_rejects_malformed_expected_hash(cli, fakes):
+    slug = "job1"
+    _make_job(cli, slug)
+    answers = json.dumps([
+        {"questionId": "q-trust", "selectedLabel": "Yes, trust it"},
+        {"questionId": "q-free", "freeText": "fine"},
+    ])
+    with pytest.raises(RuntimeError, match="expected-prompt-hash"):
+        cli.cmd_answer(_ns(slug=slug, user_input_id="ui-1",
+                           answers=answers, trust_policy_opt_in=False,
+                           classified_not_trust_prompt=True,
+                           expected_prompt_hash="not-a-hash"))
+    assert fakes.host_calls() == []
 
 
 def test_answer_bad_answers_fail_client_side(cli, fakes):

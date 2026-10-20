@@ -18,6 +18,7 @@ refusal; the -32057 userInputAnswerInvalid refusal; the "test/emit"
 hook that fires server-initiated requests on demand so the routing
 helpers can be tested end to end.
 """
+import copy
 import importlib.machinery
 import importlib.util
 import json
@@ -54,7 +55,10 @@ import argparse, copy, json, re, sys, uuid
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--record", default=None)
+ap.add_argument("--prompt-mutation", default="none",
+                choices=("none", "reissue", "vanish"))
 args = ap.parse_args()
+list_pending_calls = [0]
 
 rec = open(args.record, "a") if args.record else None
 initialized = False
@@ -262,11 +266,26 @@ for line in sys.stdin:
         if check_drift_list(rid, params):
             continue
         sid = params.get("sessionId")
+        list_pending_calls[0] += 1
+        user_inputs = [p for p in prompts.values()
+                       if p["sessionId"] == sid]
+        # Test hook for the #1772 classification binding: from the
+        # second listPending on, mutate the served prompt the way a
+        # re-issuing server would.
+        if args.prompt_mutation != "none" and list_pending_calls[0] >= 2:
+            if args.prompt_mutation == "reissue":
+                user_inputs = [copy.deepcopy(p) for p in user_inputs]
+                for p in user_inputs:
+                    for q in p["questions"]:
+                        if q["id"] == "q-trust":
+                            q["question"] = (
+                                "Do you trust this workspace? (RE-ISSUED)")
+            else:  # vanish: the prompt is gone from the pending set
+                user_inputs = []
         send({"jsonrpc": "2.0", "id": rid, "result": {
             "approvals": [a for a in approvals.values()
                           if a["sessionId"] == sid],
-            "userInputs": [p for p in prompts.values()
-                           if p["sessionId"] == sid]}})
+            "userInputs": user_inputs}})
     elif method == "approval/decide":
         if not check_command_id(rid, params):
             continue
@@ -325,13 +344,21 @@ for line in sys.stdin:
 ''')
 
 
-def _write_approval_serve(tmp_path):
-    """Write the approval-plane fixture; return (argv, record)."""
+def _write_approval_serve(tmp_path, prompt_mutation=None):
+    """Write the approval-plane fixture; return (argv, record).
+
+    ``prompt_mutation`` ("reissue" | "vanish") arms the fake serve's
+    #1772 test hook: from the second ``approval/listPending`` on, the
+    served prompt is re-issued with changed text (same ids/shapes) or
+    dropped from the pending set.
+    """
     path = tmp_path / "fake_approval_serve.py"
     path.write_text(FAKE_APPROVAL_SERVE)
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
     record = tmp_path / "record.jsonl"
     argv = [sys.executable, str(path), "--record", str(record)]
+    if prompt_mutation is not None:
+        argv += ["--prompt-mutation", prompt_mutation]
     return argv, record
 
 
@@ -733,6 +760,204 @@ def test_answer_cross_session_refused(approval_serve):
             mspa.answer_user_input(host, "sess-other", prompt,
                                    GOOD_ANSWERS)
     assert method_calls(record, "userInput/answer") == []
+
+
+# -- #1772 classification binding ----------------------------------------------
+
+def _prompt_with_text(prompt, question_id, new_text):
+    """Copy of a UserInputPrompt with one question's text replaced."""
+    questions = []
+    for q in prompt.questions:
+        questions.append(mspa.Question(
+            q.question_id, q.mode,
+            new_text if q.question_id == question_id else q.prompt_text,
+            list(q.options), q.min_selections, q.max_selections,
+            q.header))
+    return mspa.UserInputPrompt(prompt.user_input_id, questions,
+                                session_id=prompt.session_id,
+                                raw=copy.deepcopy(prompt.raw))
+
+
+def test_prompt_content_hash_deterministic_and_sensitive(approval_serve):
+    argv, _ = approval_serve
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+    h1 = mspa.prompt_content_hash(prompt)
+    assert mspa.prompt_content_hash(prompt) == h1
+    assert len(h1) == 64 and all(c in "0123456789abcdef" for c in h1)
+    # Same ids/shapes, different text -> different hash. This is the
+    # race the binding narrows: the wire's shape validation cannot
+    # catch a text-only re-issue.
+    changed = _prompt_with_text(prompt, "q-trust",
+                                "Do you trust this workspace? (EVIL)")
+    assert mspa.prompt_content_hash(changed) != h1
+    # Option-label change -> different hash.
+    q0 = prompt.questions[0]
+    relabeled = mspa.Question(
+        q0.question_id, q0.mode, q0.prompt_text,
+        ["Yes, trust it", "Absolutely not"], q0.min_selections,
+        q0.max_selections, q0.header)
+    swapped = mspa.UserInputPrompt(
+        prompt.user_input_id, [relabeled] + prompt.questions[1:],
+        session_id=prompt.session_id,
+        raw=copy.deepcopy(prompt.raw))
+    assert mspa.prompt_content_hash(swapped) != h1
+    # Question order change -> different hash (position is classified).
+    reordered = mspa.UserInputPrompt(
+        prompt.user_input_id, list(reversed(prompt.questions)),
+        session_id=prompt.session_id,
+        raw=copy.deepcopy(prompt.raw))
+    assert mspa.prompt_content_hash(reordered) != h1
+    # A different prompt id -> different hash.
+    other = mspa.UserInputPrompt("ui-2", prompt.questions,
+                                 session_id=prompt.session_id,
+                                 raw=copy.deepcopy(prompt.raw))
+    assert mspa.prompt_content_hash(other) != h1
+    # Unicode/emoji text hashes deterministically (ensure_ascii
+    # round-trip is stable across calls).
+    emoji = _prompt_with_text(prompt, "q-free", "Anything to add? \U0001f916")
+    assert mspa.prompt_content_hash(emoji) == \
+        mspa.prompt_content_hash(emoji)
+    assert mspa.prompt_content_hash(emoji) != h1
+    # Option-order-only change -> different hash (order is classified).
+    q0b = prompt.questions[0]
+    reordered_opts = mspa.Question(
+        q0b.question_id, q0b.mode, q0b.prompt_text,
+        list(reversed(q0b.options)), q0b.min_selections,
+        q0b.max_selections, q0b.header)
+    opt_swapped = mspa.UserInputPrompt(
+        prompt.user_input_id, [reordered_opts] + prompt.questions[1:],
+        session_id=prompt.session_id,
+        raw=copy.deepcopy(prompt.raw))
+    assert mspa.prompt_content_hash(opt_swapped) != h1
+    # Header-only change -> different hash (the header is its own
+    # hashed field, which also disambiguates the header/body
+    # concatenation in prompt_text).
+    q0c = prompt.questions[0]
+    reheaded = mspa.Question(
+        q0c.question_id, q0c.mode, q0c.prompt_text, list(q0c.options),
+        q0c.min_selections, q0c.max_selections, "Renamed header")
+    head_swapped = mspa.UserInputPrompt(
+        prompt.user_input_id, [reheaded] + prompt.questions[1:],
+        session_id=prompt.session_id,
+        raw=copy.deepcopy(prompt.raw))
+    assert mspa.prompt_content_hash(head_swapped) != h1
+    # toolName-only change -> different hash: the trust routing the
+    # classification protects scans toolName, so a re-issue swapping
+    # only it must break the binding (it is invisible in the question
+    # text the operator reads).
+    renamed_tool = mspa.UserInputPrompt(
+        prompt.user_input_id, prompt.questions,
+        session_id=prompt.session_id,
+        raw=dict(prompt.raw, toolName="definitely-not-ask"))
+    assert mspa.prompt_content_hash(renamed_tool) != h1
+
+
+def test_prompt_content_hash_rejects_non_prompt():
+    with pytest.raises(ValueError, match="must be a UserInputPrompt"):
+        mspa.prompt_content_hash({"userInputId": "ui-1"})
+
+
+def test_answer_with_matching_hash_sends(approval_serve):
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        bound = mspa.prompt_content_hash(prompt)
+        result = mspa.answer_user_input(host, "sess-a", prompt,
+                                        GOOD_ANSWERS,
+                                        expected_prompt_hash=bound)
+    assert result["status"] == "accepted"
+    assert len(method_calls(record, "userInput/answer")) == 1
+    # The binding re-reads approval/listPending immediately before the
+    # send: one read for the classification, one for the binding.
+    assert len(method_calls(record, "approval/listPending")) == 2
+
+
+def test_answer_without_hash_skips_reverify(approval_serve):
+    # Legacy default: no binding, no extra round-trip.
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        result = mspa.answer_user_input(host, "sess-a", prompt,
+                                        GOOD_ANSWERS)
+    assert result["status"] == "accepted"
+    assert len(method_calls(record, "approval/listPending")) == 1
+
+
+def test_answer_with_reissued_prompt_refuses(tmp_path):
+    # The fake serve re-issues q-trust with different text (same
+    # ids/shapes) on the second listPending: the operator's
+    # classification bound to the superseded text and the send must be
+    # refused, loudly, with nothing on the wire.
+    argv, record = _write_approval_serve(tmp_path,
+                                         prompt_mutation="reissue")
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        bound = mspa.prompt_content_hash(prompt)
+        with pytest.raises(mspa.MSPApprovalError, match="re-issued"):
+            mspa.answer_user_input(host, "sess-a", prompt, GOOD_ANSWERS,
+                                   expected_prompt_hash=bound)
+    assert method_calls(record, "userInput/answer") == []
+    assert len(method_calls(record, "approval/listPending")) == 2
+
+
+def test_answer_with_vanished_prompt_refuses(tmp_path):
+    argv, record = _write_approval_serve(tmp_path,
+                                         prompt_mutation="vanish")
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        bound = mspa.prompt_content_hash(prompt)
+        with pytest.raises(mspa.MSPApprovalError,
+                           match="no longer pending"):
+            mspa.answer_user_input(host, "sess-a", prompt, GOOD_ANSWERS,
+                                   expected_prompt_hash=bound)
+    assert method_calls(record, "userInput/answer") == []
+
+
+def test_answer_bad_expected_hash_rejected(approval_serve):
+    argv, record = approval_serve
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        for bad in (123, "", b"ab" * 32):
+            with pytest.raises(ValueError,
+                               match="expected_prompt_hash"):
+                mspa.answer_user_input(host, "sess-a", prompt,
+                                       GOOD_ANSWERS,
+                                       expected_prompt_hash=bad)
+    assert method_calls(record, "userInput/answer") == []
+    # Rejected before any re-read.
+    assert len(method_calls(record, "approval/listPending")) == 1
+
+
+def test_answer_trust_prompt_binding_refuses_reissue(tmp_path):
+    # The auto-answer path honors the same binding: a re-issued trust
+    # prompt is refused even with an explicit opt-in policy.
+    argv, record = _write_approval_serve(tmp_path,
+                                         prompt_mutation="reissue")
+    policy = mspa.TrustPolicy(auto_answer_trust=True)
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        bound = mspa.prompt_content_hash(prompt)
+        with pytest.raises(mspa.MSPApprovalError, match="re-issued"):
+            mspa.answer_trust_prompt(host, "sess-a", prompt, GOOD_ANSWERS,
+                                     policy=policy,
+                                     expected_prompt_hash=bound)
+    assert method_calls(record, "userInput/answer") == []
+
+
+def test_answer_trust_prompt_binding_allows_match(tmp_path):
+    argv, record = _write_approval_serve(tmp_path)
+    policy = mspa.TrustPolicy(auto_answer_trust=True)
+    with make_host(argv) as host:
+        prompt = get_prompt(host)
+        bound = mspa.prompt_content_hash(prompt)
+        result = mspa.answer_trust_prompt(host, "sess-a", prompt,
+                                          GOOD_ANSWERS, policy=policy,
+                                          expected_prompt_hash=bound)
+    assert result["status"] == "accepted"
+    assert len(method_calls(record, "userInput/answer")) == 1
+    # The trust path performs the same binding re-read.
+    assert len(method_calls(record, "approval/listPending")) == 2
 
 
 # -- trust policy --------------------------------------------------------------

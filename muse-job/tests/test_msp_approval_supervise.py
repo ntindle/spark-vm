@@ -318,7 +318,12 @@ def test_on_user_input_requested_journals_counts(cli, fakes):
     # questions to compose answers); answers are never stored.
     assert "Do you trust this workspace?" in json.dumps(entries)
     assert set(detail) == {"userInputId", "looksLikeTrustPrompt",
-                           "questions"}
+                           "promptHash", "questions"}
+    # The journaled hash is the real #1772 classification binding for
+    # this exact prompt content, so a later classification can bind to
+    # what was pending here.
+    assert detail["promptHash"] == \
+        msp_approval.prompt_content_hash(prompt)
 
 
 # -- decision queue: drain ---------------------------------------------------
@@ -396,10 +401,12 @@ def test_answer_queue_trust_true_routes_through_policy_gate(
     seen = []
     orig_trust = msp_approval.answer_trust_prompt
 
-    def spy_trust(host, sid, prompt, answers, *, policy, command_id=None):
-        seen.append(policy)
+    def spy_trust(host, sid, prompt, answers, *, policy, command_id=None,
+                  expected_prompt_hash=None):
+        seen.append((policy, expected_prompt_hash))
         return orig_trust(host, sid, prompt, answers, policy=policy,
-                          command_id=command_id)
+                          command_id=command_id,
+                          expected_prompt_hash=expected_prompt_hash)
 
     monkeypatch.setattr(msp_approval, "answer_trust_prompt", spy_trust)
     orig_plain = msp_approval.answer_user_input
@@ -421,10 +428,51 @@ def test_answer_queue_trust_true_routes_through_policy_gate(
     cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
                                   "turn-1")
     assert len(seen) == 1
-    assert seen[0].auto_answer_trust is True
+    assert seen[0][0].auto_answer_trust is True
+    # A legacy queued entry carries no classification binding, so the
+    # drain answers unbound (the pre-#1772 behavior is preserved).
+    assert seen[0][1] is None
     assert ("userInput/answer" in [m for m, _ in fakes.host_calls()])
     result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
     assert result["status"] == "answered"
+
+
+def test_answer_queue_prompt_hash_binding_refuses_reissue(cli, fakes):
+    # #1772: a queued entry carrying the operator's classification
+    # binding is verified at drain time -- a prompt re-issued while it
+    # sat in the queue is refused with nothing on the wire.
+    slug = "job1"
+    _make_job(cli, slug)
+    msp_approval = cli._msp_approval()
+    prompt = msp_approval.parse_user_input(copy.deepcopy(PROMPT_WIRE))
+    bound = msp_approval.prompt_content_hash(prompt)
+    calls = {"n": 0}
+    orig = fakes.list_pending_result
+
+    def reissuing(params):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            mutated = copy.deepcopy(PROMPT_WIRE)
+            mutated["questions"][0]["question"] = (
+                "Do you trust this workspace? (RE-ISSUED)")
+            return {"approvals": [], "userInputs": [mutated]}
+        return orig(params)
+
+    fakes.list_pending_result = reissuing
+    answers = [{"questionId": "q-trust", "selectedLabel": "No"},
+               {"questionId": "q-free", "freeText": "nothing"}]
+    rid = cli._msp_enqueue_decision(
+        slug, "answer",
+        {"user_input_id": "ui-1", "answers": answers, "trust": False,
+         "prompt_hash": bound},
+        turn_id="turn-1")
+    cli._msp_drain_decision_queue(slug, _drain_host(cli), "sess-1",
+                                  "turn-1")
+    methods = [m for m, _ in fakes.host_calls()]
+    assert "userInput/answer" not in methods
+    result = json.loads(open(cli._msp_decision_result_path(slug, rid)).read())
+    assert result["status"] == "error"
+    assert "re-issued" in result["detail"]
 
 
 def test_answer_queue_missing_trust_refused_fail_closed(cli, fakes):
