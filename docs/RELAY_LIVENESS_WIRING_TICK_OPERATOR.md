@@ -121,15 +121,22 @@ bug or a corrupt arc, not an operator decision.
   (D-RL34-3a) binds any driver — a human run, a cron entry, or a
   supervisor loop. The anchor tick converges with itself on re-drive,
   but two concurrent ticks for the same box are not supported.
-- **No auto driver exists in production.** Driving is an explicit
-  operator action until the auto-cadence slices land (#1711; S1–S5
-  filed as #1721, #1722, #1723, #1724, #1725). If you stop ticking, the wiring stops
-  suspending — a `down` reading sits un-acted-on until the next tick.
+- **No scheduled driver runs in production yet.** Manual `--tick` remains the
+  production drive path — if you stop ticking, the wiring stops suspending,
+  and a `down` reading sits un-acted-on until the next tick. The auto-cadence
+  slices are tracked in #1711 (S1–S5 filed as #1721, #1722, #1723, #1724,
+  #1725): the S1 driver module (#1721), the S3 systemd packaging (#1723), and
+  the S5 probe-loop module (#1725) have shipped — but the timer stays
+  disabled until the S4 staleness alert (#1724) lands (the enablement gate in
+  `docs/RELAY_AUTO_DRIVER_OPERATIONS.md`; enabling it earlier would re-create
+  the #1711 death mode), the probe loop still needs a schedule and a bundle
+  supplier, and the S2 plane async port + cron trigger (#1722) is still open.
 - **Tick reports are print-only today.** The report goes to whoever
   invoked the CLI; there is no durable, queryable tick history
-  (F-AC-4 in the gap analysis). The auto-cadence slices give ticks a
-  watermark and journal observability; until then, keep the tick output
-  if you want an audit trail.
+  (F-AC-4 in the gap analysis). Manual `--tick` writes no watermark (D-AC-6);
+  watermark + journal observability ride the driver path
+  (`docs/RELAY_AUTO_DRIVER_OPERATIONS.md`), which is not yet scheduled.
+  Keep the tick output if you want an audit trail.
 - Probe cadence while post-`live` arcs are active is a cost-vs-detection
   tradeoff (design §9 Q1), not this doc's call — but the tick is the
   second half of that budget: detection time is the probe cadence plus
