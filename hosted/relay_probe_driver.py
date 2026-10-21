@@ -291,9 +291,12 @@ def probe_all_tenants(
     failures (watermark/journal), never probe failures (those are
     ``failed=True`` on the tenant's own record), plus at most one
     sweep-level entry (``tenant_id`` None) when the probe-watermark
-    sidecar itself is unreadable (ELOOP plant, #1838) — one
-    sidecar-level fault is one sweep-level entry, never N per-tenant
-    ones.
+    sidecar itself is unreadable (ELOOP plant, #1838), or when the
+    single locked bulk write after the probe loop fails (lock-path
+    ELOOP plant, disk-full, permission — #1842): the bulk write is
+    sweep-level, so its failure is one sweep-level entry, never N
+    per-tenant ones. One sidecar-level fault is one sweep-level
+    entry, never N per-tenant ones.
 
     Raise contract: ``store.tenant_ids()`` raising (e.g. a corrupt
     tenant store) propagates — a store the sweep cannot even list is
@@ -429,17 +432,29 @@ def probe_all_tenants(
                 already_noted=wm_corrupt,
             )
         except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
+            # #1842: the bulk write is sweep-level, so its failure is ONE
+            # sweep-level errors[] entry (tenant_id None) — the #1838
+            # hoisting extended from the read path to the write path. A
+            # lock-path ELOOP plant is the same fault class as the
+            # sidecar-read ELOOP: one sidecar-level fault is one
+            # sweep-level entry, never N per-tenant ones. The LOUD notes
+            # stay on every tenant's own record (fail-visible per tenant)
+            # — only the errors[] signal is hoisted.
             for tid, rec in pending_writes.items():
                 rec["notes"].append(
                     "LOUD: probe observability failed for tenant %r: %s: %s"
                     % (tid, type(exc).__name__, exc)
                 )
-                errors.append(
-                    {
-                        "tenant_id": tid,
-                        "error": "%s: %s" % (type(exc).__name__, exc),
-                    }
-                )
+            errors.append(
+                {
+                    "tenant_id": None,
+                    "error": (
+                        "LOUD: sweep probe-watermark sidecar bulk write "
+                        "failed (%s: %s) — per-tenant watermark records "
+                        "carry the LOUD note" % (type(exc).__name__, exc)
+                    ),
+                }
+            )
 
     return {
         "tick_at": tick_iso,
