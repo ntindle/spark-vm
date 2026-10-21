@@ -353,6 +353,11 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   source/component/kind/outcome or missing `event_id`, coerces
   free-form fields to str-or-None (the PR #794 type-confusion class),
   and verifies row attestations the same way the S1 path does.
+  The append leg now also dedups duplicate event_ids inside a single
+  collect batch (previously only the pre-existing journal was
+  consulted), and a journal that exists but yields no events gets a
+  loud note naming the skipped audit-tail translation — so "box
+  emitted nothing" is distinguishable from "sink broke".
   Remaining slices: loud-on-configured-but-unwritable, fragment
   warn-only validation, the §3 S1 rollback-failed row reconcile.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):

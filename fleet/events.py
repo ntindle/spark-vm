@@ -251,9 +251,12 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
     rows with a missing/empty event_id, and rows with an unknown
     source/component/kind/outcome are recorded in notes, never emitted.
     (check, noop) rows stay local per the noise discipline and count in
-    local_noops. Free-form fields are coerced to str-or-None up front
-    (Engineering B1, PR #794 — the type-confusion crash class). Never
-    raises for bad input rows.
+    local_noops. The known free-form fields are coerced to str-or-None
+    up front (Engineering B1, PR #794 — the type-confusion crash
+    class); producer-fragment extras pass through verbatim — they
+    arrive as parsed JSON values, so they are always serializable, and
+    the alert rules read only known keys. Never raises for bad input
+    rows.
 
     `keyring` maps box_id -> 32-byte ed25519 pubkey (see
     attest.load_box_keys); None means the legacy estate with no keys
@@ -305,13 +308,20 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
         # The pull-context box_id is authoritative (§2): the estate dir
         # name is the identity, not the row's self-assertion. A
         # disagreeing row box_id is a loud note, never a trusted
-        # override.
+        # override. A present-but-not-a-string box_id is the same
+        # loudness class (QA, slice 4, #1649) — a null row box_id is
+        # the normal unset case and stays silent.
         row_box = row.get("box_id")
         if isinstance(row_box, str) and row_box and row_box != box_id:
             notes.append("journal row box_id %s disagrees with estate "
                          "dir box %s; using the estate dir"
                          % (_clean_text(row_box),
                             _clean_text(box_id)))
+        elif row_box is not None and not (
+                isinstance(row_box, str) and row_box):
+            notes.append("journal row has non-string box_id %r; using "
+                         "the estate dir box %s"
+                         % (row_box, _clean_text(box_id)))
         trigger = row.get("trigger")
         if trigger not in _JOURNAL_TRIGGERS:
             notes.append("journal row %s has unknown trigger %s; "
@@ -726,6 +736,14 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None):
         if local_noops:
             notes.append("%d check-noop event(s) kept local (noise "
                          "discipline)" % local_noops)
+        if not events:
+            # QA (slice 4, #1649): an empty (or all-blank) journal still
+            # flips the exclusive switch — say so loudly, or the
+            # operator cannot distinguish "box emitted nothing" from
+            # "sink broke".
+            notes.append("update-events.jsonl present but yielded no "
+                         "events; audit-tail translation skipped for the "
+                         "event leg (the box is on the journal path)")
         return events, local_noops, notes
     rows, skipped, err = _read_jsonl_file(
         os.path.join(box_dir, "audit-tail.jsonl"))
@@ -1172,8 +1190,17 @@ def append_events(store_dir, events):
                     if (e.get("box_id") is None
                         or isinstance(e.get("box_id"), str))
                     and isinstance(e.get("event_id"), str)}
-            fresh = [e for e in events
-                     if (e.get("box_id"), e.get("event_id")) not in seen]
+            # QA (slice 4, #1649): `seen` must grow as the batch is
+            # filtered, not just from the pre-existing journal — two
+            # rows with the same event_id inside ONE collect would
+            # otherwise both append, and the paging rules would read
+            # the duplicate (box_id, event_id) twice.
+            fresh = []
+            for event in events:
+                key = (event.get("box_id"), event.get("event_id"))
+                if key not in seen:
+                    seen.add(key)
+                    fresh.append(event)
             journal_path = os.path.join(store_dir, EVENTS_JOURNAL_NAME)
             # #1841: the journal append leg opens with O_NOFOLLOW — a
             # pre-planted symlink at the journal path fails loud (ELOOP)
