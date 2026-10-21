@@ -246,6 +246,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The attested-ingest convergence doc gets a slice-2 accuracy pass: every code-state claim was re-probed against what actually shipped since 2026-10-19 — the fail-closed verify-before-ingest guarantee now holds on both event canonicalizers (the read-switch leg is covered too, not just the audit-tail path), the box-key operator commands were exercised live, and the three genuinely-unowned remainders (deploy-agent signing at emit time, box-key rotation, the hosted plane-side key store) plus the trust-model residuals are all confirmed still open with their sequencing decisions intact. (#775)(#1516)
+
 - The changelog ritual lint's section-shape check closes its two review gaps (#1865): a `### ` heading inside a fenced code block is no longer mistaken for a real section heading (so an example can't fail the build), and the check now scans every `## [Unreleased]` block instead of only the first. A fence that never closes is not honored — a dangling fence can't silently hide real headings. (#1865)
 
 - Relay-liveness watermark sidecar: valid JSON holding non-dict
