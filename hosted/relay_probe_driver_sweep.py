@@ -15,9 +15,13 @@ The bundle supplier is the deployer's seam (D-RL2-3): this module
 supplies none, so a due tick with no bundle is noted LOUD (the
 dark-instrument steady state), never failed. Provider state defaults
 to ``running`` (mirrors the ``--probe-now`` CLI's
-``--provider-state``); the flag is inert until a bundle supplier is
-wired — with no bundle, the dial never runs and provider state is
-never consulted. The post-``live`` answer is derived from the real
+``--provider-state``); the flag is NOT inert — ``maybe_probe`` calls
+``provider_state_fn()`` on every tick before the bundle check, so a
+tenant whose provider reads ``suspended``/``destroyed`` stands down
+observably (``stand_down=True``) even with no bundle wired, and a
+stand-down record carries no dark-instrument note. With no bundle
+the dial itself never runs; wire a bundle supplier for probes to
+actually dial. The post-``live`` answer is derived from the real
 wiring store's anchor arc per tenant.
 
 The report JSON goes to stdout — the unit's journal is its audience

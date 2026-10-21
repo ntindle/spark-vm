@@ -297,6 +297,9 @@ def test_operator_doc_documents_pathology_budget():
     assert "TimeoutStartSec=240s" in doc
     assert "--journal-timeout-s 30" in doc
     assert "#1836" in doc
-    # The inert --provider-state flag is disclosed honestly: it does
-    # nothing until a bundle supplier is wired.
-    assert "inert until a bundle supplier is wired" in doc
+    # The --provider-state flag's true contract is disclosed honestly:
+    # it is NOT inert — provider state is read on every tick before the
+    # bundle check, so suspended/destroyed stands a tenant down even
+    # with no bundle wired (no dark-instrument note on stand-down).
+    assert "flag is NOT inert" in doc
+    assert "stand_down=True" in doc

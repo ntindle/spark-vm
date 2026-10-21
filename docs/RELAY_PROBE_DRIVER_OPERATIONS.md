@@ -116,8 +116,12 @@ path.
 Same trust model as the auto-driver sweep: the timer executes the
 checkout's code on the operator's own box; it grants no privilege
 beyond the operator's existing own. Provider state defaults to
-Provider state defaults to `running` (`--provider-state`, mirroring the
-`--probe-now` CLI); the flag is inert until a bundle supplier is wired
-(the sweep ships with none, D-RL2-3 — with no bundle, the dial never
-runs and provider state is never consulted). The post-`live` answer is
+`running` (`--provider-state`, mirroring the `--probe-now` CLI); the
+flag is NOT inert (the sweep ships with no bundle, D-RL2-3, but
+`maybe_probe` still reads provider state on every tick before the
+bundle check) — a tenant whose provider reads `suspended`/`destroyed`
+stands down observably (`stand_down=True`) even with no bundle wired,
+and a stand-down record carries no dark-instrument note. With no
+bundle the dial itself never runs; wire a bundle supplier for probes
+to actually dial. The post-`live` answer is
 derived from the real wiring store's anchor arc.
