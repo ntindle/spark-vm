@@ -298,6 +298,33 @@ class SymlinkPlantTests(unittest.TestCase):
         self.assertIsNone(fh)
         self.assertTrue(push._is_symlink_refusal(err))
 
+    def test_keys_load_refuses_symlink_plant(self):
+        # #1869: the keypair file holds the signing identity — a
+        # planted symlink must fail the sender closed (disabled) and
+        # loud, never substitute keys.
+        link = str(self.dir / "vapid.json")
+        self._plant(link)
+        sender = push.PushSender(link, str(self.dir / "subs.json"),
+                                 "mailto:test@localhost")
+        self.assertFalse(sender.enabled)
+        self.assertIn("plant refusal", sender.disabled_reason)
+        self.assertIn("no-keys", sender.disabled_reason)
+
+    def test_gen_keys_symlink_plant_pin(self):
+        # Regression pin (not a fix test): --gen-keys was already
+        # plant-safe via O_EXCL — POSIX mandates EEXIST when the path
+        # is a symlink with O_CREAT|O_EXCL, even a dangling one — and
+        # the #1869 change adds O_NOFOLLOW as explicit
+        # belt-and-suspenders. Either way a plant must raise loud and
+        # the fresh private key must land nowhere.
+        target = self.dir / "stolen-keys.json"
+        link = str(self.dir / "new-vapid.json")
+        os.symlink(str(target), link)
+        with self.assertRaises(OSError):
+            push.main(["--gen-keys", link])
+        self.assertFalse(os.path.lexists(str(target)))
+        self.assertTrue(os.path.islink(link))
+
 
 class FakeHTTPResponse:
     def __init__(self, code):

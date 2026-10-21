@@ -790,3 +790,11 @@ class TestSymlinkPlants(unittest.TestCase):
         with self.assertLogs("sparkvm.push", level="ERROR") as cm:
             self.assertEqual(self.q._requeue("a1"), "error")
         self._assert_plant_refused_loud(cm)
+
+    def test_requeue_dead_unreadable_returns_error(self):
+        # A non-refusal read failure (directory at the dead path) is
+        # loud and fails closed, like the old OSError-raising contract.
+        os.makedirs(self.q.dead_path)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(self.q._requeue("a1"), "error")
+        self.assertTrue(any("unreadable" in m for m in cm.output))

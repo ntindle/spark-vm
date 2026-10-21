@@ -497,8 +497,17 @@ class PushSender:
             log.warning("push: disabled (%s)", self.disabled_reason)
             return
         try:
-            with open(self.keys_path, encoding="utf-8") as f:
-                doc = json.load(f)
+            # #1869: the keypair file holds the signing identity — route
+            # it through the O_NOFOLLOW read primitive so a planted
+            # symlink refuses loud instead of substituting keys (or
+            # disabling push via a garbage target). Any refusal or
+            # unreadable file fails closed into disabled_reason below,
+            # the component's established posture for key problems.
+            fh, kerr = _open_nofollow_read(self.keys_path)
+            if fh is None:
+                raise OSError("%s: %s" % (self.keys_path, kerr))
+            with fh:
+                doc = json.load(fh)
             priv = b64url_decode(doc["private"])
             pub = b64url_decode(doc["public"])
             if len(priv) != 32 or len(pub) != 65 or pub[0] != 0x04:
@@ -1254,7 +1263,9 @@ class PushQueue:
                 # and fails closed ("error") instead of being followed.
                 fh, err = _open_nofollow_read(self.dead_path)
                 if fh is None:
-                    if _is_symlink_refusal(err):
+                    if err != "missing":
+                        # #1869: loud on refusal AND on unreadable —
+                        # the old code raised OSError loudly here.
                         log.error("push-queue: %s", err)
                         return "error"
                 else:
@@ -1404,7 +1415,15 @@ def main(argv):
         _need_crypto()
         priv, pub = gen_keypair()
         path = args.gen_keys
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # #1869: explicit O_NOFOLLOW as belt-and-suspenders. The write
+        # was already plant-safe via O_EXCL — POSIX mandates EEXIST
+        # when the path is a symlink with O_CREAT|O_EXCL, even a
+        # dangling one, so no private key could ever land in an
+        # attacker-chosen path. O_NOFOLLOW makes the refusal explicit
+        # (ELOOP) and keeps the write leg under the same invariant as
+        # every other write in this file.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"private": priv, "public": pub,
