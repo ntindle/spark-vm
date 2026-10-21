@@ -5,7 +5,8 @@
 # (issue #1649): the repo updater appends event rows directly in the
 # standard event shape (§2) to a box-local `update-events.jsonl` — the
 # journal the collector will read once the read switch lands (see §S2).
-# (The toolset updater's wiring is a remaining slice.)
+# Wired into both updaters: deploy/auto-deploy.sh (#1649 slice 1) and
+# deploy/toolset-update.sh (#1649 slice 2).
 # audit.log keeps the raw box-side record; the journal is the fleet-facing
 # translation.
 #

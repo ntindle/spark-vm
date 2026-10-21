@@ -53,7 +53,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `subcomponent` | string \| null | Audit-line component granularity (`proxy`, `confirm`, `cred_ui`, … — the values `deploy/components.conf` actually carries); null on lines that carry none |
 | `subcomponents` | string \| null | The plural `components` value verbatim (space-joined, from the `ok` line) for readers that need the un-fanned form; the canonical S1 fan-out emits one event per component in `subcomponent` instead |
 | `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted by `fleet/gate_publish.py` (G15 S3, issue #1543) on freeze flip/clear into the fleet journal (`--journal`, default `events.jsonl` next to the published gate document) |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); `skipped-frozen` gained its legacy producer in #1630's first slice (the release gate's `fleet-freeze`/`wave-not-live` verdicts, audited by `deploy/auto-deploy.sh`); `deferred-arc` gained its legacy producer in #1630's second slice (box-side arc-awareness: `deploy/auto-deploy.sh` audits `check/deferred-arc` when an active arc defers a permitted update); the `freeze`/`gate` triggers are reserved for S2 emitters; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); `skipped-frozen` gained its legacy producer in #1630's first slice (the release gate's `fleet-freeze`/`wave-not-live` verdicts, audited by `deploy/auto-deploy.sh`); `deferred-arc` gained its legacy producer in #1630's second slice (box-side arc-awareness: `deploy/auto-deploy.sh` audits `check/deferred-arc` when an active arc defers a permitted update) and its second producer in #1649's slice 2 (the toolset updater's idle-gate jobs-active deferral); the `freeze`/`gate` triggers are reserved for S2 emitters; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
@@ -297,8 +297,16 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   best-effort I/O) is wired into the repo updater's outcome pivots
   (`deploy/started|succeeded|failed`, `rollback/rollback-failed`,
   `deploy/rolled-back`, `precheck-fail`, `check/deferred-arc`,
-  `check/skipped-frozen`). Remaining slices: toolset updater + gate-hook
-  wiring, and the collector read switch.
+  `check/skipped-frozen`). **Delivered (slice 2, #1649, 2026-10-20):** the
+  toolset updater's outcome pivots are wired (`deploy/started|succeeded|failed`,
+  `deploy/precheck-fail` on pre-update snapshot failure,
+  `check/deferred-arc` on the idle-gate jobs-active deferral,
+  `check/skipped-frozen` on the local failure-freeze refusal,
+  `rollback/rolled-back|rollback-failed` on manual rollback — all with
+  `trigger=manual` on operator-driven paths); `cmd_install` installs the sink
+  library next to the script (installed-copy trust model); `--dry-run` and
+  opt-out stay journal-silent per the S1 noise discipline. Remaining slices:
+  gate-hook wiring, and the collector read switch.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
     failed/rolled-back gate);
