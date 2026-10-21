@@ -188,11 +188,14 @@ def read_sidecar_marks(path: str):
     """Read half of the watermark sidecar read-modify-write.
 
     Returns ``(marks, corrupt)``: the parsed sidecar dict — or ``{}``
-    when the file is missing or unparseable — and whether the content
-    was corrupt/unparseable. A missing file is the normal first run,
-    NOT corruption (no history exists to lose). A symlink at the
-    sidecar path raises ``OSError`` with ``errno.ELOOP`` loud (#1741):
-    a plant is never restarted-from-empty over.
+    when the file is missing, unparseable, or holds non-dict
+    per-tenant values (D-AC-11: valid JSON with garbage values is the
+    same corruption class as unparseable content) — and whether the
+    content was corrupt/unparseable-or-schema-invalid. A missing file
+    is the normal first run, NOT corruption (no history exists to
+    lose). A symlink at the sidecar path raises ``OSError`` with
+    ``errno.ELOOP`` loud (#1741): a plant is never restarted-from-empty
+    over.
 
     Feeds the sweep-level bulk write (``write_sidecar_bulk``) — #1739
     collapsed N per-tenant read-modify-writes per sweep into one, and
@@ -203,6 +206,20 @@ def read_sidecar_marks(path: str):
         marks = _read_sidecar_nofollow(path)
         if not isinstance(marks, dict):
             raise ValueError("sidecar content is not a JSON object")
+        # #1843 / D-AC-11: valid JSON whose per-tenant values are not
+        # record dicts (garbage-but-valid JSON) is the same corruption
+        # class as unparseable content. A garbage value cannot feed the
+        # S4 staleness rule or ride the merge as ground truth — so the
+        # sidecar restarts from empty, fail-visible per D-AC-7 (the LOUD
+        # note fires on the corrupt=True path). The check is "is it a
+        # dict", deliberately not a field whitelist: records gain fields
+        # over time and the read must not reject a newer writer's shape.
+        for tenant_id, value in marks.items():
+            if not isinstance(value, dict):
+                raise ValueError(
+                    "sidecar value for tenant %r is not a record dict"
+                    % (tenant_id,)
+                )
     except FileNotFoundError:
         # Normal first run: no history to lose, nothing to say.
         return {}, False
@@ -239,7 +256,8 @@ def write_sidecar_bulk(path: str, records: dict, corrupt_note=None,
     N tenants was N full read-modify-write cycles of a file holding N
     records — O(N^2) JSON IO on the probe cadence. This is O(N).
 
-    Returns True when the sidecar was corrupt/unparseable and history
+    Returns True when the sidecar was corrupt (unparseable or
+    schema-invalid per-tenant values, D-AC-11) and history
     restarted from empty (D-AC-7 fail-visible — the caller notes it
     LOUD); a missing file is the normal first run, not corruption.
     A symlink plant raises ``OSError`` with ``errno.ELOOP`` loud
