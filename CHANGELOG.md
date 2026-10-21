@@ -246,6 +246,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The changelog ritual lint's section-shape check closes its two review gaps (#1865): a `### ` heading inside a fenced code block is no longer mistaken for a real section heading (so an example can't fail the build), and the check now scans every `## [Unreleased]` block instead of only the first. A fence that never closes is not honored — a dangling fence can't silently hide real headings. (#1865)
+
 - Relay-liveness watermark sidecar: valid JSON holding non-dict
   per-tenant values (`{"tnt-a": "garbage"}`) is now treated as corrupt —
   the sidecar restarts from empty with the D-AC-7 LOUD note, instead of
