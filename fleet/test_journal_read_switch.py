@@ -321,7 +321,11 @@ def _store_snapshot(store):
 def test_collect_e2e_version_leg_still_reads_audit_tail():
     # The read switch moves only the event-journal leg: the
     # version-inventory leg still reads the audit tail on a
-    # journal-path box.
+    # journal-path box. No snapshot.json is written on purpose — the
+    # box's repo_commit must come from the audit tail's claim (with
+    # the loud no-snapshot note), so the test genuinely exercises the
+    # audit-tail version derivation instead of the snapshot precedence
+    # masking it (QA re-confirm hardening).
     commit = "d" * 40
     with tempfile.TemporaryDirectory() as tmp:
         estate = os.path.join(tmp, "estate")
@@ -338,8 +342,6 @@ def test_collect_e2e_version_leg_still_reads_audit_tail():
         }])
         with open(os.path.join(box_dir, "status.json"), "w") as fh:
             json.dump(_status_json(), fh)
-        with open(os.path.join(box_dir, "snapshot.json"), "w") as fh:
-            json.dump(_snapshot_json(commit), fh)
         proc = subprocess.run(
             [sys.executable, INVENTORY, "collect",
              "--estate", estate, "--store", store],
@@ -352,10 +354,13 @@ def test_collect_e2e_version_leg_still_reads_audit_tail():
         box_rows = [e for e in stored if e.get("box_id") == "box-7"]
         assert [e["event_id"] for e in box_rows] == [
             "0193b2c4-0000-7000-8000-0000000000ee"]
-        # Version leg: the box record exists and carries the
-        # audit-tail-derived repo_commit claim.
+        # Version leg: the box record exists and its repo_commit came
+        # from the audit tail (no box snapshot to mask it).
         snap = _store_snapshot(store)
-        assert snap["boxes"]["box-7"]["versions"]["repo_commit"] == commit
+        record = snap["boxes"]["box-7"]
+        assert record["versions"]["repo_commit"] == commit
+        assert any("repo_commit taken from audit tail (no box snapshot)"
+                   in n for n in record["notes"])
 
 
 def test_collect_migration_seam_journals_each_event_once():
