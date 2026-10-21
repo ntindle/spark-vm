@@ -312,3 +312,224 @@ def test_service_unit_contract():
     assert "checkout" not in svc["ExecStart"]
     assert svc["StandardOutput"] == "journal"
     assert svc["StandardError"] == "journal"
+
+
+# --- #1649 S2 slice 3: the gate-answer journal producer ----------------------
+# The hook appends one standard-shape `kind: gate-answer` row to the
+# box-local `update-events.jsonl` (next to the status file) on each answer
+# transition, plus an anchor row on the first tick. Unchanged answers stay
+# journal-silent (the S1 noise discipline).
+
+def read_journal(status):
+    journal = os.path.join(os.path.dirname(status), "update-events.jsonl")
+    if not os.path.exists(journal):
+        return []
+    with open(journal, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def test_hook_emits_anchor_row_on_first_tick(
+        hook_env, registry, manifest, keyfile):
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "gate-hook"
+    assert row["component"] == "gate"
+    assert row["kind"] == "gate-answer"
+    assert row["outcome"] == "succeeded"  # live answer: "permitted"
+    assert row["trigger"] == "gate"  # the gate trigger is S2-reserved (§2)
+    assert row["reason"] == "gate ok"
+    assert row["box_id"] == BOX_ID
+    assert row["attested"] is False
+    assert row["repo_max"] == "a" * 40
+    assert row["toolset_max"] == "2026.09.27"
+    assert row["image_max"] == "2026.09.29-0"
+    # The journal is 0600 (the updater's state-dir contract).
+    mode = stat.S_IMODE(os.stat(
+        os.path.join(os.path.dirname(status), "update-events.jsonl")).st_mode)
+    assert mode == 0o600
+
+
+def test_hook_emits_nothing_when_answer_unchanged(
+        hook_env, registry, manifest, keyfile):
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert len(read_journal(status)) == 1  # anchor only
+
+
+def test_hook_emits_skipped_frozen_on_freeze_transition(
+        hook_env, registry, manifest, keyfile):
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    publish(registry, manifest, keyfile, gate, extra=("--freeze",))
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 2
+    row = rows[1]
+    assert row["outcome"] == "skipped-frozen"
+    assert row["reason"] == "freeze flag set"
+    assert row["trigger"] == "gate"
+
+
+def test_hook_emits_succeeded_on_unfreeze_transition(
+        hook_env, registry, manifest, keyfile):
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate, extra=("--freeze",))
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 1 and rows[0]["outcome"] == "skipped-frozen"
+    publish(registry, manifest, keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 2
+    assert rows[1]["outcome"] == "succeeded"
+    assert rows[1]["reason"] == "gate ok"
+
+
+def test_hook_emits_on_reason_change_within_frozen(
+        hook_env, registry, manifest, keyfile):
+    # A reason change inside the frozen state (operator freeze -> no-signal)
+    # is a genuine transition — the fleet must see it.
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate, extra=("--freeze",))
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert len(read_journal(status)) == 1
+    # Break the key: the gate no longer verifies -> no-signal, still frozen.
+    bad = dict(env)
+    bad["SPARKVM_GATE_KEYS"] = f"{KEY_ID}={os.path.join(os.path.dirname(gate), 'nope.key')}"
+    r = run("bash", HOOK, env_extra=bad)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 2
+    assert rows[1]["outcome"] == "skipped-frozen"
+    assert rows[1]["reason"].startswith("no-signal:")
+
+
+def test_hook_anchor_on_corrupt_previous_status(
+        hook_env, registry, manifest, keyfile):
+    # An undecodable status file is "no previous answer" -> anchor row.
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    os.makedirs(os.path.dirname(status), exist_ok=True)
+    with open(status, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "succeeded"
+
+
+def test_hook_respects_event_journal_override(
+        hook_env, registry, manifest, keyfile, tmp_path):
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    custom = str(tmp_path / "custom-events.jsonl")
+    env = dict(env, EVENT_JOURNAL=custom)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert os.path.exists(custom)
+    with open(custom, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "gate-answer"
+    # The default location stays untouched when overridden.
+    default = os.path.join(os.path.dirname(status), "update-events.jsonl")
+    assert not os.path.exists(default)
+
+
+def test_hook_no_emit_when_query_fails(
+        hook_env, registry, manifest, keyfile):
+    # A failed tick writes no status file AND no journal row: the row must
+    # always reflect a recorded answer, never a phantom. (A missing gate
+    # file is NOT a failure — it yields a no-signal frozen answer, rc 0.)
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert len(read_journal(status)) == 1
+    # gate_query argparse-errors on the unknown flag -> rc != 0.
+    r = run("bash", HOOK, "--bogus-flag", env_extra=env)
+    assert r.returncode != 0
+    assert len(read_journal(status)) == 1
+
+
+def test_hook_sustained_no_signal_emits_once(
+        hook_env, registry, manifest, keyfile):
+    # B1 (Product review): no-signal reasons embed a tick-growing age
+    # counter ("expired 93s past ttl=300s"). The transition key normalizes
+    # digit runs, so a sustained no-signal is ONE row, not one per tick.
+    # Deterministic: plant a same-class, different-digits reason in the
+    # previous status file — without the normalization the next tick would
+    # emit (raw strings differ); with it, the tick stays silent.
+    import time
+    env, gate, status = hook_env
+    publish(registry, manifest, keyfile, gate, extra=("--ttl-seconds", "1"))
+    time.sleep(2)  # let the 1s-ttl gate expire
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "skipped-frozen"
+    assert rows[0]["reason"].startswith("no-signal: gate document expired")
+    # Same failure class, wildly different digits.
+    doc = read_status(status)
+    doc["answer"]["reason"] = \
+        "no-signal: gate document expired 99999s past ttl=1s"
+    tmp = status + ".plant"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, status)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert len(read_journal(status)) == 1, \
+        "sustained no-signal must not emit per tick"
+
+
+def test_hook_row_matches_status_on_trailing_equals_value(
+        hook_env, keyfile, tmp_path):
+    # QA fidelity defect: the emit-side shell parse must match the python
+    # split("=", 1) the transition gate and status writer use — a value
+    # ending in `=` is data, not syntax. The row must reflect the recorded
+    # answer byte-for-byte.
+    env, gate, status = hook_env
+    reg = {
+        "repo": {"max_permitted_commit": "a" * 40, "channel": "stable"},
+        "toolset": {"max_permitted_pin": "2026.09.27", "channel": "stable"},
+        "image": {"max_permitted_image_version": "2026.09.29-0=",
+                  "channel": "stable"},
+    }
+    regp = tmp_path / "registry.json"
+    regp.write_text(json.dumps(reg))
+    man = {
+        comp: {"live": 2, "state": "wave-2",
+               "assignments": {BOX_ID: 1}, "default": "hash_mod_4"}
+        for comp in ("repo", "toolset", "image")
+    }
+    manp = tmp_path / "waves.json"
+    manp.write_text(json.dumps(man))
+    publish(str(regp), str(manp), keyfile, gate)
+    r = run("bash", HOOK, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rows = read_journal(status)
+    assert len(rows) == 1
+    recorded = read_status(status)["answer"]["image_max"]
+    assert recorded == "2026.09.29-0="
+    assert rows[0]["image_max"] == recorded, \
+        "the journal row must reflect the recorded answer"

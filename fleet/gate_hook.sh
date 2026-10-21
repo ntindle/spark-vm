@@ -71,6 +71,35 @@ answer_tmp="$(mktemp "${TMPDIR:-/tmp}/gate_hook.answer.XXXXXX")"
 err_tmp="$(mktemp "${TMPDIR:-/tmp}/gate_hook.err.XXXXXX")"
 trap 'rm -f "$answer_tmp" "$err_tmp"' EXIT
 
+# --- #1649 S2 (slice 3): the gate-answer journal producer -------------------
+# The hook appends one standard-shape `kind: gate-answer` row to a
+# box-local `update-events.jsonl` on each answer TRANSITION (plus an anchor
+# row on the first tick) — the G18 freeze-propagation proof's observable
+# stream (UPDATE_EVENT_REPORTING.md §G18). Per-tick rows would flood the
+# 12k-bound journal (~960/day); transitions are the events the fleet
+# consumes, matching the S1 noise discipline (noop stays local-only).
+#
+# Sink layout: the installed copy is flat ($INSTALLED_BIN/event-journal.sh
+# next to this script — installed by `auto-deploy.sh init`); the checkout
+# keeps the sink at deploy/event-journal.sh. Try both so repo tests
+# exercise the same code the timer runs.
+_JOURNAL_LIB=""
+for _cand in "$HOOK_DIR/event-journal.sh" "$HOOK_DIR/../deploy/event-journal.sh"; do
+    if [ -f "$_cand" ]; then _JOURNAL_LIB="$_cand"; break; fi
+done
+# shellcheck source=event-journal.sh
+[ -n "$_JOURNAL_LIB" ] && source "$_JOURNAL_LIB"
+unset _cand _JOURNAL_LIB
+# The hook's journal lives next to the gate status file (the root-owned
+# gate lane — same trust as the status file itself), NOT the updater's
+# state-dir journal: the hook runs as root, and a root-performed 12k-bound
+# rotation would re-own the updater's file and silently break its appends.
+# Overridable (tests, unusual layouts). Note: `:=` assigns the default when
+# EVENT_JOURNAL is unset OR empty, so the sink is always armed at this
+# point — the sink's "unset = silent no-op" contract applies to direct
+# sink sourcing, not to this script.
+: "${EVENT_JOURNAL:=$(dirname "$STATUS_FILE")/update-events.jsonl}"
+
 # Journal-channel scrub (the S1a log-channel rule): operator-controlled
 # strings never reach the journal raw. Unicode-aware (python, not tr) so
 # multibyte UTF-8 survives intact.
@@ -110,6 +139,60 @@ fi
     exit 1
 }
 
+# --- gate-answer transition gate (#1649 S2 slice 3) ---
+# Read the PREVIOUS answer's (state, reason) from the status file BEFORE
+# the writer below overwrites it. Best-effort: missing/corrupt/undecodable
+# reads as "no previous answer" (prints 1), which emits the anchor row —
+# a box whose hook history is unknown re-announces its answer once, and a
+# corrupt status file is operator-visible via the anchor's arrival. (The
+# `|| echo 0` fallback — python itself failed — prints 0: no emit, since
+# the transition is unknowable.)
+# The comparison is on (state, reason-class), NOT the raw reason string:
+# no-signal reasons embed a tick-growing age counter ("gate document
+# expired 93s past ttl=300s" — gate_query.py), so a raw comparison would
+# fire every tick under a sustained no-signal (~960 rows/day) and break
+# the slice's own noise discipline precisely in the fleet-wide outage the
+# G18 freeze proof is about. The full age-bearing reason still lands in
+# the emitted row's fragment — only the transition key is normalized.
+_gate_transition="$(python3 - "$STATUS_FILE" "$answer_tmp" <<'PYEOF' 2>/dev/null || echo 0
+import json
+import re
+import sys
+
+def _transition_key(reason):
+    # Collapse tick-varying counters so a sustained no-signal is one
+    # transition, not one per tick. Semantic changes (operator freeze vs
+    # no-signal, different failure classes) survive the collapse.
+    return re.sub(r"\d+", "#", reason or "")
+
+def _prev(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        ans = doc.get("answer") or {}
+        state, reason = ans.get("state"), ans.get("reason")
+        if isinstance(state, str) and isinstance(reason, str):
+            return (state, _transition_key(reason))
+    except Exception:
+        pass
+    return None
+
+new = {}
+try:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line and "=" in line:
+                key, value = line.split("=", 1)
+                new[key] = value
+except OSError:
+    pass
+
+prev = _prev(sys.argv[1])
+new_key = (new.get("state"), _transition_key(new.get("reason")))
+print("1" if (prev is None or prev != new_key) else "0")
+PYEOF
+)"
 # Assemble + atomically write the status document. The python step also
 # prints the scrubbed one-line journal summary; its exit code is the
 # hook's (0 = status file written).
@@ -175,3 +258,42 @@ reason = scrub(answer.get("reason", "?"))
 print(f"gate_hook: state={state} reason={reason} status={scrub(status_path)}",
       file=sys.stderr)
 PYEOF
+
+# --- gate-answer emit (#1649 S2 slice 3) ---
+# Reached only when the status file was written (the writer above exits
+# non-zero on failure, and `set -e` ends the hook there) — the row always
+# reflects a recorded answer, never a phantom.
+if [ "${_gate_transition:-0}" = "1" ] && command -v event_emit >/dev/null 2>&1; then
+    _ga_state=""; _ga_reason=""; _ga_repo_max=""; _ga_toolset_max=""; _ga_image_max=""
+    # Parse the key=value answer lines with the same semantics as the python
+    # `split("=", 1)` the transition gate and the status writer use:
+    # split on the FIRST `=` only, keep everything after it (a trailing `=`
+    # in a value is data, not syntax — `IFS='=' read` would strip it).
+    while IFS= read -r _line; do
+        case "$_line" in
+            *=*) _k="${_line%%=*}"; _v="${_line#*=}" ;;
+            *) continue ;;
+        esac
+        case "$_k" in
+            state) _ga_state="$_v" ;;
+            reason) _ga_reason="$_v" ;;
+            repo_max) _ga_repo_max="$_v" ;;
+            toolset_max) _ga_toolset_max="$_v" ;;
+            image_max) _ga_image_max="$_v" ;;
+        esac
+    done <"$answer_tmp"
+    # The outcome vocabulary stretches here (UPDATE_EVENT_REPORTING.md
+    # §G18): `succeeded` reads as "permitted", not "deployed".
+    _ga_outcome="skipped-frozen"
+    [ "$_ga_state" = "live" ] && _ga_outcome="succeeded"
+    # `trigger=gate`: the freeze/gate triggers are reserved for S2 emitters
+    # (§2). Reason + per-component permitted commits ride in the fragment
+    # ("permitted commit X"); maxes are absent on no-signal answers (only
+    # the freeze/live evaluations carry {comp}_max).
+    _ga_frag=",\"trigger\":\"gate\",\"reason\":\"$(_event_journal_json_escape "$_ga_reason")\""
+    [ -n "$_ga_repo_max" ] && _ga_frag="$_ga_frag,\"repo_max\":\"$(_event_journal_json_escape "$_ga_repo_max")\""
+    [ -n "$_ga_toolset_max" ] && _ga_frag="$_ga_frag,\"toolset_max\":\"$(_event_journal_json_escape "$_ga_toolset_max")\""
+    [ -n "$_ga_image_max" ] && _ga_frag="$_ga_frag,\"image_max\":\"$(_event_journal_json_escape "$_ga_image_max")\""
+    event_emit "gate-hook" "gate" "gate-answer" "$_ga_outcome" "$_ga_frag"
+fi
+unset _gate_transition _ga_state _ga_reason _ga_repo_max _ga_toolset_max _ga_image_max _ga_outcome _ga_frag _line _k _v
