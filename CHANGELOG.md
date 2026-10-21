@@ -51,6 +51,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- The fleet collector now reads each box's event journal directly instead of translating audit tails: whenever the estate copy carries the box's `update-events.jsonl`, the wired producers' typed rows (repo updater, toolset updater, gate hook) land in the fleet event stream as-is — no more dual translation, and the paging rules can't fire twice on one incident. The audit tail still feeds version inventory, and boxes without the journal keep the legacy translation. (#1649)
+
 - Sentinel-feed transport leg convergence pin (2026-10-20, #1349): the G25 transport vision is checked against current main — none of the three build items (tenant-plane shipper, D-OP2 envelope-channel record kind, operator-plane intake) is built, though the attested-channel signing half (#1762) and the fleet-journal `skipped-frozen` records (#1807) landed around it; the one genuinely-new gap is the un-owned D-25-3 seq-gap alert (#1809). (#1810)
 
 - The owner alert taxonomy gains the sentinel transport-health class: when the tenant-plane → operator-plane shipment intake ships, a seq-gap ("the trail has a hole" — missing telemetry on a per-surface counter, or an epoch reset the intake can't account for) gets a dashboard chip while the gap is open, a push page only for persistent gaps, and a digest row — with the suppression rule that accounted restarts and self-healed blips never page. The intake that raises the alert is still unbuilt; this is the surfacing spec it fires into. (#1809)(#1832)

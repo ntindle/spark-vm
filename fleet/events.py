@@ -203,6 +203,168 @@ def _read_jsonl_file(path):
     return rows, skipped, None
 
 
+# --- S2 box-side journal read switch (#1649) ----------------------------------
+# The S2 producers (deploy/event-journal.sh's event_emit, wired into the
+# repo updater, the toolset updater, and the gate hook by slices 1-3)
+# emit native standard-shape rows into a box-local `update-events.jsonl`.
+# The collector reads that file from the estate dir instead of
+# translating audit tails (the design's S2 "read switch"). The enums
+# mirror the emitter's closed vocabulary (deploy/event-journal.sh); a
+# row with an unknown value fails closed with a loud note, like the S1
+# "no translation" path. The trigger vocabulary is the §2 one.
+_JOURNAL_NAME = "update-events.jsonl"
+_JOURNAL_SOURCES = {"auto-deploy", "toolset-update", "manual",
+                    "controller", "gate-hook"}
+_JOURNAL_COMPONENTS = {"repo", "toolset-cua-driver", "image", "gate"}
+_JOURNAL_KINDS = {"check", "deploy", "rollback", "gate-answer",
+                  "freeze-hold"}
+_JOURNAL_OUTCOMES = {"started", "noop", "precheck-fail", "deferred-arc",
+                     "skipped-frozen", "succeeded", "failed",
+                     "rolled-back", "rollback-failed", "superseded"}
+_JOURNAL_TRIGGERS = {"scheduled", "manual", "freeze", "gate",
+                     "extra-inputs"}
+
+# Known fleet-event members (docs/UPDATE_EVENT_REPORTING.md §2). The S2
+# journal rows carry these natively; producer fragments may add extra
+# top-level keys (e.g. the gate-hook's reason/repo_max) — extras ride
+# through verbatim (see canonicalize_journal_rows).
+_JOURNAL_KNOWN_FIELDS = {"event_id", "box_id", "session_epoch",
+                         "emitted_at", "received_at", "source",
+                         "component", "subcomponent", "subcomponents",
+                         "kind", "outcome", "from", "to", "from_version",
+                         "to_version", "phase", "window", "rollout",
+                         "trigger", "attested", "note", "attestation"}
+
+
+def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
+    """Translate box-side S2 journal rows into standard-shape events.
+
+    The S2 producers emit rows already in the standard shape (§2), so
+    the collector is a thin, forgiving adapter: validate, stamp the
+    fleet-side fields (schema, window, received_at, and the
+    pull-context box_id), and verify attestation the same way the S1
+    path does — a row carrying an `attestation` member with a bad
+    signature gets the loud forgery note even when the row's shape is
+    unknown or local-only (those rows still produce no events).
+
+    Returns (events, local_noops, notes). Fail-closed: non-dict rows,
+    rows with a missing/empty event_id, and rows with an unknown
+    source/component/kind/outcome are recorded in notes, never emitted.
+    (check, noop) rows stay local per the noise discipline and count in
+    local_noops. Free-form fields are coerced to str-or-None up front
+    (Engineering B1, PR #794 — the type-confusion crash class). Never
+    raises for bad input rows.
+
+    `keyring` maps box_id -> 32-byte ed25519 pubkey (see
+    attest.load_box_keys); None means the legacy estate with no keys
+    pinned — every row stays unattested.
+    """
+    events = []
+    local_noops = 0
+    notes = []
+    if rows is None:
+        return events, local_noops, notes
+    for row in rows:
+        if not isinstance(row, dict):
+            notes.append("skipped non-object journal line")
+            continue
+        # #1516 S3: verify the row's attestation claim before the shape
+        # gates, so a forged signature is the loud forgery signal even
+        # on rows that produce no event (unknown shapes, local-only
+        # rows). S2 producers do not emit attestations yet, so a row
+        # without the member verifies silently and stays unattested.
+        attested, attest_note = attest.verify_attestation(
+            keyring, box_id, row)
+        if attest_note is not None:
+            notes.append(attest_note)
+        event_id = _str_or_none(row.get("event_id"))
+        if not event_id:
+            notes.append("journal row without event_id; "
+                         "kept out of the event journal")
+            continue
+        source = row.get("source")
+        component = row.get("component")
+        kind = row.get("kind")
+        outcome = row.get("outcome")
+        vocab_bad = None
+        if source not in _JOURNAL_SOURCES:
+            vocab_bad = "source=%s" % _clean_text(source)
+        elif component not in _JOURNAL_COMPONENTS:
+            vocab_bad = "component=%s" % _clean_text(component)
+        elif kind not in _JOURNAL_KINDS:
+            vocab_bad = "kind=%s" % _clean_text(kind)
+        elif outcome not in _JOURNAL_OUTCOMES:
+            vocab_bad = "outcome=%s" % _clean_text(outcome)
+        if vocab_bad is not None:
+            notes.append("journal row with unknown %s; "
+                         "kept out of the event journal" % vocab_bad)
+            continue
+        if (kind, outcome) == ("check", "noop"):
+            local_noops += 1
+            continue
+        # The pull-context box_id is authoritative (§2): the estate dir
+        # name is the identity, not the row's self-assertion. A
+        # disagreeing row box_id is a loud note, never a trusted
+        # override.
+        row_box = row.get("box_id")
+        if isinstance(row_box, str) and row_box and row_box != box_id:
+            notes.append("journal row box_id %s disagrees with estate "
+                         "dir box %s; using the estate dir"
+                         % (_clean_text(row_box),
+                            _clean_text(box_id)))
+        trigger = row.get("trigger")
+        if trigger not in _JOURNAL_TRIGGERS:
+            notes.append("journal row %s has unknown trigger %s; "
+                         "defaulting to scheduled"
+                         % (_clean_text(event_id),
+                            _clean_text(trigger)))
+            trigger = "scheduled"
+        rollout = row.get("rollout")
+        if rollout is not None and not isinstance(rollout, dict):
+            notes.append("journal row %s has non-object rollout; "
+                         "dropping it" % _clean_text(event_id))
+            rollout = None
+        event = {
+            "schema": EVENT_SCHEMA,
+            "event_id": event_id,
+            "box_id": box_id,
+            "session_epoch": row.get("session_epoch"),
+            "emitted_at": _clean_text(_str_or_none(
+                row.get("emitted_at"))),
+            "received_at": received_at,
+            "source": source,
+            "component": component,
+            "subcomponent": _clean_text(
+                _str_or_none(row.get("subcomponent"))),
+            "subcomponents": _clean_text(
+                _str_or_none(row.get("subcomponents"))),
+            "kind": kind,
+            "outcome": outcome,
+            "from": _clean_text(_str_or_none(row.get("from"))),
+            "to": _clean_text(_str_or_none(row.get("to"))),
+            "from_version": _clean_text(
+                _str_or_none(row.get("from_version"))),
+            "to_version": _clean_text(
+                _str_or_none(row.get("to_version"))),
+            "phase": _clean_text(_str_or_none(row.get("phase"))),
+            "window": None,            # G14 maintenance windows are future
+            "rollout": rollout,
+            "trigger": trigger,
+            "attested": attested,
+            "note": _clean_text(_str_or_none(row.get("note"))),
+        }
+        # Producer-fragment extras ride through verbatim (the gate-hook's
+        # reason/repo_max, future producer fields): they are
+        # producer-emitted evidence, and the alert rules only read known
+        # keys. Fleet-stamped members above always win over a row key
+        # with the same name.
+        for key, value in row.items():
+            if key not in _JOURNAL_KNOWN_FIELDS and key not in event:
+                event[key] = value
+        events.append(event)
+    return events, local_noops, notes
+
+
 # --- Translation table (§3) ----------------------------------------------
 # (audit event, audit result) -> (kind, outcome). Verified against the
 # actual audit() calls in deploy/auto-deploy.sh. The retired
@@ -533,12 +695,38 @@ def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
 
 
 def collect_box_events(box_dir, box_id, received_at, keyring=None):
-    """Read one box's audit-tail.jsonl and canonicalize it. Returns
+    """Read one box's event evidence and canonicalize it. Returns
     (events, local_noops, notes); never raises for bad artifacts.
+
+    S2 read switch (#1649): when the box's estate dir carries an
+    `update-events.jsonl` (the native standard-shape journal the S2
+    producers emit), the collector reads it INSTEAD of translating
+    audit tails — translating both would double-journal the same
+    underlying events under two different event_ids (native UUIDv7 vs
+    the S1 deterministic UUIDv5), and the paging rules would fire
+    twice on one incident. The audit tail still feeds the
+    version-inventory leg in inventory.py; only the event-journal leg
+    switches. Boxes without the journal keep the legacy audit-tail
+    translation (estate dirs pulled from boxes that predate the S2
+    sink, or whose sink is disabled).
 
     `keyring` maps box_id -> 32-byte ed25519 pubkey (attest.load_box_keys);
     None keeps the legacy all-unattested behavior.
     """
+    journal_path = os.path.join(box_dir, _JOURNAL_NAME)
+    if os.path.exists(journal_path):
+        rows, skipped, err = _read_jsonl_file(journal_path)
+        if err:
+            return [], 0, ["update-events.jsonl %s" % err]
+        events, local_noops, notes = canonicalize_journal_rows(
+            rows, box_id, received_at, keyring=keyring)
+        if skipped:
+            notes.append("update-events journal had %d malformed line(s) "
+                         "skipped" % skipped)
+        if local_noops:
+            notes.append("%d check-noop event(s) kept local (noise "
+                         "discipline)" % local_noops)
+        return events, local_noops, notes
     rows, skipped, err = _read_jsonl_file(
         os.path.join(box_dir, "audit-tail.jsonl"))
     if err:

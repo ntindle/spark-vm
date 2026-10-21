@@ -52,6 +52,12 @@ Per-box directory layout (each subdir of --estate is one box; the dir
 name is the box_id unless --box-id-map remaps it):
   <box>/status.json        self_update.py status --json output
   <box>/audit-tail.jsonl   tail of the box's auto-deploy audit log
+  <box>/update-events.jsonl
+      the box's S2 event journal (native standard-shape rows from the
+      wired producers, docs/UPDATE_EVENT_REPORTING.md §S2): the
+      event-journal leg reads it INSTEAD of translating audit tails
+      (collect_box_events's exclusive read switch, #1649) — the audit
+      tail still feeds the version-inventory leg above
   <box>/snapshot.json      fleet/box_snapshot.py output
 
 Store layout:
@@ -1258,9 +1264,13 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     if err:
         return err
 
-    # G17 S1: canonicalize each box's audit tail into the update-event
-    # journal (the design's S1 sink — the same estate dir the collector
-    # already pulls), then evaluate the six fleet alert rules. A failed
+    # G17 S1: canonicalize each box's event evidence into the
+    # update-event journal (the design's S2 sink — the same estate dir
+    # the collector already pulls), then evaluate the six fleet alert
+    # rules. #1649 S2 read switch: collect_box_events reads the box's
+    # native `update-events.jsonl` instead of translating audit tails
+    # whenever the estate dir carries it (exclusive per box — no
+    # double-journaling under two event_ids). A failed
     # event/alert write fails the collect loudly: the operator's
     # contract is the exit code, and a silently un-journaled event would
     # be missing evidence masquerading as silence.
