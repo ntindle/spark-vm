@@ -426,6 +426,16 @@ _sudo() {
 # shellcheck source=arc_probe.sh
 source "$SCRIPT_DIR/arc_probe.sh"
 
+# S2 box-side event journal (docs/UPDATE_EVENT_REPORTING.md §S2, issue
+# #1649): fleet-facing event rows in the standard shape (§2), appended
+# alongside the box-local audit trail to update-events.jsonl — the journal
+# the collector will read once the read switch lands (see §S2 remaining
+# slices). Functions only; see deploy/event-journal.sh for the contract.
+# Unset = sink unconfigured (event_emit becomes a no-op), never an error.
+: "${EVENT_JOURNAL:=$TOOLSET_STATE_DIR/update-events.jsonl}"
+# shellcheck source=event-journal.sh
+source "$SCRIPT_DIR/event-journal.sh"
+
 
 _jobs_active() {
     # UID-aware idle probe (#532): for every user in TOOLSET_AGENT_USERS,
@@ -1896,6 +1906,10 @@ _freeze_refuse_if_frozen() {
     if [ "$_fz_frozen" = "1" ]; then
         log "update: FROZEN since $_fz_at (reason: $_fz_reason) — box needs attention; run 'toolset-update.sh unfreeze' after investigating (no update attempted)"
         audit 'toolset-update' ",\"result\":\"frozen\",\"since\":\"$_fz_at\",\"reason\":\"$_fz_reason\""
+        # #1649 S2: the failure-freeze is a frozen wave, not a failing one
+        # (G15 §4's toll rule consumes these events) — the run was skipped
+        # because the box is frozen.
+        event_emit toolset-update toolset-cua-driver check skipped-frozen ',"note":"local failure-freeze — run refused; unfreeze after investigating"'
         return 1
     fi
     return 0
@@ -2535,6 +2549,17 @@ cmd_update() {
         *) return "$rc" ;;
     esac
 
+    # #1649 S2: run-start event. A --now invocation is operator-driven
+    # (trigger=manual); the timer path leaves the §2 default (scheduled).
+    local trig=""
+    [ "$now" = "1" ] && trig=',"trigger":"manual"'
+    # #1649 S2: run-start event. --dry-run is a diagnostic — it changes
+    # nothing, so it emits no started row (a started row without a
+    # terminal outcome would read as a vanished run in the §S2 census).
+    if [ "$dry" != "1" ]; then
+        event_emit toolset-update toolset-cua-driver deploy started ',"components":"os-security cua-driver apt playwright"'"$trig"
+    fi
+
     # Failure freeze (#532 Recovery): a frozen box surfaces "box needs
     # attention" instead of churning through doomed updates. --dry-run is
     # still permitted while frozen as a diagnostic — it changes nothing
@@ -2547,6 +2572,16 @@ cmd_update() {
         # Deferral is not a failure: exit 0 keeps the timer quiet; the run
         # log and the audit line below carry the loud record.
         audit 'toolset-update' ',"result":"deferred","reason":"jobs-active"'
+        # #1649 S2: --dry-run is a diagnostic — it changes nothing and emits
+        # no journal row (a deferred row with no started row would read as a
+        # phantom run in the §S2 census).
+        if [ "$dry" != "1" ]; then
+            # The idle gate defers on the same "live agent work" probes
+            # arc_probe.sh defines (never-interrupt-an-arc, G15 §6) —
+            # an arc-busy box is not a failing box (the G17 eligible-box
+            # computation needs this distinction).
+            event_emit toolset-update toolset-cua-driver check deferred-arc ',"note":"jobs active — update deferred (never-interrupt-an-arc)"'
+        fi
         return 0
     fi
 
@@ -2561,6 +2596,10 @@ cmd_update() {
             log "update: pre-update snapshot failed — refusing to change the box without a rollback target"
             _freeze_record_result failed "snapshot"
             audit 'toolset-update' ',"result":"failed","reason":"snapshot-failed"'
+            # #1649 S2: no snapshot, no change — the same mapping as the
+            # repo updater (auto-deploy.sh): snapshot failure is a
+            # precheck failure of the deploy, not a failed converge.
+            event_emit toolset-update toolset-cua-driver deploy precheck-fail ',"note":"pre-update snapshot failed — no rollback target"'"$trig"
             return 1
         }
     fi
@@ -2605,12 +2644,19 @@ cmd_update() {
 
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
+        # #1649 S2: --dry-run is a diagnostic — it changes nothing and
+        # emits no journal row (same as the repo updater's slice 1).
     elif [ "$rc" = "0" ]; then
         _freeze_record_result ok
         audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver apt playwright"'
+        event_emit toolset-update toolset-cua-driver deploy succeeded ',"components":"os-security cua-driver apt playwright"'"$trig"
     else
         _freeze_record_result failed "$failed_comps"
         audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
+        # #1649 S2: mirror the repo updater's deploy/failed row — the
+        # fragment names the failed layers; the enum stays closed (failed
+        # is the run outcome, the per-layer detail rides the fragment).
+        event_emit toolset-update toolset-cua-driver deploy failed ',"components":"os-security cua-driver apt playwright","failed":"'"$failed_comps"'"'"$trig"
         log "update: FAILED ($failed_comps); see audit log"
     fi
     # Prune old snapshots on real runs (dry-run created none).
@@ -2679,10 +2725,17 @@ cmd_rollback() {
             log "rollback: restored ${layer:-all layers} from $snapdir"
         fi
         audit 'toolset-update' ",\"result\":\"rolled-back\",\"manual\":true,\"layer\":\"$layer\",\"snapshot\":\"$snapdir\""
+        # #1649 S2: manual rollback is an operator-driven event
+        # (trigger=manual); kind=rollback, outcome=rolled-back.
+        # Security round-1: $snapdir is the one interpolated value not drawn
+        # from a closed alphabet — escape it so a metachar in a snapshot
+        # dir name cannot emit a malformed JSONL row into the fleet feed.
+        event_emit toolset-update toolset-cua-driver rollback rolled-back ',"trigger":"manual","layer":"'"$layer"'","snapshot":"'"$(_event_journal_json_escape "$snapdir")"'"'
         return 0
     fi
     log "rollback: INCOMPLETE — see log; snapshot: $snapdir"
     audit 'toolset-update' ",\"result\":\"rollback-failed\",\"manual\":true,\"layer\":\"$layer\",\"snapshot\":\"$snapdir\""
+    event_emit toolset-update toolset-cua-driver rollback rollback-failed ',"trigger":"manual","layer":"'"$layer"'","snapshot":"'"$(_event_journal_json_escape "$snapdir")"'"'
     return 1
 }
 
@@ -3040,6 +3093,11 @@ cmd_install() {
     # alongside the script (same trust model: re-run install to refresh).
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/arc_probe.sh" "$INSTALLED_BIN/arc_probe.sh" \
         || { echo "ERROR: cannot install arc probe library" >&2; return 1; }
+    # #1649 S2: the event journal sink library — the installed copy
+    # sources it from its own dir, so install it alongside the script
+    # (same trust model: re-run install to refresh).
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/event-journal.sh" "$INSTALLED_BIN/event-journal.sh" \
+        || { echo "ERROR: cannot install event journal library" >&2; return 1; }
     # The pins file is the operator-owned version authority for pinned
     # layers (cua-driver). It is installed/backfilled ONLY here — the update
     # plane never reads it from the live checkout, per the installed-copy

@@ -1645,6 +1645,20 @@ def test_install_copies_pins_file(env):
     assert "cua-driver = 0.28.2" in pins.read_text()
 
 
+def test_install_copies_event_journal_lib(env):
+    # #1649 S2 (QA round-1 recommendation): the installed copy sources
+    # event-journal.sh from its own dir — a missing installed lib kills
+    # every updater invocation at the `source` line under set -euo
+    # pipefail (loud, not silent), so the install step owns this copy.
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr
+    lib = env["state"] / "bin" / "event-journal.sh"
+    assert lib.exists()
+    # Byte-identical to the checkout copy install refreshes from.
+    with open(os.path.join(REPO, "deploy", "event-journal.sh"), "rb") as f:
+        assert lib.read_bytes() == f.read()
+
+
 # --- apt layer (issue #532) --------------------------------------------------
 
 def apt_env(env, tmp_path, installed=(), rc_state=(), apt_exit=0):
@@ -4251,3 +4265,60 @@ def test_gate_cap_fails_closed_on_duplicate_max_lines(env, tmp_path):
     e = gate_env(env, tmp_path, lines)
     r = source_and("_toolset_gate_cap cua-driver 0.28.2 0.27.0", env_extra=e)
     assert r.returncode == 2, r.stderr
+
+
+def _busy_tmux_env(env, name):
+    # PATH overlay whose tmux reports one live mjob-* session, so the
+    # idle gate defers with result=deferred/reason=jobs-active.
+    bindir = make_stub_bin(env["tmp"] / name, {
+        "unattended-upgrades": "exit 0",
+        "dpkg": "exit 1",
+        "tmux": 'echo "mjob-builder-1"; exit 0',
+        "sudo": "exit 1",
+        "apt-get": "exit 1",
+    })
+    e = dict(env["env"])
+    e["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+    e["TMUX_BIN"] = os.path.join(bindir, "tmux")
+    return e
+
+
+def _journal_rows(env):
+    journal = env["state"] / "update-events.jsonl"
+    if not journal.exists():
+        return []
+    return [json.loads(l) for l in journal.read_text().splitlines() if l.strip()]
+
+
+def test_journal_silent_on_dry_run_idle_gate_deferral(env):
+    # #1649 S2 (Engineering round-1 B1): --dry-run is a diagnostic — the
+    # idle-gate deferral keeps its box-local audit line but must write NO
+    # journal row (a deferred row with no started row would read as a
+    # phantom run in the §S2 census, and would pollute the G17
+    # eligible-box signal the outcome exists for).
+    e = _busy_tmux_env(env, "busybin-journal-dry")
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr  # deferral is quiet, not a failure
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "deferred"
+    assert lines[-1]["reason"] == "jobs-active"
+    assert _journal_rows(env) == []
+
+
+def test_journal_emits_deferred_arc_on_idle_gate_deferral(env):
+    # #1649 S2: a real (non-dry-run) idle-gate deferral is an active-arc
+    # deferral — the run-start row plus one check/deferred-arc row, so
+    # the G17 eligible-box computation reads "arc-busy", not "failing".
+    # (The started row lands before the gate check — the deferred row is
+    # the run's terminal outcome, not a phantom.)
+    e = _busy_tmux_env(env, "busybin-journal-real")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr  # deferral is quiet, not a failure
+    rows = _journal_rows(env)
+    assert len(rows) == 2, f"expected started + deferred-arc, got {rows}"
+    started, row = rows
+    assert (started["kind"], started["outcome"]) == ("deploy", "started")
+    assert (row["source"], row["component"], row["kind"], row["outcome"]) == (
+        "toolset-update", "toolset-cua-driver", "check", "deferred-arc")
+    assert row["note"] == "jobs active — update deferred (never-interrupt-an-arc)"
+    assert row["trigger"] == "scheduled"  # the §2 default; --now was not passed
