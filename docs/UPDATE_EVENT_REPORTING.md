@@ -52,18 +52,18 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `session_epoch` | int \| null | Reimage counter from the provisioner's box record; S1 canonicalizer emits `null` (OQ3 tracks the record that makes it non-null); soak/aggregation keying degrades to (box, build) while null |
 | `emitted_at` | string | Box clock, ISO-8601 UTC; on controller `freeze-hold` events it equals `received_at` — the controller clock IS the collector clock, so there is no box/collector clock split to keep |
 | `received_at` | string | Collector/plane clock, ISO-8601 UTC; box clocks are never trusted for ordering — consumers order by `(emitted_at, event_id)` so re-collection never reorders history |
-| `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` — `freeze-hold` is always `controller` |
-| `component` | enum \| null | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum. Null on fleet-scoped controller events (`freeze-hold`): the freeze flag governs all updaters, so no single updater value is honest |
+| `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` \| `gate-hook` — `freeze-hold` is always `controller`; `gate-answer` rows are always `gate-hook` (the G18 gate-hook tick, #1649 S2 slice 3) |
+| `component` | enum \| null | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) \| `gate` — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum. Null on fleet-scoped controller events (`freeze-hold`): the freeze flag governs all updaters, so no single updater value is honest. `gate` is the gate channel's own rows (`gate-answer`): fleet-scoped, not a deployable component |
 | `subcomponent` | string \| null | Audit-line component granularity (`proxy`, `confirm`, `cred_ui`, … — the values `deploy/components.conf` actually carries); null on lines that carry none |
 | `subcomponents` | string \| null | The plural `components` value verbatim (space-joined, from the `ok` line) for readers that need the un-fanned form; the canonical S1 fan-out emits one event per component in `subcomponent` instead |
 | `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted by `fleet/gate_publish.py` (G15 S3, issue #1543) on freeze flip/clear into the fleet journal (`--journal`, default `events.jsonl` next to the published gate document — the append leg opens O_NOFOLLOW, #1845) |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); `skipped-frozen` gained its legacy producer in #1630's first slice (the release gate's `fleet-freeze`/`wave-not-live` verdicts, audited by `deploy/auto-deploy.sh`); `deferred-arc` gained its legacy producer in #1630's second slice (box-side arc-awareness: `deploy/auto-deploy.sh` audits `check/deferred-arc` when an active arc defers a permitted update) and its second producer in #1649's slice 2 (the toolset updater's idle-gate jobs-active deferral); the `freeze`/`gate` triggers are reserved for S2 emitters; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); `skipped-frozen` gained its legacy producer in #1630's first slice (the release gate's `fleet-freeze`/`wave-not-live` verdicts, audited by `deploy/auto-deploy.sh`); `deferred-arc` gained its legacy producer in #1630's second slice (box-side arc-awareness: `deploy/auto-deploy.sh` audits `check/deferred-arc` when an active arc defers a permitted update) and its second producer in #1649's slice 2 (the toolset updater's idle-gate jobs-active deferral); `freeze`/`gate` are S2-emitter triggers (`gate` is emitted by the gate-hook tick, #1649 S2 slice 3); S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
 | `window` | string \| null | `"maintenance"` when the event was emitted inside a G14 maintenance window (UPDATE_IDLE_SUSPEND_CLOCK.md D1/D6: maintenance events never feed the stall detector) |
 | `rollout` | object | `{release_id, wave}` — null until G15 S2 assigns waves |
-| `trigger` | enum | `scheduled` \| `manual` \| `freeze` \| `gate` \| `extra-inputs` — absent `trigger` on a legacy line means `scheduled` (the timer path); `extra-inputs` is emitted only on the range-synthesized forced path (`deploy/auto-deploy.sh`, the `trig` variable); `freeze`/`gate` are reserved for S2 emitters |
+| `trigger` | enum | `scheduled` \| `manual` \| `freeze` \| `gate` \| `extra-inputs` — absent `trigger` on a legacy line means `scheduled` (the timer path); `extra-inputs` is emitted only on the range-synthesized forced path (`deploy/auto-deploy.sh`, the `trig` variable); `freeze`/`gate` are S2-emitter triggers (`gate` is emitted by the gate-hook tick, #1649 S2 slice 3) |
 | `attested` | bool | S1/S2: `false`. S3: `true` when the event rode G13's attested box→plane channel |
 | `note` | string | Human/alert text — at S1 synthesized from the audit line itself (the box-side alert reason lives in `$LAST_FAILURE`, which the collector does not pull), never a debug dump |
 
@@ -319,8 +319,24 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   carry it; `cmd_install` installs the sink
   library next to the script (installed-copy trust model); `--dry-run`,
   opt-out, and the lock-held deferral stay journal-silent per the S1 noise
-  discipline. Remaining slices:
-  gate-hook wiring, and the collector read switch.
+  discipline. **Delivered (slice 3, #1649, 2026-10-21):** the gate-hook
+  loop's `gate-answer` producer (`fleet/gate_hook.sh` — `source: gate-hook`,
+  `component: gate`, `trigger: gate`): one row per answer transition —
+  anchor row on the first tick, `succeeded` ("permitted", state=live) /
+  `skipped-frozen` (state=frozen, incl. no-signal) after — with `reason` and
+  the per-component permitted commits in the fragment; unchanged answers
+  stay journal-silent (S1 noise discipline). `succeeded` reads as "the gate
+  evaluates live, not frozen" — it does not assert any component's wave is
+  live for this box (that permission stays in the updaters' verdict rows);
+  fragment maxes are transition-time values (a max change with no
+  state/reason change emits nothing). The transition key is
+  (state, reason-class): no-signal reasons embed a tick-growing age
+  counter, so a sustained no-signal is one transition, not one row per
+  tick. The hook's journal defaults
+  next to the gate status file (root-owned gate lane, same trust as the
+  status file itself — a root-performed 12k-bound rotation must never
+  re-own the updater's state-dir journal), overridable via `EVENT_JOURNAL`.
+  Remaining slices: the collector read switch.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
     failed/rolled-back gate);

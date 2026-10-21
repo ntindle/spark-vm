@@ -122,6 +122,24 @@ def test_invalid_enums_fail_loud_write_nothing(tmp_path, bad_args):
     assert rows == []
 
 
+def test_gate_hook_producer_enums_accepted(tmp_path):
+    # #1649 S2 slice 3: the G18 gate-hook tick is a first-class producer —
+    # source=gate-hook, component=gate (the gate channel's own rows).
+    r, rows = emit_snippet(
+        str(tmp_path),
+        'event_emit gate-hook gate gate-answer succeeded ",\\"trigger\\":\\"gate\\""',
+        'event_emit gate-hook gate gate-answer skipped-frozen ",\\"trigger\\":\\"gate\\""',
+    )
+    assert r.returncode == 0, r.stderr
+    assert "[event-journal] INVALID" not in r.stderr
+    assert len(rows) == 2
+    assert [row["outcome"] for row in rows] == ["succeeded", "skipped-frozen"]
+    assert all(row["source"] == "gate-hook" for row in rows)
+    assert all(row["component"] == "gate" for row in rows)
+    assert all(row["kind"] == "gate-answer" for row in rows)
+    assert all(row["trigger"] == "gate" for row in rows)
+
+
 def test_unset_journal_is_silent_noop(tmp_path):
     r = run_bash(f"unset EVENT_JOURNAL; source {LIB}; event_emit auto-deploy repo deploy started")
     assert r.returncode == 0

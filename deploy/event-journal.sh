@@ -35,6 +35,16 @@
 #   (same rule as audit(): callers MUST expand variables before passing —
 #   single-quoted '$x' logs literally).
 #
+#   Producer vocabulary (closed enums, fail-LOUD on violation):
+#     source: the box-side producer — auto-deploy (repo updater),
+#       toolset-update (toolset updater), manual (operator-run rows),
+#       controller (plane/controller rows, e.g. freeze-hold publishes),
+#       gate-hook (the G18 gate-hook tick, kind gate-answer — #1649 S2
+#       slice 3).
+#     component: the updatable component the row is about — repo,
+#       toolset-cua-driver, image; gate (the gate channel's own rows —
+#       fleet-scoped gate answers, not a deployable component).
+#
 # Discipline:
 #   - Closed enum vocabulary (fail-LOUD, not fail-silent): an invalid
 #     source/component/kind/outcome prints a loud [event-journal] line to
@@ -104,11 +114,11 @@ event_emit() {
 
     local bad=""
     case " $source " in
-        " auto-deploy "|" toolset-update "|" manual "|" controller ") ;;
+        " auto-deploy "|" toolset-update "|" manual "|" controller "|" gate-hook ") ;;
         *) bad="source='$source'" ;;
     esac
     case " $component " in
-        " repo "|" toolset-cua-driver "|" image ") ;;
+        " repo "|" toolset-cua-driver "|" image "|" gate ") ;;
         *) bad="${bad:+$bad, }component='$component'" ;;
     esac
     case " $kind " in
