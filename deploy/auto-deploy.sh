@@ -114,6 +114,16 @@ source "$UPDATER_COMPONENTS_CONF"
 # shellcheck source=arc_probe.sh
 source "$SCRIPT_DIR/arc_probe.sh"
 
+# S2 box-side event journal (docs/UPDATE_EVENT_REPORTING.md §S2, issue
+# #1649): fleet-facing event rows in the standard shape (§2), appended
+# alongside the box-local audit trail to update-events.jsonl — the journal
+# the collector will read once the read switch lands (see §S2 remaining slices). Functions only;
+# see deploy/event-journal.sh for the contract. Unset = sink unconfigured
+# (event_emit becomes a no-op), never an error.
+: "${EVENT_JOURNAL:=$UPDATER_STATE_DIR/update-events.jsonl}"
+# shellcheck source=event-journal.sh
+source "$SCRIPT_DIR/event-journal.sh"
+
 # --- helpers -----------------------------------------------------------------
 
 log() { echo "[auto-deploy] $*" >&2; }
@@ -869,9 +879,11 @@ do_rollback() {
     local c
     alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
     audit 'deploy' ',"result":"deploy-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$failed_c"'","phase":"'"$phase"'"'"$atrig"
+    event_emit auto-deploy repo deploy failed ',"from":"'"$old"'","to":"'"$new"'","subcomponent":"'"$failed_c"'","phase":"'"$phase"'"'"$atrig"
     if ! restore_snapshot "$snapdir"; then
         alert "ROLLBACK FAILED for $new — box may be half-deployed, operator intervention required"
         audit 'deploy' ',"result":"rollback-failed","from":"'"$old"'","to":"'"$new"'"'"$atrig"
+        event_emit auto-deploy repo rollback rollback-failed ',"from":"'"$old"'","to":"'"$new"'"'"$atrig"
         if [ -z "$no_block" ]; then
             printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
         fi
@@ -898,6 +910,7 @@ do_rollback() {
     # deployed version is whatever the restored VERSION file says.
     local rbv; rbv="$(sync_version_from_deployed)"
     audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'"$atrig"
+    event_emit auto-deploy repo deploy rolled-back ',"from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'"$atrig"
     return 1
 }
 
@@ -919,6 +932,11 @@ cmd_init() {
     # probe library — the installed copy must carry it, or the source line
     # fails outright under `set -e` and every tick dies before deploying.
     install -m 0644 "$SCRIPT_DIR/arc_probe.sh" "$INSTALLED_BIN/arc_probe.sh"
+    # Issue #1649 (S2 box-side event journal): auto-deploy.sh sources the
+    # journal sink at top level — the installed copy must carry it, or the
+    # source line fails outright under `set -e` and every tick dies before
+    # deploying (same install discipline as arc_probe.sh above).
+    install -m 0644 "$SCRIPT_DIR/event-journal.sh" "$INSTALLED_BIN/event-journal.sh"
     # extra_inputs_hash() reads host-side inputs through this helper at the
     # deploy privilege (sudo_run); the installed copy must carry it, or the
     # digest read fails outright and the tick retries without converging.
@@ -1409,6 +1427,7 @@ cmd_deploy() {
             # no extra-inputs scan (the forced path would defer through
             # gate_permits_touch anyway); the next tick re-evaluates.
             audit 'check' ',"result":"wave-not-live"'
+            event_emit auto-deploy repo check skipped-frozen ',"note":"wave not live (release gate)"'
             return 0
             ;;
         esac
@@ -1456,6 +1475,7 @@ cmd_deploy() {
             case "$touch_verdict" in
             verdict=wave-not-live|verdict=fleet-freeze)
                 audit 'check' ',"result":"'"${touch_verdict#verdict=}"'"'
+                event_emit auto-deploy repo check skipped-frozen ',"note":"gate verdict: '"${touch_verdict#verdict=}"'"'
                 ;;
             *)
                 audit 'check' ',"result":"noop"'
@@ -1474,11 +1494,13 @@ cmd_deploy() {
             # and invocation failures carry no verdict and keep the
             # fail-closed alert path below.
             audit 'check' ',"result":"fleet-freeze"'
+            event_emit auto-deploy repo check skipped-frozen ',"note":"fleet freeze (release gate)"'
             return 1
             ;;
         esac
         alert "pre-deploy check failed"
         audit 'check' ',"result":"precheck-fail"'
+        event_emit auto-deploy repo check precheck-fail
         return 1
     fi
     if [ "$range_synthesized" -eq 0 ]; then
@@ -1504,6 +1526,7 @@ cmd_deploy() {
     git -C "$UPDATER_REPO" reset --hard -q "$new" || {
         alert "mirror reset to $new failed ($old -> $new)"
         audit 'deploy' ',"result":"precheck-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
+        event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'"'"$trig"
         return 1
     }
 
@@ -1563,6 +1586,7 @@ cmd_deploy() {
     if [ "$arc_rc" = "0" ]; then
         log "active arc — deferring $old -> $new until the arc ends (never-interrupt-an-arc, #1808)"
         audit 'check' ',"result":"deferred-arc"'
+        event_emit auto-deploy repo check deferred-arc ',"from":"'"$old"'","to":"'"$new"'","note":"active arc — deploy deferred (never-interrupt-an-arc, #1808)"'
         return 0
     elif [ "$arc_rc" = "2" ]; then
         # The scan itself failed: we cannot see whether an arc is active.
@@ -1573,12 +1597,18 @@ cmd_deploy() {
         # the G17 stuck-precheck rule pages after its threshold.
         alert "arc-activity scan failed — cannot verify no arc is active"
         audit 'check' ',"result":"precheck-fail"'
+        event_emit auto-deploy repo check precheck-fail ',"note":"arc-activity scan failed — cannot verify no arc is active"'
         return 1
     fi
     # Components sharing an install unit deploy together (proxy+confirm share
     # deploy.sh, which installs both unconditionally).
     expand_install_unit COMPS
     log "deploying $old -> $new; components: ${COMPS[*]}"
+    # S2 fleet visibility (issue #1649): a deploy with no legacy "started"
+    # producer — the fleet journal gets the start row so gates can see a
+    # deploy in flight, not just its outcome.
+    local started_comps; started_comps="$(printf '%s\n' "${COMPS[@]}" | tr '\n' ' ' | xargs)"
+    event_emit auto-deploy repo deploy started ',"from":"'"$old"'","to":"'"$new"'","subcomponents":"'"$started_comps"'"'"$trig"
     # The drift check belongs here, not on the quiet noop tick: a pending
     # deploy is exactly when stale updater logic is most dangerous, and the
     # timer never runs `check` or `status`.
@@ -1616,6 +1646,7 @@ cmd_deploy() {
             fi
             alert "pre-deploy gate failed for component $c ($old -> $new)${blocked_sha:+; marked $blocked_sha blocked — no retry until a newer commit lands (clear with: rm \"$BLOCKED_COMMIT\")}"
             audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'","blocked":"'"$blocked_sha"'"'"$trig"
+            event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'","subcomponent":"'"$c"'","note":"pre-deploy gate failed"'"$trig"
             return 1
         }
     done
@@ -1626,16 +1657,19 @@ cmd_deploy() {
     rm -rf "$snapdir"; mkdir -p "$snapdir" || {
         alert "could not create snapshot dir $snapdir ($old -> $new)"
         audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
+        event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'","note":"snapshot failed"'"$trig"
         return 1
     }
     printf '%s\n' "$old" >"$snapdir/FROM_COMMIT" || {
         alert "could not write snapshot manifest ($old -> $new)"
         audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
+        event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'","note":"snapshot failed"'"$trig"
         return 1
     }
     printf '%s\n' "${COMPS[@]}" >"$snapdir/COMPONENTS" || {
         alert "could not write snapshot manifest ($old -> $new)"
         audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
+        event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'","note":"snapshot failed"'"$trig"
         return 1
     }
     local snapc
@@ -1643,6 +1677,7 @@ cmd_deploy() {
         snapshot_component "$snapc" "$snapdir" || {
             alert "snapshot of component $snapc failed ($old -> $new)"
             audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$snapc"'"'"$trig"
+            event_emit auto-deploy repo deploy precheck-fail ',"from":"'"$old"'","to":"'"$new"'","subcomponent":"'"$snapc"'","note":"snapshot failed"'"$trig"
             return 1
         }
     done
@@ -1700,6 +1735,7 @@ cmd_deploy() {
     prune_snapshots
     local complist; complist="$(printf '%s\n' "${COMPS[@]}" | tr '\n' ' ' | xargs)"
     audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'"$trig"
+    event_emit auto-deploy repo deploy succeeded ',"from":"'"$old"'","to":"'"$new"'","subcomponents":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'"$trig"
     log "deployed $new ($nv) — components: $complist"
 }
 

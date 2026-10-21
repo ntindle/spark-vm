@@ -291,6 +291,14 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   as the audit log — audit.log keeps the raw box-side record; the event
   journal is the fleet-facing translation). The collector reads
   `update-events.jsonl` instead of translating audit tails.
+  **Delivered (slice 1, #1649, 2026-10-20):** the sink library
+  (`deploy/event-journal.sh`, `event_emit` — standard-shape rows, UUIDv7
+  event IDs, closed enum vocabulary with loud rejection, 12k/10k bound,
+  best-effort I/O) is wired into the repo updater's outcome pivots
+  (`deploy/started|succeeded|failed`, `rollback/rollback-failed`,
+  `deploy/rolled-back`, `precheck-fail`, `check/deferred-arc`,
+  `check/skipped-frozen`). Remaining slices: toolset updater + gate-hook
+  wiring, and the collector read switch.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
     failed/rolled-back gate);
