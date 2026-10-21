@@ -243,7 +243,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   gate fires: how to tell a stale suite-size claim from an unregistered
   one, the registry-entry shape for a new claim, and the counting
   convention the gate uses — so the fix happens locally instead of after a
-  red CI run. (#TBD)
+  red CI run. (#1879)
 
 ### Changed
 
