@@ -28,9 +28,10 @@ Today:
   slice 2 (#1649, 2026-10-20): its outcome pivots `event_emit` rows directly
   to `update-events.jsonl` (`source: toolset-update`,
   `component: toolset-cua-driver` — §4 S2), the box-side journal the
-  collector switches to reading in a remaining §4 S2 slice. The result
-  vocabulary is defined now; the unread-off-box fate stands until the
-  collector read switch lands.
+  collector reads since slice 4 (#1649, 2026-10-21) instead of
+  translating audit tails (the exclusive per-box read switch). The
+  result vocabulary is defined now; the unread-off-box fate ended with
+  the read switch.
 - The fleet collector (G16 S1) already pulls per-box `audit-tail.jsonl`
   into its estate dir — but treats the tail as cross-check evidence for
   *version claims*, not as an event stream. Outcomes are incidental.
@@ -336,7 +337,45 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   next to the gate status file (root-owned gate lane, same trust as the
   status file itself — a root-performed 12k-bound rotation must never
   re-own the updater's state-dir journal), overridable via `EVENT_JOURNAL`.
-  Remaining slices: the collector read switch.
+  **Delivered (slice 4, #1649, 2026-10-21):** the collector read switch —
+  `fleet/events.py::collect_box_events` reads the box's `update-events.jsonl`
+  from the estate dir instead of translating audit tails whenever the
+  estate dir carries it (exclusive per box: translating both would
+  double-journal the same underlying events under two event_ids — native
+  UUIDv7 vs the S1 deterministic UUIDv5 — and the paging rules would
+  fire twice on one incident). The audit tail still feeds the
+  version-inventory leg; only the event-journal leg switches. Boxes
+  without the journal keep the legacy audit-tail translation. The
+  collector stamps the fleet-side fields (`schema`, `window`,
+  `received_at`, pull-context `box_id` — a disagreeing row `box_id` is
+  a loud note, never trusted), keeps `(check, noop)` local per the noise
+  discipline, fails closed with loud notes on unknown
+  source/component/kind/outcome or missing `event_id`, coerces
+  free-form fields to str-or-None (the PR #794 type-confusion class),
+  and verifies row attestations the same way the S1 path does.
+  The estate-side journal read opens with O_NOFOLLOW (mirroring the
+  #1841/#1845 append legs and the #1846 read leg): a symlinked journal
+  path is refused loudly, and the leg falls back to the legacy
+  audit-tail translation so exactly one leg still emits — fail-closed
+  would hand a box-side planter a trivial event-suppression switch.
+  The append leg now also dedups duplicate event_ids inside a single
+  collect batch (previously only the pre-existing journal was
+  consulted), and a journal that exists but yields no events gets a
+  loud note naming the skipped audit-tail translation — so "box
+  emitted nothing" is distinguishable from "sink broke".
+  **Cutover honesty:** the S1→S2 flip carries a bounded one-time
+  duplicate wave. Slices 1–3 dual-wrote (`audit()` + `event_emit()`)
+  while the collector still translated audit tails, so S2-era
+  incidents already journaled as deterministic UUIDv5 rows re-appear
+  as native UUIDv7 rows on the first journal-path collect (dedup is
+  per `(box_id, event_id)`, so the twins never dedup). The first
+  collect that actually journals rows for a box emits a loud "read
+  switch engaged" note naming the wave (persisted per-box in the
+  store's `journal_cutover.json`, so it fires once) — re-pages in
+  that window are cutover, not a new incident. Steady state never
+  double-journals.
+  Remaining slices: loud-on-configured-but-unwritable, fragment
+  warn-only validation, the §3 S1 rollback-failed row reconcile.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
     failed/rolled-back gate);
