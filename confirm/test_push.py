@@ -213,6 +213,92 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.all(), [])
 
 
+class SymlinkPlantTests(unittest.TestCase):
+    """#1869: the data read/write legs refuse symlink plants loud
+    (O_NOFOLLOW), mirroring the #1755 lock-sidecar hardening — the lock
+    sidecar, the golden-image signal and the enrollment auto-detect all
+    open with O_NOFOLLOW, but these legs plain-opened and followed
+    symlinks. Each test plants a symlink and asserts the plant is
+    refused loudly and never followed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _plant(self, link_path, target_text="planted-target-content"):
+        target = self.dir / ("target-" + Path(link_path).name)
+        target.write_text(target_text)
+        os.symlink(str(target), link_path)
+        return target
+
+    def _assert_plant_refused_loud(self, cm):
+        self.assertTrue(
+            any("plant refusal" in m for m in cm.output),
+            "expected a loud 'plant refusal' log line, got: %r" % cm.output)
+
+    def test_store_load_refuses_symlink(self):
+        p = str(self.dir / "subs.json")
+        target = self._plant(p)
+        store = push.SubscriptionStore(p)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(store.all(), [])
+        self._assert_plant_refused_loud(cm)
+        # The plant was never followed: target untouched.
+        self.assertEqual(target.read_text(), "planted-target-content")
+
+    def test_store_load_still_reads_real_file(self):
+        # Non-vacuity: a real (non-plant) store still loads.
+        p = str(self.dir / "subs.json")
+        push._atomic_write_json(
+            p, {"version": 1, "subscriptions": [
+                {"endpoint": "https://push.example/x",
+                 "keys": {"p256dh": "p", "auth": "a"},
+                 "created": "t"}]})
+        self.assertEqual(len(push.SubscriptionStore(p).all()), 1)
+
+    def test_notified_load_refuses_symlink(self):
+        p = str(self.dir / "notified.json")
+        self._plant(p)
+        noted = push.NotifiedLog(p)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertFalse(noted.seen("a1"))
+        self._assert_plant_refused_loud(cm)
+
+    def test_atomic_write_tmp_plant_refuses(self):
+        # The tmp leg: a pre-planted symlink at <path>.tmp must raise
+        # loud (ELOOP) instead of letting the atomic write follow it
+        # into an attacker-chosen file.
+        p = str(self.dir / "subs.json")
+        target = self._plant(p + ".tmp")
+        with self.assertRaises(OSError):
+            push._atomic_write_json(p, {"version": 1, "subscriptions": []})
+        self.assertEqual(target.read_text(), "planted-target-content")
+        # Nothing landed at the real destination either.
+        self.assertFalse(os.path.lexists(p))
+
+    def test_open_nofollow_read_vocabulary(self):
+        # Non-vacuity on the primitive itself: missing / refused /
+        # readable all report the fleet-style err vocabulary.
+        missing = str(self.dir / "nope.json")
+        fh, err = push._open_nofollow_read(missing)
+        self.assertIsNone(fh)
+        self.assertEqual(err, "missing")
+        p = str(self.dir / "real.json")
+        Path(p).write_text("{}")
+        fh, err = push._open_nofollow_read(p)
+        self.assertIsNone(err)
+        with fh:
+            self.assertEqual(fh.read(), "{}")
+        link = str(self.dir / "link.json")
+        self._plant(link)
+        fh, err = push._open_nofollow_read(link)
+        self.assertIsNone(fh)
+        self.assertTrue(push._is_symlink_refusal(err))
+
+
 class FakeHTTPResponse:
     def __init__(self, code):
         self._code = code
