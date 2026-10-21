@@ -920,11 +920,35 @@ def journal_lock(store_dir, timeout_s=None):
 # --- Event journal --------------------------------------------------------
 def _load_journal(store_dir, name):
     """Load a JSONL journal; returns (lines, error). Malformed lines are
-    skipped (counted in the caller's domain via len check)."""
+    skipped (counted in the caller's domain via len check).
+
+    #1846: the read opens with O_NOFOLLOW — a pre-planted symlink at
+    the journal path fails loud (ELOOP -> the "cannot read" error,
+    never attacker-chosen content) instead of silently feeding a
+    planted target's rows into alert evaluation / acks (evaluate_alerts
+    / ack_alert / cmd_events_ack would otherwise render
+    attacker-chosen alert content to the operator). Mirrors the #1841
+    append-leg and #1755 lock-sidecar hardening. O_NOFOLLOW covers the
+    final path component only — intermediate-component symlinks are
+    still followed (the store dir itself is created by
+    _ensure_store_dir)."""
     path = os.path.join(store_dir, name)
     lines = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (name, exc)
+    # Mirrors the #1755 journal_lock fdopen guard: if fdopen itself
+    # raises, the fd must be closed, not leaked.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -935,8 +959,6 @@ def _load_journal(store_dir, name):
                     continue
                 if isinstance(obj, dict):
                     lines.append(obj)
-    except FileNotFoundError:
-        return [], None
     except OSError as exc:
         return None, "cannot read %s: %s" % (name, exc)
     return lines, None

@@ -95,9 +95,10 @@ path.
 
 - A broken tenant instrument fails loud in its own probe record
   (`failed=True`) and never wedges the sweep (D-AC-3).
-- A wedged probe-watermark sidecar (ELOOP plant, #1838) lands as the
-  single sweep-level `errors[]` entry and still exits 0 — the S4
-  staleness rule reads the sidecar's absence, not the unit state.
+- A wedged probe-watermark sidecar (ELOOP plant on the read leg, #1838;
+  ELOOP plant on the bulk-write lock, disk-full, permission — #1842)
+  lands as the single sweep-level `errors[]` entry and still exits 0 —
+  the S4 staleness rule reads the sidecar's absence, not the unit state.
 - The sweep itself failing (bad input, unreadable store) exits 2 with
   one line on stderr, never a bare traceback.
 - No bundle wired (D-RL2-3): a due tick is noted LOUD

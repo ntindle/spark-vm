@@ -548,6 +548,40 @@ def test_probe_watermark_symlink_plant_is_one_sweep_level_error(tmp_path):
     assert os.path.islink(wm)
 
 
+def test_probe_lock_plant_fans_out_to_one_sweep_level_entry(tmp_path):
+    # #1842 (probe half): the lock-path ELOOP plant is the exact fault
+    # that fanned out to N per-tenant errors[] entries on the
+    # bulk-write except path. With two tenants the sweep now reports
+    # ONE sweep-level entry (tenant_id None) — the errors[] signal
+    # never scales with the tenant count — while both tenants' own
+    # records still carry the LOUD note (fail-visible per tenant).
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.lock")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, wm + ".lock")
+    state_fn, post_live_fn, bundle_fn = _suppliers()
+    summary = probe.probe_all_tenants(
+        store, watermark_path=wm,
+        provider_state_fn=state_fn, post_live_fn=post_live_fn,
+        bundle_fn=bundle_fn, history=str(tmp_path / "hist.jsonl"),
+        now=NOW,
+    )
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False
+        assert any("observability failed" in n for n in rec["notes"])
+    assert len(summary["errors"]) == 1, summary["errors"]
+    entry = summary["errors"][0]
+    assert entry["tenant_id"] is None
+    assert "LOUD" in entry["error"] and "bulk write failed" in entry["error"]
+    assert not os.path.exists(wm)
+
+
 def test_probe_corrupt_watermark_sidecar_restarts_empty(tmp_path):
     # D-AC-7 (probe half, QA #3 follow-up): a corrupt probe-watermark
     # sidecar is observability damage, never a reason to skip the probe

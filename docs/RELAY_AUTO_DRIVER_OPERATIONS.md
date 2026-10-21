@@ -125,8 +125,11 @@ as applied.
   when the sweep itself could not run: bad input, unreadable store,
   internal error.
 - A wedged watermark sidecar never wedges the sweep: the tick still
-  drives, the failure lands LOUD on the tenant's record (and in the
-  report's `errors[]`), the sweep still exits 0 — the unit shows
+  drives, the failure lands LOUD on the tenant's record, and the
+  report's `errors[]` carries a single sweep-level entry (not one per
+  tenant — a lock-path ELOOP plant is the same fault class as the
+  sidecar-read ELOOP, #1842 extends the #1838 hoisting to the
+  bulk-write leg); the sweep still exits 0 — the unit shows
   success. The MISSING fresh watermark is what S4's staleness rule
   reads as driver trouble (#1724): staleness reads the sidecar, not
   the unit state.

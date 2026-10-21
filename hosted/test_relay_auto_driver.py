@@ -433,6 +433,9 @@ def test_observability_failure_does_not_wedge_sweep(tmp_path):
     # Engineering A2: a watermark write failure (missing parent dir)
     # is fail-soft — the tenant was already driven; the sweep continues
     # and the failure surfaces LOUD in the summary's errors.
+    # #1842: the bulk write is sweep-level — ONE sweep-level errors[]
+    # entry (tenant_id None), not one per tenant. The LOUD note still
+    # lands on every tenant's own record (fail-visible per tenant).
     store = _wired_store(tmp_path, {
         "tnt-a": [_arc("box-a")],
         "tnt-b": [_arc("box-a")],
@@ -443,8 +446,8 @@ def test_observability_failure_does_not_wedge_sweep(tmp_path):
         latest_probe_fn=_fresh_probe,
     )
     assert set(summary["tenants"]) == {"tnt-a", "tnt-b"}
-    assert len(summary["errors"]) == 2
-    assert all(e["tenant_id"] in ("tnt-a", "tnt-b") for e in summary["errors"])
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["tenant_id"] is None
     for tid in ("tnt-a", "tnt-b"):
         rec = summary["tenants"][tid]
         assert rec["failed"] is False  # the drive itself worked
@@ -657,6 +660,11 @@ def test_watermark_lock_refuses_symlink_plant(tmp_path):
     # file (lock-desync / lock-DoS). The tick refuses loudly
     # (fail-visible through the observability handler), the drive
     # itself still works, and the sweep is not wedged.
+    # #1842: the bulk write is sweep-level — the lock-path ELOOP is the
+    # same fault class as the sidecar-read ELOOP (#1838), so the
+    # errors[] signal is the single sweep-level entry (tenant_id None),
+    # not one per tenant. The tenant's own record still carries the
+    # LOUD note.
     store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
     wm = str(tmp_path / "wm.json")
     victim = str(tmp_path / "victim.lock")
@@ -671,12 +679,42 @@ def test_watermark_lock_refuses_symlink_plant(tmp_path):
     assert rec["failed"] is False  # the drive itself worked
     assert any("observability failed" in n for n in rec["notes"])
     assert len(summary["errors"]) == 1
-    assert summary["errors"][0]["tenant_id"] == "tnt-a"
+    assert summary["errors"][0]["tenant_id"] is None
     # The victim file was never flocked through: no lock sibling was
     # created behind the plant, and the real watermark was not written.
     assert not os.path.exists(wm)
     with open(victim, encoding="utf-8") as fh:
         assert fh.read() == "victim"
+
+
+def test_lock_plant_fans_out_to_one_sweep_level_entry(tmp_path):
+    # #1842: the lock-path ELOOP plant is the exact fault that fanned
+    # out to N per-tenant errors[] entries. With two tenants the sweep
+    # now reports ONE sweep-level entry (tenant_id None) — the errors[]
+    # signal never scales with the tenant count — while both tenants'
+    # own records still carry the LOUD note (fail-visible per tenant).
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.lock")
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("victim")
+    os.symlink(victim, wm + ".lock")
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False
+        assert any("observability failed" in n for n in rec["notes"])
+    assert len(summary["errors"]) == 1, summary["errors"]
+    assert summary["errors"][0]["tenant_id"] is None
+    assert "ELOOP" in summary["errors"][0]["error"] or \
+        "Too many levels of symbolic links" in summary["errors"][0]["error"]
+    assert not os.path.exists(wm)
 
 
 def test_watermark_read_refuses_symlink_plant(tmp_path):
@@ -1050,6 +1088,10 @@ def test_bulk_watermark_write_failure_notes_every_tenant(tmp_path, monkeypatch):
     # A failed bulk write (disk full / permission) notes LOUD on every
     # tenant's record and keeps the sweep alive — observability never
     # wedges the sweep, and nothing is silently dropped.
+    # #1842: the bulk write is sweep-level, so its failure is ONE
+    # sweep-level errors[] entry (tenant_id None) — not N per-tenant
+    # ones. The per-record LOUD notes stay (fail-visible per tenant);
+    # only the errors[] signal is hoisted.
     store = _wired_store(tmp_path, {
         "tnt-a": [_arc("box-a")],
         "tnt-b": [_arc("box-b")],
@@ -1074,9 +1116,9 @@ def test_bulk_watermark_write_failure_notes_every_tenant(tmp_path, monkeypatch):
             "observability failed" in n and "disk full" in n
             for n in rec["notes"]
         ), rec["notes"]
-    assert len(summary["errors"]) == 2
-    assert all(e["tenant_id"] in ("tnt-a", "tnt-b")
-               for e in summary["errors"])
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["tenant_id"] is None
+    assert "bulk write failed" in summary["errors"][0]["error"]
 
 
 def test_bulk_watermark_merges_over_preseeded_sidecar(tmp_path):

@@ -1172,6 +1172,10 @@ def test_append_events_refuses_symlink_plant(dirs):
     # the append into the attacker's target. The append fails loud (error
     # returned), the target gains no bytes, and the plant itself is not
     # replaced by a real file.
+    # #1846 note: the plant is now refused even earlier — at the dedup
+    # read (_load_journal's O_NOFOLLOW) before the append leg's own
+    # O_NOFOLLOW open is reached. The loud-failure contract is
+    # unchanged; only the refusal point moved up one leg.
     events = _import_events_module()
     estate, store = dirs
     target = os.path.join(estate, "attacker-target.jsonl")
@@ -1184,7 +1188,7 @@ def test_append_events_refuses_symlink_plant(dirs):
     appended, duplicates, err = events.append_events(
         store, [_symlink_row("plant-1")])
     assert err is not None
-    assert "cannot append to event journal" in err
+    assert "cannot read events.jsonl" in err  # #1846: refused at the dedup read
     assert (appended, duplicates) == (None, None)
     with open(target, encoding="utf-8") as fh:
         assert fh.read() == preexisting
@@ -1206,3 +1210,47 @@ def test_append_events_normal_append_unaffected(dirs):
     assert err is None
     assert (appended, duplicates) == (0, 1)
     assert len(journal(store, "events.jsonl")) == 1
+
+
+# --- Journal-read symlink-plant refusal (#1846) ---------------------------
+# _load_journal opens with O_NOFOLLOW: a pre-planted symlink at the
+# journal path must fail LOUD (a returned error — the callers
+# evaluate_alerts / ack_alert / cmd_events_ack already surface the
+# read error instead of rendering attacker-chosen alert content to
+# the operator) instead of silently following the plant. The
+# pre-#1846 plain open() followed the link and returned the
+# attacker's rows; the O_NOFOLLOW refusal surfaces as ELOOP.
+
+
+def test_load_journal_refuses_symlink_plant(dirs):
+    # #1846: a symlink planted at <store>/events.jsonl must not feed
+    # the attacker's rows to the reader. The read fails loud (error
+    # returned), the target is not read (no rows), and the plant
+    # itself is left alone.
+    events = _import_events_module()
+    estate, store = dirs
+    target = os.path.join(estate, "attacker-target.jsonl")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event_id": "attacker-1",
+                             "box_id": "box-evil"}) + "\n")
+    journal_path = os.path.join(store, "events.jsonl")
+    os.makedirs(store, exist_ok=True)
+    os.symlink(target, journal_path)
+    rows, err = events.load_events(store)
+    assert err is not None
+    assert "cannot read" in err
+    assert rows is None
+    assert os.path.islink(journal_path)
+
+
+def test_load_journal_normal_read_unaffected(dirs):
+    # The O_NOFOLLOW open changes nothing for the legitimate path:
+    # a real journal file reads rows as before.
+    events = _import_events_module()
+    estate, store = dirs
+    appended, duplicates, err = events.append_events(
+        store, [_symlink_row("n-1")])
+    assert err is None
+    rows, err = events.load_events(store)
+    assert err is None
+    assert [r["event_id"] for r in rows] == ["n-1"]
