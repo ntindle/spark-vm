@@ -187,8 +187,8 @@ exact-match `Origin` always.
 pytest confirm/
 ```
 
-284 tests cover the handler paths (including the pre-seeded-CSRF-file 403
+292 tests cover the handler paths (including the pre-seeded-CSRF-file 403
 probes), expiry stamping, re-open idempotency, flood control, and push.
 Hermetic — no network, no daemon, no fixtures outside this directory.
-(284 collected when the optional `cryptography` package is absent — the
-45 push tests skip; 329 with it installed.)
+(292 collected when the optional `cryptography` package is absent — the
+52 push tests skip; 344 with it installed.)
