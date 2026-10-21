@@ -1254,3 +1254,37 @@ def test_load_journal_normal_read_unaffected(dirs):
     rows, err = events.load_events(store)
     assert err is None
     assert [r["event_id"] for r in rows] == ["n-1"]
+
+
+def test_read_journal_raw_refuses_symlink_plant(dirs):
+    # #1846 follow-up (Security review of PR #1854): the prune paths
+    # (prune_events, prune_journal) read journals through
+    # read_journal_raw — a symlink planted at the journal path must
+    # fail loud here too, or prune would compute retention decisions
+    # from the attacker's rows (and a symlink->FIFO plant would hang
+    # at open while prune holds the journal lock). A real journal
+    # file still reads verbatim lines back byte-identical.
+    events = _import_events_module()
+    estate, store = dirs
+    target = os.path.join(estate, "attacker-target.jsonl")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event_id": "attacker-1",
+                             "box_id": "box-evil"}) + "\n")
+    journal_path = os.path.join(store, "events.jsonl")
+    os.makedirs(store, exist_ok=True)
+    os.symlink(target, journal_path)
+    items, err = events.read_journal_raw(journal_path)
+    assert err is not None
+    assert "cannot read events.jsonl" in err
+    assert items is None
+    assert os.path.islink(journal_path)
+    # Legitimate path: a real file reads rows as before, verbatim
+    # items byte-identical.
+    os.unlink(journal_path)
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        fh.write('{"event_id": "r-1"}\n\nnot-json\n')
+    items, err = events.read_journal_raw(journal_path)
+    assert err is None
+    assert items == [('{"event_id": "r-1"}', {"event_id": "r-1"}, False),
+                    ("", None, True),
+                    ("not-json", None, True)]

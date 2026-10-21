@@ -1548,10 +1548,33 @@ def read_journal_raw(path):
     trailing newline, obj the parsed dict, verbatim True for blank
     lines and malformed/non-dict lines. Callers that rewrite must keep
     verbatim items byte-identical — they cannot be dated, so they
-    cannot be pruned; they are never counted or banded."""
+    cannot be pruned; they are never counted or banded.
+
+    #1846 follow-up (Security review of PR #1854): the read opens with
+    O_NOFOLLOW — a pre-planted symlink at the journal path fails loud
+    (ELOOP -> the "cannot read" error) instead of silently feeding a
+    planted target's rows into the prune paths (prune_events,
+    prune_journal), which would then compute retention decisions from
+    attacker rows and rewrite attacker-derived content over the
+    journal; a symlink->FIFO plant would also hang at open while
+    prune holds the store-scoped journal lock. Mirrors the
+    _load_journal O_NOFOLLOW hardening."""
     items = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (os.path.basename(path), exc)
+    # Mirrors the #1755 journal_lock fdopen guard: if fdopen itself
+    # raises, the fd must be closed, not leaked.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with fh:
             for line in fh:
                 text = line.rstrip("\n")
                 if not text.strip():
@@ -1565,8 +1588,6 @@ def read_journal_raw(path):
                     items.append((text, None, True))
                     continue
                 items.append((text, obj, False))
-    except FileNotFoundError:
-        return [], None
     except OSError as exc:
         return None, "cannot read %s: %s" % (os.path.basename(path), exc)
     return items, None
