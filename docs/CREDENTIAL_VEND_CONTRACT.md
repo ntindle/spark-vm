@@ -282,7 +282,8 @@ endpoint answers a denied take with `429` + `Retry-After:
 <retry_after_s>` (the hint is advisory — the denial is the airtight
 part). The bucket only ever fires on abuse
 loops: at the §2.3 minimum TTL the legitimate cadence is already ~1
-mint per 300 s per name, so no legitimate box is throttled — the bound
+mint request per 300 s per box (all due names batched per the §5
+discipline, D-VC-13), so no legitimate box is throttled — the bound
 is on the D1 write amplification of a compromised box minting in a
 tight loop. (Precedent note, kept honest: the pairing 50-pending cap
 in `CONTROL_PLANE_API_REFERENCE.md` is a *count* cap, not a rate
@@ -529,6 +530,14 @@ an outage degrades into bypassed identity):
   (it would put plane latency on every credentialed request); a
   lease-miss at swap time triggers an immediate blocking refresh
   (fetch-on-miss).
+- **Batched mints (D-VC-13):** each re-check cycle, the fetcher
+  collects *all* due names and issues a single mint `POST` carrying
+  them (first boot with no leases: `ceil(N/64)` requests for N names).
+  Per-name minting is non-conformant: the D105 per-box rate limiter
+  (§2.2) counts mint *requests* per `box_id`, and its
+  "never touches legitimate traffic" claim rests on this discipline —
+  without batching, a box with 11+ minimum-TTL names would eat 429s
+  on legitimate traffic.
 - **Hard delete-on-expiry:** at expiry the value is wiped from memory. A
   subsequent swap request fails closed until a fresh lease lands.
 - **RAM-only cache:** vended values are never written to the box
@@ -652,6 +661,11 @@ is already explicit in the H11 audit (§3).
     only a fresh (plaintext-different) value, established by
     decrypt-compare with the data key, lifts the tombstone. Issue
     #1406.
+14. The D105 per-box mint rate limiter: an 11th mint request inside
+   any 300 s window reads `429` with a `Retry-After` hint naming the
+   advisory `retry_after_s`, and a client honoring the §5 batching
+   discipline (one mint request per re-check cycle, all due names
+   batched) is never throttled on legitimate traffic. Issue #1405.
 
 ## 11. What's next
 
