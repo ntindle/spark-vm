@@ -2078,3 +2078,42 @@ def test_collect_audit_tail_symlink_plant_fails_closed_loud(env):
     assert any("refused as a symlink plant" in n for n in record["notes"])
     assert record["versions"]["repo_commit"] is None
     assert os.path.islink(os.path.join(boxdir, "audit-tail.jsonl"))
+
+
+# --- status.json / snapshot.json symlink-plant refusal (#1860 follow-up)
+# Architecture review: status.json and snapshot.json are box-pulled
+# estate artifacts like the audit tail — a symlinked plant would
+# resolve operator-side and feed the version record (toolset pins
+# carried as-is, repo_commit/suspect determination). Both read through
+# the shared O_NOFOLLOW discipline now; plants are refused fail-closed
+# and loudly, and the derived fields stay null. Neuter-verified: on
+# pristine code the plants' payloads flow through (toolset_pins set,
+# repo_commit == COMMIT_A).
+
+
+def test_collect_status_snapshot_symlink_plants_fails_closed_loud(env):
+    estate, store = env
+    boxdir = os.path.join(estate, "tower")
+    os.makedirs(boxdir)
+    for name, payload in (("status.json", _status_json()),
+                          ("snapshot.json", _snapshot_json(COMMIT_A))):
+        target = os.path.join(estate, "attacker-%s-target" % name)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.symlink(target, os.path.join(boxdir, name))
+    # A real (empty) audit tail keeps the plant refusals as the only
+    # loud signal.
+    with open(os.path.join(boxdir, "audit-tail.jsonl"), "w") as fh:
+        fh.write("")
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    record = _journal(store)[0]
+    assert any("status.json refused as a symlink plant" in n
+               for n in record["notes"])
+    assert any("snapshot.json refused as a symlink plant" in n
+               for n in record["notes"])
+    assert record["versions"]["toolset_pins"] is None
+    assert record["versions"]["repo_commit"] is None
+    assert record["versions"]["image_version"] is None
+    assert os.path.islink(os.path.join(boxdir, "status.json"))
+    assert os.path.islink(os.path.join(boxdir, "snapshot.json"))

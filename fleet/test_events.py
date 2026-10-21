@@ -1439,3 +1439,22 @@ def test_append_alerts_normal_append_unaffected(dirs):
               encoding="utf-8") as fh:
         rows = [json.loads(line) for line in fh if line.strip()]
     assert [r["alert_id"] for r in rows] == ["a-1", "a-2"]
+
+
+def test_check_tail_continuity_symlink_plant_warns_loud(dirs):
+    # #1860 follow-up (Architecture review): the watermark leg's plant
+    # refusal is not silent — check_tail_continuity surfaces it as a
+    # warning while keeping the old watermark (fail-safe: no false
+    # discontinuity page on the plant).
+    events = _import_events_module()
+    estate, store = dirs
+    os.makedirs(store, exist_ok=True)
+    box_dir, _ = _plant_audit_tail(estate, "box-evil", [_ok_audit_line()])
+    warnings, fired, err = events.check_tail_continuity(
+        store, [(box_dir, "box-evil")], NOW.isoformat())
+    assert err is None
+    assert any("refused as a symlink plant" in w for w in warnings)
+    assert fired == []
+    # The watermark was not advanced on the plant's rows.
+    marks, _ = events._load_tail_watermarks(store)
+    assert "box-evil" not in marks

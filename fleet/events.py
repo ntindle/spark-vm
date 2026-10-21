@@ -19,7 +19,8 @@ inventory.py: like every fleet module it is stdlib-only and is exercised
 through subprocess by the hermetic suite. The small parsing helpers
 (_parse_ts, _read_jsonl_file) mirror inventory.py's; see the module
 docstring there for the shared rationale. (The box-artifact file reads
-— audit-tail rows and the S2 journal — live here now with O_NOFOLLOW
+— audit-tail rows, the S2 journal, the tail watermark — live here now
+behind one shared O_NOFOLLOW open primitive, open_nofollow_read
 (#1860, #1649 slice 4); the legacy plain-open _read_jsonl_file is
 retired.)
 
@@ -184,6 +185,91 @@ def _parse_ts(value):
     return dt
 
 
+# --- Estate-artifact open discipline (#1860) ---------------------------------
+# Every operator-side read of a box-pulled estate file goes through
+# open_nofollow_read: the tenant holds root in the guest and rsync -a
+# preserves symlinks, so a box-side symlink plant would otherwise
+# resolve operator-side and turn the collector into a read primitive
+# against operator-readable files. One shared primitive (not an
+# inlined copy per leg) so the refusal discipline cannot drift.
+
+
+def open_nofollow_read(path):
+    """Open a file for reading with O_NOFOLLOW.
+
+    Returns (fh, err): fh is a UTF-8 text file on success; err is None
+    on success, "missing" for an absent path, "refused: <path> is a
+    symlink (O_NOFOLLOW plant refusal)" for ELOOP, or "unreadable:
+    ..." otherwise. The fd is never leaked: an OSError at open or
+    fdopen becomes err; anything else still raises after closing.
+    O_NOFOLLOW covers the final path component only —
+    intermediate-component symlinks are still followed (same caveat as
+    the fleet journal legs).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, ("refused: %s is a symlink (O_NOFOLLOW "
+                          "plant refusal)" % path)
+        return None, "unreadable: %s" % exc
+    # The fd must never leak: an OSError here (e.g. the path is a
+    # directory — os.fdopen raises IsADirectoryError, an OSError
+    # subclass) becomes a loud "unreadable" note; anything else still
+    # raises after closing.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        return None, "unreadable: %s" % exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fh, None
+
+
+def is_symlink_refusal(err):
+    """True when err is open_nofollow_read's plant-refusal marker.
+
+    The one shared predicate for the refusal convention (mirrors
+    _load_journal's err-string discipline): call sites branch on this
+    to choose fail-closed-vs-degraded behavior instead of threading a
+    separate eloop flag.
+    """
+    return isinstance(err, str) and err.startswith("refused:")
+
+
+def _open_nofollow_append(path, mode):
+    """Open a journal file for appending with O_NOFOLLOW|O_CREAT.
+
+    The append-leg sibling of open_nofollow_read: returns (fh, err)
+    with the same err vocabulary ("missing" never occurs — O_CREAT is
+    always set). `mode` applies only at creation; pre-existing files
+    keep their permissions (we never re-chmod operator-owned files —
+    #1537). The fd is never leaked.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                     | os.O_NOFOLLOW, mode)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, ("refused: %s is a symlink (O_NOFOLLOW "
+                          "plant refusal)" % path)
+        return None, "unreadable: %s" % exc
+    # Mirrors open_nofollow_read's no-leak guard.
+    try:
+        fh = os.fdopen(fd, "a", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        os.close(fd)
+        return None, "unreadable: %s" % exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fh, None
+
+
 # --- S2 box-side journal read switch (#1649) ----------------------------------
 # The S2 producers (deploy/event-journal.sh's event_emit, wired into the
 # repo updater, the toolset updater, and the gate hook by slices 1-3)
@@ -233,36 +319,18 @@ def _read_box_journal_nofollow(box_dir):
     `update-events.jsonl` as a symlink (rsync -a preserves symlinks;
     the target resolves operator-side), turning the collector into a
     read primitive against operator-readable files whose rows flow
-    into alert evaluation. The O_NOFOLLOW refusal mirrors the
-    #1841/#1845 append legs and the #1846 read leg. O_NOFOLLOW covers
-    the final path component only — intermediate-component symlinks
-    are still followed (same caveat as the fleet journal legs).
-
-    Returns (rows, skipped, err, eloop): eloop is True when the path
-    was refused as a symlink plant — the caller falls back to the
-    legacy audit-tail translation so exactly one leg still emits
+    into alert evaluation. The refusal goes through open_nofollow_read
+    (the shared estate-artifact open discipline); the caller
+    distinguishes the plant via is_symlink_refusal and falls back to
+    the legacy audit-tail translation so exactly one leg still emits
     (fail-closed would hand the attacker a trivial
     event-suppression switch).
+
+    Returns (rows, skipped, err).
     """
-    path = os.path.join(box_dir, _JOURNAL_NAME)
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return None, 0, "missing", False
-    except OSError as exc:
-        return None, 0, "unreadable: %s" % exc, \
-            exc.errno == errno.ELOOP
-    # The fd must never leak: an OSError here (e.g. the path is a
-    # directory) becomes a loud "unreadable" note; anything else still
-    # raises after closing.
-    try:
-        fh = os.fdopen(fd, "r", encoding="utf-8")
-    except OSError as exc:
-        os.close(fd)
-        return None, 0, "unreadable: %s" % exc, False
-    except BaseException:
-        os.close(fd)
-        raise
+    fh, err = open_nofollow_read(os.path.join(box_dir, _JOURNAL_NAME))
+    if err:
+        return None, 0, err
     rows, skipped = [], 0
     try:
         with fh:
@@ -275,8 +343,8 @@ def _read_box_journal_nofollow(box_dir):
                 except ValueError:
                     skipped += 1
     except OSError as exc:
-        return None, 0, "unreadable: %s" % exc, False
-    return rows, skipped, None, False
+        return None, 0, "unreadable: %s" % exc
+    return rows, skipped, None
 
 
 def read_audit_tail_nofollow(box_dir):
@@ -287,42 +355,21 @@ def read_audit_tail_nofollow(box_dir):
     `audit-tail.jsonl` as a symlink (rsync -a preserves symlinks; the
     target resolves operator-side), turning the collector into a read
     primitive against operator-readable files whose rows flow into
-    version-claim translation and the S1 event canonicalizer. This is
-    the O_NOFOLLOW-parity companion to the S2 journal leg
-    (`_read_box_journal_nofollow`, #1649 slice 4) and the #1841/#1845
-    append / #1846 read legs: a symlinked audit tail is refused with
-    ELOOP and the leg falls back to nothing — the audit tail is the
+    version-claim translation and the S1 event canonicalizer. The
+    refusal goes through open_nofollow_read (the shared estate-artifact
+    open discipline); callers distinguish the plant via
+    is_symlink_refusal and fail closed loudly — the audit tail is the
     last producer on these legs, so there is nothing to fall back to
     (fail-closed, loudly; the journal leg's degraded fallback exists
     only because the audit tail existed as its fallback).
-    O_NOFOLLOW covers the final path component only — intermediate
-    symlinks are still followed (same caveat as the fleet journal
-    legs).
 
-    Returns (rows, skipped, err, eloop): eloop is True when the path
-    was refused as a symlink plant. Public because the
+    Returns (rows, skipped, err). Public because the
     version-inventory leg (fleet/inventory.py) reads the same file
     and applies the same discipline.
     """
-    path = os.path.join(box_dir, "audit-tail.jsonl")
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return None, 0, "missing", False
-    except OSError as exc:
-        return None, 0, "unreadable: %s" % exc, \
-            exc.errno == errno.ELOOP
-    # The fd must never leak: an OSError here (e.g. the path is a
-    # directory) becomes a loud "unreadable" note; anything else still
-    # raises after closing.
-    try:
-        fh = os.fdopen(fd, "r", encoding="utf-8")
-    except OSError as exc:
-        os.close(fd)
-        return None, 0, "unreadable: %s" % exc, False
-    except BaseException:
-        os.close(fd)
-        raise
+    fh, err = open_nofollow_read(os.path.join(box_dir, "audit-tail.jsonl"))
+    if err:
+        return None, 0, err
     rows, skipped = [], 0
     try:
         with fh:
@@ -335,8 +382,8 @@ def read_audit_tail_nofollow(box_dir):
                 except ValueError:
                     skipped += 1
     except OSError as exc:
-        return None, 0, "unreadable: %s" % exc, False
-    return rows, skipped, None, False
+        return None, 0, "unreadable: %s" % exc
+    return rows, skipped, None
 
 
 def _journal_cutover_note(store_dir, box_id, observed_at, rows_read):
@@ -911,8 +958,8 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None,
     """
     journal_path = os.path.join(box_dir, _JOURNAL_NAME)
     if os.path.exists(journal_path):
-        rows, skipped, err, eloop = _read_box_journal_nofollow(box_dir)
-        if eloop:
+        rows, skipped, err = _read_box_journal_nofollow(box_dir)
+        if is_symlink_refusal(err):
             # Security (slice 4, #1649): the journal path was refused
             # as a symlink plant — fall back to the legacy audit-tail
             # translation so exactly one leg still emits. The redirect
@@ -924,10 +971,10 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None,
             notes = ["update-events.jsonl refused as a symlink; "
                      "falling back to audit-tail translation for the "
                      "event leg"]
-            legacy_rows, legacy_skipped, legacy_err, legacy_eloop = \
+            legacy_rows, legacy_skipped, legacy_err = \
                 read_audit_tail_nofollow(box_dir)
             if legacy_err:
-                if legacy_eloop:
+                if is_symlink_refusal(legacy_err):
                     # The audit tail is symlinked too — a double plant.
                     # There is no third producer, so the leg is
                     # fail-closed and loud: the attacker gets neither
@@ -973,9 +1020,9 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None,
             if cutover is not None:
                 notes.append(cutover)
         return events, local_noops, notes
-    rows, skipped, err, eloop = read_audit_tail_nofollow(box_dir)
+    rows, skipped, err = read_audit_tail_nofollow(box_dir)
     if err:
-        if eloop:
+        if is_symlink_refusal(err):
             # Security (#1860): the audit tail is the only event
             # producer on the legacy path — a symlink plant here is
             # refused fail-closed and loudly; there is nothing to
@@ -1028,34 +1075,19 @@ def audit_tail_lines(box_dir):
     keeps the old watermark in that case (a missing tail is not proof
     of loss; the artifact notes already cover it).
 
-    Security (#1860): the read opens with O_NOFOLLOW — a symlinked
-    tail is refused as a plant (the hashes of the planted target's
-    lines must never enter the continuity computation) and the caller
-    keeps the old watermark, which is the fail-safe choice here; the
-    loud operator signal for the plant rides the event/inventory
-    legs' notes."""
-    path = os.path.join(box_dir, "audit-tail.jsonl")
+    Security (#1860): the read goes through open_nofollow_read — a
+    symlinked tail is refused as a plant (the hashes of the planted
+    target's lines must never enter the continuity computation) and
+    the caller keeps the old watermark, which is the fail-safe choice
+    here. The refusal is NOT silent: check_tail_continuity surfaces
+    it as a warning (the event/inventory legs' notes carry it too,
+    since they run in the same collect sweep).
+    """
+    fh, err = open_nofollow_read(
+        os.path.join(box_dir, "audit-tail.jsonl"))
+    if err:
+        return [], err
     hashes = []
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return [], "missing"
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            return [], ("refused: audit-tail.jsonl is a symlink "
-                        "(O_NOFOLLOW plant refusal)")
-        return [], "unreadable: %s" % exc
-    # The fd must never leak: an OSError here (e.g. the path is a
-    # directory) becomes a loud "unreadable" note; anything else still
-    # raises after closing.
-    try:
-        fh = os.fdopen(fd, "r", encoding="utf-8")
-    except OSError as exc:
-        os.close(fd)
-        return [], "unreadable: %s" % exc
-    except BaseException:
-        os.close(fd)
-        raise
     try:
         with fh:
             for line in fh:
@@ -1171,7 +1203,15 @@ def check_tail_continuity(store_dir, box_dirs, observed_at):
                     continue
                 # Read under the lock (see docstring): a stale input
                 # must never meet a newer mark.
-                line_hashes, _ = audit_tail_lines(box_dir)
+                line_hashes, tail_err = audit_tail_lines(box_dir)
+                if is_symlink_refusal(tail_err):
+                    # Security (#1860): a symlinked audit tail is
+                    # refused as a plant — loud, and the old watermark
+                    # is kept (fail-safe: no false discontinuity page).
+                    warnings.append(
+                        "box %s: audit-tail.jsonl refused as a symlink "
+                        "plant (O_NOFOLLOW); keeping the previous tail "
+                        "watermark" % box_id)
                 if not line_hashes:
                     # No pullable tail this round (missing/unreadable/
                     # empty): keep the old watermark — the artifact
@@ -1576,30 +1616,21 @@ def _append_alerts_nolock(store_dir, candidates):
         return [], None
     alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
     # #1855: the alert-journal append leg opens with O_NOFOLLOW — a
-    # pre-planted symlink at the alerts path fails loud (ELOOP)
-    # instead of silently redirecting appends into an arbitrary file.
-    # Mirrors the #1841 event-journal append leg. O_NOFOLLOW covers the
-    # final path component only (same caveat as the fleet journal
-    # legs). Defense-in-depth: the dedup read above (_load_journal's
-    # #1846 O_NOFOLLOW) already refuses the plant before the open is
+    # pre-planted symlink at the alerts path fails loud instead of
+    # silently redirecting appends into an arbitrary file. Mirrors the
+    # #1841 event-journal append leg, through the shared
+    # _open_nofollow_append primitive. O_NOFOLLOW covers the final
+    # path component only (same caveat as the fleet journal legs).
+    # Defense-in-depth: the dedup read above (_load_journal's #1846
+    # O_NOFOLLOW) already refuses the plant before the open is
     # reached; this closes the read->append swap race outside the
     # pre-plant threat model. Pre-existing journal files keep whatever
     # permissions the older plain-open path created them with (we never
-    # re-chmod operator-owned files — #1537); the O_NOFOLLOW refusal
-    # applies at every open, not just creation.
-    try:
-        fd = os.open(alerts_path,
-                     os.O_WRONLY | os.O_CREAT | os.O_APPEND
-                     | os.O_NOFOLLOW, 0o600)
-    except OSError as exc:
-        return None, "cannot append to alert journal: %s" % exc
-    # Mirrors the #1841 append leg's fdopen guard (same file): if
-    # fdopen itself raises, the fd must be closed, not leaked.
-    try:
-        fh = os.fdopen(fd, "a", encoding="utf-8", buffering=1)
-    except BaseException:
-        os.close(fd)
-        raise
+    # re-chmod operator-owned files — #1537); the mode below applies
+    # only at creation.
+    fh, err = _open_nofollow_append(alerts_path, 0o600)
+    if err:
+        return None, "cannot append to alert journal: %s" % err
     try:
         with fh:
             for alert in fresh:
