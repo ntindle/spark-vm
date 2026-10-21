@@ -138,6 +138,13 @@ _CLAIMS = [
         "scripts/test_waitlist_jobs.py",
         r"`scripts/test_waitlist_jobs\.py`,\s*(\d+) tests",
     ),
+    (
+        # The sentinel-feed transport convergence pin (PR #1810) stated the
+        # G13 attested-channel suite's count without registering it.
+        "docs/SENTINEL_FEED_TRANSPORT_CONVERGENCE.md",
+        "fleet/test_attest.py",
+        r"`fleet/test_attest\.py` \((\d+) tests\)",
+    ),
 ]
 
 
