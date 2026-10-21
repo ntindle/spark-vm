@@ -433,3 +433,171 @@ def test_cli_missing_heading_label_is_not_a_path_label():
         assert r.returncode == 1
         assert "missing release heading" in r.stdout
         assert "workspace-internal path" not in r.stdout
+
+
+# --- Rule 7: fence-blindness + multi-Unreleased scan (issue #1865) ---
+
+
+def test_fenced_section_headings_are_ignored():
+    """A ### Added line inside a fenced example is not a real heading —
+    without the #1865 fix this false-positives as a duplicate."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                ],
+            )
+        ]
+    )
+    text = text.replace(
+        "- New thing. (#1)\n",
+        "- New thing. (#1)\n\n```\n### Added\n```\n",
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_fenced_example_with_info_string_is_ignored():
+    """An opening fence may carry an info string (```bash)."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                ],
+            )
+        ]
+    )
+    text = text.replace(
+        "- New thing. (#1)\n",
+        "- New thing. (#1)\n\n```bash\n### Added\n### Fixed\n```\n",
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_tilde_fences_are_ignored():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                ],
+            )
+        ]
+    )
+    text = text.replace(
+        "- New thing. (#1)\n",
+        "- New thing. (#1)\n\n~~~\n### Added\n~~~\n",
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_unclosed_fence_does_not_hide_headings():
+    """A dangling fence is not honored (fail-closed): headings after it are
+    still checked, so a missing close cannot silently swallow drift."""
+    lint = _load_lint()
+    text = (
+        "## [Unreleased]\n\n"
+        "### Added\n\n- New thing. (#1)\n\n"
+        "```\n"
+        "some unterminated example\n\n"
+        "### Added\n\n- Older thing. (#2)\n"
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    assert violations[0][1] == "duplicate section heading"
+
+
+def test_second_unreleased_block_is_scanned():
+    """Before the #1865 fix only the first ## [Unreleased] block was
+    shape-scanned, so drift in a second block was missed."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            ("## [Unreleased]", [("Added", ["- New thing. (#1)"])]),
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- Newer thing. (#2)"]),
+                    ("Added", ["- Older thing. (#3)"]),
+                ],
+            ),
+        ]
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    lineno, kind, excerpt = violations[0]
+    assert kind == "duplicate section heading"
+    assert lineno == 15
+    assert "first at line 11" in excerpt
+
+
+def test_headings_may_repeat_across_unreleased_blocks():
+    """Duplicate/order state is per block: one ### Added in each of two
+    Unreleased blocks is not a violation."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            ("## [Unreleased]", [("Added", ["- New thing. (#1)"])]),
+            ("## [Unreleased]", [("Added", ["- Newer thing. (#2)"])]),
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_section_order_state_is_per_unreleased_block():
+    """Order state resets per block: Security-then-Added across two
+    Unreleased blocks is not out of order."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            ("## [Unreleased]", [("Security", ["- Hardening. (#1)"])]),
+            ("## [Unreleased]", [("Added", ["- New thing. (#2)"])]),
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_fenced_unreleased_example_does_not_create_phantom_block():
+    """A ## [Unreleased] line inside a fenced example neither starts nor
+    ends a block: the example's ### Added lines are fenced content, not
+    duplicates — no violation."""
+    lint = _load_lint()
+    text = (
+        "## [Unreleased]\n\n"
+        "### Added\n\n- New thing. (#1)\n\n"
+        "```\n"
+        "## [Unreleased]\n\n"
+        "### Added\n\n"
+        "- Example heading. (#2)\n\n"
+        "### Added\n\n"
+        "- Another example. (#3)\n"
+        "```\n"
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_fenced_version_example_does_not_truncate_block():
+    """A fenced ## [1.0.0] example line does not end the Unreleased block:
+    the genuine duplicate ### Added after the fence close is still flagged."""
+    lint = _load_lint()
+    text = (
+        "## [Unreleased]\n\n"
+        "### Added\n\n- New thing. (#1)\n\n"
+        "```\n"
+        "## [1.0.0]\n"
+        "```\n\n"
+        "### Added\n\n- Older thing. (#2)\n"
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    lineno, kind, excerpt = violations[0]
+    assert kind == "duplicate section heading"
+    assert lineno == 11
+    assert "first at line 3" in excerpt
