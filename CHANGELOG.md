@@ -239,6 +239,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   assignment, and the no-signal-to-frozen contract) — previously exercised
   only end-to-end, so edge behavior like TTL skew windows and canary
   pin-only semantics is now individually guarded. (#1707)
+- The contributor guide now documents what to do when the test-count merge
+  gate fires: how to tell a stale suite-size claim from an unregistered
+  one, the registry-entry shape for a new claim, and the counting
+  convention the gate uses — so the fix happens locally instead of after a
+  red CI run. (#1879)
 
 ### Changed
 
