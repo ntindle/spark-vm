@@ -387,7 +387,7 @@ def test_start_rejects_bool_prompt(turn_serve):
         with pytest.raises(ValueError):
             mspt.start_turn(host, "sess-x", True)
         with pytest.raises(ValueError):
-            mspt.steer_turn(host, "sess-x", False)
+            mspt.steer_turn(host, "sess-x", False, expected_turn_id="turn-x")
 
 
 def test_start_rejects_bad_command_id(turn_serve):

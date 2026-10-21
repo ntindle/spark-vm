@@ -146,7 +146,7 @@ def fakes(monkeypatch):
         return ({"turnId": "turn-1"}, {})
 
     def steer_turn(host, session_id, message, *, command_id=None,
-                   expected_turn_id=None):
+                   expected_turn_id):
         m_turn.steered.append((session_id, message, expected_turn_id))
         return {}
 
