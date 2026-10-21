@@ -147,11 +147,40 @@ def test_unset_journal_is_silent_noop(tmp_path):
 
 
 def test_unwritable_journal_never_fails_run(tmp_path):
+    # Slice 5 (#1649): configured-but-unwritable is LOUD — a broken journal
+    # must not read as a quiet box on the gate-consumed feed. rc stays 0
+    # (set -e callers never die on a broken journal).
     r, rows = emit_snippet(
         "/proc/definitely-not-here",
         "event_emit auto-deploy repo deploy started",
     )
     assert r.returncode == 0
+    assert rows == []
+    assert "[event-journal] JOURNAL UNWRITABLE" in r.stderr
+    assert "journal='/proc/definitely-not-here/update-events.jsonl'" in r.stderr
+    assert "source=auto-deploy component=repo kind=deploy outcome=started" in r.stderr
+
+
+def test_directory_as_journal_is_loud(tmp_path):
+    # Appending to a directory fails — same loud contract as an unwritable path.
+    r = run_bash(
+        f"EVENT_JOURNAL={tmp_path}; source {LIB}; "
+        "event_emit auto-deploy repo deploy started"
+    )
+    assert r.returncode == 0
+    assert "[event-journal] JOURNAL UNWRITABLE" in r.stderr
+
+
+def test_writable_journal_stays_silent(tmp_path):
+    # A working journal produces no [event-journal] stderr line at all —
+    # the loud note fires only on configured-but-unwritable.
+    r, rows = emit_snippet(
+        str(tmp_path),
+        'event_emit auto-deploy repo deploy started ""',
+    )
+    assert r.returncode == 0, r.stderr
+    assert "[event-journal]" not in r.stderr
+    assert len(rows) == 1
 
 
 def test_bounded_discipline(tmp_path):
