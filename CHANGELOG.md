@@ -43,6 +43,13 @@ This changelog only works if entries land with the change, not after it:
    baselines, any corpus movement (filings, aging), and items flagged but
    not filed. The verified no-change record is the value; the process that
    produced it is not.
+7. **One section, one place, one order.** Each `### ` section heading
+   (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`)
+   appears at most once per release block, and the sections follow the
+   Keep-a-Changelog order (Added, Changed, Deprecated, Removed, Fixed,
+   Security). The ritual lint enforces this for `## [Unreleased]`
+   (released blocks are grandfathered); reviewers request changes when the
+   Unreleased headings drift — fold, don't append a second one.
 
 (This section was removed by PR #586's bullet scrub (2026-09-27) without
 disclosure, and is restored here; the scrub's reader-facing standard is
@@ -51,6 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+
 - The fleet collector now reads each box's event journal directly instead of translating audit tails: whenever the estate copy carries the box's `update-events.jsonl`, the wired producers' typed rows (repo updater, toolset updater, gate hook) land in the fleet event stream as-is — no more dual translation, and the paging rules can't fire twice on one incident. The audit tail still feeds version inventory, and boxes without the journal keep the legacy translation. Cutover note: the flip carries a bounded one-time duplicate wave — incidents from the dual-write era (slices 1–3 wrote both the audit log and the journal while the collector still translated) appear once under each event id; the first journaled collect per box says so loudly, and steady state never duplicates. (#1649)(#1862)
 
 - Sentinel-feed transport leg convergence pin (2026-10-20, #1349): the G25 transport vision is checked against current main — none of the three build items (tenant-plane shipper, D-OP2 envelope-channel record kind, operator-plane intake) is built, though the attested-channel signing half (#1762) and the fleet-journal `skipped-frozen` records (#1807) landed around it; the one genuinely-new gap is the un-owned D-25-3 seq-gap alert (#1809). (#1810)
@@ -63,19 +71,6 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The release-gate hook now records each gate-answer change in the box-side event journal: the first tick writes an anchor row, and every later freeze/unfreeze (or reason change, like an operator freeze versus an unverifiable gate) appends one typed row — a frozen fleet shows up as fleet-frozen events in the stream, not just in the systemd journal. Unchanged answers stay quiet, and the hook's journal lives next to its own status file, overridable when the operator needs it elsewhere. (#1649)(#1859)
 
-### Security
-- The fleet journal's append legs now refuse symlink plants: `fleet/events.append_events` opens the journal with `O_NOFOLLOW`, so a pre-planted symlink at the journal path fails loud (a returned error on the sweep's error channel) instead of silently redirecting appended events into an attacker-chosen file — the same plant class the lock (#1755) and sidecar (#1741) paths already close. The same fix lands on the two parallel appenders to fleet journals: the controller's freeze-hold event writer in `fleet/gate_publish.py` (ELOOP surfaces as the caller's loud-but-non-blocking warning) and the plane/costs journal writer in `fleet/plane_inventory.py` (loud exit 2). The sidecar's journal-note helper gets the fix through the shared append path. (#1841)(#1845)
-- The fleet collector's remaining box-pulled file reads now refuse symlink plants too: the pulled audit tail — the event stream's legacy source, the version-inventory leg's tick source, and the tail-continuity watermark's input — opens with `O_NOFOLLOW`, so a symlinked tail is refused loudly and fail-closed instead of feeding attacker-chosen rows into version claims and paging; the tail is the last producer on those legs, so there is no further fallback, and a refused watermark read surfaces as a warning while the previous watermark is kept. The same treatment lands on the other two box-pulled estate artifacts the inventory leg reads — the status payload (toolset pins) and the box snapshot (repo commit, image, gate state) — and on the alert journal's append leg as defense-in-depth for the dedup-read→append race. (#1860)(#1855)(#1863)
-- The credential-management UI's token rotation no longer needs a manual service restart: the rotate command signals the running service (SIGHUP) and then verifies the server actually adopted the new token, warning loudly if it didn't. A minute-interval watchdog re-reads the token store as a fail-safe; if the store stays unreadable the server fails closed (denies all API auth) after five minutes rather than honoring a possibly-revoked token indefinitely. (#1751)(#1830)
-
-### Fixed
-- The relay auto-driver and probe-driver sweeps now report a wedged watermark sidecar (a symlink plant on the sidecar lock, a full disk, or a permission failure during the single bulk write) as one sweep-level error instead of one error per tenant — a sidecar-level fault is one sweep-level entry, never N per-tenant ones — while every tenant's own tick record still notes the failure loudly. (#1854)
-- The fleet event journal's read path now refuses symlink plants: a pre-planted symlink at the journal path fails loudly with a read error instead of feeding attacker-chosen rows into alert evaluation and acknowledgements — and the raw read the prune paths use gets the same refusal, so retention decisions can't be computed from planted rows. Matches the refusal the append leg, the journal lock, and the watermark sidecar already apply. (#1854)
-- Steering a follow-up message into a live turn now rejects a missing expected-turn id at the call signature instead of deep inside validation: the anti-cross-turn guard is mandatory in the API shape, not just in behavior (every in-repo caller already passes it). Companion doc notes record that the first-turn engagement-watch helpers are no longer on the spawn path — the per-turn supervisor owns that watch now. Filed the session plane's other finding separately: `session/list` pagination returns a cursor the client can never use (#1852). (#1853)
-- The docs-only CI path now also runs the test-count pin: a docs PR stating a test suite's size (`(N tests)`) can no longer land with the claim unregistered or stale while CI stays green — previously the pin lived only in the full suite that docs-only diffs skip. (#1848)(#1849)
-- The update-event reporting design doc gets a slice-2 accuracy pass: the toolset updater's emitted rows are now described as shipped (manual trigger only on manual runs and manual rollbacks, the timer path defaults to scheduled, dry runs / opt-outs / lock-held deferrals stay journal-silent), and the fleet journal's new symlink-plant refusal on the append legs is pinned as the sink's write-safety property. (#1649)(#1841)(#1845)(#1850)
-
-### Added
 - Adds the relay-liveness probe-loop module (#1725): once scheduled **and** given a bundle supplier, it will tick each tenant's live anchor through the probe on the shared 5-minute cadence, keeping relay-path probe history fresh so the wiring driver stops ticking against permanently stale readings. Probe bundles stay caller-supplied and are never persisted; the loop stands down observably when the box's provider is suspended/destroyed or no post-`live` session exists, and each tick writes its own watermark so a dead probe loop reads as probe trouble, not driver trouble. Until both the schedule and the supplier land, the wiring driver's loud "stale probe history" notes remain the steady state by design. (#1725)(#1829)
 - Phone-home lane convergence pin: the 2026-10-02 vision for one Durable Object per box is checked against everything shipped since — all eight design gaps resolved, the plane socket endpoint live, the box client speaking it — leaving live acceptance as the only open slice; also fixes the box client's two stale "plane half not built yet" notes (code header + `--help` text), which would misdiagnose a live failure. (#1820)
 - Competitor watch (2026-10-20 morning): Daytona — one of the tracked agent-sandbox vendors — closed a $60M Series B at a $1B valuation led by FirstMark, taking its total funding to about $91M, with revenue run-rate reportedly up 25x since January and customers including Anthropic, OpenAI, Nvidia, Cursor, Meta, and Cohere — the clearest demand signal yet for task-scoped agent sandboxes as a unicorn-scale market. Everything else re-verified unchanged (Daytona's V0.225.0 changelog, Docker's v0.48.0 release notes, Microsandbox v0.7.8, DigitalOcean pricing and limits, Modal's egress billing now in effect, Vercel/E2B/Boat/TermSquad pricing; AgentComputer still publishes no egress pricing). (#1819)
@@ -155,7 +150,116 @@ codified as rule 6 so future watch bullets arrive compliant.)
   fine but whose image gate never passed can no longer sit quietly in
   the release list with no buildable image behind it. (#1779)
 
+- Relay auto-driver lane convergence analysis: vision-vs-state pin after the
+  scheduled-packaging slice shipped — the four genuinely-new findings a
+  fresh read of the shipped driver turned up (silent corrupt-watermark
+  restart, watermark never pruning deleted tenants, the journal-append
+  bound sitting at the fleet 300s default instead of tick scale,
+  undocumented no-anchor journal attribution), the four continuing
+  decisions, and the re-pinned slice table with the staleness-alert
+  enablement gate. (#1711)
+- Relay-liveness auto-driver, scheduled packaging slice: the self-hosted
+  half of the scheduled driver — a systemd service + timer that fires a
+  new sweep entry point once per probe-cadence tick, driving every
+  tenant's relay wiring through the driver module (never the manual
+  tick), landing each tick in the per-tenant watermark sidecar and the
+  fleet journal. Ships with an operator's guide (install, cadence knob,
+  where the output goes, sweep-vs-manual-tick discipline) and tests that
+  pin the timer period to the probe-cadence default. The timer ships
+  disabled until the staleness alert (#1724) lands. (#1723)
+- Relay-liveness auto-driver, first slice: a new in-repo module provides
+  the tick-all-tenants driver that follow-up slices will invoke on the
+  probe schedule — it ticks every tenant's relay wiring, records each
+  tick in a per-tenant watermark and the fleet event journal, and flags
+  stale probe data loudly instead of probing it itself. The hosted cron
+  trigger and self-hosted packaging arrive as follow-up slices; the
+  manual tick stays the override path. (#1737)
+- Documented the relay-liveness wiring tick for operators: how to run a
+  manual tick for a tenant, how to read the tick report it prints, what
+  the exit codes and failure behavior mean, and the operating discipline
+  until the auto-cadence driver lands — with a test that fails if the
+  doc drifts from the wiring's real flags, report fields, and notes.
+  (#1728)
+- The CI guide's job list is now pinned to the workflow itself: a new
+  contributor-docs check fails if the job table in the CI reference drifts
+  from the actual jobs (a new job without a table row, or a stale row for a
+  removed job), so the merge-gate docs can't go silently stale. (#1727)
+- Pinned the design for the relay-liveness auto cadence driver: a
+  vision-vs-state analysis of #1711's remainder — one clock (drive
+  cadence = probe cadence), drive-only consumption with loud stale-probe
+  notes, overlap-safe ticks, per-tenant last-tick watermarks with a
+  staleness alert, and placement on the plane-cron template — decomposed
+  into five build slices. (#1726)
+- Relay-liveness wiring is now operator-driven from the command line:
+  one `--tick` run per tenant drives rule-6 relay suspensions, the
+  recovery pair, anchor selection, and stale-reachability resync, and
+  prints the tick report as JSON — the wiring no longer waits on a
+  production cadence driver that was never built, and the single-tick
+  discipline is documented for whatever drives it next. (#1711, #1717)
+- Settled the fleet console's alert-acknowledgment auth question: acking
+  stays a command-line action permanently — the fleet read API is
+  loopback-only by design with no remote binding possible, so no operator
+  token or certificate story is needed; the console keeps its read-only
+  posture and ships copy-pasteable ack commands instead. Closes #1703. (#1716)
+- The fleet version table now records when each box emitted its snapshot and
+  when its gate answer was generated, and shows per-box gate staleness
+  recomputed from the true generation time instead of the box's emit-time
+  `answer_age_s` — a trailing `~` means the age is the box's own number from
+  snapshot emission, not a fresh recomputation; `observed_at` stays the
+  collector's receive time. (#1660, #1632, #1714)
+- Pinned the alert-ack provenance contract (#1704, #1705): re-acking an alert
+  refreshes its acknowledgment timestamp — each ack is a fresh operator
+  declaration, and the stuck-alert re-fire gate keys on the latest ack, so a
+  re-ack re-extends the suppression window; operator attribution stays
+  best-effort metadata (rendered as "unknown" when unknowable) until the
+  fleet console's auth story lands. Closes #1704 and #1705. (#1708)
+- Documented the hosted push lane's async enqueue boundary and async
+  endpoint-driven push mappings in the hosted component README — two
+  shipped reference modules that had no coverage; their test-suite sizes
+  are pinned so the docs can't drift. (#1692)
+- The gate publisher now journals freeze flips itself: publishing with a
+  changed freeze flag appends one standard-shape `freeze-hold` event to
+  the fleet journal (direction in the note), so freeze flips and clears
+  show up in the journal — and on the status-page feed — without anyone
+  deriving them from document diffs. (#1702)
+- A gap analysis of the alert-ack entry ticket (FLEET_READ_API_SPEC §3's
+  promise that ack lands with the S2 console, OQ3): the S2 console shipped
+  read-only by design with no auth story, so ack stays CLI-only as a
+  journal rewrite with best-effort operator attribution until the auth
+  story is chosen — the console's copy-pasteable ack hints are the composed
+  flow in the meantime; files the auth-story choice plus the
+  `acked_by` identity contract and re-ack timestamp semantics. (#1706)
+- Unit-test pins for the box-side release-gating self-evaluation
+  (identity and key resolution, gate MAC + TTL verification, wave
+  assignment, and the no-signal-to-frozen contract) — previously exercised
+  only end-to-end, so edge behavior like TTL skew windows and canary
+  pin-only semantics is now individually guarded. (#1707)
+
+### Changed
+
+- Relay-liveness wiring internals hardened at the module boundary: the
+  per-box tick emitter is now module-private (nothing outside the wiring
+  module ever called it), so the anchor-only driving discipline is
+  enforced structurally instead of by convention; the created-at instant
+  parser the wiring shares with the tenant layer is now a documented
+  public seam instead of a cross-module private reach. (#1732)
+
 ### Fixed
+
+- The Unreleased block of this changelog no longer carries duplicate
+  section headings (`### Added` x3, `### Fixed` x3, `### Security` x3): each
+  is folded into one (newest-first), the block's sections now follow
+  Keep-a-Changelog order (Added, Changed, Fixed, Security), and the
+  changelog-ritual lint fails on duplicate or misordered section headings
+  in the Unreleased block so the drift is caught at PR time instead of by
+  audit. Closes #1851.
+
+- The relay auto-driver and probe-driver sweeps now report a wedged watermark sidecar (a symlink plant on the sidecar lock, a full disk, or a permission failure during the single bulk write) as one sweep-level error instead of one error per tenant — a sidecar-level fault is one sweep-level entry, never N per-tenant ones — while every tenant's own tick record still notes the failure loudly. (#1854)
+- The fleet event journal's read path now refuses symlink plants: a pre-planted symlink at the journal path fails loudly with a read error instead of feeding attacker-chosen rows into alert evaluation and acknowledgements — and the raw read the prune paths use gets the same refusal, so retention decisions can't be computed from planted rows. Matches the refusal the append leg, the journal lock, and the watermark sidecar already apply. (#1854)
+- Steering a follow-up message into a live turn now rejects a missing expected-turn id at the call signature instead of deep inside validation: the anti-cross-turn guard is mandatory in the API shape, not just in behavior (every in-repo caller already passes it). Companion doc notes record that the first-turn engagement-watch helpers are no longer on the spawn path — the per-turn supervisor owns that watch now. Filed the session plane's other finding separately: `session/list` pagination returns a cursor the client can never use (#1852). (#1853)
+- The docs-only CI path now also runs the test-count pin: a docs PR stating a test suite's size (`(N tests)`) can no longer land with the claim unregistered or stale while CI stays green — previously the pin lived only in the full suite that docs-only diffs skip. (#1848)(#1849)
+- The update-event reporting design doc gets a slice-2 accuracy pass: the toolset updater's emitted rows are now described as shipped (manual trigger only on manual runs and manual rollbacks, the timer path defaults to scheduled, dry runs / opt-outs / lock-held deferrals stay journal-silent), and the fleet journal's new symlink-plant refusal on the append legs is pinned as the sink's write-safety property. (#1649)(#1841)(#1845)(#1850)
+
 - The relay-liveness wiring-tick operator doc no longer says the auto-cadence driver is unbuilt: the driver module, the systemd timer packaging, and the probe-loop module have shipped, while the timer stays disabled until the staleness alert lands and manual ticks remain the production drive path. The doc's operating discipline and the docs index now carry the real shipped/open split, and the CI pin's wording was corrected to match. (#1834)
 - A box with a live agent session no longer takes a service-restarting update mid-session: when the scheduled updater finds an active agent session (a live `muse-job` tmux session or a non-terminal job record), it defers the permitted update until the session ends and records the deferral in the audit trail as `deferred-arc` — so the rollout controller reads it as a deferral, not a failure. If the updater can't verify whether a session is live, it fails closed and loud instead of guessing. (#1808)(#1831)
 - Closing a job now archives its per-job recovery log with the closed job instead of leaving it behind to grow without bound: the log is moved into the job directory and compressed with the other logs, so it is swept away with the closed job -- and the disk sweeper now prunes leftover recovery logs older than 30 days (never a live job's). Closes #1800. (#1828)
@@ -291,7 +395,70 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - A sabotaged watermark sidecar (a symlink planted at the sidecar path) no longer multiplies into one loud failure per tenant: both the wiring-driver sweep and the probe-driver sweep now record a single sweep-level entry and skip the per-tenant watermark/journal legs for the whole sweep, so one sidecar-level fault reads as exactly one fault. (#1838)(#1840)
 
 
+- The release-gating rotation ledger now gets the same atomic-write
+  discipline as the gate document: its temp file is created
+  O_EXCL/0600 so a pre-planted symlink can fail loud instead of
+  redirecting the write, and a stale temp from a crashed run is unlinked
+  and retried once. (#1735)
+- The golden-image build gate's final verification step can no longer pass
+  as specified: it required the real muse CLI, which the image recipe
+  deliberately does not bake. The gate now drives a minimal stdlib-only
+  vehicle that proves the same credential-swap path through the
+  inference proxy, so the automatable gate is green without baking the
+  operator-bound CLI. (#1736)
+- A box whose release-gating files were unreadable or malformed crashed
+  the box-side gate query with a traceback instead of failing closed to
+  frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII
+  gate signature, and malformed wave data are now all treated as
+  no-signal, like every other untrusted input. (#1707)
+- The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
+  browser-encoded form bodies) is now prefix-case-sensitive like the plain
+  form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase
+  `HSURR%3A` prefix no longer triggers a real-secret swap — the fail-closed
+  direction, since inserting more secrets is riskier than inserting fewer —
+  and no longer produces a refused-credential audit line. Supersedes the
+  #1658 note in 0.9.0, which described the old case-insensitive behavior.
+  (#1700)
+- The relay-path dial prober now caps its per-phase timeouts at 300 seconds
+  (and requires finite numbers): a misconfigured caller can no longer pass
+  an astronomically large timeout that would turn the probe's absolute
+  anti-tarpit deadline into an effectively unbounded wait. Non-finite
+  timeouts (NaN/inf) are rejected fail-closed too. (#1699)
+- The relay-path dial prober no longer misreports a completed, host-key-verified
+  probe as a box-leg failure when the connection's closing handshake hits a
+  reset: once the host key is read and the outcome is decided, the closing
+  DISCONNECT is best-effort and can't change it. (#1696)
+- The jail build now logs the network flows still open through the jail right
+  after the firewall ruleset is re-applied: a re-apply does not flush
+  connection tracking, so pre-existing flows keep flowing under the new rules
+  even after a tightening, and the operator can tear them down explicitly.
+  The stated residual is documented in the jail's enforcement contract. (#1691)
+- The v0.9.0 golden-image build gate failed because the image recipe fetched
+  the cua-driver release asset under the wrong filename (upstream names them
+  `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses
+  the correct name, and a pin test keeps the recipe's asset name identical to
+  the self-update tool's. (#1689)
+- The golden-image build gate is no longer red at the cred-ui layer: the
+  recipe's cred-ui RUN step sets `CRED_UI_TOKEN_FILE` to a local path, taking
+  the documented local-file contract for installs without swapd, so
+  install.sh's #964 ui-token preflight no longer aborts the image build. The
+  variable is build-time only (never baked into the unit) and the guard
+  itself is unchanged, so real deploys via proxy/deploy.sh keep the #964
+  intent; a pin test keeps the variable in the recipe. (#1698)
+- `vapid_sign` no longer mints VAPID JWTs whose `exp` is not in the future:
+  an already-expired `expires_at` is a caller error that could previously
+  only surface as a push-service 4xx far from the misconfiguration, so it
+  now raises `ValueError` fail-closed (the RFC 8292 24h upper bound is
+  deliberately not enforced — it needs the request time only the caller
+  has). The in-repo sender threads its own send clock through so its
+  frozen test clocks compare consistently. (#1698)
+
 ### Security
+
+- The fleet journal's append legs now refuse symlink plants: `fleet/events.append_events` opens the journal with `O_NOFOLLOW`, so a pre-planted symlink at the journal path fails loud (a returned error on the sweep's error channel) instead of silently redirecting appended events into an attacker-chosen file — the same plant class the lock (#1755) and sidecar (#1741) paths already close. The same fix lands on the two parallel appenders to fleet journals: the controller's freeze-hold event writer in `fleet/gate_publish.py` (ELOOP surfaces as the caller's loud-but-non-blocking warning) and the plane/costs journal writer in `fleet/plane_inventory.py` (loud exit 2). The sidecar's journal-note helper gets the fix through the shared append path. (#1841)(#1845)
+- The fleet collector's remaining box-pulled file reads now refuse symlink plants too: the pulled audit tail — the event stream's legacy source, the version-inventory leg's tick source, and the tail-continuity watermark's input — opens with `O_NOFOLLOW`, so a symlinked tail is refused loudly and fail-closed instead of feeding attacker-chosen rows into version claims and paging; the tail is the last producer on those legs, so there is no further fallback, and a refused watermark read surfaces as a warning while the previous watermark is kept. The same treatment lands on the other two box-pulled estate artifacts the inventory leg reads — the status payload (toolset pins) and the box snapshot (repo commit, image, gate state) — and on the alert journal's append leg as defense-in-depth for the dedup-read→append race. (#1860)(#1855)(#1863)
+- The credential-management UI's token rotation no longer needs a manual service restart: the rotate command signals the running service (SIGHUP) and then verifies the server actually adopted the new token, warning loudly if it didn't. A minute-interval watchdog re-reads the token store as a fail-safe; if the store stays unreadable the server fails closed (denies all API auth) after five minutes rather than honoring a possibly-revoked token indefinitely. (#1751)(#1830)
+
 - Answering a user-input prompt now binds the answer to the exact prompt content the operator classified: the prompt is re-read just before sending, and the answer is refused -- loudly, with nothing sent -- if the prompt was re-issued with different question text (or vanished) since classification. This narrows the race where a re-issued prompt could slip different text under the same prompt id between the operator's trust classification and the send -- from the whole classification-to-send window down to the single re-read→send gap (client-side only; `userInput/answer` has no server-side enforcement like `approval/decide`'s requirement id), protecting the explicit classification the trust policy depends on. The approvals listing shows the binding hash, and `muse-job answer` accepts it as `--expected-prompt-hash`, so an answer queued behind a busy supervisor is verified at drain time too when the flag is passed (without it, a queued answer is sent unbound, as before). Closes #1772. (#1828)
 - Push notifications now refuse to send with a mismatched VAPID keypair: the sender fails closed at send time if the configured VAPID public key does not correspond to the private key, instead of minting an authorization header no push service could verify and failing every delivery with a 4xx far from the misconfigured key. Closes #1823. (#1827)
 - The `muse-job` MSP supervisor launch lock now also refuses planted
@@ -369,165 +536,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   operator surface through the fleet-box audit path. Tabs still allowed;
   newlines still rejected. Closes #1764. (#1775)
 
-### Changed
-- Relay-liveness wiring internals hardened at the module boundary: the
-  per-box tick emitter is now module-private (nothing outside the wiring
-  module ever called it), so the anchor-only driving discipline is
-  enforced structurally instead of by convention; the created-at instant
-  parser the wiring shares with the tenant layer is now a documented
-  public seam instead of a cross-module private reach. (#1732)
-### Added
-- Relay auto-driver lane convergence analysis: vision-vs-state pin after the
-  scheduled-packaging slice shipped — the four genuinely-new findings a
-  fresh read of the shipped driver turned up (silent corrupt-watermark
-  restart, watermark never pruning deleted tenants, the journal-append
-  bound sitting at the fleet 300s default instead of tick scale,
-  undocumented no-anchor journal attribution), the four continuing
-  decisions, and the re-pinned slice table with the staleness-alert
-  enablement gate. (#1711)
-- Relay-liveness auto-driver, scheduled packaging slice: the self-hosted
-  half of the scheduled driver — a systemd service + timer that fires a
-  new sweep entry point once per probe-cadence tick, driving every
-  tenant's relay wiring through the driver module (never the manual
-  tick), landing each tick in the per-tenant watermark sidecar and the
-  fleet journal. Ships with an operator's guide (install, cadence knob,
-  where the output goes, sweep-vs-manual-tick discipline) and tests that
-  pin the timer period to the probe-cadence default. The timer ships
-  disabled until the staleness alert (#1724) lands. (#1723)
-- Relay-liveness auto-driver, first slice: a new in-repo module provides
-  the tick-all-tenants driver that follow-up slices will invoke on the
-  probe schedule — it ticks every tenant's relay wiring, records each
-  tick in a per-tenant watermark and the fleet event journal, and flags
-  stale probe data loudly instead of probing it itself. The hosted cron
-  trigger and self-hosted packaging arrive as follow-up slices; the
-  manual tick stays the override path. (#1737)
-- Documented the relay-liveness wiring tick for operators: how to run a
-  manual tick for a tenant, how to read the tick report it prints, what
-  the exit codes and failure behavior mean, and the operating discipline
-  until the auto-cadence driver lands — with a test that fails if the
-  doc drifts from the wiring's real flags, report fields, and notes.
-  (#1728)
-- The CI guide's job list is now pinned to the workflow itself: a new
-  contributor-docs check fails if the job table in the CI reference drifts
-  from the actual jobs (a new job without a table row, or a stale row for a
-  removed job), so the merge-gate docs can't go silently stale. (#1727)
-- Pinned the design for the relay-liveness auto cadence driver: a
-  vision-vs-state analysis of #1711's remainder — one clock (drive
-  cadence = probe cadence), drive-only consumption with loud stale-probe
-  notes, overlap-safe ticks, per-tenant last-tick watermarks with a
-  staleness alert, and placement on the plane-cron template — decomposed
-  into five build slices. (#1726)
-- Relay-liveness wiring is now operator-driven from the command line:
-  one `--tick` run per tenant drives rule-6 relay suspensions, the
-  recovery pair, anchor selection, and stale-reachability resync, and
-  prints the tick report as JSON — the wiring no longer waits on a
-  production cadence driver that was never built, and the single-tick
-  discipline is documented for whatever drives it next. (#1711, #1717)
-- Settled the fleet console's alert-acknowledgment auth question: acking
-  stays a command-line action permanently — the fleet read API is
-  loopback-only by design with no remote binding possible, so no operator
-  token or certificate story is needed; the console keeps its read-only
-  posture and ships copy-pasteable ack commands instead. Closes #1703. (#1716)
-- The fleet version table now records when each box emitted its snapshot and
-  when its gate answer was generated, and shows per-box gate staleness
-  recomputed from the true generation time instead of the box's emit-time
-  `answer_age_s` — a trailing `~` means the age is the box's own number from
-  snapshot emission, not a fresh recomputation; `observed_at` stays the
-  collector's receive time. (#1660, #1632, #1714)
-- Pinned the alert-ack provenance contract (#1704, #1705): re-acking an alert
-  refreshes its acknowledgment timestamp — each ack is a fresh operator
-  declaration, and the stuck-alert re-fire gate keys on the latest ack, so a
-  re-ack re-extends the suppression window; operator attribution stays
-  best-effort metadata (rendered as "unknown" when unknowable) until the
-  fleet console's auth story lands. Closes #1704 and #1705. (#1708)
-- Documented the hosted push lane's async enqueue boundary and async
-  endpoint-driven push mappings in the hosted component README — two
-  shipped reference modules that had no coverage; their test-suite sizes
-  are pinned so the docs can't drift. (#1692)
-- The gate publisher now journals freeze flips itself: publishing with a
-  changed freeze flag appends one standard-shape `freeze-hold` event to
-  the fleet journal (direction in the note), so freeze flips and clears
-  show up in the journal — and on the status-page feed — without anyone
-  deriving them from document diffs. (#1702)
-- A gap analysis of the alert-ack entry ticket (FLEET_READ_API_SPEC §3's
-  promise that ack lands with the S2 console, OQ3): the S2 console shipped
-  read-only by design with no auth story, so ack stays CLI-only as a
-  journal rewrite with best-effort operator attribution until the auth
-  story is chosen — the console's copy-pasteable ack hints are the composed
-  flow in the meantime; files the auth-story choice plus the
-  `acked_by` identity contract and re-ack timestamp semantics. (#1706)
-- Unit-test pins for the box-side release-gating self-evaluation
-  (identity and key resolution, gate MAC + TTL verification, wave
-  assignment, and the no-signal-to-frozen contract) — previously exercised
-  only end-to-end, so edge behavior like TTL skew windows and canary
-  pin-only semantics is now individually guarded. (#1707)
-
-### Fixed
-- The release-gating rotation ledger now gets the same atomic-write
-  discipline as the gate document: its temp file is created
-  O_EXCL/0600 so a pre-planted symlink can fail loud instead of
-  redirecting the write, and a stale temp from a crashed run is unlinked
-  and retried once. (#1735)
-- The golden-image build gate's final verification step can no longer pass
-  as specified: it required the real muse CLI, which the image recipe
-  deliberately does not bake. The gate now drives a minimal stdlib-only
-  vehicle that proves the same credential-swap path through the
-  inference proxy, so the automatable gate is green without baking the
-  operator-bound CLI. (#1736)
-- A box whose release-gating files were unreadable or malformed crashed
-  the box-side gate query with a traceback instead of failing closed to
-  frozen: non-UTF-8 gate-document or identity-file bytes, a non-ASCII
-  gate signature, and malformed wave data are now all treated as
-  no-signal, like every other untrusted input. (#1707)
-- The swap proxy's encoded-form placeholder (`hsurr%3A…` as sent in
-  browser-encoded form bodies) is now prefix-case-sensitive like the plain
-  form: only the `%3A`/`%3a` hex digits are case-insensitive. An uppercase
-  `HSURR%3A` prefix no longer triggers a real-secret swap — the fail-closed
-  direction, since inserting more secrets is riskier than inserting fewer —
-  and no longer produces a refused-credential audit line. Supersedes the
-  #1658 note in 0.9.0, which described the old case-insensitive behavior.
-  (#1700)
-- The relay-path dial prober now caps its per-phase timeouts at 300 seconds
-  (and requires finite numbers): a misconfigured caller can no longer pass
-  an astronomically large timeout that would turn the probe's absolute
-  anti-tarpit deadline into an effectively unbounded wait. Non-finite
-  timeouts (NaN/inf) are rejected fail-closed too. (#1699)
-- The relay-path dial prober no longer misreports a completed, host-key-verified
-  probe as a box-leg failure when the connection's closing handshake hits a
-  reset: once the host key is read and the outcome is decided, the closing
-  DISCONNECT is best-effort and can't change it. (#1696)
-- The jail build now logs the network flows still open through the jail right
-  after the firewall ruleset is re-applied: a re-apply does not flush
-  connection tracking, so pre-existing flows keep flowing under the new rules
-  even after a tightening, and the operator can tear them down explicitly.
-  The stated residual is documented in the jail's enforcement contract. (#1691)
-- The v0.9.0 golden-image build gate failed because the image recipe fetched
-  the cua-driver release asset under the wrong filename (upstream names them
-  `cua-driver-rs-<version>-linux-<arch>-binary.tar.gz`); the recipe now uses
-  the correct name, and a pin test keeps the recipe's asset name identical to
-  the self-update tool's. (#1689)
-- The golden-image build gate is no longer red at the cred-ui layer: the
-  recipe's cred-ui RUN step sets `CRED_UI_TOKEN_FILE` to a local path, taking
-  the documented local-file contract for installs without swapd, so
-  install.sh's #964 ui-token preflight no longer aborts the image build. The
-  variable is build-time only (never baked into the unit) and the guard
-  itself is unchanged, so real deploys via proxy/deploy.sh keep the #964
-  intent; a pin test keeps the variable in the recipe. (#1698)
-- `vapid_sign` no longer mints VAPID JWTs whose `exp` is not in the future:
-  an already-expired `expires_at` is a caller error that could previously
-  only surface as a push-service 4xx far from the misconfiguration, so it
-  now raises `ValueError` fail-closed (the RFC 8292 24h upper bound is
-  deliberately not enforced — it needs the request time only the caller
-  has). The in-repo sender threads its own send clock through so its
-  frozen test clocks compare consistently. (#1698)
-
-### Security
 - The relay auto-driver's per-tenant tick watermark no longer serializes
   its lock file through a symlink: the lock open refuses a pre-planted
   symlink loudly (fail-visible) instead of silently moving the flock onto
   another file, which would have desynced concurrent sweeps or wedged the
   watermark. Same O_NOFOLLOW discipline the gate lane already pins for
   key/state paths. (#1742)
+
 
 ## [0.9.0] - 2026-10-18
 

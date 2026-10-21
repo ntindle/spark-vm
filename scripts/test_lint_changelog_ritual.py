@@ -198,3 +198,238 @@ def test_unreadable_encoding_is_exit_2_not_traceback():
         )
         assert r.returncode == 2
         assert "cannot read" in r.stderr
+
+
+# --- Rule 7: Unreleased section-shape checks (duplicate / order) ---
+
+
+def _changelog_blocks(blocks):
+    """Build a changelog with explicit section headings per release block.
+
+    ``blocks`` is [(heading, [(section, [entries])]), ...].
+    """
+    parts = ["# Changelog", ""]
+    for heading, sections in blocks:
+        parts += [heading, ""]
+        for section, entries in sections:
+            parts += ["### " + section, ""]
+            parts += entries
+            parts += [""]
+    return "\n".join(parts)
+
+
+def test_duplicate_section_heading_in_unreleased_flagged():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Added", ["- Older thing. (#2)"]),
+                ],
+            )
+        ]
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    lineno, kind, excerpt = violations[0]
+    assert kind == "duplicate section heading"
+    assert "### Added" in excerpt
+    assert "first at line 5" in excerpt
+
+
+def test_duplicate_section_heading_is_case_insensitive():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("added", ["- Older thing. (#2)"]),
+                ],
+            )
+        ]
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    assert violations[0][1] == "duplicate section heading"
+
+
+def test_out_of_order_sections_in_unreleased_flagged():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Security", ["- Fix. (#2)"]),
+                    ("Fixed", ["- Fix. (#3)"]),
+                ],
+            )
+        ]
+    )
+    violations = lint.find_violations(text)
+    assert len(violations) == 1
+    lineno, kind, excerpt = violations[0]
+    assert kind == "section heading out of order"
+    assert "### Fixed" in excerpt
+
+
+def test_skipped_section_kinds_are_not_out_of_order():
+    """Added, Fixed, Security (no Changed/Deprecated/Removed) is fine."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Fixed", ["- Fix. (#2)"]),
+                    ("Security", ["- Hardening. (#3)"]),
+                ],
+            )
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_full_canonical_order_is_clean():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Changed", ["- Change. (#2)"]),
+                    ("Deprecated", ["- Deprecation. (#3)"]),
+                    ("Removed", ["- Removal. (#4)"]),
+                    ("Fixed", ["- Fix. (#5)"]),
+                    ("Security", ["- Hardening. (#6)"]),
+                ],
+            )
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_unrecognized_section_name_is_not_order_checked():
+    """A one-off heading like ### Notes is still duplicate-checked but has
+    no canonical order position, so it never trips the order rule."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Notes", ["- Note. (#2)"]),
+                    ("Fixed", ["- Fix. (#3)"]),
+                ],
+            )
+        ]
+    )
+    assert lint.find_violations(text) == []
+    text2 = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Notes", ["- Note. (#1)"]),
+                    ("Notes", ["- Note. (#2)"]),
+                ],
+            )
+        ]
+    )
+    violations = lint.find_violations(text2)
+    assert len(violations) == 1
+    assert violations[0][1] == "duplicate section heading"
+
+
+def test_section_shape_checks_are_unreleased_scoped():
+    """Released blocks are grandfathered: duplicates and disorder below a
+    ## [x.y.z] heading are not violations."""
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [Unreleased]",
+                [
+                    ("Added", ["- New thing. (#1)"]),
+                    ("Fixed", ["- Fix. (#2)"]),
+                ],
+            ),
+            (
+                "## [0.9.0] - 2026-10-18",
+                [
+                    ("Added", ["- Old thing. (#3)"]),
+                    ("Fixed", ["- Old fix. (#4)"]),
+                    ("Added", ["- Older thing. (#5)"]),
+                ],
+            ),
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_no_unreleased_heading_means_no_shape_check():
+    lint = _load_lint()
+    text = _changelog_blocks(
+        [
+            (
+                "## [0.9.0] - 2026-10-18",
+                [
+                    ("Added", ["- Old thing. (#3)"]),
+                    ("Added", ["- Older thing. (#5)"]),
+                ],
+            )
+        ]
+    )
+    assert lint.find_violations(text) == []
+
+
+def test_cli_reports_section_violations_clearly():
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = os.path.join(tmp, "CHANGELOG.md")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write(
+                _changelog_blocks(
+                    [
+                        (
+                            "## [Unreleased]",
+                            [
+                                ("Added", ["- New thing. (#1)"]),
+                                ("Added", ["- Older thing. (#2)"]),
+                            ],
+                        )
+                    ]
+                )
+            )
+        r = subprocess.run(
+            [sys.executable, _LINT_PATH, bad],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 1
+        assert "duplicate section heading" in r.stdout
+        assert "workspace-internal path" not in r.stdout
+
+
+def test_cli_missing_heading_label_is_not_a_path_label():
+    """A heading-less changelog must not print as a 'workspace-internal
+    path' violation — the label should say what is actually wrong."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = os.path.join(tmp, "CHANGELOG.md")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("# Changelog\n\n- Entry with no release heading. (#1)\n")
+        r = subprocess.run(
+            [sys.executable, _LINT_PATH, bad],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 1
+        assert "missing release heading" in r.stdout
+        assert "workspace-internal path" not in r.stdout
