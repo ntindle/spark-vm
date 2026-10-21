@@ -44,8 +44,8 @@ filed #1553/#1554. One build has landed since: **PR #1817 closed
 | Slice | State |
 |---|---|
 | S1 tenant-scoping (#280) | **Shipped** — contract §1 stands; no drift found on re-read. |
-| S2 vend contract | **Shipped, amended** — §2.2 gains the D105/D106 rate-limit mechanism (#1817); §5 gains the batching discipline and §10 gains item 14 (this turn, F-VC-13/F-VC-14). |
-| S3 plane vend endpoint (#890) | **Open, p2** — not built. Body (last touched 2026-10-16) predates #1817: no reference to the D105 integration (wire `try_take_async` ahead of the mint path; denied → 429 + `Retry-After`) — pointer comment this turn (F-VC-15). The #1178 retention pin still gates its D1 migration (D-VR-1, re-verified open). |
+| S2 vend contract | **Shipped, amended** — §2.2 gains the D105/D106 rate-limit mechanism (#1817); §5 gains the batching discipline and §10 gains item 14 (this turn, F-VC-15/F-VC-16). |
+| S3 plane vend endpoint (#890) | **Open, p2** — not built. Body (last touched 2026-10-16) predates #1817: no reference to the D105 integration (wire `try_take_async` ahead of the mint path; denied → 429 + `Retry-After`) — pointer comment this turn (F-VC-17). The #1178 retention pin still gates its D1 migration (D-VR-1, re-verified open). |
 | S4 box-side swapd fetch (#891) | **Open, p2** — not built. Body (2026-10-08) predates #1817 and pins no batching discipline — pointer comment this turn (the new §5 bullet is the discipline its fetcher must implement). |
 | S5 H19 reconcile → vend bootstrap | **Open** — rides #906 per D-VR-4 (pointer comment on #906 stands; #906 still open). |
 | S6 acceptance (#1553) | **Open, p2** — tracks the contract's §10 verbatim; inherits the new item 14 automatically (pointer comment this turn). |
@@ -54,7 +54,7 @@ filed #1553/#1554. One build has landed since: **PR #1817 closed
 
 ## 3. Genuinely-new findings (this turn)
 
-- **F-VC-13 — D105's "never touches legitimate traffic" claim assumed
+- **F-VC-15 — D105's "never touches legitimate traffic" claim assumed
   batched mints; the contract pinned no batching discipline.** The
   bucket is per `box_id` (10 takes / 300 s). The contract's §2.2
   sentence read "the legitimate cadence is already ~1 mint per 300 s
@@ -72,17 +72,17 @@ filed #1553/#1554. One build has landed since: **PR #1817 closed
   mint POST (first boot: `ceil(N/64)` requests) — and the §2.2 /
   module-docstring / README phrasing is corrected to "~1 mint
   request per 300 s per box (all due names batched)". Decision
-  D-VC-13: the per-box bucket shape is kept (a per-(box,name) bucket
+  D-VC-15: the per-box bucket shape is kept (a per-(box,name) bucket
   would let 64 names × 10 mints defeat the D1 write-amplification
   bound #1405 was filed for); batching is the client-side half of
   the design.
-- **F-VC-14 — §10's acceptance checklist never learned about the
+- **F-VC-16 — §10's acceptance checklist never learned about the
   rate limiter.** The 13 items predate #1817; #1553 tracks §10
   "verbatim", so the S6 slice silently dropped the 14th behavior
   (denied take → 429 + `Retry-After`; batched legitimate cadence
   never throttled). **Fixed in-turn:** §10 gains item 14; #1553's
   verbatim tracking inherits it (pointer comment posted).
-- **F-VC-15 — #890's body omits the D105 integration** (same class as
+- **F-VC-17 — #890's body omits the D105 integration** (same class as
   the 10-16 turn's F-VR-3): the contract's §2.2 names the #890
   endpoint's emission duty (wire `try_take_async` ahead of the mint
   path via the async port; denied → 429 + advisory `Retry-After`;
@@ -110,18 +110,18 @@ filed #1553/#1554. One build has landed since: **PR #1817 closed
 - **D2's caller contract dangles until #890.** Both modules document
   that the caller must pass the #844-resolved `box_id` and reject a
   box-asserted identity upstream — that caller does not exist yet.
-  It is #890's build scope (covered by the F-VC-15 pointer comment),
+  It is #890's build scope (covered by the F-VC-17 pointer comment),
   not a new issue.
 
 ## 5. Decisions
 
-- **D-VC-13 — batching is the client-side half of D105.** The fetcher
+- **D-VC-15 — batching is the client-side half of D105.** The fetcher
   (§5, #891) batches all due names into one mint POST per re-check
   cycle; the per-box bucket keeps its 10/300 s shape. A per-name
   minting client is non-conformant as of this pin.
-- **D-VC-14 — §10 item 14 is the rate limiter's acceptance home.**
+- **D-VC-16 — §10 item 14 is the rate limiter's acceptance home.**
   #1553 inherits it via its verbatim-§10 tracking; no separate
   rate-limit acceptance issue.
-- **D-VC-15 — the D105 integration duty lives on #890** (pointer
+- **D-VC-17 — the D105 integration duty lives on #890** (pointer
   comment), following the F-VR-3 precedent — build duties belong on
   build issues, not in third trackers.
