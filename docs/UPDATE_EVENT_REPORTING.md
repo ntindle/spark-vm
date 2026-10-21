@@ -358,6 +358,21 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   path is refused loudly, and the leg falls back to the legacy
   audit-tail translation so exactly one leg still emits — fail-closed
   would hand a box-side planter a trivial event-suppression switch.
+  The legacy audit-tail leg itself, the version-inventory leg's
+  audit-tail read, and the tail-continuity watermark's input all open
+  with O_NOFOLLOW as well: a symlinked tail is refused loudly and
+  fail-closed (the tail is the last producer on those legs, so there
+  is no further fallback), and a double plant — symlinked journal and
+  symlinked tail — names both refusals instead of suppressing
+  anything silently. The other two box-pulled estate artifacts the
+  version-inventory leg reads — `status.json` (toolset pins) and
+  `snapshot.json` (repo commit, image, gate state) — get the same
+  O_NOFOLLOW discipline, refused fail-closed and loud with the
+  derived fields null for the round; and a refused watermark read
+  surfaces as a warning in the tail-continuity sweep while the
+  previous watermark is kept. All of these read through one shared
+  open primitive, so the refusal discipline cannot drift between
+  legs.
   The append leg now also dedups duplicate event_ids inside a single
   collect batch (previously only the pre-existing journal was
   consulted), and a journal that exists but yields no events gets a

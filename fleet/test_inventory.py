@@ -2044,3 +2044,76 @@ def test_correlated_gate_stale_detail_caps_named_boxes(env):
         assert "box-%02d (1h)" % n in detail, detail
     assert "and 2 more" in detail, detail
     assert "box-11" not in detail and "box-12" not in detail, detail
+
+
+# --- Audit-tail symlink-plant refusal, version-inventory leg (#1860) ------
+# inventory.py's collect_box reads the same box-pulled audit-tail.jsonl
+# the event leg does; it gets the same O_NOFOLLOW discipline. A plant
+# is refused fail-closed and loud: the tick selection sees no rows, so
+# the audit-derived version fields are null, and the record's notes
+# name the plant. Neuter-verified: on pristine code the target's tick
+# line flows through and repo_commit is COMMIT_A.
+
+
+def test_collect_audit_tail_symlink_plant_fails_closed_loud(env):
+    # #1860: a symlinked audit-tail.jsonl must not feed the
+    # version-inventory leg. No snapshot here, so the audit tail is the
+    # only repo_commit source: on pristine code the plant's claim flows
+    # through and repo_commit is COMMIT_A; with the fix the plant is
+    # refused fail-closed and loudly, and repo_commit stays null.
+    estate, store = env
+    target = os.path.join(estate, "attacker-audit-target.jsonl")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "event": "deploy", "result": "ok",
+                             "to": COMMIT_A}) + "\n")
+    boxdir = os.path.join(estate, "tower")
+    os.makedirs(boxdir)
+    with open(os.path.join(boxdir, "status.json"), "w") as fh:
+        json.dump(_status_json(), fh)
+    os.symlink(target, os.path.join(boxdir, "audit-tail.jsonl"))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    record = _journal(store)[0]
+    assert any("refused as a symlink plant" in n for n in record["notes"])
+    assert record["versions"]["repo_commit"] is None
+    assert os.path.islink(os.path.join(boxdir, "audit-tail.jsonl"))
+
+
+# --- status.json / snapshot.json symlink-plant refusal (#1860 follow-up)
+# Architecture review: status.json and snapshot.json are box-pulled
+# estate artifacts like the audit tail — a symlinked plant would
+# resolve operator-side and feed the version record (toolset pins
+# carried as-is, repo_commit/suspect determination). Both read through
+# the shared O_NOFOLLOW discipline now; plants are refused fail-closed
+# and loudly, and the derived fields stay null. Neuter-verified: on
+# pristine code the plants' payloads flow through (toolset_pins set,
+# repo_commit == COMMIT_A).
+
+
+def test_collect_status_snapshot_symlink_plants_fails_closed_loud(env):
+    estate, store = env
+    boxdir = os.path.join(estate, "tower")
+    os.makedirs(boxdir)
+    for name, payload in (("status.json", _status_json()),
+                          ("snapshot.json", _snapshot_json(COMMIT_A))):
+        target = os.path.join(estate, "attacker-%s-target" % name)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.symlink(target, os.path.join(boxdir, name))
+    # A real (empty) audit tail keeps the plant refusals as the only
+    # loud signal.
+    with open(os.path.join(boxdir, "audit-tail.jsonl"), "w") as fh:
+        fh.write("")
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    record = _journal(store)[0]
+    assert any("status.json refused as a symlink plant" in n
+               for n in record["notes"])
+    assert any("snapshot.json refused as a symlink plant" in n
+               for n in record["notes"])
+    assert record["versions"]["toolset_pins"] is None
+    assert record["versions"]["repo_commit"] is None
+    assert record["versions"]["image_version"] is None
+    assert os.path.islink(os.path.join(boxdir, "status.json"))
+    assert os.path.islink(os.path.join(boxdir, "snapshot.json"))

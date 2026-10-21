@@ -1288,3 +1288,173 @@ def test_read_journal_raw_refuses_symlink_plant(dirs):
     assert items == [('{"event_id": "r-1"}', {"event_id": "r-1"}, False),
                     ("", None, True),
                     ("not-json", None, True)]
+
+
+# --- Audit-tail symlink-plant refusal (#1860) ------------------------------
+# The legacy audit-tail leg (collect_box_events' audit-tail reads and
+# audit_tail_lines' watermark hashes) opens with O_NOFOLLOW, mirroring
+# the S2 journal leg (#1649 slice 4) and the #1841/#1845 append /
+# #1846 read legs. A box-side symlink plant at audit-tail.jsonl is
+# refused loud (ELOOP) and the leg is fail-closed: the audit tail is
+# the last producer on these legs, so there is nothing to degrade to.
+# These tests are neuter-verified: on pristine code the plant's rows
+# flow through (canonicalized events / hashes of the target's lines),
+# so every assertion below fails without the fix.
+
+
+def _plant_audit_tail(estate, box_id, lines):
+    # Returns (box_dir, target): a box dir whose audit-tail.jsonl is a
+    # symlink plant pointing at a target file carrying `lines`.
+    target = os.path.join(estate, "attacker-audit-target.jsonl")
+    with open(target, "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line if isinstance(line, str) else json.dumps(line))
+            fh.write("\n")
+    box_dir = os.path.join(estate, box_id)
+    os.makedirs(box_dir)
+    os.symlink(target, os.path.join(box_dir, "audit-tail.jsonl"))
+    return box_dir, target
+
+
+def _ok_audit_line():
+    return json.dumps({
+        "ts": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "deploy",
+        "result": "ok", "to": "d" * 40, "components": "cua-driver"})
+
+
+def test_audit_tail_legacy_path_refuses_symlink_plant(dirs):
+    # #1860: legacy path (no journal present) — the plant's rows must
+    # not reach the S1 canonicalizer; the leg fails closed and loud.
+    events = _import_events_module()
+    estate, store = dirs
+    box_dir, target = _plant_audit_tail(estate, "box-evil",
+                                        [_ok_audit_line()])
+    evs, noops, notes = events.collect_box_events(
+        box_dir, "box-evil", NOW.isoformat())
+    assert evs == [] and noops == 0
+    assert any("refused as a symlink plant" in n for n in notes)
+    assert any("fail-closed" in n for n in notes)
+    # The plant itself survives; the target is byte-identical.
+    assert os.path.islink(os.path.join(box_dir, "audit-tail.jsonl"))
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read().count("deploy") == 1
+
+
+def test_audit_tail_journal_fallback_double_plant(dirs):
+    # #1860: journal symlinked -> the leg falls back to the audit tail
+    # -> the audit tail is symlinked too. Both refusals are loud; no
+    # events; nothing suppressed silently.
+    events = _import_events_module()
+    estate, store = dirs
+    box_dir, target = _plant_audit_tail(estate, "box-evil",
+                                        [_ok_audit_line()])
+    journal_target = os.path.join(estate, "attacker-journal-target.jsonl")
+    with open(journal_target, "w", encoding="utf-8") as fh:
+        fh.write('{"event_id": "attacker-1"}\n')
+    os.symlink(journal_target,
+               os.path.join(box_dir, "update-events.jsonl"))
+    evs, noops, notes = events.collect_box_events(
+        box_dir, "box-evil", NOW.isoformat())
+    assert evs == [] and noops == 0
+    assert any("refused as a symlink" in n for n in notes)  # journal leg
+    assert any("audit-tail.jsonl refused as a symlink plant" in n
+               for n in notes)
+    assert os.path.islink(os.path.join(box_dir, "audit-tail.jsonl"))
+
+
+def test_audit_tail_lines_refuses_symlink_plant(dirs):
+    # #1860: the watermark leg must never hash the planted target's
+    # lines — it keeps the old watermark (fail-safe) and reports the
+    # refusal.
+    events = _import_events_module()
+    estate, store = dirs
+    box_dir, _ = _plant_audit_tail(estate, "box-evil",
+                                   [_ok_audit_line()])
+    hashes, err = events.audit_tail_lines(box_dir)
+    assert hashes == []
+    assert err is not None and "refused" in err
+    assert os.path.islink(os.path.join(box_dir, "audit-tail.jsonl"))
+    # Legitimate path: a real tail still hashes line-by-line.
+    os.unlink(os.path.join(box_dir, "audit-tail.jsonl"))
+    write_box(estate, "box-evil", [_ok_audit_line()])
+    hashes, err = events.audit_tail_lines(box_dir)
+    assert err is None and len(hashes) == 1
+
+
+# --- Alert-journal append symlink-plant refusal (#1855) -------------------
+# _append_alerts_nolock opens the alerts journal with O_NOFOLLOW,
+# mirroring the #1841 event-journal append leg. Honest note on the
+# refusal point: a plant at alerts.jsonl is refused even earlier — at
+# the dedup read (_load_journal's #1846 O_NOFOLLOW) before the append
+# leg's own open is reached (the same shift the #1841 test documents).
+# The append-leg O_NOFOLLOW is defense-in-depth for the read->append
+# swap race, which no deterministic test can exercise: the test below
+# pins the end-to-end loud-failure contract and the normal path, and
+# passes on pristine code (vacuous for the append leg itself — the
+# dedup read refuses first there too); the append-leg hardening is
+# verified by inspection against the #1841 pattern.
+
+
+def test_append_alerts_refuses_symlink_plant(dirs):
+    # #1855: a symlink planted at <store>/alerts.jsonl must not
+    # redirect the append into the attacker's target. The call fails
+    # loud (error returned), the target gains no bytes, and the plant
+    # itself is not replaced by a real file.
+    events = _import_events_module()
+    estate, store = dirs
+    target = os.path.join(estate, "attacker-alerts-target.jsonl")
+    preexisting = "attacker pre-existing content\n"
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(preexisting)
+    alerts_path = os.path.join(store, "alerts.jsonl")
+    os.makedirs(store, exist_ok=True)
+    os.symlink(target, alerts_path)
+    fresh, err = events._append_alerts_nolock(
+        store, [{"alert_id": "plant-1"}])
+    assert fresh is None
+    # The plant is refused at the dedup read (#1846's O_NOFOLLOW in
+    # _load_journal) before the append leg's own open is reached —
+    # either refusal point satisfies the loud-failure contract.
+    assert err is not None and ("cannot append to alert journal" in err
+                                or "cannot read alerts.jsonl" in err)
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read() == preexisting
+    assert os.path.islink(alerts_path)
+
+
+def test_append_alerts_normal_append_unaffected(dirs):
+    # The O_NOFOLLOW open changes nothing for the legitimate path:
+    # create-on-absent, append, and the alert_id dedup all behave as
+    # before.
+    events = _import_events_module()
+    estate, store = dirs
+    os.makedirs(store, exist_ok=True)
+    fresh, err = events._append_alerts_nolock(
+        store, [{"alert_id": "a-1"}, {"alert_id": "a-2"}])
+    assert err is None
+    assert [a["alert_id"] for a in fresh] == ["a-1", "a-2"]
+    fresh, err = events._append_alerts_nolock(store, [{"alert_id": "a-1"}])
+    assert err is None and fresh == []  # at-most-once dedup
+    with open(os.path.join(store, "alerts.jsonl"),
+              encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    assert [r["alert_id"] for r in rows] == ["a-1", "a-2"]
+
+
+def test_check_tail_continuity_symlink_plant_warns_loud(dirs):
+    # #1860 follow-up (Architecture review): the watermark leg's plant
+    # refusal is not silent — check_tail_continuity surfaces it as a
+    # warning while keeping the old watermark (fail-safe: no false
+    # discontinuity page on the plant).
+    events = _import_events_module()
+    estate, store = dirs
+    os.makedirs(store, exist_ok=True)
+    box_dir, _ = _plant_audit_tail(estate, "box-evil", [_ok_audit_line()])
+    warnings, fired, err = events.check_tail_continuity(
+        store, [(box_dir, "box-evil")], NOW.isoformat())
+    assert err is None
+    assert any("refused as a symlink plant" in w for w in warnings)
+    assert fired == []
+    # The watermark was not advanced on the plant's rows.
+    marks, _ = events._load_tail_watermarks(store)
+    assert "box-evil" not in marks
