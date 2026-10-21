@@ -10,15 +10,19 @@
 #      itself and passes them as build args — the tree is the pin; there is
 #      no override flag, so a build can never silently bake a different
 #      commit than the one the manifest names;
-#   3. generates the image manifest into the build context (the recipe COPYs
+#   2a. verifies the recipe's pinned upstream release assets exist
+#      (preflight-upstream-assets.sh — the v0.9.0 gate failed two minutes
+#      into the docker build on a 404 for the cua-driver checksums.txt;
+#      this refuses in seconds instead);
+#   4. generates the image manifest into the build context (the recipe COPYs
 #      it in — it cannot be generated in-image because the build context
 #      excludes .git and the generator needs git metadata), removed by a
 #      trap so the tree stays clean;
-#   4. builds the image from that tree;
-#   5. runs the baked-secrets scan INSIDE the built image (the gate
+#   5. builds the image from that tree;
+#   6. runs the baked-secrets scan INSIDE the built image (the gate
 #      procedure's Step 0b — exit 1 is a build failure, not a warning);
-#   6. preflights the baked manifest (gate Step 0);
-#   7. emits the gate-record skeleton (automated steps filled, the
+#   7. preflights the baked manifest (gate Step 0);
+#   8. emits the gate-record skeleton (automated steps filled, the
 #      interactive round-trip steps left pending — the operator runs
 #      docs/GOLDEN_IMAGE_GATE_PROCEDURE.md before publish).
 #
@@ -116,8 +120,10 @@ esac
 # defaults to a different version than the tree being baked is a silent
 # pin — refuse (the Dockerfile RUN check is the second line of defense).
 # Exactly one defaulted ARG may exist: two would make the effective default
-# ambiguous (the first wins silently).
-RECIPE_DEFAULT_COUNT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | grep -c .)"
+# ambiguous (the first wins silently). The || true keeps set -e from firing
+# on grep's exit 1 when zero lines match, so the loud check below — not a
+# silent exit — names the problem.
+RECIPE_DEFAULT_COUNT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | grep -c . || true)"
 [ "$RECIPE_DEFAULT_COUNT" -eq 1 ] \
     || die "expected exactly one ARG SPARKVM_VERSION default in the recipe, found $RECIPE_DEFAULT_COUNT"
 RECIPE_DEFAULT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | head -1)"
@@ -131,6 +137,13 @@ if [ "$PREFLIGHT_ONLY" = "1" ]; then
     echo "build-image: preflight-only — OK"
     exit 0
 fi
+
+# --- 2a. upstream-asset preflight ------------------------------------------------
+# The recipe fetches the pinned cua-driver release from upstream GitHub at
+# build time; the v0.9.0 gate failed two minutes into the docker build on a
+# 404 for the release's checksums.txt. Refuse in seconds, before the manifest
+# is staged and docker starts, instead of failing mid-build.
+"$REPO/deploy/golden-image/preflight-upstream-assets.sh"
 
 # --- gate-record skeleton ------------------------------------------------------
 # Emitted both by the full build and by --gate-record-out (CI static job);
@@ -286,7 +299,7 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "docker not found — the image builds on the operator's build host or in CI"
 
-# --- 2b. manifest into the build context -----------------------------------------
+# --- 3. manifest into the build context -----------------------------------------
 # The recipe COPYs the manifest in — it cannot generate it in-image (the
 # build context excludes .git, and the generator needs git metadata to name
 # the SHA). Generated here, after the dirty-tree preflight above, and removed
@@ -297,7 +310,7 @@ trap cleanup_context_manifest EXIT
 "$REPO/harness/generate-image-manifest.sh" --out "$CONTEXT_MANIFEST"
 echo "build-image: context manifest generated"
 
-# --- 3. build ------------------------------------------------------------------
+# --- 4. build ------------------------------------------------------------------
 echo "build-image: docker build $TAG"
 docker build -f "$REPO/deploy/golden-image/Dockerfile" \
     --build-arg "SPARKVM_VERSION=$VERSION" \
@@ -314,7 +327,7 @@ BASE_REF="$(sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "$REPO/deploy
 BASE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$BASE_REF" 2>/dev/null || true)"
 echo "build-image: base $BASE_REF digest: ${BASE_DIGEST:-(not recorded — pull the base by digest to pin it)}"
 
-# --- 4. baked-secrets scan inside the built image (gate Step 0b) ---------------
+# --- 5. baked-secrets scan inside the built image (gate Step 0b) ---------------
 echo "build-image: baked-secrets scan of the built image"
 SCAN_OUT="$(mktemp)"
 set +e
@@ -331,8 +344,8 @@ elif [ "$SCAN_EXIT" -ne 0 ]; then
 fi
 echo "build-image: scan clean (exit 0)"
 
-# --- 5. manifest preflight (gate Step 0) -------------------------------------------
-# The context manifest (generated pre-build in step 2b) is the D-P1 artifact;
+# --- 6. manifest preflight (gate Step 0) -------------------------------------------
+# The context manifest (generated pre-build in step 3) is the D-P1 artifact;
 # preflight it here for the gate record (the recipe preflights the baked
 # copy in-image too).
 MANIFEST="image-manifest-${SHA:0:12}.json"
@@ -340,7 +353,7 @@ cp "$CONTEXT_MANIFEST" "$MANIFEST"
 "$REPO/harness/check-image-manifest.sh" "$MANIFEST" --expect-version "$SHA" >/dev/null
 echo "build-image: manifest $MANIFEST preflights (exit 0)"
 
-# --- 6. gate-record skeleton ------------------------------------------------------
+# --- 7. gate-record skeleton ------------------------------------------------------
 GATE_RECORD="gate-record-${SHA:0:12}.json"
 emit_gate_record "$GATE_RECORD" "pass" "$BASE_DIGEST" "0" "/" "0" "built"
 

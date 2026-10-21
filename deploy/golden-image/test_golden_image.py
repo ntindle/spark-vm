@@ -6,12 +6,14 @@ Every test that asserts a refusal also proves the refusal is non-vacuous:
 the same invocation against a conforming fixture must succeed.
 """
 import configparser
+import http.server
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -271,6 +273,24 @@ def test_build_image_refuses_duplicate_recipe_default(tmp_path):
     r = _run_driver(repo, "--preflight-only")
     assert r.returncode != 0
     assert "exactly one" in r.stderr
+
+
+def test_build_image_refuses_missing_recipe_default(tmp_path):
+    """A recipe with no defaulted ARG SPARKVM_VERSION must refuse LOUDLY —
+    not die silently to set -e inside the count pipeline. Regression: the
+    preflight's twin grep -c idiom had the same silent-exit shape before
+    its own || true."""
+    def strip_default(src, dst):
+        with open(src, encoding="utf-8") as f:
+            t = f.read()
+        t = re.sub(r"^ARG SPARKVM_VERSION=\S+\n", "", t, flags=re.M)
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(t)
+    repo, _ = _scratch_repo(tmp_path, dockerfile_transform=strip_default)
+    r = _run_driver(repo, "--preflight-only")
+    assert r.returncode != 0, "driver accepted a recipe with no SPARKVM_VERSION default"
+    assert "expected exactly one" in r.stderr, f"refusal must name the problem: {r.stderr}"
+    assert "found 0" in r.stderr, f"refusal must name the count: {r.stderr}"
 
 
 def test_dockerfile_runs_gate_tooling():
@@ -663,6 +683,10 @@ def _scratch_repo(tmp_path, version=None, dirty=False, dockerfile_transform=None
         os.path.join(REPO_ROOT, "scripts", "sparkvm_version.py"),
         repo / "scripts" / "sparkvm_version.py",
     )
+    shutil.copy(
+        os.path.join(GOLDEN_DIR, "preflight-upstream-assets.sh"),
+        repo / "deploy" / "golden-image" / "preflight-upstream-assets.sh",
+    )
     (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
     env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1",
                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
@@ -675,8 +699,15 @@ def _scratch_repo(tmp_path, version=None, dirty=False, dockerfile_transform=None
     return repo, env
 
 
-def _run_driver(repo, *args):
+def _run_driver(repo, *args, upstream_base=None):
+    """Run the build driver against a scratch repo. upstream_base pins
+    CUA_DRIVER_RELEASES_BASE so the step-2a upstream-asset preflight hits a
+    local stand-in instead of live github.com — the driver suite stays
+    offline-capable (the v0.9.0 gate-404 class needs a live network in
+    production, never in tests)."""
     env = dict(os.environ, REPO_OVERRIDE=str(repo))
+    if upstream_base is not None:
+        env["CUA_DRIVER_RELEASES_BASE"] = upstream_base
     return subprocess.run(
         ["bash", BUILD_IMAGE, *args],
         capture_output=True, text=True, env=env, timeout=120,
@@ -717,12 +748,13 @@ def test_build_image_refuses_non_semver_version(tmp_path):
     assert "not valid semver" in r.stderr
 
 
-def test_gate_record_skeleton_schema(tmp_path):
+def test_gate_record_skeleton_schema(tmp_path, checksums_server):
     """--gate-record-out emits the schema the interactive gate completes:
     automated steps honestly marked, interactive steps pending."""
     repo, _ = _scratch_repo(tmp_path)
     out = tmp_path / "gate-record.json"
-    r = _run_driver(repo, "--gate-record-out", str(out))
+    upstream = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    r = _run_driver(repo, "--gate-record-out", str(out), upstream_base=upstream)
     assert r.returncode == 0, r.stderr
     with open(out, encoding="utf-8") as f:
         record = json.load(f)
@@ -866,14 +898,15 @@ def _inspected_ref(tmp_path):
     return lines[-1].split()[-1]
 
 
-def _emit_completed_gate(tmp_path):
+def _emit_completed_gate(tmp_path, checksums_server):
     """A scratch repo + a gate record skeleton marked as a completed pass
     (the publish step presumes the interactive gate already ran). The
     completed-pass vocabulary is shared with harness/pin_image.py's
     _check_gate_record — status "complete", verdict "pass"."""
     repo, _ = _scratch_repo(tmp_path)
     out = tmp_path / "gate-record.json"
-    r = _run_driver(repo, "--gate-record-out", str(out))
+    upstream = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    r = _run_driver(repo, "--gate-record-out", str(out), upstream_base=upstream)
     assert r.returncode == 0, r.stderr
     with open(out, encoding="utf-8") as f:
         record = json.load(f)
@@ -895,12 +928,12 @@ def _image_digest(record_path):
         return json.load(f)["build"]["image_digest"]
 
 
-def test_record_pushed_digest_stamps_gate_record(tmp_path):
+def test_record_pushed_digest_stamps_gate_record(tmp_path, checksums_server):
     """The publish step records the digest the registry produced — resolved
     through the daemon, never pasted by the operator, and OF the pushed
     ref (the fake docker logs its argv; a script that inspected the wrong
     ref would fail here)."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     r = _run_record(tmp_path, repo, f"registry.fly.io/myapp/sparkvm-golden@{_DIGEST_A}",
                      record, _REF)
     assert r.returncode == 0, r.stderr
@@ -909,9 +942,9 @@ def test_record_pushed_digest_stamps_gate_record(tmp_path):
     assert _inspected_ref(tmp_path) == _REF
 
 
-def test_record_pushed_digest_is_idempotent(tmp_path):
+def test_record_pushed_digest_is_idempotent(tmp_path, checksums_server):
     """Re-recording the same digest is a no-op, not an error."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     repodigest = f"registry.fly.io/myapp/sparkvm-golden@{_DIGEST_A}"
     assert _run_record(tmp_path, repo, repodigest, record, _REF).returncode == 0
     r = _run_record(tmp_path, repo, repodigest, record, _REF)
@@ -920,10 +953,10 @@ def test_record_pushed_digest_is_idempotent(tmp_path):
     assert _image_digest(record) == _DIGEST_A
 
 
-def test_record_pushed_digest_refuses_overwrite_without_force(tmp_path):
+def test_record_pushed_digest_refuses_overwrite_without_force(tmp_path, checksums_server):
     """A recorded digest is write-once: a different digest refuses unless
     --force names the re-push case explicitly."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     assert _run_record(tmp_path, repo, f"x@{_DIGEST_A}", record, _REF).returncode == 0
     r = _run_record(tmp_path, repo, f"x@{_DIGEST_B}", record, _REF)
     assert r.returncode != 0
@@ -934,31 +967,33 @@ def test_record_pushed_digest_refuses_overwrite_without_force(tmp_path):
     assert _image_digest(record) == _DIGEST_B
 
 
-def test_record_pushed_digest_fails_when_ref_unpushed(tmp_path):
+def test_record_pushed_digest_fails_when_ref_unpushed(tmp_path, checksums_server):
     """An empty RepoDigests (the daemon never resolved the ref) fails
     closed instead of recording nothing."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     r = _run_record(tmp_path, repo, "", record, _REF)
     assert r.returncode != 0
     assert "RepoDigests" in r.stderr
     assert _image_digest(record) is None  # failed, not half-written
 
 
-def test_record_pushed_digest_rejects_malformed_digest(tmp_path):
+def test_record_pushed_digest_rejects_malformed_digest(tmp_path, checksums_server):
     """A non-strict digest from the daemon never lands in the trust record."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     r = _run_record(tmp_path, repo, "registry.fly.io/x@sha256:ZZZ", record, _REF)
     assert r.returncode != 0
     assert "not a strict sha256 digest" in r.stderr
     assert _image_digest(record) is None
 
 
-def test_record_pushed_digest_refuses_skeleton(tmp_path):
+def test_record_pushed_digest_refuses_skeleton(tmp_path, checksums_server):
     """Publish presumes a completed gate: stamping a skeleton (or a refused
     gate) is meaningless to the pin cross-check and looks authoritative."""
     repo, _ = _scratch_repo(tmp_path)
     out = tmp_path / "gate-record.json"
-    assert _run_driver(repo, "--gate-record-out", str(out)).returncode == 0
+    upstream = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    assert _run_driver(repo, "--gate-record-out", str(out),
+                        upstream_base=upstream).returncode == 0
     r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", out, _REF)
     assert r.returncode != 0
     assert "completed gate" in r.stderr
@@ -975,10 +1010,10 @@ def test_record_pushed_digest_rejects_non_gate_record(tmp_path):
     assert "not a sparkvm/golden-image-gate-record@1 record" in r.stderr
 
 
-def test_record_pushed_digest_refuses_wrong_tree_record(tmp_path):
+def test_record_pushed_digest_refuses_wrong_tree_record(tmp_path, checksums_server):
     """The tree is the pin: a record naming another build's image_version
     refuses, so a digest can never be stamped onto the wrong record."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     with open(record, encoding="utf-8") as f:
         rec = json.load(f)
     rec["image_version"] = "0" * 40
@@ -990,10 +1025,10 @@ def test_record_pushed_digest_refuses_wrong_tree_record(tmp_path):
     assert _image_digest(record) is None
 
 
-def test_record_pushed_digest_fails_without_docker(tmp_path):
+def test_record_pushed_digest_fails_without_docker(tmp_path, checksums_server):
     """No docker on the host fails closed — the digest cannot be resolved
     from the registry, so nothing is recorded."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", record, _REF,
                      no_docker=True)
     assert r.returncode != 0
@@ -1001,10 +1036,10 @@ def test_record_pushed_digest_fails_without_docker(tmp_path):
     assert _image_digest(record) is None
 
 
-def test_record_pushed_digest_refuses_missing_build_section(tmp_path):
+def test_record_pushed_digest_refuses_missing_build_section(tmp_path, checksums_server):
     """A gate record whose build section is not an object is never
     stamped — the trust record's shape is part of the contract."""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     with open(record, encoding="utf-8") as f:
         rec = json.load(f)
     rec["build"] = None
@@ -1017,11 +1052,11 @@ def test_record_pushed_digest_refuses_missing_build_section(tmp_path):
         assert json.load(f)["build"] is None  # refused, not repaired
 
 
-def test_record_pushed_digest_bad_directory_fails_clean(tmp_path):
+def test_record_pushed_digest_bad_directory_fails_clean(tmp_path, checksums_server):
     """A write failure fails closed with the tool's clean ERROR contract,
     not a raw traceback. (The .tmp path is blocked by a directory here —
     deterministic without permission games, and works as root.)"""
-    repo, record = _emit_completed_gate(tmp_path)
+    repo, record = _emit_completed_gate(tmp_path, checksums_server)
     (tmp_path / "gate-record.json.tmp").mkdir()
     r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", record, _REF)
     assert r.returncode != 0
@@ -1049,7 +1084,7 @@ def test_force_requires_record_mode(tmp_path):
     assert "--force only applies to --record-pushed-digest" in r.stderr
 
 
-def test_completed_gate_vocabulary_agrees_with_pin_image(tmp_path):
+def test_completed_gate_vocabulary_agrees_with_pin_image(tmp_path, checksums_server):
     """The record mode's completed-pass predicate and pin_image's
     _check_gate_record must agree on every (status, verdict) shape — a
     drift means no record can travel the publish → pin pipeline (E1:
@@ -1069,9 +1104,11 @@ def test_completed_gate_vocabulary_agrees_with_pin_image(tmp_path):
         ({"status": "complete", "verdict": "no-pass"}, False),
         (None, False),
     ]
+    upstream = f"http://127.0.0.1:{checksums_server.server_address[1]}"
     for interactive, expect_accept in corpus:
         out = tmp_path / "gate-record.json"
-        assert _run_driver(repo, "--gate-record-out", str(out)).returncode == 0
+        assert _run_driver(repo, "--gate-record-out", str(out),
+                            upstream_base=upstream).returncode == 0
         with open(out, encoding="utf-8") as f:
             record = json.load(f)
         record["interactive_gate"] = interactive
@@ -1333,3 +1370,163 @@ def test_driver_refuses_plus_version(tmp_path):
     r = _run_driver(repo, "--preflight-only")
     assert r.returncode != 0, f"driver accepted VERSION with '+': {r.stdout}"
     assert "#1271" in r.stderr, f"refusal must cite #1271: {r.stderr}"
+
+
+# --- upstream-asset preflight (v0.9.0 gate 404) -----------------------------------
+
+PREFLIGHT = os.path.join(GOLDEN_DIR, "preflight-upstream-assets.sh")
+
+
+def _recipe_cua_driver_pin():
+    """The recipe's ARG CUA_DRIVER_VERSION default — the tree's deliberate pin."""
+    m = re.search(r"^ARG CUA_DRIVER_VERSION=(\S+)", _dockerfile_text(), re.M)
+    assert m, "ARG CUA_DRIVER_VERSION default missing from the recipe"
+    return m.group(1)
+
+
+def _rendered_recipe_checksums_url(pin):
+    """Render the checksums URL the recipe's cua-driver layer fetches FIRST —
+    the exact URL that 404'd on the v0.9.0 gate (tag= and base= templates from
+    the recipe, the pin substituted)."""
+    text = _dockerfile_text()
+    tag_m = re.search(r'^\s*tag="([^"]*)";\s*\\$', text, re.M)
+    base_m = re.search(r'^\s*base="([^"]*)";\s*\\$', text, re.M)
+    assert tag_m, "recipe cua-driver tag= template not found"
+    assert base_m, "recipe cua-driver base= template not found"
+    tag = tag_m.group(1).replace("${CUA_DRIVER_VERSION}", pin)
+    return f"{base_m.group(1)}/{tag}/checksums.txt"
+
+
+class _ChecksumsHandler(http.server.BaseHTTPRequestHandler):
+    """Local stand-in for the upstream release host. HEAD only; the status
+    class attribute is flipped per test (200 = published release, 404 =
+    the v0.9.0 failure class)."""
+
+    status = 200
+
+    def do_HEAD(self):
+        self.send_response(type(self).status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture()
+def checksums_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _ChecksumsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join()
+        _ChecksumsHandler.status = 200
+
+
+def _run_preflight(base_url, dockerfile=None):
+    env = dict(os.environ, CUA_DRIVER_RELEASES_BASE=base_url)
+    cmd = [PREFLIGHT] + ([dockerfile] if dockerfile is not None else [])
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60)
+
+
+def _checked_url(proc):
+    """The URL the preflight checked — printed on both the OK line and the
+    refusal diagnostic, so tests can assert agreement with the recipe."""
+    m = re.search(r"https?://\S+", proc.stdout + proc.stderr)
+    assert m, f"preflight did not name the checked URL: {proc.stdout!r} {proc.stderr!r}"
+    return m.group(0)
+
+
+def test_upstream_asset_preflight_passes_on_200(checksums_server):
+    """A published upstream release passes the preflight."""
+    base = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    r = _run_preflight(base)
+    assert r.returncode == 0, f"preflight refused a live upstream: {r.stderr}"
+
+
+def test_upstream_asset_preflight_checks_the_recipe_url(checksums_server):
+    """The preflight must HEAD the same URL the recipe fetches first — the
+    agreement the v0.9.0 post-mortem demands (#1689 pinned the asset names;
+    this pins the URL). Non-vacuous: a preflight composing a different tag
+    form would print a different URL and fail."""
+    base = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    r = _run_preflight(base)
+    assert r.returncode == 0, r.stderr
+    pin = _recipe_cua_driver_pin()
+    expected = _rendered_recipe_checksums_url(pin).replace(
+        "https://github.com/trycua/cua/releases/download", base
+    )
+    assert _checked_url(r) == expected, (_checked_url(r), expected)
+
+
+def test_upstream_asset_preflight_refuses_on_404(checksums_server):
+    """The v0.9.0 failure class: an unpublished/moved upstream release must
+    refuse in seconds with the URL, the HTTP status, and the pinned version —
+    not two minutes into the docker build. Non-vacuous: the companion 200
+    test proves the same invocation succeeds against a live upstream."""
+    _ChecksumsHandler.status = 404
+    base = f"http://127.0.0.1:{checksums_server.server_address[1]}"
+    r = _run_preflight(base)
+    assert r.returncode != 0, "preflight accepted a 404 upstream — the v0.9.0 class is open"
+    assert "404" in r.stderr, f"refusal must name the HTTP status: {r.stderr}"
+    pin = _recipe_cua_driver_pin()
+    assert pin in r.stderr, f"refusal must name the pinned version: {r.stderr}"
+    assert _checked_url(r).startswith(base), f"refusal must name the URL: {r.stderr}"
+
+
+def test_upstream_asset_preflight_refuses_duplicate_recipe_default(tmp_path):
+    """Two defaulted ARG CUA_DRIVER_VERSION lines make the effective pin
+    ambiguous — refuse loudly, mirroring the driver's SPARKVM_VERSION
+    discipline. Non-vacuous: the 200 test proves the single-default recipe
+    passes."""
+    df = tmp_path / "Dockerfile"
+    df.write_text(
+        "ARG CUA_DRIVER_VERSION=0.28.2\nARG CUA_DRIVER_VERSION=0.28.2\n",
+        encoding="utf-8",
+    )
+    r = _run_preflight("http://127.0.0.1:1", dockerfile=str(df))
+    assert r.returncode != 0, "preflight accepted an ambiguous recipe pin"
+    assert "exactly one" in r.stderr, f"refusal must cite the ambiguity: {r.stderr}"
+
+
+def test_upstream_asset_preflight_refuses_missing_recipe_default(tmp_path):
+    """A recipe with no defaulted ARG CUA_DRIVER_VERSION must refuse LOUDLY
+    (naming the problem) — not die silently to set -e inside the count
+    pipeline. Regression: the first draft exited 1 with no diagnostic."""
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    r = _run_preflight("http://127.0.0.1:1", dockerfile=str(df))
+    assert r.returncode != 0, "preflight accepted a recipe with no version pin"
+    assert "exactly one" in r.stderr, f"refusal must name the problem: {r.stderr}"
+    assert "found 0" in r.stderr, f"refusal must name the count: {r.stderr}"
+
+
+def test_build_image_calls_upstream_preflight():
+    """The build driver must run the preflight before the docker build (step
+    2a) — a preflight the driver never calls protects nothing. Matches
+    non-comment lines only: a bare .index() would resolve to the header
+    comment's mention instead of the real invocation."""
+    lines = open(BUILD_IMAGE, encoding="utf-8").read().splitlines()
+    call_lines = [
+        i for i, l in enumerate(lines)
+        if "preflight-upstream-assets.sh" in l and not l.lstrip().startswith("#")
+    ]
+    build_lines = [
+        i for i, l in enumerate(lines) if l.lstrip().startswith("docker build")
+    ]
+    assert call_lines, "driver never calls the preflight (no non-comment invocation)"
+    assert build_lines, "no docker build command found in driver"
+    assert min(call_lines) < min(build_lines), "preflight must run before the docker build"
+
+
+def test_workflow_runs_upstream_preflight_before_build():
+    """The CI gate job runs docker buildx directly (not the driver), so the
+    workflow must call the preflight itself — before 'Build the recipe'."""
+    text = _workflow_text()
+    assert "preflight-upstream-assets.sh" in text, "workflow never calls the preflight"
+    call = text.index("preflight-upstream-assets.sh")
+    build = text.index("Build the recipe")
+    assert call < build, "workflow preflight must precede the recipe build"
