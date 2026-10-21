@@ -16,7 +16,7 @@ write amplification. This module is the mechanism (D105):
 - **D105 — vend mint rate limit.** Capacity 10 mints / 300 s / box.
   The §2.3 minimum TTL is 300 s, so the legitimate cadence is already
   ~1 mint request per 300 s per box (all due names batched per the
-  contract §5 discipline, D-VC-15) — the bucket never touches
+  contract §5 discipline, D-VC15) — the bucket never touches
   legitimate traffic; it only bounds a compromised box's tight loop
   (the D1 write-amplification bound is the point, not throttling
   tenants).
@@ -65,7 +65,7 @@ from typing import NamedTuple, Optional
 
 # D105 — the bucket. 10 mints per 300 s per box: at the §2.3 minimum
 # TTL the legitimate cadence is ~1 mint request / 300 s / box (all due
-# names batched per the contract §5 discipline, D-VC-15), so this only
+# names batched per the contract §5 discipline, D-VC15), so this only
 # ever fires on abuse loops.
 RATE_LIMIT_CAPACITY = 10
 RATE_LIMIT_WINDOW_S = 300

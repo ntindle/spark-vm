@@ -382,7 +382,7 @@ The mechanism behind the contract's §2.2 rate-limit sentence
 (`docs/CREDENTIAL_VEND_CONTRACT.md`): a D1-backed token bucket, one
 per `(box_id)`, capacity 10 mints / 300 s / box (D105 — at the §2.3
 minimum TTL the legitimate cadence is already ~1 mint request / 300 s /
-box (all due names batched per the §5 discipline, D-VC-15),
+box (all due names batched per the §5 discipline, D-VC15),
 so the bucket only ever fires on abuse loops; the point is bounding
 the D1 write amplification of a compromised box, not throttling
 tenants). The take is one atomic single-statement UPDATE — refill

@@ -283,7 +283,7 @@ endpoint answers a denied take with `429` + `Retry-After:
 part). The bucket only ever fires on abuse
 loops: at the §2.3 minimum TTL the legitimate cadence is already ~1
 mint request per 300 s per box (all due names batched per the §5
-discipline, D-VC-15), so no legitimate box is throttled — the bound
+discipline, D-VC15), so no legitimate box is throttled — the bound
 is on the D1 write amplification of a compromised box minting in a
 tight loop. (Precedent note, kept honest: the pairing 50-pending cap
 in `CONTROL_PLANE_API_REFERENCE.md` is a *count* cap, not a rate
@@ -530,7 +530,7 @@ an outage degrades into bypassed identity):
   (it would put plane latency on every credentialed request); a
   lease-miss at swap time triggers an immediate blocking refresh
   (fetch-on-miss).
-- **Batched mints (D-VC-15):** each re-check cycle — the fetcher's
+- **Batched mints (D-VC15):** each re-check cycle — the fetcher's
   single 300-s tick, the minimum of the per-lease `max(300 s, ttl/3)`
   cadences — the fetcher collects *all* due names and issues a single
   mint `POST` carrying them (first boot with no leases: `ceil(N/64)`
