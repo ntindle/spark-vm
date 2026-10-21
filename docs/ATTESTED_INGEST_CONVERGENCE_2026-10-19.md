@@ -2,8 +2,11 @@
 
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `2e33ceca` (2026-10-19, PR
-#1765's merge — two merges after the S3 ingest landed). Issue/PR
-numbers are GitHub references as of 2026-10-19 (not code-verifiable
+#1765's merge — two merges after the S3 ingest landed), then
+re-verified at main `64d52eb1` (2026-10-21, PR #1867's merge; the
+slice-2 accuracy pass — see §6, which records the probe checklist
+and the two drift items it corrected). Issue/PR
+numbers are GitHub references as of 2026-10-21 (not code-verifiable
 from the tree). Honesty rules apply (`docs/POSITIONING.md`): this
 describes current state and work to do, not promises. Nothing here
 authorizes an update on any box.
@@ -58,13 +61,19 @@ disqualified as a signing key (guest-resident, tenant-exfiltratable);
 an operator-estate box signs with its provisioned key; the mechanism
 is key-agnostic.
 
-**Scope 2 — attested ingestion SHIPPED.** `canonicalize_audit_rows`
-(`fleet/events.py`) verifies every object row's attestation claim
-*before* the shape gates (events.py:408) — a forged signature on a
-claiming row produces the loud forgery note even when the row's shape
-is unknown or local-only. Valid signatures stamp `attested: True`;
-everything else stays `attested: False`. The legacy path is intact:
-`fleet/test_events.py:149` still pins unsigned rows to `attested is
+**Scope 2 — attested ingestion SHIPPED, on both canonicalizers.**
+`canonicalize_audit_rows` (the audit-tail path) verifies every object
+row's attestation claim *before* the shape gates — and since the
+#1862 S2 collector read switch, `canonicalize_journal_rows` (the
+journal path) does the same. Two call sites (`fleet/events.py`, the
+audit-tail and journal canonicalizers), one invariant: a forged
+signature on a claiming row produces the loud forgery note
+("ATTESTATION SIGNATURE INVALID ... event logged, never
+gate-consumed") even when the row's shape is unknown or local-only —
+the read switch preserved the S3 verify-first design on the new leg.
+Valid signatures stamp `attested: True`; everything else stays
+`attested: False`. The legacy path is intact:
+`fleet/test_events.py:154` still pins unsigned rows to `attested is
 False` — that test is the legacy-path pin, not a stale stub.
 
 **Scope 3 — T2 rule pinned as code + documented for the first gate
@@ -154,3 +163,53 @@ its implementation lives outside the trust lane); not a
 re-verification of the #1762 review record (unanimous SHIP IT on the
 final head — see the slot entry, not here). #775 stays OPEN (S3
 remainders + F-AI-4 residuals).
+
+## 6. Slice-2 re-verification (2026-10-21, main `64d52eb1`)
+
+The merges since the §2 pin that touched the legs this doc claims
+on — the #1862 S2 collector read switch, the #1846/#1855/#1860
+symlink-plant refusal hardening, the #1840 relay probe-driver
+packaging changes, and the #1866/#1843 sidecar-corruption handling —
+so every §2 code-state claim was re-probed against the shipped tree
+— not assumed. Results:
+
+- **Mechanism (`fleet/attest.py`) unchanged:** 400 lines, 33 tests,
+  canonical envelope contract intact (`sort_keys=True`,
+  `separators=(",", ":")`, `ensure_ascii=False`), all four API
+  functions present, #844 pairing-key disqualification still in the
+  module docstring.
+- **Fail-closed verdicts unchanged:** bad signature → the LOUDEST
+  note ("ATTESTATION SIGNATURE INVALID ... event logged, never
+  gate-consumed"); malformed or missing-key claims → loud notes;
+  fingerprint mismatch → noted but attested (valid against the pinned
+  key); a row with no attestation member verifies silently and stays
+  unattested.
+- **Verify-first now holds on two legs (the substantive drift):**
+  the #1862 read switch added `canonicalize_journal_rows` alongside
+  `canonicalize_audit_rows`; both call the same verifier before the
+  shape gates (§2 Scope 2 updated). The S3 design survived the read
+  switch — the invariant is now wider than the doc originally
+  claimed, not narrower.
+- **Test pins:** `fleet/test_attest.py:477` (the
+  `gate_consumable_events` filter pin) is still line-exact; the
+  legacy unsigned-row pin moved `fleet/test_events.py:149` → `:154`
+  (§2 corrected).
+- **Operator CLI probed live on a scratch store:** `box-key pin`
+  prints the `SHA256:` fingerprint, `box-key show` reads it back,
+  `box-keys.json` stays write-once (fail-closed on a different key).
+- **Honest-origin carve-outs re-confirmed:** freeze-hold rows are
+  still controller-origin (`source: controller`, `trigger: manual`,
+  `attested: False`); `evaluate_gate_stale_alerts` still reads the
+  collector-local gate snapshot, not box events; the relay
+  auto-driver's tick notes are driver-origin (`source:
+  relay-auto-driver`) and only append — no in-repo consumer violates
+  the `gate_consumable_events` T2 pin.
+- **Issue state re-checked via API:** #1516, #775, #1515, #1407,
+  #778, #776 and the three filed remainders (#1767 producer lane,
+  #1768 rotation ceremony, #1769 plane-side key source) are all
+  still open. The F-AI-1–F-AI-3 dispositions and sequencing
+  decisions D-AI-1–D-AI-3 stand unchanged; nothing else since
+  2026-10-19 altered the lane's vision-vs-state split.
+
+The drift was two sentences in §2 (one site named, one line pin) —
+both corrected in this pass. No behavioral claim needed retraction.
