@@ -63,6 +63,10 @@
 #     pipefail` a bad row or a broken journal must never kill the updater;
 #     the systemd journal carries the complaint for the operator).
 #     Callers never need `|| true`.
+#   - Symlink-plant refusal: a symlink at the journal path or its rotation
+#     tmp sibling is a loud refusal, not a write (mirrors the fleet-side
+#     O_NOFOLLOW discipline, #1841/#1846/#1860 — the shell cannot pass
+#     O_NOFOLLOW through a redirection, so the check is explicit).
 
 _event_journal_json_escape() {
     # Escape a string value for embedding in a JSON double-quoted string.
@@ -145,6 +149,24 @@ event_emit() {
     local journal="${EVENT_JOURNAL:-}"
     [ -n "$journal" ] || return 0
 
+    # Symlink-plant refusal (box-side shell legs): the fleet-side Python
+    # legs refuse symlink plants atomically with O_NOFOLLOW (#1841, #1846,
+    # #1860, #1870). A shell redirection cannot pass O_NOFOLLOW, so the
+    # sink checks explicitly before writing: a symlink at the journal path
+    # — or at its rotation tmp sibling — is a loud refusal, not a write.
+    # This matters because the toolset-update timer runs as root with its
+    # state dir under the operator's home: a planted update-events.jsonl /
+    # update-events.jsonl.tmp would otherwise hand a box-local
+    # lower-privilege writer a root file-append (>>) and a root
+    # file-truncation (tail > .tmp) primitive. Check-then-open is not
+    # atomic (same documented caveat class as the fleet legs'
+    # intermediate-component note); the rotation target is re-checked at
+    # the point of use, the dangerous leg.
+    if [ -L "$journal" ] || [ -L "$journal.tmp" ]; then
+        echo "[event-journal] REFUSED symlink plant — event NOT written: journal='$journal' (O_NOFOLLOW plant refusal)" >&2
+        return 0
+    fi
+
     local event_id ts box_id_json trigger
     event_id="$(_event_journal_uuid7 2>/dev/null)" || return 0
     ts="$(date -u +%FT%TZ 2>/dev/null)" || return 0
@@ -178,12 +200,6 @@ event_emit() {
     # enum-violation path, but never fail the run — return 0 so `set -e`
     # callers survive a broken journal.
     mkdir -p "$(dirname "$journal")" 2>/dev/null || true
-    # Configured-but-unwritable is LOUD (slice 5, #1649 — see the header
-    # Discipline note): the journal is named and on, but the event cannot
-    # be recorded. Fail loud to stderr (operator-visible) like the
-    # enum-violation path, but never fail the run — return 0 so `set -e`
-    # callers survive a broken journal.
-    mkdir -p "$(dirname "$journal")" 2>/dev/null || true
     # Keep the subshell grouping so a redirection failure reports only the
     # curated loud line below — not the shell's own bare
     # `event-journal.sh: line N: <path>: No such file or directory` note.
@@ -198,7 +214,14 @@ event_emit() {
     # touches it. Best-effort, like the rest of the sink.
     chmod 600 "$journal" 2>/dev/null || true
     # Bound the journal: keep the newest 10k lines once it passes 12k —
-    # the same discipline as audit().
+    # the same discipline as audit(). Re-check the rotation target at the
+    # point of use: `tail > .tmp` truncates whatever the path resolves
+    # to, so a plant that landed after the entry check must still refuse
+    # (the already-appended row stays; the next tick retries the bound).
+    if [ -L "$journal.tmp" ]; then
+        echo "[event-journal] REFUSED symlink plant at rotation target — journal left unrotated: tmp='$journal.tmp'" >&2
+        return 0
+    fi
     local n
     n="$(wc -l <"$journal" 2>/dev/null || echo 0)"
     if [ "$n" -gt 12000 ] 2>/dev/null; then

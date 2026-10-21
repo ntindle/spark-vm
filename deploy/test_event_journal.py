@@ -339,3 +339,64 @@ def test_wired_emit_lines_are_set_e_safe():
         assert "|| true" not in line, (
             "event_emit must be set-e-safe by contract, not by || true: " + line
         )
+
+
+def test_symlink_journal_plant_refused_loud(tmp_path):
+    # A symlink at the journal path must be refused, not followed: the
+    # sink runs as root in the toolset-update lane while the state dir
+    # is operator-writable, so following the plant would hand a box-local
+    # writer a root file-append primitive.
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL\n")
+    journal = tmp_path / "update-events.jsonl"
+    os.symlink(str(victim), str(journal))
+    r = run_bash(
+        "unset SPARKVM_BOX_ID; "
+        f"source {LIB}; event_emit auto-deploy repo deploy started",
+        env_extra={"EVENT_JOURNAL": str(journal)},
+    )
+    assert r.returncode == 0
+    assert "REFUSED" in r.stderr and "symlink" in r.stderr
+    assert victim.read_text() == "ORIGINAL\n"
+    assert os.path.islink(str(journal))  # plant left in place, loudly
+
+
+def test_symlink_tmp_plant_refused_loud(tmp_path):
+    # The rotation tmp sibling is the truncation leg (tail > .tmp): a
+    # plant there must refuse the whole emit, even below the 12k bound.
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL\n")
+    os.symlink(str(victim), str(tmp_path / "update-events.jsonl.tmp"))
+    journal = tmp_path / "update-events.jsonl"
+    r = run_bash(
+        "unset SPARKVM_BOX_ID; "
+        f"source {LIB}; event_emit auto-deploy repo deploy started",
+        env_extra={"EVENT_JOURNAL": str(journal)},
+    )
+    assert r.returncode == 0
+    assert "REFUSED" in r.stderr
+    assert victim.read_text() == "ORIGINAL\n"
+    assert not os.path.lexists(str(journal))
+
+
+def test_rotation_armed_still_refuses_tmp_plant(tmp_path):
+    # With the journal past the 12k-line bound the rotation would fire —
+    # the plant must still refuse before tail > .tmp ever runs.
+    journal = tmp_path / "update-events.jsonl"
+    with open(journal, "w") as f:
+        for _ in range(12001):
+            f.write('{"pad":1}\n')
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL\n")
+    os.symlink(str(victim), str(tmp_path / "update-events.jsonl.tmp"))
+    r = run_bash(
+        "unset SPARKVM_BOX_ID; "
+        f"source {LIB}; event_emit auto-deploy repo deploy started",
+        env_extra={"EVENT_JOURNAL": str(journal)},
+    )
+    assert r.returncode == 0
+    assert "REFUSED" in r.stderr
+    assert victim.read_text() == "ORIGINAL\n"
+    # The 12001 pre-existing lines are untouched (no append, no rotation).
+    with open(journal) as f:
+        assert sum(1 for _ in f) == 12001
