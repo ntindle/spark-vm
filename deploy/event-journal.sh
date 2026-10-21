@@ -54,9 +54,15 @@
 #     updater; the systemd journal carries the complaint for the operator.
 #   - Bounded journal: once past 12000 lines, keep the newest 10000 — the
 #     same discipline as audit().
-#   - Best-effort I/O: unwritable dirs, full disks, and every other
-#     environmental failure are silent no-ops (never fail the run), like
-#     audit(). Callers never need `|| true`.
+#   - Configured-but-unwritable is LOUD (slice 5, #1649): when EVENT_JOURNAL
+#     is set but the write fails, event_emit prints a loud [event-journal]
+#     line to stderr and writes nothing — so a broken journal never reads
+#     as a quiet box on the gate-consumed feed. Unconfigured (EVENT_JOURNAL
+#     unset/empty) stays a silent no-op: the sink is off, not broken.
+#   - Return contract: event_emit ALWAYS returns 0 (under `set -euo
+#     pipefail` a bad row or a broken journal must never kill the updater;
+#     the systemd journal carries the complaint for the operator).
+#     Callers never need `|| true`.
 
 _event_journal_json_escape() {
     # Escape a string value for embedding in a JSON double-quoted string.
@@ -166,10 +172,25 @@ event_emit() {
         "$outcome" \
         "${trigger:+,\"trigger\":$trigger}" \
         "$*")"
-    # Best-effort write: a redirection failure (unwritable state dir) is
-    # silent rather than noisy, and never fails the run.
+    # Configured-but-unwritable is LOUD (slice 5, #1649 — see the header
+    # Discipline note): the journal is named and on, but the event cannot
+    # be recorded. Fail loud to stderr (operator-visible) like the
+    # enum-violation path, but never fail the run — return 0 so `set -e`
+    # callers survive a broken journal.
     mkdir -p "$(dirname "$journal")" 2>/dev/null || true
-    ( printf '%s\n' "$row" >>"$journal" ) 2>/dev/null || return 0
+    # Configured-but-unwritable is LOUD (slice 5, #1649 — see the header
+    # Discipline note): the journal is named and on, but the event cannot
+    # be recorded. Fail loud to stderr (operator-visible) like the
+    # enum-violation path, but never fail the run — return 0 so `set -e`
+    # callers survive a broken journal.
+    mkdir -p "$(dirname "$journal")" 2>/dev/null || true
+    # Keep the subshell grouping so a redirection failure reports only the
+    # curated loud line below — not the shell's own bare
+    # `event-journal.sh: line N: <path>: No such file or directory` note.
+    if ! ( printf '%s\n' "$row" >>"$journal" ) 2>/dev/null; then
+        echo "[event-journal] JOURNAL UNWRITABLE — event NOT written: journal='$journal' (source=$source component=$component kind=$kind outcome=$outcome)" >&2
+        return 0
+    fi
     # The state dir must not be world-readable (the updater's contract);
     # enforce 0600 on every append (#1858), not only when the sink itself
     # created the file — a pre-existing loose-perm journal (operator error,

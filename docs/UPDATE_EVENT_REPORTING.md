@@ -389,8 +389,24 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   store's `journal_cutover.json`, so it fires once) — re-pages in
   that window are cutover, not a new incident. Steady state never
   double-journals.
-  Remaining slices: loud-on-configured-but-unwritable, fragment
-  warn-only validation, the §3 S1 rollback-failed row reconcile.
+  **Delivered (slice 5, #1649, 2026-10-21):** configured-but-unwritable
+  is now LOUD — `event_emit` prints a loud `[event-journal] JOURNAL
+  UNWRITABLE — event NOT written: journal='<path>' (...)` line to stderr
+  naming the journal path and the event's (source, component, kind,
+  outcome) whenever `EVENT_JOURNAL` is set but the append fails
+  (unwritable dir, full disk, path-is-a-directory), and writes nothing.
+  Like the enum-violation path it always returns 0 — a broken journal
+  never kills the updater under `set -e` — but a quiet box is now
+  distinguishable from a broken journal in the systemd/cron logs, which
+  is what the gate-consumed feed needs. Unconfigured (EVENT_JOURNAL
+  unset/empty) stays a silent no-op: the sink is off, not broken.
+  Honest scope: this loud line is box-local — the fleet *gate consumer*
+  still sees silence from a broken journal; the fleet-level "quiet box
+  vs broken journal" distinction is the planned #1861 collector-side
+  work. Operators do the distinguishing *for* the feed by reading their
+  box logs.
+  Remaining slices: fragment warn-only validation, the §3 S1
+  rollback-failed row reconcile.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
     failed/rolled-back gate);
