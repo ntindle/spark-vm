@@ -4322,3 +4322,62 @@ def test_journal_emits_deferred_arc_on_idle_gate_deferral(env):
         "toolset-update", "toolset-cua-driver", "check", "deferred-arc")
     assert row["note"] == "jobs active — update deferred (never-interrupt-an-arc)"
     assert row["trigger"] == "scheduled"  # the §2 default; --now was not passed
+
+
+# --- Symlink-plant refusal on the root-lane audit() ---------------------------
+# The toolset timer runs as root with its state dir under the operator's
+# home; a planted audit.log / audit.log.tmp symlink would otherwise hand a
+# box-local lower-privilege writer a root file-append (>>) and a root
+# file-truncation (tail > .tmp) primitive — the same class as the S2
+# journal sink's refusal (deploy/event-journal.sh).
+
+
+def _audit_env(tmp_path):
+    statedir = tmp_path / "state"
+    statedir.mkdir(parents=True, exist_ok=True)
+    return statedir, {"TOOLSET_STATE_DIR": str(statedir), "SKIP_SUDO": "1"}
+
+
+def test_audit_refuses_symlink_plant(tmp_path):
+    statedir, env = _audit_env(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL\n")
+    os.symlink(str(victim), str(statedir / "audit.log"))
+    r = source_and("audit test-event", env_extra=env)
+    assert r.returncode == 0
+    run_log = statedir / "toolset-update.log"
+    assert run_log.exists() and "REFUSED" in run_log.read_text()
+    assert victim.read_text() == "ORIGINAL\n"
+    assert os.path.islink(str(statedir / "audit.log"))
+
+
+def test_audit_refuses_tmp_symlink_plant(tmp_path):
+    statedir, env = _audit_env(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL\n")
+    os.symlink(str(victim), str(statedir / "audit.log.tmp"))
+    r = source_and("audit test-event", env_extra=env)
+    assert r.returncode == 0
+    run_log = statedir / "toolset-update.log"
+    assert run_log.exists() and "REFUSED" in run_log.read_text()
+    assert victim.read_text() == "ORIGINAL\n"
+    assert not os.path.lexists(str(statedir / "audit.log"))
+
+
+def test_audit_refusal_does_not_follow_run_log_plant(tmp_path):
+    # The refusal channel must not itself follow a plant: with BOTH
+    # audit.log and toolset-update.log symlinked to victims, the refusal
+    # falls back to stderr — no root append through either plant, and the
+    # operator still sees the complaint.
+    statedir, env = _audit_env(tmp_path)
+    victim_audit = tmp_path / "victim-audit.txt"
+    victim_audit.write_text("ORIGINAL\n")
+    victim_log = tmp_path / "victim-log.txt"
+    victim_log.write_text("ORIGINAL\n")
+    os.symlink(str(victim_audit), str(statedir / "audit.log"))
+    os.symlink(str(victim_log), str(statedir / "toolset-update.log"))
+    r = source_and("audit test-event", env_extra=env)
+    assert r.returncode == 0
+    assert "REFUSED" in r.stderr
+    assert victim_audit.read_text() == "ORIGINAL\n"
+    assert victim_log.read_text() == "ORIGINAL\n"

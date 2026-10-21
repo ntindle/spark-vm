@@ -380,16 +380,52 @@ _refuse() {
     return 1
 }
 
+_audit_refusal_loud() {
+    # $1 = refusal message. The refusal channel must not itself follow a
+    # plant: $STATE_RUN_LOG lives in the same owner-writable state dir,
+    # so a paired toolset-update.log plant would otherwise turn every
+    # refusal into a root file-append through the run log — and swallow
+    # the operator-visible complaint. Fall back to stderr when the run
+    # log is a symlink (STATE_RUN_LOG is always assigned at source time).
+    if [ -L "$STATE_RUN_LOG" ]; then
+        printf '%s %s\n' "$(date -u +%FT%TZ)" "audit: $1" >&2
+    else
+        log "audit: $1"
+    fi
+}
+
 audit() {
     # audit <event> <json-fields...>
     # Appends one JSON line: {"ts":..., "event":..., ...}. Best-effort: never
     # fails the run. Callers MUST expand variables before passing fields —
     # single-quoted '$x' would log literally.
     local event="$1"; shift
+    # Symlink-plant refusal (root lane): the toolset timer runs as root
+    # with its state dir under the operator's home, and install only
+    # chmods that dir 700 (the owner keeps write) — a planted audit.log /
+    # audit.log.tmp symlink would otherwise hand a box-local
+    # lower-privilege writer a root file-append (>>) and a root
+    # file-truncation (tail > .tmp) primitive. Loud refusal, nothing
+    # written — mirrors the fleet-side O_NOFOLLOW discipline
+    # (#1841/#1846/#1860) and the S2 journal sink's refusal; the shell
+    # cannot pass O_NOFOLLOW through a redirection, so the check is
+    # explicit (check-then-open caveat, same class as the fleet legs'
+    # intermediate-component note).
+    if [ -L "$STATE_AUDIT_LOG" ] || [ -L "$STATE_AUDIT_LOG.tmp" ]; then
+        _audit_refusal_loud "REFUSED symlink plant — event NOT written: $STATE_AUDIT_LOG (O_NOFOLLOW plant refusal)"
+        return 0
+    fi
     mkdir -p "$(dirname "$STATE_AUDIT_LOG")" 2>/dev/null || true
     local ts; ts="$(date -u +%FT%TZ)"
     ( printf '{"ts":"%s","event":"%s"%s}\n' "$ts" "$event" "$*" \
         >>"$STATE_AUDIT_LOG" ) 2>/dev/null || true
+    # Re-check the rotation target at the point of use: `tail > .tmp`
+    # truncates whatever the path resolves to (same rationale as the S2
+    # journal sink).
+    if [ -L "$STATE_AUDIT_LOG.tmp" ]; then
+        _audit_refusal_loud "REFUSED symlink plant at rotation target — log left unrotated: $STATE_AUDIT_LOG.tmp"
+        return 0
+    fi
     local n; n="$(wc -l <"$STATE_AUDIT_LOG" 2>/dev/null || echo 0)"
     if [ "$n" -gt 12000 ] 2>/dev/null; then
         tail -n 10000 "$STATE_AUDIT_LOG" >"$STATE_AUDIT_LOG.tmp" 2>/dev/null \
