@@ -237,14 +237,16 @@ def start_turn(host, session_id, prompt, *, command_id=None):
 
 
 def steer_turn(host, session_id, message, *, command_id=None,
-               expected_turn_id=None):
+               expected_turn_id):
     """Inject a follow-up message into the session's current turn.
 
     ``turn/steer`` is the tmux send-keys replacement: no Enter
     swallowing, no text/Enter dance, no paste verification. The message
-    travels verbatim (see _check_text). expected_turn_id is the turn the
-    caller polled as active -- the server rejects the steer when another
-    turn has taken over (the anti-cross-turn guard). Returns
+    travels verbatim (see _check_text). expected_turn_id is REQUIRED: it
+    is the turn the caller polled as active -- the server rejects the
+    steer when another turn has taken over (the anti-cross-turn guard).
+    A steer that cannot name the turn it targets is a caller bug, so the
+    parameter has no default. Returns
     (turn_dict, result_dict); raises as start_turn does.
     """
     _check_session_id(session_id)
@@ -339,6 +341,14 @@ def watch_turn_events(host, session_id, turn_id, timeout=30.0):
 
 class TurnStillbornError(MSPTurnError):
     """The first turn of a spawn died before the agent could engage.
+
+    SUPERSEDED IN PRODUCTION (issue #1129): the spawn path no longer
+    raises this -- the per-turn supervisor owns turn/start and runs its
+    own inline first-turn watch (the supervisor loop in bin/muse-job
+    classifies through _turn_terminal and persists through
+    _terminal_label). This exception remains as the unit-tested
+    engagement contract (muse-job/tests/test_msp_turn.py) but has no
+    production raiser.
 
     Raised (via await_first_turn_engagement) when the turn reaches a
     dead terminal -- cancelled, interrupted, failed, or an
@@ -435,6 +445,14 @@ def _turn_terminal(note, turn_id):
 def begin_first_turn_watch(host, session_id):
     """Subscribe to the turn prefix and buffer this session's turn notes.
 
+    SUPERSEDED IN PRODUCTION (issue #1129): the spawn path no longer
+    calls this -- the per-turn supervisor owns turn/start and runs its
+    own inline first-turn watch (the supervisor loop in bin/muse-job
+    classifies through _turn_terminal and persists through
+    _terminal_label). This function remains as the unit-tested
+    engagement contract (muse-job/tests/test_msp_turn.py) but has no
+    production callers.
+
     Call this BEFORE turn/start. The reader thread dispatches
     notifications only to currently-registered subscribers, so a
     terminal notification the server emits in the gap between
@@ -474,7 +492,10 @@ def begin_first_turn_watch(host, session_id):
 
 
 def close_first_turn_watch(watch):
-    """Release a first-turn watch without awaiting it (turn/start raised)."""
+    """Release a first-turn watch without awaiting it (turn/start raised).
+
+    SUPERSEDED IN PRODUCTION (issue #1129): see begin_first_turn_watch.
+    """
     try:
         unsub = watch["unsub"]
     except (TypeError, KeyError):
@@ -485,6 +506,14 @@ def close_first_turn_watch(watch):
 def await_first_turn_engagement(watch, turn_id, *,
                                 timeout=FIRST_TURN_ENGAGEMENT_TIMEOUT):
     """Watch the first turn of a spawn until it engages or dies.
+
+    SUPERSEDED IN PRODUCTION (issue #1129): the spawn path no longer
+    calls this -- the per-turn supervisor owns turn/start and runs its
+    own inline first-turn watch (the supervisor loop in bin/muse-job
+    classifies through _turn_terminal and persists through
+    _terminal_label). This function remains as the unit-tested
+    engagement contract (muse-job/tests/test_msp_turn.py) but has no
+    production callers.
 
     `watch` is a token from begin_first_turn_watch (already
     subscribed); `turn_id` comes from turn/start's result and is bound
