@@ -53,6 +53,7 @@ Key design rules, from the doc (call-site-auditable):
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -213,6 +214,10 @@ def _read_jsonl_file(path):
 # row with an unknown value fails closed with a loud note, like the S1
 # "no translation" path. The trigger vocabulary is the §2 one.
 _JOURNAL_NAME = "update-events.jsonl"
+# Per-box first-sight record for the S1→S2 read-switch cutover (see
+# _journal_cutover_note). Maps box_id -> observed_at of the first
+# collect that actually journaled rows from the box's S2 journal.
+JOURNAL_CUTOVER_NAME = "journal_cutover.json"
 _JOURNAL_SOURCES = {"auto-deploy", "toolset-update", "manual",
                     "controller", "gate-hook"}
 _JOURNAL_COMPONENTS = {"repo", "toolset-cua-driver", "image", "gate"}
@@ -227,13 +232,117 @@ _JOURNAL_TRIGGERS = {"scheduled", "manual", "freeze", "gate",
 # Known fleet-event members (docs/UPDATE_EVENT_REPORTING.md §2). The S2
 # journal rows carry these natively; producer fragments may add extra
 # top-level keys (e.g. the gate-hook's reason/repo_max) — extras ride
-# through verbatim (see canonicalize_journal_rows).
+# through verbatim (see canonicalize_journal_rows). `components` is the
+# toolset updater's non-§2 plural key, normalized to `subcomponents`
+# during canonicalization, so it is known (and never passed through as
+# a duplicate extra).
 _JOURNAL_KNOWN_FIELDS = {"event_id", "box_id", "session_epoch",
                          "emitted_at", "received_at", "source",
                          "component", "subcomponent", "subcomponents",
-                         "kind", "outcome", "from", "to", "from_version",
-                         "to_version", "phase", "window", "rollout",
-                         "trigger", "attested", "note", "attestation"}
+                         "components", "kind", "outcome", "from", "to",
+                         "from_version", "to_version", "phase", "window",
+                         "rollout", "trigger", "attested", "note",
+                         "attestation"}
+
+
+def _read_box_journal_nofollow(box_dir):
+    """Read a box's S2 journal with O_NOFOLLOW.
+
+    Security (slice 4, #1649): the estate dir is pulled from boxes and
+    the tenant holds root in the guest — a box-side attacker can ship
+    `update-events.jsonl` as a symlink (rsync -a preserves symlinks;
+    the target resolves operator-side), turning the collector into a
+    read primitive against operator-readable files whose rows flow
+    into alert evaluation. The O_NOFOLLOW refusal mirrors the
+    #1841/#1845 append legs and the #1846 read leg. O_NOFOLLOW covers
+    the final path component only — intermediate-component symlinks
+    are still followed (same caveat as the fleet journal legs).
+
+    Returns (rows, skipped, err, eloop): eloop is True when the path
+    was refused as a symlink plant — the caller falls back to the
+    legacy audit-tail translation so exactly one leg still emits
+    (fail-closed would hand the attacker a trivial
+    event-suppression switch).
+    """
+    path = os.path.join(box_dir, _JOURNAL_NAME)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None, 0, "missing", False
+    except OSError as exc:
+        return None, 0, "unreadable: %s" % exc, \
+            exc.errno == errno.ELOOP
+    # The fd must never leak: an OSError here (e.g. the path is a
+    # directory) becomes a loud "unreadable" note; anything else still
+    # raises after closing.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        return None, 0, "unreadable: %s" % exc, False
+    except BaseException:
+        os.close(fd)
+        raise
+    rows, skipped = [], 0
+    try:
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    skipped += 1
+    except OSError as exc:
+        return None, 0, "unreadable: %s" % exc, False
+    return rows, skipped, None, False
+
+
+def _journal_cutover_note(store_dir, box_id, observed_at, rows_read):
+    """Loud first-sight note for the S1→S2 read-switch cutover.
+
+    The cutover carries a bounded one-time duplicate wave: slices 1–3
+    dual-wrote audit()+event_emit() while the collector still
+    translated audit tails, so S2-era incidents already journaled as
+    deterministic UUIDv5 rows re-appear as native UUIDv7 rows on the
+    first journal-path collect that actually journals rows (dedup is
+    per (box_id, event_id), so the twins never dedup). The note names
+    the wave so re-pages in that window read as cutover, not as a new
+    incident. Returns the note on first sighting, None afterwards. A
+    corrupt or unwritable marker file warns (via the repeated note)
+    and re-establishes — it never bricks collection.
+    """
+    if rows_read <= 0:
+        return None
+    path = os.path.join(store_dir, JOURNAL_CUTOVER_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if box_id in data:
+        return None
+    data[box_id] = observed_at
+    try:
+        tmp = path + ".tmp.%d" % os.getpid()
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return ("read switch engaged for box %s: %d journal row(s) read; "
+            "S2-era rows may duplicate S1-translated events from the "
+            "dual-write window (bounded one-time wave — re-pages in "
+            "this window are cutover, not a new incident)"
+            % (_clean_text(box_id), rows_read))
 
 
 def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
@@ -280,7 +389,13 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
             keyring, box_id, row)
         if attest_note is not None:
             notes.append(attest_note)
-        event_id = _str_or_none(row.get("event_id"))
+        # Engineering (slice 4, #1649): event_id is box-emitted and
+        # lands verbatim in operator output (events.jsonl, alert
+        # dedup keys, crosscheck/API rows) — it gets the module's
+        # _clean_text scrub like every other box-emitted string (the
+        # #1738/#1764 class). Legit UUIDv7s are hex+dash, so the
+        # scrub is a no-op on honest rows.
+        event_id = _clean_text(_str_or_none(row.get("event_id")))
         if not event_id:
             notes.append("journal row without event_id; "
                          "kept out of the event journal")
@@ -329,16 +444,37 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
                          % (_clean_text(event_id),
                             _clean_text(trigger)))
             trigger = "scheduled"
+        # Engineering (slice 4, #1649): session_epoch is a future
+        # field (G15 S2 assigns it) — coerce int-or-None now per the
+        # #794 lesson rather than letting a type-confused value ride
+        # into the journal.
+        session_epoch = row.get("session_epoch")
+        if session_epoch is not None and not (
+                isinstance(session_epoch, int)
+                and not isinstance(session_epoch, bool)):
+            notes.append("journal row %s has non-integer session_epoch; "
+                         "dropping it" % _clean_text(event_id))
+            session_epoch = None
         rollout = row.get("rollout")
         if rollout is not None and not isinstance(rollout, dict):
             notes.append("journal row %s has non-object rollout; "
                          "dropping it" % _clean_text(event_id))
             rollout = None
+        subcomponents = _clean_text(_str_or_none(
+            row.get("subcomponents")))
+        if subcomponents is None:
+            # Engineering (slice 4, #1649): the toolset updater's slice-2
+            # wiring emits the non-§2 key `components` (mirroring its
+            # audit line) where auto-deploy emits §2 `subcomponents`.
+            # Normalize so §2 consumers see one key; the mapped value
+            # is preserved, not dropped.
+            subcomponents = _clean_text(_str_or_none(
+                row.get("components")))
         event = {
             "schema": EVENT_SCHEMA,
             "event_id": event_id,
             "box_id": box_id,
-            "session_epoch": row.get("session_epoch"),
+            "session_epoch": session_epoch,
             "emitted_at": _clean_text(_str_or_none(
                 row.get("emitted_at"))),
             "received_at": received_at,
@@ -346,8 +482,7 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
             "component": component,
             "subcomponent": _clean_text(
                 _str_or_none(row.get("subcomponent"))),
-            "subcomponents": _clean_text(
-                _str_or_none(row.get("subcomponents"))),
+            "subcomponents": subcomponents,
             "kind": kind,
             "outcome": outcome,
             "from": _clean_text(_str_or_none(row.get("from"))),
@@ -367,7 +502,9 @@ def canonicalize_journal_rows(rows, box_id, received_at, keyring=None):
         # reason/repo_max, future producer fields): they are
         # producer-emitted evidence, and the alert rules only read known
         # keys. Fleet-stamped members above always win over a row key
-        # with the same name.
+        # with the same name. Security note (slice 4, #1649): extras
+        # are type-unchecked — any future consumer MUST treat them as
+        # untrusted input, never as typed schema members.
         for key, value in row.items():
             if key not in _JOURNAL_KNOWN_FIELDS and key not in event:
                 event[key] = value
@@ -704,7 +841,8 @@ def canonicalize_audit_rows(rows, box_id, received_at, keyring=None):
     return events, local_noops, notes
 
 
-def collect_box_events(box_dir, box_id, received_at, keyring=None):
+def collect_box_events(box_dir, box_id, received_at, keyring=None,
+                       store_dir=None):
     """Read one box's event evidence and canonicalize it. Returns
     (events, local_noops, notes); never raises for bad artifacts.
 
@@ -720,12 +858,48 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None):
     translation (estate dirs pulled from boxes that predate the S2
     sink, or whose sink is disabled).
 
+    Cutover honesty: the S1→S2 flip carries a bounded one-time
+    duplicate wave (slices 1–3 dual-wrote while the collector still
+    translated audit tails — those incidents re-appear as UUIDv7 rows
+    on the first journal-path collect). When store_dir is given, the
+    first collect that actually journals rows for a box emits a loud
+    cutover note naming the wave; the marker persists in the store so
+    the note fires once.
+
     `keyring` maps box_id -> 32-byte ed25519 pubkey (attest.load_box_keys);
     None keeps the legacy all-unattested behavior.
     """
     journal_path = os.path.join(box_dir, _JOURNAL_NAME)
     if os.path.exists(journal_path):
-        rows, skipped, err = _read_jsonl_file(journal_path)
+        rows, skipped, err, eloop = _read_box_journal_nofollow(box_dir)
+        if eloop:
+            # Security (slice 4, #1649): the journal path was refused
+            # as a symlink plant — fall back to the legacy audit-tail
+            # translation so exactly one leg still emits. The redirect
+            # primitive dies at the O_NOFOLLOW refusal; fail-closed
+            # would hand the attacker a trivial event-suppression
+            # switch. (The legacy audit-tail leg's own plain-open
+            # exposure is pre-existing — filed separately, not changed
+            # in this slice.)
+            notes = ["update-events.jsonl refused as a symlink; "
+                     "falling back to audit-tail translation for the "
+                     "event leg"]
+            legacy_rows, legacy_skipped, legacy_err = _read_jsonl_file(
+                os.path.join(box_dir, "audit-tail.jsonl"))
+            if legacy_err:
+                return [], 0, notes + ["audit-tail.jsonl %s"
+                                       % legacy_err]
+            events, local_noops, legacy_notes = \
+                canonicalize_audit_rows(legacy_rows, box_id,
+                                        received_at, keyring=keyring)
+            notes.extend(legacy_notes)
+            if legacy_skipped:
+                notes.append("audit tail had %d malformed line(s) "
+                             "skipped" % legacy_skipped)
+            if local_noops:
+                notes.append("%d check-noop event(s) kept local (noise "
+                             "discipline)" % local_noops)
+            return events, local_noops, notes
         if err:
             return [], 0, ["update-events.jsonl %s" % err]
         events, local_noops, notes = canonicalize_journal_rows(
@@ -744,6 +918,11 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None):
             notes.append("update-events.jsonl present but yielded no "
                          "events; audit-tail translation skipped for the "
                          "event leg (the box is on the journal path)")
+        if store_dir is not None:
+            cutover = _journal_cutover_note(store_dir, box_id,
+                                            received_at, len(rows))
+            if cutover is not None:
+                notes.append(cutover)
         return events, local_noops, notes
     rows, skipped, err = _read_jsonl_file(
         os.path.join(box_dir, "audit-tail.jsonl"))

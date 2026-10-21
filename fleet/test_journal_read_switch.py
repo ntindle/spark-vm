@@ -444,6 +444,38 @@ def test_collect_directory_at_journal_path_is_loud_not_fatal():
         assert any("update-events.jsonl unreadable" in n for n in notes)
 
 
+def test_collect_journal_symlink_refused_falls_back_to_audit_tail():
+    # Security (slice 4, #1649): a symlinked journal path is refused
+    # via O_NOFOLLOW (ELOOP) — the planted target's rows never reach
+    # alert evaluation. The leg falls back to the legacy audit-tail
+    # translation so exactly one leg still emits (fail-closed would
+    # hand the attacker a trivial event-suppression switch).
+    with tempfile.TemporaryDirectory() as tmp:
+        box_dir = os.path.join(tmp, "box-7")
+        os.makedirs(box_dir)
+        planted = os.path.join(tmp, "planted.jsonl")
+        with open(planted, "w") as fh:
+            fh.write(json.dumps(journal_row(
+                event_id="0193b2c4-0000-7000-8000-0000000000aa",
+                outcome="rollback-failed")) + "\n")
+        os.symlink(planted, os.path.join(box_dir, "update-events.jsonl"))
+        write_audit_tail(box_dir, [{
+            "ts": "2026-10-21T07:44:00Z", "event": "deploy",
+            "result": "ok", "to": "d" * 40, "components": "cua-driver",
+        }])
+        evs, _, notes = events.collect_box_events(
+            box_dir, "box-7", RECEIVED_AT)
+        assert any("refused as a symlink" in n for n in notes)
+        assert any("falling back to audit-tail translation" in n
+                   for n in notes)
+        # The planted rollback-failed row never made it in; the audit
+        # tail's deploy/ok translated exactly once.
+        assert len(evs) == 1
+        assert evs[0]["outcome"] == "succeeded"
+        assert "0193b2c4-0000-7000-8000-0000000000aa" not in \
+            {e["event_id"] for e in evs}
+
+
 def test_append_events_dedups_duplicates_inside_one_batch():
     # Two rows with the same (box_id, event_id) inside ONE collect
     # append exactly one journal row — the paging rules must never
@@ -461,3 +493,110 @@ def test_append_events_dedups_duplicates_inside_one_batch():
         stored, err = events.load_events(store)
         assert err is None
         assert len(stored) == 1
+
+
+def test_journal_event_id_is_scrubbed():
+    # event_id is box-emitted and lands verbatim in operator output —
+    # the module's _clean_text scrub applies (the #1738/#1764 class):
+    # NUL, the ESC introducer byte, and the U+2028 line separator are
+    # stripped, leaving only inert printable residue ("[2J" without
+    # its introducer cannot drive a terminal).
+    hostile = ("0193b2c4-0000-7000-8000-0000000000f1"
+               "\x00\x1b[2J\u2028")
+    evs, _, _ = events.canonicalize_journal_rows(
+        [journal_row(event_id=hostile)], "box-7", RECEIVED_AT)
+    assert len(evs) == 1
+    assert evs[0]["event_id"] == \
+        "0193b2c4-0000-7000-8000-0000000000f1[2J"
+    assert "\x00" not in evs[0]["event_id"]
+    assert "\x1b" not in evs[0]["event_id"]
+    assert "\u2028" not in evs[0]["event_id"]
+    # A legit UUIDv7 survives the scrub byte-identical.
+    clean = "0193b2c4-0000-7000-8000-0000000000f2"
+    evs, _, _ = events.canonicalize_journal_rows(
+        [journal_row(event_id=clean)], "box-7", RECEIVED_AT)
+    assert evs[0]["event_id"] == clean
+
+
+def test_journal_session_epoch_coerced_int_or_none():
+    evs, _, notes = events.canonicalize_journal_rows(
+        [journal_row(session_epoch="tomorrow")], "box-7", RECEIVED_AT)
+    assert len(evs) == 1
+    assert evs[0]["session_epoch"] is None
+    assert any("non-integer session_epoch" in n for n in notes)
+    evs, _, notes = events.canonicalize_journal_rows(
+        [journal_row(session_epoch=42)], "box-7", RECEIVED_AT)
+    assert evs[0]["session_epoch"] == 42
+    assert notes == []
+
+
+def test_journal_components_normalized_to_subcomponents():
+    # The toolset updater's slice-2 wiring emits the non-§2 key
+    # `components` where auto-deploy emits §2 `subcomponents` — the
+    # adapter normalizes so §2 consumers see one key; the mapped value
+    # is preserved, not dropped, and never doubled as an extra.
+    evs, _, _ = events.canonicalize_journal_rows(
+        [journal_row(source="toolset-update",
+                     component="toolset-cua-driver",
+                     components="os-security cua-driver")],
+        "box-7", RECEIVED_AT)
+    assert len(evs) == 1
+    assert evs[0]["subcomponents"] == "os-security cua-driver"
+    assert "components" not in evs[0]
+    # An explicit §2 subcomponents wins over the legacy key.
+    evs, _, _ = events.canonicalize_journal_rows(
+        [journal_row(subcomponents="a b", components="c d")],
+        "box-7", RECEIVED_AT)
+    assert evs[0]["subcomponents"] == "a b"
+
+
+def test_journal_attestation_verified_before_shape_gates():
+    # The #1516 property on the new leg: a bad attestation is the loud
+    # forgery note EVEN when the row's shape is unknown (no event).
+    evs, _, notes = events.canonicalize_journal_rows(
+        [journal_row(kind="teleport", attestation="not-an-object")],
+        "box-7", RECEIVED_AT)
+    assert evs == []
+    assert any("attestation member is not an object" in n for n in notes)
+    assert any("unknown kind=teleport" in n for n in notes)
+
+
+def test_journal_fleet_stamps_win_over_row_keys():
+    # Fleet-stamped members always win over a row key with the same
+    # name — a hostile row cannot spoof schema, received_at, or box_id.
+    evs, _, _ = events.canonicalize_journal_rows(
+        [journal_row(schema="evil-schema", received_at="yesterday",
+                     box_id="box-7")],
+        "box-7", RECEIVED_AT)
+    assert len(evs) == 1
+    assert evs[0]["schema"] == "fleet-event/1"
+    assert evs[0]["received_at"] == RECEIVED_AT
+    assert evs[0]["box_id"] == "box-7"
+
+
+def test_cutover_note_fires_once_per_box():
+    # The S1→S2 cutover's bounded duplicate wave gets one loud note
+    # per box — the first collect that actually journals rows — then
+    # never again (marker persists in the store).
+    with tempfile.TemporaryDirectory() as tmp:
+        box_dir = os.path.join(tmp, "box-7")
+        store = os.path.join(tmp, "store")
+        os.makedirs(store)
+        write_journal(box_dir, [
+            journal_row(event_id="0193b2c4-0000-7000-8000-0000000000f3"),
+        ])
+        _, _, notes1 = events.collect_box_events(
+            box_dir, "box-7", RECEIVED_AT, store_dir=store)
+        assert any("read switch engaged for box box-7" in n
+                   for n in notes1)
+        assert any("dual-write window" in n for n in notes1)
+        marker = os.path.join(store, "journal_cutover.json")
+        assert json.load(open(marker))["box-7"] == RECEIVED_AT
+        _, _, notes2 = events.collect_box_events(
+            box_dir, "box-7", RECEIVED_AT, store_dir=store)
+        assert not any("read switch engaged" in n for n in notes2)
+        # Without a store_dir there is no marker and no note (unit
+        # callers don't track cutover).
+        _, _, notes3 = events.collect_box_events(
+            box_dir, "box-7", RECEIVED_AT)
+        assert not any("read switch engaged" in n for n in notes3)

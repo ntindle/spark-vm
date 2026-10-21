@@ -353,11 +353,27 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   source/component/kind/outcome or missing `event_id`, coerces
   free-form fields to str-or-None (the PR #794 type-confusion class),
   and verifies row attestations the same way the S1 path does.
+  The estate-side journal read opens with O_NOFOLLOW (mirroring the
+  #1841/#1845 append legs and the #1846 read leg): a symlinked journal
+  path is refused loudly, and the leg falls back to the legacy
+  audit-tail translation so exactly one leg still emits — fail-closed
+  would hand a box-side planter a trivial event-suppression switch.
   The append leg now also dedups duplicate event_ids inside a single
   collect batch (previously only the pre-existing journal was
   consulted), and a journal that exists but yields no events gets a
   loud note naming the skipped audit-tail translation — so "box
   emitted nothing" is distinguishable from "sink broke".
+  **Cutover honesty:** the S1→S2 flip carries a bounded one-time
+  duplicate wave. Slices 1–3 dual-wrote (`audit()` + `event_emit()`)
+  while the collector still translated audit tails, so S2-era
+  incidents already journaled as deterministic UUIDv5 rows re-appear
+  as native UUIDv7 rows on the first journal-path collect (dedup is
+  per `(box_id, event_id)`, so the twins never dedup). The first
+  collect that actually journals rows for a box emits a loud "read
+  switch engaged" note naming the wave (persisted per-box in the
+  store's `journal_cutover.json`, so it fires once) — re-pages in
+  that window are cutover, not a new incident. Steady state never
+  double-journals.
   Remaining slices: loud-on-configured-but-unwritable, fragment
   warn-only validation, the §3 S1 rollback-failed row reconcile.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):

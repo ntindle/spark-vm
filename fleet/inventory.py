@@ -1285,7 +1285,8 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     all_events = []
     for box_dir, box_id in box_contexts:
         box_events, _, ev_notes = events.collect_box_events(
-            box_dir, box_id, observed_at, keyring=keyring)
+            box_dir, box_id, observed_at, keyring=keyring,
+            store_dir=store_dir)
         all_events.extend(box_events)
         for note in ev_notes:
             print("fleet events note (%s): %s" % (box_id, note),
