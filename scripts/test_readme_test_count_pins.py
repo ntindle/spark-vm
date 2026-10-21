@@ -99,6 +99,11 @@ _CLAIMS = [
         r"`test_vend_rate_limit_async\.py` \((\d+) tests",
     ),
     (
+        "docs/VEND_LANE_CONVERGENCE_2026-10-21.md",
+        "hosted/test_vend_rate_limit_async.py",
+        r"`test_vend_rate_limit_async\.py` \((\d+) tests\)",
+    ),
+    (
         "harness/README.md",
         "harness/test_key_registry.py",
         r"`test_key_registry\.py` \((\d+) tests",
