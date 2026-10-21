@@ -18,7 +18,10 @@ This module is a deliberate sibling script, not an import of
 inventory.py: like every fleet module it is stdlib-only and is exercised
 through subprocess by the hermetic suite. The small parsing helpers
 (_parse_ts, _read_jsonl_file) mirror inventory.py's; see the module
-docstring there for the shared rationale.
+docstring there for the shared rationale. (The box-artifact file reads
+— audit-tail rows and the S2 journal — live here now with O_NOFOLLOW
+(#1860, #1649 slice 4); the legacy plain-open _read_jsonl_file is
+retired.)
 
 Per-box directory layout and the store layout follow inventory.py; this
 module adds:
@@ -181,29 +184,6 @@ def _parse_ts(value):
     return dt
 
 
-def _read_jsonl_file(path):
-    """Read a JSONL file; returns (rows, skipped, error). Mirrors
-    inventory.py's helper: malformed lines are counted in skipped,
-    never fatal to the rest of the file."""
-    rows = []
-    skipped = 0
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    skipped += 1
-    except FileNotFoundError:
-        return None, 0, "missing"
-    except OSError as exc:
-        return None, 0, "unreadable: %s" % exc
-    return rows, skipped, None
-
-
 # --- S2 box-side journal read switch (#1649) ----------------------------------
 # The S2 producers (deploy/event-journal.sh's event_emit, wired into the
 # repo updater, the toolset updater, and the gate hook by slices 1-3)
@@ -265,6 +245,66 @@ def _read_box_journal_nofollow(box_dir):
     event-suppression switch).
     """
     path = os.path.join(box_dir, _JOURNAL_NAME)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None, 0, "missing", False
+    except OSError as exc:
+        return None, 0, "unreadable: %s" % exc, \
+            exc.errno == errno.ELOOP
+    # The fd must never leak: an OSError here (e.g. the path is a
+    # directory) becomes a loud "unreadable" note; anything else still
+    # raises after closing.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        return None, 0, "unreadable: %s" % exc, False
+    except BaseException:
+        os.close(fd)
+        raise
+    rows, skipped = [], 0
+    try:
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    skipped += 1
+    except OSError as exc:
+        return None, 0, "unreadable: %s" % exc, False
+    return rows, skipped, None, False
+
+
+def read_audit_tail_nofollow(box_dir):
+    """Read a box's pulled audit tail with O_NOFOLLOW.
+
+    Security (#1860): the estate dir is pulled from boxes and the
+    tenant holds root in the guest — a box-side attacker can ship
+    `audit-tail.jsonl` as a symlink (rsync -a preserves symlinks; the
+    target resolves operator-side), turning the collector into a read
+    primitive against operator-readable files whose rows flow into
+    version-claim translation and the S1 event canonicalizer. This is
+    the O_NOFOLLOW-parity companion to the S2 journal leg
+    (`_read_box_journal_nofollow`, #1649 slice 4) and the #1841/#1845
+    append / #1846 read legs: a symlinked audit tail is refused with
+    ELOOP and the leg falls back to nothing — the audit tail is the
+    last producer on these legs, so there is nothing to fall back to
+    (fail-closed, loudly; the journal leg's degraded fallback exists
+    only because the audit tail existed as its fallback).
+    O_NOFOLLOW covers the final path component only — intermediate
+    symlinks are still followed (same caveat as the fleet journal
+    legs).
+
+    Returns (rows, skipped, err, eloop): eloop is True when the path
+    was refused as a symlink plant. Public because the
+    version-inventory leg (fleet/inventory.py) reads the same file
+    and applies the same discipline.
+    """
+    path = os.path.join(box_dir, "audit-tail.jsonl")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
@@ -878,15 +918,24 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None,
             # translation so exactly one leg still emits. The redirect
             # primitive dies at the O_NOFOLLOW refusal; fail-closed
             # would hand the attacker a trivial event-suppression
-            # switch. (The legacy audit-tail leg's own plain-open
-            # exposure is pre-existing — filed separately, not changed
-            # in this slice.)
+            # switch. (The legacy audit-tail leg's own plain-open exposure,
+            # filed as #1860, is hardened in the same change — the
+            # fallback below reads through read_audit_tail_nofollow.)
             notes = ["update-events.jsonl refused as a symlink; "
                      "falling back to audit-tail translation for the "
                      "event leg"]
-            legacy_rows, legacy_skipped, legacy_err = _read_jsonl_file(
-                os.path.join(box_dir, "audit-tail.jsonl"))
+            legacy_rows, legacy_skipped, legacy_err, legacy_eloop = \
+                read_audit_tail_nofollow(box_dir)
             if legacy_err:
+                if legacy_eloop:
+                    # The audit tail is symlinked too — a double plant.
+                    # There is no third producer, so the leg is
+                    # fail-closed and loud: the attacker gets neither
+                    # the read primitive nor event suppression cover.
+                    return [], 0, notes + [
+                        "audit-tail.jsonl refused as a symlink plant; "
+                        "the event leg is fail-closed for this box "
+                        "this round"]
                 return [], 0, notes + ["audit-tail.jsonl %s"
                                        % legacy_err]
             events, local_noops, legacy_notes = \
@@ -924,9 +973,16 @@ def collect_box_events(box_dir, box_id, received_at, keyring=None,
             if cutover is not None:
                 notes.append(cutover)
         return events, local_noops, notes
-    rows, skipped, err = _read_jsonl_file(
-        os.path.join(box_dir, "audit-tail.jsonl"))
+    rows, skipped, err, eloop = read_audit_tail_nofollow(box_dir)
     if err:
+        if eloop:
+            # Security (#1860): the audit tail is the only event
+            # producer on the legacy path — a symlink plant here is
+            # refused fail-closed and loudly; there is nothing to
+            # degrade to.
+            return [], 0, ["audit-tail.jsonl refused as a symlink "
+                           "plant; the event leg is fail-closed for "
+                           "this box this round"]
         return [], 0, ["audit-tail.jsonl %s" % err]
     events, local_noops, notes = canonicalize_audit_rows(rows, box_id,
                                                          received_at,
@@ -970,18 +1026,43 @@ def audit_tail_lines(box_dir):
     (the tail's head is line_hashes[-1]); never raises. A missing,
     unreadable, or empty tail yields ([], error-or-None) — the caller
     keeps the old watermark in that case (a missing tail is not proof
-    of loss; the artifact notes already cover it)."""
+    of loss; the artifact notes already cover it).
+
+    Security (#1860): the read opens with O_NOFOLLOW — a symlinked
+    tail is refused as a plant (the hashes of the planted target's
+    lines must never enter the continuity computation) and the caller
+    keeps the old watermark, which is the fail-safe choice here; the
+    loud operator signal for the plant rides the event/inventory
+    legs' notes."""
     path = os.path.join(box_dir, "audit-tail.jsonl")
     hashes = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return [], "missing"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return [], ("refused: audit-tail.jsonl is a symlink "
+                        "(O_NOFOLLOW plant refusal)")
+        return [], "unreadable: %s" % exc
+    # The fd must never leak: an OSError here (e.g. the path is a
+    # directory) becomes a loud "unreadable" note; anything else still
+    # raises after closing.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        return [], "unreadable: %s" % exc
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with fh:
             for line in fh:
                 stripped = line.strip()
                 if stripped:
                     hashes.append(
                         hashlib.sha256(stripped.encode("utf-8")).hexdigest())
-    except FileNotFoundError:
-        return [], "missing"
     except OSError as exc:
         return [], "unreadable: %s" % exc
     return hashes, None
@@ -1494,8 +1575,33 @@ def _append_alerts_nolock(store_dir, candidates):
     if not fresh:
         return [], None
     alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
+    # #1855: the alert-journal append leg opens with O_NOFOLLOW — a
+    # pre-planted symlink at the alerts path fails loud (ELOOP)
+    # instead of silently redirecting appends into an arbitrary file.
+    # Mirrors the #1841 event-journal append leg. O_NOFOLLOW covers the
+    # final path component only (same caveat as the fleet journal
+    # legs). Defense-in-depth: the dedup read above (_load_journal's
+    # #1846 O_NOFOLLOW) already refuses the plant before the open is
+    # reached; this closes the read->append swap race outside the
+    # pre-plant threat model. Pre-existing journal files keep whatever
+    # permissions the older plain-open path created them with (we never
+    # re-chmod operator-owned files — #1537); the O_NOFOLLOW refusal
+    # applies at every open, not just creation.
     try:
-        with open(alerts_path, "a", encoding="utf-8", buffering=1) as fh:
+        fd = os.open(alerts_path,
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                     | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        return None, "cannot append to alert journal: %s" % exc
+    # Mirrors the #1841 append leg's fdopen guard (same file): if
+    # fdopen itself raises, the fd must be closed, not leaked.
+    try:
+        fh = os.fdopen(fd, "a", encoding="utf-8", buffering=1)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with fh:
             for alert in fresh:
                 fh.write(json.dumps(alert, sort_keys=True) + "\n")
             fh.flush()

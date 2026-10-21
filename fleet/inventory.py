@@ -194,28 +194,6 @@ def _read_json_file(path):
         return None, "unreadable: %s" % exc
 
 
-def _read_jsonl_file(path):
-    """Read a JSONL file; returns (rows, skipped, error). Malformed lines
-    are counted in skipped, never fatal to the rest of the file."""
-    rows = []
-    skipped = 0
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    skipped += 1
-    except FileNotFoundError:
-        return None, 0, "missing"
-    except OSError as exc:
-        return None, 0, "unreadable: %s" % exc
-    return rows, skipped, None
-
-
 # A `to` commit is a usable *state claim* only when the event says the
 # box actually landed there. A failed deploy's `to` is an attempt, not a
 # state claim — treating it as one flags honest boxes suspect. The set is
@@ -307,10 +285,18 @@ def collect_box(box_dir, box_id, observed_at):
     status, status_err = _read_json_file(os.path.join(box_dir, "status.json"))
     if status_err:
         notes.append("status.json %s" % status_err)
-    audit_rows, audit_skipped, audit_err = _read_jsonl_file(
-        os.path.join(box_dir, "audit-tail.jsonl"))
+    audit_rows, audit_skipped, audit_err, audit_eloop = \
+        events.read_audit_tail_nofollow(box_dir)
     if audit_err:
-        notes.append("audit-tail.jsonl %s" % audit_err)
+        if audit_eloop:
+            # Security (#1860): the audit tail is the only producer of
+            # the tick-selection below — a symlink plant is refused
+            # fail-closed and loudly; there is no fallback producer.
+            notes.append("audit-tail.jsonl refused as a symlink plant; "
+                         "version fields from the audit tail are null "
+                         "this round")
+        else:
+            notes.append("audit-tail.jsonl %s" % audit_err)
     elif audit_skipped:
         # Corrupt audit lines are a trust-relevant input: surface the
         # count in the record instead of silently dropping it (the
