@@ -1143,3 +1143,66 @@ def test_clean_text_keeps_other_mn_marks():
     assert events._clean_text("caf\u0301") == "caf\u0301"  # combining acute
     assert events._clean_text("a\u034fb") == "a\u034fb"    # CGJ (Mn)
     assert events._clean_text("a\u180Bb") == "a\u180Bb"    # Mongolian FVS1
+
+
+# --- Journal-append symlink-plant refusal (#1841) --------------------------
+# append_events opens the journal with O_NOFOLLOW: a pre-planted symlink at
+# the journal path must fail LOUD (a returned error, nothing written to the
+# symlink's target) instead of silently redirecting appends. The pre-#1841
+# plain open() demonstrated a 1402-byte write-redirect with exit 0 and an
+# empty errors[] — this test pins the fix end to end.
+
+
+def _symlink_row(event_id):
+    return {"schema": "fleet-event/1", "event_id": event_id,
+            "box_id": "box-1", "session_epoch": None,
+            "emitted_at": ts(5), "received_at": ts(5),
+            "source": "test", "component": None,
+            "subcomponent": None, "subcomponents": None,
+            "kind": "test", "outcome": "succeeded",
+            "from": None, "to": None,
+            "from_version": None, "to_version": None,
+            "phase": None, "window": None, "rollout": None,
+            "trigger": "manual", "attested": False,
+            "note": "symlink-plant test row"}
+
+
+def test_append_events_refuses_symlink_plant(dirs):
+    # #1841: a symlink planted at <store>/events.jsonl must not redirect
+    # the append into the attacker's target. The append fails loud (error
+    # returned), the target gains no bytes, and the plant itself is not
+    # replaced by a real file.
+    events = _import_events_module()
+    estate, store = dirs
+    target = os.path.join(estate, "attacker-target.jsonl")
+    preexisting = "attacker pre-existing content\n"
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(preexisting)
+    journal_path = os.path.join(store, "events.jsonl")
+    os.makedirs(store, exist_ok=True)
+    os.symlink(target, journal_path)
+    appended, duplicates, err = events.append_events(
+        store, [_symlink_row("plant-1")])
+    assert err is not None
+    assert "cannot append to event journal" in err
+    assert (appended, duplicates) == (None, None)
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read() == preexisting
+    assert os.path.islink(journal_path)
+
+
+def test_append_events_normal_append_unaffected(dirs):
+    # The O_NOFOLLOW open changes nothing for the legitimate path:
+    # create-on-absent, append, and the (box_id, event_id) dedup all
+    # behave as before.
+    events = _import_events_module()
+    estate, store = dirs
+    appended, duplicates, err = events.append_events(
+        store, [_symlink_row("n-1")])
+    assert err is None
+    assert (appended, duplicates) == (1, 0)
+    appended, duplicates, err = events.append_events(
+        store, [_symlink_row("n-1")])
+    assert err is None
+    assert (appended, duplicates) == (0, 1)
+    assert len(journal(store, "events.jsonl")) == 1

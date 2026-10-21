@@ -338,10 +338,18 @@ def _append_freeze_hold_event(journal_path: str, event: dict) -> None:
     """Append one event line to the fleet journal. O_APPEND keeps one write
     as one journal line; the fd is fsync'd before close so a controller
     crash cannot lose an already-reported flip. 0600 applies at creation.
-    Raises OSError to the caller — the caller decides loud-vs-blocking."""
+    Raises OSError to the caller — the caller decides loud-vs-blocking.
+
+    #1841: opens with O_NOFOLLOW — a pre-planted symlink at the journal
+    path fails loud (ELOOP, caught by the caller as a WARNING) instead of
+    silently redirecting the freeze-hold event into an arbitrary file.
+    Mirrors the fleet/events.py append-leg hardening on the same
+    events.jsonl. O_NOFOLLOW covers the final path component only."""
     line = (json.dumps(event, sort_keys=True, ensure_ascii=False)
             + "\n").encode("utf-8")
-    fd = os.open(journal_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(journal_path,
+                 os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                 0o600)
     try:
         written = 0
         while written < len(line):

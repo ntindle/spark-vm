@@ -965,9 +965,33 @@ def append_events(store_dir, events):
             fresh = [e for e in events
                      if (e.get("box_id"), e.get("event_id")) not in seen]
             journal_path = os.path.join(store_dir, EVENTS_JOURNAL_NAME)
+            # #1841: the journal append leg opens with O_NOFOLLOW — a
+            # pre-planted symlink at the journal path fails loud (ELOOP)
+            # instead of silently redirecting appends into an arbitrary
+            # file. Mirrors the #1740/#1741 hardening on the lock and
+            # sidecar paths. O_NOFOLLOW covers the final path component
+            # only — intermediate-component symlinks are still followed
+            # (the store dir itself is created by _ensure_store_dir).
+            # Pre-existing journal files keep whatever permissions the
+            # older plain-open path created them with (we never re-chmod
+            # operator-owned files — #1537); the O_NOFOLLOW refusal
+            # applies at every open, not just creation.
             try:
-                with open(journal_path, "a", encoding="utf-8",
-                          buffering=1) as fh:
+                fd = os.open(journal_path,
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                             | os.O_NOFOLLOW, 0o600)
+            except OSError as exc:
+                return None, None, "cannot append to event journal: %s" \
+                    % exc
+            # Mirrors the #1755 journal_lock fdopen guard (same file): if
+            # fdopen itself raises, the fd must be closed, not leaked.
+            try:
+                fh = os.fdopen(fd, "a", encoding="utf-8", buffering=1)
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                with fh:
                     for event in fresh:
                         fh.write(json.dumps(event, sort_keys=True) + "\n")
                     fh.flush()

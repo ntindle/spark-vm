@@ -584,3 +584,51 @@ def test_release_rejects_non_lowercase_channel(store):
                  deployment_id="dpl_stable2")
     assert p.returncode == 0, p.stderr
     assert _json(p)["channel"] == "stable"
+
+
+# --- Journal-append symlink-plant refusal (#1841) ---------------------------
+# _append_journal writes plane_events.jsonl and costs.jsonl under the same
+# store lock as the fleet journal — it carries the same O_NOFOLLOW. A
+# pre-planted symlink must fail loud (exit 2 via _fail) instead of
+# silently redirecting records into an attacker-chosen file.
+
+
+def _import_plane_inventory():
+    fleet_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+    if fleet_dir not in sys.path:
+        sys.path.insert(0, fleet_dir)
+    import plane_inventory
+    return plane_inventory
+
+
+def test_plane_journal_refuses_symlink_plant(tmp_path):
+    # #1841: a symlink planted at the journal path must not redirect
+    # plane events into the attacker's target.
+    pi = _import_plane_inventory()
+    store = str(tmp_path / "store")
+    os.makedirs(store, exist_ok=True)
+    target = str(tmp_path / "attacker-target.jsonl")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("attacker pre-existing content\n")
+    journal_path = os.path.join(store, pi.PLANE_EVENTS_JOURNAL_NAME)
+    os.symlink(target, journal_path)
+    with pytest.raises(SystemExit) as excinfo:
+        pi._append_journal(store, pi.PLANE_EVENTS_JOURNAL_NAME,
+                           [{"plane_id": "p1"}])
+    assert excinfo.value.code == 2
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read() == "attacker pre-existing content\n"
+    assert os.path.islink(journal_path)
+
+
+def test_plane_journal_normal_append_unaffected(tmp_path):
+    # The O_NOFOLLOW open changes nothing for the legitimate path:
+    # create-on-absent append writes the record.
+    pi = _import_plane_inventory()
+    store = str(tmp_path / "store")
+    os.makedirs(store, exist_ok=True)
+    pi._append_journal(store, pi.PLANE_EVENTS_JOURNAL_NAME,
+                       [{"plane_id": "p1"}])
+    with open(os.path.join(store, pi.PLANE_EVENTS_JOURNAL_NAME),
+              encoding="utf-8") as fh:
+        assert json.loads(fh.read())["plane_id"] == "p1"

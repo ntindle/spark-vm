@@ -1659,3 +1659,46 @@ def test_ledger_lock_rejects_planted_symlink(tmp_path):
         raise AssertionError("planted symlink at the ledger lock path did "
                              "not fail loud (expected ELOOP)")
     assert target.read_text() == "not the lock"
+
+
+# --- Freeze-hold journal symlink-plant refusal (#1841) -----------------------
+# _append_freeze_hold_event writes the same events.jsonl the fleet
+# append-leg hardens, through its own open — it carries the same
+# O_NOFOLLOW. A pre-planted symlink must raise ELOOP (the caller already
+# catches OSError as a loud-but-non-blocking WARNING) instead of
+# silently redirecting the freeze-hold event.
+
+
+def _import_gate_publish():
+    fleet_dir = os.path.join(REPO, "fleet")
+    if fleet_dir not in sys.path:
+        sys.path.insert(0, fleet_dir)
+    import gate_publish
+    return gate_publish
+
+
+def test_freeze_hold_journal_refuses_symlink_plant(tmp_path):
+    # #1841: a symlink planted at the journal path must not redirect the
+    # freeze-hold event into the attacker's target.
+    gp = _import_gate_publish()
+    target = tmp_path / "attacker-target.jsonl"
+    target.write_text("attacker pre-existing content\n", encoding="utf-8")
+    journal_path = tmp_path / "events.jsonl"
+    os.symlink(target, journal_path)
+    with pytest.raises(OSError) as excinfo:
+        gp._append_freeze_hold_event(str(journal_path),
+                                     {"kind": "freeze-hold"})
+    assert excinfo.value.errno == errno.ELOOP
+    assert target.read_text(encoding="utf-8") == \
+        "attacker pre-existing content\n"
+    assert os.path.islink(journal_path)
+
+
+def test_freeze_hold_journal_normal_append_unaffected(tmp_path):
+    # The O_NOFOLLOW open changes nothing for the legitimate path:
+    # create-on-absent and one-write-one-line append behave as before.
+    gp = _import_gate_publish()
+    journal_path = str(tmp_path / "events.jsonl")
+    gp._append_freeze_hold_event(journal_path, {"kind": "freeze-hold"})
+    with open(journal_path, encoding="utf-8") as fh:
+        assert json.loads(fh.read())["kind"] == "freeze-hold"
