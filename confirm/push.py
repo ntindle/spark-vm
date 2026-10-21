@@ -1320,14 +1320,20 @@ class PushQueue:
         record["attempts"] = attempts
         with _locked(self.dead_path):
             # #1869: the duplicate scan reads through the shared
-            # O_NOFOLLOW primitive — a planted symlink refuses loud and
-            # the entry stays queued (fail-closed) instead of the scan
-            # following the plant.
+            # O_NOFOLLOW primitive — a planted symlink must refuse
+            # loud, never be followed. On refusal RAISE (do not
+            # return): the caller (run_once) treats a raise as a
+            # journal-write failure and keeps the entry inflight; a
+            # bare return would let the caller remove the entry with
+            # no dead-letter record written (fail-open loss — Security
+            # round-1 Blocker 1).
             fh, err = _open_nofollow_read(self.dead_path)
             if fh is None:
                 if _is_symlink_refusal(err):
                     log.error("push-queue: %s", err)
-                    return
+                    raise OSError(errno.ELOOP,
+                                  "refusing to dead-letter through a "
+                                  "symlink plant: %s" % self.dead_path)
             else:
                 with fh:
                     for line in fh:

@@ -770,18 +770,40 @@ class TestSymlinkPlants(unittest.TestCase):
         # The real journal is untouched.
         self.assertEqual(len(read_entries(self.q.queue_path)), 1)
 
-    def test_dead_letter_scan_plant_refuses_fail_closed(self):
-        # A planted dead-letter symlink: the duplicate scan refuses
-        # loud and the entry stays queued (fail-closed) — the scan
-        # never follows the plant.
+    def test_dead_letter_scan_plant_raises_fail_closed(self):
+        # Security round-1 Blocker 1: a planted dead-letter symlink
+        # must RAISE (OSError, loud) out of _dead_letter, not return —
+        # a bare return would let run_once remove the entry with no
+        # dead-letter record written (fail-open loss). The raise lets
+        # run_once's journal-write-failure handler keep the entry
+        # inflight (see the integration test below).
         self.q.enqueue({"id": "a1", "summary": "hello"})
         self._plant(self.q.dead_path)
         entry = {"aid": "a1", "summary": "hello", "attempts": 8,
                  "next_at": 0, "state": "inflight"}
         with self.assertLogs("sparkvm.push", level="ERROR") as cm:
-            self.q._dead_letter(entry, 8, "max-attempts")
+            with self.assertRaises(OSError):
+                self.q._dead_letter(entry, 8, "max-attempts")
         self._assert_plant_refused_loud(cm)
         self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_dead_letter_plant_keeps_entry_queued_in_run_once(self):
+        # Integration: with a planted dead_path, a max-attempts entry
+        # is neither dead-lettered nor dropped — run_once reports the
+        # journal-write failure (errors, not dead) and the entry stays
+        # journaled for a later pass.
+        q, sender = make_queue(self._td.name, script={"a1": "retry"})
+        self.assertEqual(q.enqueue({"id": "a1", "summary": "x"}), "queued")
+        with push._locked(q.queue_path):
+            entries = q._read_all()
+            entries[0]["attempts"] = push.QUEUE_MAX_ATTEMPTS - 1
+            entries[0]["next_at"] = 0
+            q._rewrite(entries)
+        self._plant(q.dead_path)
+        stats = q.run_once(sender)
+        self.assertEqual(stats["dead"], 0)
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(len(read_entries(q.queue_path)), 1)
 
     def test_requeue_dead_scan_plant_refuses(self):
         # A planted dead-letter symlink: _requeue fails loud ("error")
