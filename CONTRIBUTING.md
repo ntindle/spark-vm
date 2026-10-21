@@ -339,6 +339,66 @@ sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest \
   -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
 ```
 
+### When the test-count pin fires
+
+The docs-guard's test-count pin (`scripts/test_readme_test_count_pins.py`)
+is the one that trips people: READMEs and docs state how many tests a test
+file holds ("`test_foo.py` (N tests)"), and the count rots the moment the
+suite changes — or is wrong the day it's written. Three tests enforce it:
+
+- `test_readme_test_count_claims_match` — every claim registered in the
+  file's `_CLAIMS` registry matches its test file's actual count.
+- `test_all_test_count_claims_are_registered` — the anti-drift scanner: any
+  `test_*.py (N tests)`-shaped claim in any `*.md` (a test-file mention with
+  a `(N tests)`-shaped count in the ~100 characters immediately following
+  the mention) must have a `_CLAIMS` entry, or CI fails. A new claim can
+  never land unregistered the way `scripts/test_waitlist_jobs.py`'s did.
+- `test_confirm_readme_directory_counts_match` — the `confirm/README.md`
+  pair is a *directory* total, env-conditional (without vs with the optional
+  `cryptography` package): its own pin, not a `_CLAIMS` entry.
+
+When it fires, the failure message names the doc and the test file, and the
+fix depends on which test tripped:
+
+1. **Stale count** (`stale test-count claims`): you changed a suite. Update
+   the stated count in the doc in the same PR. (The confirm/README pair's
+   pin uses the prefix `stale confirm/ test-count claims` — same fix: update
+   the doc. Its message names which of its two tripwires fired —
+   parametrization landing in the directory, or the gated-file assumption
+   breaking — so follow what the message says.)
+2. **Unregistered claim** (`unregistered test-count claims`): your doc
+   states a suite size nobody registered. Add one `_CLAIMS` entry in the
+   same PR — a tuple of `(doc path, test file path, anchor regex)`, all
+   paths repo-root-relative, where the anchor regex carries exactly one
+   capture group for the stated count and must match **exactly once** in
+   the doc (a second mention would shadow the pin). Copy the shape of the
+   nearest existing entry, e.g.:
+
+   ```python
+   (
+       "docs/YOUR_DOC.md",
+       "hosted/test_foo.py",
+       r"`test_foo\.py` \((\d+) tests\)",
+   ),
+   ```
+
+The counting convention: the number of `test_*` functions pytest would
+collect — module level plus class methods, counted by AST, not regex. A
+parametrized test counts once (parametrization doesn't move the number); a
+`test_*` def nested inside a function body doesn't count, because pytest
+never collects it.
+
+Run it directly — CI bundles it with the other doc-claim pins in one
+pytest invocation, but the command below is behaviorally equivalent:
+
+```bash
+python3 -m pytest scripts/test_readme_test_count_pins.py -q
+```
+
+It also runs on docs-only PRs (the docs-guard job has no changed-paths
+carve-out), so a docs PR that states a suite size is pinned exactly like a
+code PR — register it before you push, not after CI tells you.
+
 ## Secrets: the one hard rule
 
 **Never commit real secrets, tokens, credentials, or private keys.**
