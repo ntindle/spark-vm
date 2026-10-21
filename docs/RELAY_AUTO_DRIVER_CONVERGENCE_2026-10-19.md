@@ -92,3 +92,32 @@ turned up that the slice map did not.
   against the merged heads; the one exception is F-AC-8's docstring
   claim, handled above).
 - Touch the timer: it ships disabled, and stays disabled until #1724.
+
+## 5. D-AC-11 — the D-AC-7 "corrupt" scope pin (2026-10-21, #1843)
+
+The D-AC-7 fail-visible contract as shipped by PR #1840 only named
+the unparseable case. **Decision:** the corrupt class extends to
+valid JSON whose per-tenant values are not record dicts
+(`{"tnt-a": "garbage"}`) — the same whole-sidecar restart-from-empty +
+LOUD note as the unparseable path, per the D-AC-4 fail-visible
+discipline. Rationale: a garbage value cannot feed the S4 staleness
+rule (#1724) or ride the bulk merge as ground truth; garbage for
+unprobed tenants persisted silently (the hole #1843 filed — practical
+impact was low because probed tenants' records overwrite, but the
+contract had a shape hole). Whole-sidecar restart was chosen over
+surgical per-value quarantine: quarantine cannot be fail-visible —
+dropping only garbage values either silently discards the bad tenant's
+history (a D-AC-4 violation) or needs a per-tenant LOUD mechanism that
+does not exist in the note model; the sidecar is a single JSON
+document with no per-tenant integrity boundary, so "corrupt" is a
+document-level property, and D-AC-7 already accepted exactly this cost
+for the unparseable case. The check is deliberately "is every value
+a dict", not a field whitelist: records gain fields over time and
+the read must not reject a newer writer's record-field extensions.
+The stated invariant is narrower than "any future shape": all sidecar
+values are per-tenant records, so a future top-level metadata key
+(e.g. a `"_schema"` value) WILL trip the corrupt path — that is the
+intended fail-visible behavior, not a false positive. Pin lands in
+`read_sidecar_marks` + one new test
+(`test_corrupt_watermark_sidecar_garbage_values_restarts_empty`,
+neuter-verified). Closes #1843.

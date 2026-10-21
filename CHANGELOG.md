@@ -246,6 +246,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Relay-liveness watermark sidecar: valid JSON holding non-dict
+  per-tenant values (`{"tnt-a": "garbage"}`) is now treated as corrupt —
+  the sidecar restarts from empty with the D-AC-7 LOUD note, instead of
+  silently keeping garbage values for tenants not in the sweep
+  (D-AC-11 scope pin; closes #1843). (#TBD)
 - The Unreleased block of this changelog no longer carries duplicate
   section headings (`### Added` x3, `### Fixed` x3, `### Security` x3): each
   is folded into one (newest-first), the block's sections now follow

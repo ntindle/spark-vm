@@ -409,6 +409,39 @@ def test_corrupt_watermark_sidecar_restarts_empty(tmp_path):
     assert "corrupt" in rows[0]["note"]
 
 
+def test_corrupt_watermark_sidecar_garbage_values_restarts_empty(tmp_path):
+    # #1843 / D-AC-11: valid JSON with garbage per-tenant values is the
+    # same corruption class as unparseable content — the sidecar
+    # restarts from empty, fail-visible. The second garbage tenant
+    # ("tnt-b", not in this sweep) pins the shape hole #1843 found: on
+    # pristine code, garbage values rode the merge silently and stale
+    # entries for unprobed tenants persisted.
+    store = _wired_store(tmp_path, {"tnt-a": [_arc("box-a")]})
+    wm = str(tmp_path / "wm.json")
+    with open(wm, "w", encoding="utf-8") as fh:
+        fh.write('{"tnt-a": "garbage", "tnt-b": ["x"]}')
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    summary = driver.tick_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        read_fn=lambda vm_id: _ok(), now=NOW,
+        latest_probe_fn=_fresh_probe,
+    )
+    rec = summary["tenants"]["tnt-a"]
+    assert any(
+        n.startswith("LOUD:") and "corrupt" in n for n in rec["notes"]
+    ), rec["notes"]
+    with open(wm, encoding="utf-8") as fh:
+        marks = json.load(fh)
+    # Garbage tenants are gone: the whole sidecar restarted, not just
+    # the probed tenant's entry.
+    assert set(marks) == {"tnt-a"}
+    assert marks["tnt-a"]["tenant_id"] == "tnt-a"
+    assert any(
+        n.startswith("LOUD:") and "corrupt" in n for n in marks["tnt-a"]["notes"]
+    ), marks["tnt-a"]["notes"]
+
+
 def test_missing_watermark_sidecar_first_run_is_silent(tmp_path):
     # The normal first run has no sidecar yet: no history exists to lose,
     # so no LOUD corruption note is emitted — only genuinely corrupt
