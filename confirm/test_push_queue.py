@@ -686,3 +686,137 @@ class TestPlaneHandoff(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSymlinkPlants(unittest.TestCase):
+    """#1869: the queue journal / dead-letter read/write legs refuse
+    symlink plants loud (O_NOFOLLOW) — parity with the #1755
+    lock-sidecar hardening in the same file. Each test plants a symlink
+    and asserts the plant is refused loudly and never followed."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.dir = Path(self._td.name)
+        self.q, self.sender = make_queue(self._td.name)
+        # Hermetic env (same as TestEnqueue): never consult the real
+        # pairing dir, caller env, or the #1268 signal file.
+        pair_dir = os.path.join(self._td.name, "pair")
+        os.makedirs(pair_dir, exist_ok=True)
+        self._env = mock.patch.dict(os.environ, {
+            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir,
+            "SPARKVM_PLANE_PUSH_FILE": os.path.join(self._td.name,
+                                                    "no-signal")},
+            clear=False)
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._td.cleanup()
+
+    def _plant(self, link_path, target_text="planted-target-content"):
+        target = self.dir / ("target-" + Path(link_path).name)
+        target.write_text(target_text)
+        os.symlink(str(target), link_path)
+        return target
+
+    def _assert_plant_refused_loud(self, cm):
+        self.assertTrue(
+            any("plant refusal" in m for m in cm.output),
+            "expected a loud 'plant refusal' log line, got: %r" % cm.output)
+
+    def test_journal_read_plant_refuses_fail_closed(self):
+        # A planted journal symlink: the claim/read legs see no entries
+        # (fail-closed) and refuse loud — never attacker rows.
+        target = self._plant(self.q.queue_path,
+                             '{"aid": "evil", "state": "pending", '
+                             '"next_at": 0}\n')
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(self.q._read_all(), [])
+        self._assert_plant_refused_loud(cm)
+        self.assertTrue(target.read_text().startswith('{"aid": "evil"'))
+        # And a worker pass does nothing loud-but-quietly: no claims,
+        # no sends, the loud line is the only signal.
+        with self.assertLogs("sparkvm.push", level="ERROR"):
+            stats = self.q.run_once(self.sender)
+        self.assertEqual(stats["processed"], 0)
+        self.assertEqual(self.sender.calls, [])
+
+    def test_enqueue_append_plant_refuses(self):
+        # A planted journal symlink: the append open raises ELOOP, so
+        # enqueue fails loud ("error") instead of appending into the
+        # attacker's file.
+        target = self._plant(self.q.queue_path)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(
+                self.q.enqueue({"id": "a1", "summary": "hello"}), "error")
+        self._assert_plant_refused_loud(cm)
+        self.assertEqual(target.read_text(), "planted-target-content")
+
+    def test_enqueue_still_works_on_real_journal(self):
+        # Non-vacuity: a real journal still enqueues.
+        self.assertEqual(
+            self.q.enqueue({"id": "a1", "summary": "hello"}), "queued")
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_rewrite_tmp_plant_refuses(self):
+        # A pre-planted symlink at <journal>.tmp: the atomic rewrite
+        # raises loud instead of redirecting the write.
+        self.q.enqueue({"id": "a1", "summary": "hello"})
+        target = self._plant(self.q.queue_path + ".tmp")
+        with self.assertRaises(OSError):
+            self.q._rewrite([])
+        self.assertEqual(target.read_text(), "planted-target-content")
+        # The real journal is untouched.
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_dead_letter_scan_plant_raises_fail_closed(self):
+        # Security round-1 Blocker 1: a planted dead-letter symlink
+        # must RAISE (OSError, loud) out of _dead_letter, not return —
+        # a bare return would let run_once remove the entry with no
+        # dead-letter record written (fail-open loss). The raise lets
+        # run_once's journal-write-failure handler keep the entry
+        # inflight (see the integration test below).
+        self.q.enqueue({"id": "a1", "summary": "hello"})
+        self._plant(self.q.dead_path)
+        entry = {"aid": "a1", "summary": "hello", "attempts": 8,
+                 "next_at": 0, "state": "inflight"}
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            with self.assertRaises(OSError):
+                self.q._dead_letter(entry, 8, "max-attempts")
+        self._assert_plant_refused_loud(cm)
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_dead_letter_plant_keeps_entry_queued_in_run_once(self):
+        # Integration: with a planted dead_path, a max-attempts entry
+        # is neither dead-lettered nor dropped — run_once reports the
+        # journal-write failure (errors, not dead) and the entry stays
+        # journaled for a later pass.
+        q, sender = make_queue(self._td.name, script={"a1": "retry"})
+        self.assertEqual(q.enqueue({"id": "a1", "summary": "x"}), "queued")
+        with push._locked(q.queue_path):
+            entries = q._read_all()
+            entries[0]["attempts"] = push.QUEUE_MAX_ATTEMPTS - 1
+            entries[0]["next_at"] = 0
+            q._rewrite(entries)
+        self._plant(q.dead_path)
+        stats = q.run_once(sender)
+        self.assertEqual(stats["dead"], 0)
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(len(read_entries(q.queue_path)), 1)
+
+    def test_requeue_dead_scan_plant_refuses(self):
+        # A planted dead-letter symlink: _requeue fails loud ("error")
+        # instead of reading the attacker's file.
+        self._plant(self.q.dead_path)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(self.q._requeue("a1"), "error")
+        self._assert_plant_refused_loud(cm)
+
+    def test_requeue_dead_unreadable_returns_error(self):
+        # A non-refusal read failure (directory at the dead path) is
+        # loud and fails closed, like the old OSError-raising contract.
+        os.makedirs(self.q.dead_path)
+        with self.assertLogs("sparkvm.push", level="ERROR") as cm:
+            self.assertEqual(self.q._requeue("a1"), "error")
+        self.assertTrue(any("unreadable" in m for m in cm.output))

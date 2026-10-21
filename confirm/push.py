@@ -236,8 +236,12 @@ def _atomic_write_json(path: str, obj) -> None:
     # Engineering review: create the tmp file 0600 from the start — the
     # old write-then-chmod left a world-readable window for endpoint
     # URLs (capability-ish tokens).
+    # #1869: O_NOFOLLOW — a pre-planted symlink at the tmp path must
+    # refuse loud (ELOOP) instead of letting the atomic write follow it
+    # into an attacker-chosen file.
     tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2)
@@ -282,6 +286,56 @@ def _locked(path: str):
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
+# --------------------------------------------------------------------------
+# O_NOFOLLOW read primitive (GitHub #1869; mirrors
+# fleet/events.py::open_nofollow_read from #1846/#1863).
+#
+# The lock sidecar, the golden-image signal and the enrollment
+# auto-detect all open with O_NOFOLLOW — but the data read legs below
+# plain-opened and followed symlinks. Every read leg goes through this
+# one helper now: a planted symlink refuses loud (ELOOP) instead of
+# silently diverting the read.
+# --------------------------------------------------------------------------
+
+def _open_nofollow_read(path):
+    """Open a file for reading with O_NOFOLLOW.
+
+    Returns (fh, err): fh is a UTF-8 text file on success; err is None
+    on success, "missing" for an absent path, "refused: <path> is a
+    symlink (O_NOFOLLOW plant refusal)" for ELOOP, or "unreadable: ..."
+    otherwise. The fd is never leaked: an OSError at open or fdopen
+    becomes err; anything else still raises after closing.
+    O_NOFOLLOW covers the final path component only — intermediate
+    symlinks are still followed (same caveat as the fleet journal legs).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, ("refused: %s is a symlink (O_NOFOLLOW "
+                          "plant refusal)" % path)
+        return None, "unreadable: %s" % exc
+    # The fd must never leak: an OSError here (e.g. the path is a
+    # directory — os.fdopen raises IsADirectoryError, an OSError
+    # subclass) becomes a loud "unreadable" note; anything else still
+    # raises after closing.
+    try:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        return None, "unreadable: %s" % exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fh, None
+
+
+def _is_symlink_refusal(err):
+    return isinstance(err, str) and err.startswith("refused: ")
+
+
 class SubscriptionStore:
     """push-subscriptions.json: [{endpoint, keys:{p256dh,auth}, created}]."""
 
@@ -289,13 +343,21 @@ class SubscriptionStore:
         self.path = path
 
     def _load(self):
+        # #1869: O_NOFOLLOW via the shared read primitive — a planted
+        # symlink refuses loud instead of diverting the read. "missing"
+        # and "unreadable" keep the old contract ([]); refusal logs.
+        fh, err = _open_nofollow_read(self.path)
+        if fh is None:
+            if _is_symlink_refusal(err):
+                log.error("push: %s", err)
+            return []
         try:
-            with open(self.path, encoding="utf-8") as f:
-                doc = json.load(f)
+            with fh:
+                doc = json.load(fh)
             subs = doc.get("subscriptions")
             if isinstance(subs, list):
                 return [s for s in subs if isinstance(s, dict)]
-        except (OSError, ValueError):
+        except ValueError:
             pass
         return []
 
@@ -350,13 +412,21 @@ class NotifiedLog:
         self.path = path
 
     def _load(self):
+        # #1869: O_NOFOLLOW via the shared read primitive — a planted
+        # symlink refuses loud instead of diverting the read. "missing"
+        # and "unreadable" keep the old contract ({}); refusal logs.
+        fh, err = _open_nofollow_read(self.path)
+        if fh is None:
+            if _is_symlink_refusal(err):
+                log.error("push: %s", err)
+            return {}
         try:
-            with open(self.path, encoding="utf-8") as f:
-                doc = json.load(f)
+            with fh:
+                doc = json.load(fh)
             noted = doc.get("notified")
             if isinstance(noted, dict):
                 return noted
-        except (OSError, ValueError):
+        except ValueError:
             pass
         return {}
 
@@ -427,8 +497,17 @@ class PushSender:
             log.warning("push: disabled (%s)", self.disabled_reason)
             return
         try:
-            with open(self.keys_path, encoding="utf-8") as f:
-                doc = json.load(f)
+            # #1869: the keypair file holds the signing identity — route
+            # it through the O_NOFOLLOW read primitive so a planted
+            # symlink refuses loud instead of substituting keys (or
+            # disabling push via a garbage target). Any refusal or
+            # unreadable file fails closed into disabled_reason below,
+            # the component's established posture for key problems.
+            fh, kerr = _open_nofollow_read(self.keys_path)
+            if fh is None:
+                raise OSError("%s: %s" % (self.keys_path, kerr))
+            with fh:
+                doc = json.load(fh)
             priv = b64url_decode(doc["private"])
             pub = b64url_decode(doc["public"])
             if len(priv) != 32 or len(pub) != 65 or pub[0] != 0x04:
@@ -937,8 +1016,12 @@ class PushQueue:
                 entry = {"aid": aid, "summary": summary,
                          "enqueued_at": now, "attempts": 0,
                          "next_at": now, "state": "pending"}
+                # #1869: O_NOFOLLOW — a planted symlink at the journal
+                # path refuses loud (ELOOP -> "error" below) instead of
+                # appending into an attacker-chosen file.
                 fd = os.open(self.queue_path,
-                             os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                             | os.O_NOFOLLOW, 0o600)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
                         f.write(json.dumps(entry, separators=(",", ":"))
@@ -976,33 +1059,42 @@ class PushQueue:
 
     def _read_all(self):
         """All journal entries in file order; corrupt lines are logged
-        and skipped, never fatal."""
+        and skipped, never fatal. #1869: reads through the shared
+        O_NOFOLLOW primitive — a symlink plant refuses loud and yields
+        no entries (fail-closed) instead of being followed."""
         entries = []
-        try:
-            with open(self.queue_path, encoding="utf-8") as f:
-                for lineno, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        log.error("push-queue: skipping corrupt line %d",
-                                  lineno)
-                        continue
-                    if isinstance(e, dict) and e.get("aid"):
-                        entries.append(e)
-                    else:
-                        log.error("push-queue: skipping malformed line %d",
-                                  lineno)
-        except FileNotFoundError:
-            pass
+        fh, err = _open_nofollow_read(self.queue_path)
+        if fh is None:
+            if _is_symlink_refusal(err):
+                log.error("push-queue: journal %s", err)
+            elif err != "missing":
+                log.error("push-queue: journal unreadable: %s", err)
+            return entries
+        with fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    log.error("push-queue: skipping corrupt line %d",
+                              lineno)
+                    continue
+                if isinstance(e, dict) and e.get("aid"):
+                    entries.append(e)
+                else:
+                    log.error("push-queue: skipping malformed line %d",
+                              lineno)
         return entries
 
     def _rewrite(self, entries):
-        """Rewrite the whole journal atomically (0600, fsync)."""
+        """Rewrite the whole journal atomically (0600, fsync). #1869:
+        O_NOFOLLOW on the tmp open — a planted symlink at the tmp path
+        refuses loud instead of redirecting the atomic write."""
         tmp = self.queue_path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                     | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 for e in entries:
@@ -1166,9 +1258,19 @@ class PushQueue:
                 return "invalid"
             match = None
             with _locked(self.dead_path):
-                try:
-                    with open(self.dead_path, encoding="utf-8") as f:
-                        for line in f:
+                # #1869: O_NOFOLLOW via the shared read primitive — a
+                # planted symlink at the dead-letter file refuses loud
+                # and fails closed ("error") instead of being followed.
+                fh, err = _open_nofollow_read(self.dead_path)
+                if fh is None:
+                    if err != "missing":
+                        # #1869: loud on refusal AND on unreadable —
+                        # the old code raised OSError loudly here.
+                        log.error("push-queue: %s", err)
+                        return "error"
+                else:
+                    with fh:
+                        for line in fh:
                             line = line.strip()
                             if not line:
                                 continue
@@ -1178,8 +1280,6 @@ class PushQueue:
                                 continue
                             if isinstance(r, dict) and r.get("aid") == aid:
                                 match = r
-                except FileNotFoundError:
-                    pass
             if match is None:
                 return "not-found"
             return self.enqueue({"id": aid,
@@ -1219,9 +1319,24 @@ class PushQueue:
         record["dead_reason"] = reason
         record["attempts"] = attempts
         with _locked(self.dead_path):
-            try:
-                with open(self.dead_path, encoding="utf-8") as f:
-                    for line in f:
+            # #1869: the duplicate scan reads through the shared
+            # O_NOFOLLOW primitive — a planted symlink must refuse
+            # loud, never be followed. On refusal RAISE (do not
+            # return): the caller (run_once) treats a raise as a
+            # journal-write failure and keeps the entry inflight; a
+            # bare return would let the caller remove the entry with
+            # no dead-letter record written (fail-open loss — Security
+            # round-1 Blocker 1).
+            fh, err = _open_nofollow_read(self.dead_path)
+            if fh is None:
+                if _is_symlink_refusal(err):
+                    log.error("push-queue: %s", err)
+                    raise OSError(errno.ELOOP,
+                                  "refusing to dead-letter through a "
+                                  "symlink plant: %s" % self.dead_path)
+            else:
+                with fh:
+                    for line in fh:
                         line = line.strip()
                         if not line:
                             continue
@@ -1233,10 +1348,13 @@ class PushQueue:
                             log.info("push-queue: %s already dead-lettered, "
                                      "skipping duplicate record", aid)
                             return
-            except FileNotFoundError:
-                pass
+            # #1869: O_NOFOLLOW on the append — a planted symlink at the
+            # dead-letter path refuses loud instead of appending into an
+            # attacker-chosen file. The caller (run_once) treats the
+            # raise as a journal-write failure: the entry stays queued.
             fd = os.open(self.dead_path,
-                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | os.O_NOFOLLOW, 0o600)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(json.dumps(record, separators=(",", ":"))
@@ -1303,7 +1421,15 @@ def main(argv):
         _need_crypto()
         priv, pub = gen_keypair()
         path = args.gen_keys
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # #1869: explicit O_NOFOLLOW as belt-and-suspenders. The write
+        # was already plant-safe via O_EXCL — POSIX mandates EEXIST
+        # when the path is a symlink with O_CREAT|O_EXCL, even a
+        # dangling one, so no private key could ever land in an
+        # attacker-chosen path. O_NOFOLLOW makes the refusal explicit
+        # (ELOOP) and keeps the write leg under the same invariant as
+        # every other write in this file.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"private": priv, "public": pub,
