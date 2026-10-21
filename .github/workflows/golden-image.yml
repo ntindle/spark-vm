@@ -96,6 +96,12 @@ jobs:
         # metadata to name the SHA). Cleaned up after the build so the tree
         # stays pristine.
         run: harness/generate-image-manifest.sh --out deploy/golden-image/image-manifest.json
+      - name: Preflight upstream asset pins
+        # Fail fast when the recipe's pinned upstream release assets don't
+        # exist: the v0.9.0 gate failed two minutes into the docker build on
+        # a 404 for the cua-driver checksums.txt. This refuses in seconds
+        # with the URL and the pinned version instead.
+        run: deploy/golden-image/preflight-upstream-assets.sh
       - name: Build the recipe
         run: |
           docker buildx build --load \
