@@ -341,3 +341,7 @@ def test_ops_doc_documents_pathology_budget():
     assert "TimeoutStartSec=240s" in doc
     assert "--journal-timeout-s 30" in doc
     assert "#1836" in doc
+    # The honest per-leg enumeration: the journal-append leg is still
+    # the 300s fleet default until #1746 lands. Neuter: deleting the
+    # #1746 line fails.
+    assert "#1746" in doc

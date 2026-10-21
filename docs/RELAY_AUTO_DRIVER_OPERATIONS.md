@@ -145,14 +145,22 @@ as applied.
   empty; prior per-tenant last-tick history lost, staleness self-heals
   from this tick`. A *missing* sidecar (the normal first run) restarts
   from empty silently: no history existed to lose.
-- A wedged sweep never outlives its firing period (#1836): the unit
-  pins `TimeoutStartSec=240s` (inside the 5-minute timer period — a
-  pathology budget, not a latency budget; a healthy sweep finishes in
-  seconds) and `--journal-timeout-s 30` bounds the per-box journal-lock
-  wait to a tick-scale 30s instead of the 300s fleet default. A sweep
-  killed by the timeout leaves no LOUD per-tenant record — the MISSING
-  fresh watermark is the fail-visible signal, read by S4's staleness
-  rule (#1724) exactly as for the wedged-sidecar case above.
+- A wedged sweep is killed at 240s, inside its firing period (#1836):
+  the unit pins `TimeoutStartSec=240s` (a pathology budget, not a
+  latency budget; a healthy sweep finishes in seconds) and
+  `--journal-timeout-s 30` bounds the per-box READ-phase session-journal
+  lock wait to a tick-scale 30s instead of the 300s fleet default. The
+  240s bound is per-deployment (self-hosted; the S2 plane port must set
+  its own) — the module's per-leg bounds, honestly enumerated:
+  probe-history lock 60s (#1540), journal-read 30s (this change),
+  journal-append 300s fleet default (#1746, open), tenant-store flock
+  unbounded. A killed sweep leaves partial journal notes and ZERO fresh
+  watermark records (the bulk write never runs); it has no LOUD
+  per-tenant record. Until #1724 lands, the only signal is
+  `journalctl -u relay-auto-driver.service` (and the timer stays
+  disabled per the §1 gate); once the S4 staleness rule exists, the
+  MISSING fresh watermark is the fail-visible signal it reads as driver
+  trouble.
 
 ## 6. Trust note
 

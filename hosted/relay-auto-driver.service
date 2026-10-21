@@ -18,16 +18,23 @@ Type=oneshot
 # pins the template placeholders, never the operator's paths.)
 User=<BOX_OWNER>
 WorkingDirectory=<CHECKOUT>
-# Pathology budget (#1836): a wedged sweep is killed at 240s, inside the
-# 5-minute firing period. D-AC-3's "ticks are bounded" was implicit and
-# box-count-linear — the per-box journal-lock wait is tick-scale (see the
-# --journal-timeout-s below) and the probe-history lock wait is bounded
-# (#1540), so a healthy sweep finishes in seconds; a sweep that cannot
-# finish in 240s is wedged. There is deliberately no LOUD per-tenant
-# record for the kill — the MISSING fresh watermark is what S4's
-# staleness rule reads as driver trouble (#1724), exactly as for the
-# wedged-sidecar case in §5. Do not raise this above the timer period:
-# test_relay_auto_driver_packaging.py pins TimeoutStartSec < OnUnitActiveSec.
+# Pathology budget (#1836): a sweep that cannot finish in 240s is
+# wedged and gets killed (SIGTERM at 240s; SIGKILL follows
+# TimeoutStopSec). This is a PER-DEPLOYMENT guardrail for the
+# self-hosted path — the S2 plane port (D-AC-5) cannot inherit a
+# systemd unit file and must set its own bound from the plane's
+# execution limits. The module's per-leg bounds, honestly enumerated:
+# probe-history lock 60s (#1540), journal READ lock 30s (see the
+# --journal-timeout-s below), journal APPEND leg 300s fleet default
+# (#1746, open), tenant-store flock unbounded (releases on process
+# death). A killed sweep leaves partial journal notes and ZERO fresh
+# watermark records (the #1739 bulk write never runs) — its only
+# signal until #1724 lands is `journalctl -u relay-auto-driver.service`
+# (the timer stays disabled until then per the §1 gate); once #1724
+# lands, the MISSING fresh watermark is the fail-visible signal its
+# staleness rule reads as driver trouble. Do not raise this above the
+# timer period: test_relay_auto_driver_packaging.py pins
+# TimeoutStartSec < OnUnitActiveSec.
 TimeoutStartSec=240s
 # Trust note: the timer executes the checkout's code, like the wiring's
 # --tick CLI it replaces on the schedule. The auto-deploy installed-copy
@@ -36,12 +43,14 @@ TimeoutStartSec=240s
 # privilege beyond the operator's existing own. Revisit if the driver
 # ever leaves the operator's box.
 ExecStart=/usr/bin/python3 -m hosted.relay_auto_driver_sweep --store <TENANT_STORE> --journal-store-dir <ESTATE_STORE_DIR> --journal-timeout-s 30
-# --journal-timeout-s 30 (#1836): the per-box journal-lock wait is
-# tick-scale, not the 300s fleet default. relay_session_liveness's own
-# docstring says plane-facing callers should pass a request-scoped
-# budget — seconds, not minutes: a wedged journal lock fails loud per
-# tenant after 30s (LOUD record, sweep continues) instead of stalling
-# the sweep up to 5 minutes per box instrument.
+# --journal-timeout-s 30 (#1836): the per-box READ-phase session-journal
+# lock wait is tick-scale, not the 300s fleet default.
+# relay_session_liveness's own docstring says plane-facing callers
+# should pass a request-scoped budget — seconds, not minutes: a wedged
+# read-phase journal lock fails loud per tenant after 30s (LOUD record,
+# sweep continues). The tick-note APPEND leg still runs under the fleet
+# 300s default until #1746 lands — a wedge there is what the 240s kill
+# switch above catches, at the cost of the in-memory watermark records.
 # The sweep prints the tick report JSON to stdout (D-AC-4: the raw
 # report's audience is the unit's journal; the watermark + fleet journal
 # are the durable observability). Control bytes are escaped by
