@@ -16,13 +16,13 @@ on unacknowledged alerts.
 
 This module is a deliberate sibling script, not an import of
 inventory.py: like every fleet module it is stdlib-only and is exercised
-through subprocess by the hermetic suite. The small parsing helpers
-(_parse_ts, _read_jsonl_file) mirror inventory.py's; see the module
-docstring there for the shared rationale. (The box-artifact file reads
-— audit-tail rows, the S2 journal, the tail watermark — live here now
-behind one shared O_NOFOLLOW open primitive, open_nofollow_read
-(#1860, #1649 slice 4); the legacy plain-open _read_jsonl_file is
-retired.)
+through subprocess by the hermetic suite. The small parsing helper
+_parse_ts mirrors inventory.py's; see the module docstring there for
+the shared rationale. (The box-artifact file reads — audit-tail rows,
+the S2 journal, the tail watermark, the status payload, the box
+snapshot — live here now behind one shared O_NOFOLLOW open primitive,
+open_nofollow_read (#1860, #1649 slice 4); the legacy plain-open
+_read_jsonl_file is retired from both modules.)
 
 Per-box directory layout and the store layout follow inventory.py; this
 module adds:
