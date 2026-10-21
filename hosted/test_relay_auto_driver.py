@@ -915,10 +915,14 @@ def test_bulk_watermark_corrupt_notes_every_tenant(tmp_path):
 
 
 def test_bulk_watermark_symlink_plant_still_drives(tmp_path):
-    # #1741 preserved under the #1739 bulk write: a symlink plant at
-    # the sidecar path fails loud per tenant, but the sweep still
-    # drives every tenant (observability never wedges the sweep) and
-    # writes nothing through the plant.
+    # #1741 preserved under the #1739 bulk write, contracted per #1838:
+    # a symlink plant at the sidecar path is ONE sweep-level condition —
+    # a single errors[] entry (tenant_id None), never N per-tenant
+    # ones. The sweep still drives every tenant (observability never
+    # wedges the sweep), writes nothing through the plant, and the
+    # per-tenant records carry no observability note (the sweep-level
+    # entry is the honest signal; S4's staleness rule reads the missing
+    # watermark as driver trouble).
     store = _wired_store(tmp_path, {
         "tnt-a": [_arc("box-a")],
         "tnt-b": [_arc("box-b")],
@@ -935,16 +939,18 @@ def test_bulk_watermark_symlink_plant_still_drives(tmp_path):
         read_fn=lambda vm_id: _ok(), now=NOW,
         latest_probe_fn=_fresh_probe,
     )
-    # Both tenants were driven (no drive failure), and each record
-    # carries the LOUD observability failure naming the plant.
+    # Both tenants were driven (no drive failure) and carry no
+    # observability note — the fault is not theirs.
     for tid in ("tnt-a", "tnt-b"):
         rec = summary["tenants"][tid]
         assert rec["failed"] is False
-        assert any(
-            "observability failed" in n and "symlink" in n
-            for n in rec["notes"]
-        ), rec["notes"]
-    assert len(summary["errors"]) == 2
+        assert not any("observability failed" in n for n in rec["notes"]), \
+            rec["notes"]
+    # Exactly one sweep-level errors[] entry naming the plant.
+    assert len(summary["errors"]) == 1
+    entry = summary["errors"][0]
+    assert entry["tenant_id"] is None
+    assert "LOUD" in entry["error"] and "symlink" in entry["error"], entry
     # Nothing was written through the plant: the victim is untouched
     # and the sidecar path is still the link.
     with open(victim, encoding="utf-8") as fh:

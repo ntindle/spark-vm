@@ -34,8 +34,11 @@ stand-down.
   dead" from "driver dead".
 
 The S1 auto-driver (``hosted/relay_auto_driver``) consumes the probe
-history this module produces; until this module is scheduled, S1's
-loud-stale ticks are the steady state by design (D-AC-2).
+history this module produces; its scheduled packaging is
+``hosted/relay-probe-driver.{service,timer}`` (#1837) — inert until
+the operator enables it past the #1724 gate. Until a scheduled probe
+source runs, S1's loud-stale ticks are the steady state by design
+(D-AC-2).
 """
 
 import time
@@ -286,7 +289,11 @@ def probe_all_tenants(
     Returns ``{"tick_at", "cadence_s", "tenants": {tenant_id: record},
     "errors": [...]}`` — ``errors`` carries per-tenant observability
     failures (watermark/journal), never probe failures (those are
-    ``failed=True`` on the tenant's own record).
+    ``failed=True`` on the tenant's own record), plus at most one
+    sweep-level entry (``tenant_id`` None) when the probe-watermark
+    sidecar itself is unreadable (ELOOP plant, #1838) — one
+    sidecar-level fault is one sweep-level entry, never N per-tenant
+    ones.
 
     Raise contract: ``store.tenant_ids()`` raising (e.g. a corrupt
     tenant store) propagates — a store the sweep cannot even list is
@@ -317,9 +324,10 @@ def probe_all_tenants(
     except OSError as exc:
         # read_sidecar_marks raises OSError only for errno.ELOOP: a
         # symlink plant at the sidecar path (#1741). Defer it to the
-        # per-tenant observability handler below so the sweep still
-        # probes every tenant — the watermark simply does not persist
-        # this sweep.
+        # sweep-level handler below (#1838): one sidecar-level fault is
+        # one sweep-level errors[] entry, never N per-tenant ones. The
+        # sweep still probes every tenant — the watermark simply does
+        # not persist this sweep.
         wm_corrupt = False
         wm_read_exc = exc
 
@@ -339,54 +347,74 @@ def probe_all_tenants(
             history=history,
             journal_timeout_s=journal_timeout_s,
         )
-        try:
-            if wm_read_exc is not None:
-                # #1741: the sidecar read refused a symlink plant — fail
-                # this tenant's observability loud; the journal append
-                # below is skipped for the same reason it was
-                # unreachable before.
-                raise wm_read_exc
-            if wm_corrupt:
-                # D-AC-7: the sidecar was corrupt/unparseable and
-                # restarts from empty — history for every tenant was
-                # lost, so every record this sweep carries the LOUD
-                # note. Appended before the journal event is built, so
-                # it rides the journaled probe-note; staleness
-                # self-heals from this tick onward.
-                record["notes"].append(sidecar.CORRUPT_SIDECAR_LOUD)
-            if journal_store_dir is not None:
-                event = _probe_event(
-                    tenant_id=tenant_id,
-                    vm_id=vm_id,
-                    tick_iso=tick_iso,
-                    record=record,
+        # #1838: the per-tenant watermark/journal legs run only when the
+        # sidecar itself was readable. A sidecar-level fault (wm_read_exc,
+        # the ELOOP plant above) skips these legs for the WHOLE sweep —
+        # the single sweep-level errors[] entry appended after the loop
+        # is the honest signal, not N per-tenant ones. The probe loop
+        # still ran every tenant above.
+        if wm_read_exc is None:
+            try:
+                if wm_corrupt:
+                    # D-AC-7: the sidecar was corrupt/unparseable and
+                    # restarts from empty — history for every tenant was
+                    # lost, so every record this sweep carries the LOUD
+                    # note. Appended before the journal event is built, so
+                    # it rides the journaled probe-note; staleness
+                    # self-heals from this tick onward.
+                    record["notes"].append(sidecar.CORRUPT_SIDECAR_LOUD)
+                if journal_store_dir is not None:
+                    event = _probe_event(
+                        tenant_id=tenant_id,
+                        vm_id=vm_id,
+                        tick_iso=tick_iso,
+                        record=record,
+                    )
+                    journal_err = sidecar.append_journal_note(
+                        journal_store_dir, event)
+                    if journal_err is not None:
+                        # Secondary observability only: note it on the
+                        # record and keep sweeping — the record is
+                        # collected below and the single bulk write
+                        # persists the final notes.
+                        record["notes"].append(journal_err)
+                pending_writes[tenant_id] = record
+            except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
+                # The tenant was already probed; only its observability
+                # failed. Note LOUD on the returned record and keep
+                # sweeping — S4's staleness rule reads a missing watermark
+                # as probe-loop trouble, which is the honest signal for a
+                # disk-full/permission failure.
+                record["notes"].append(
+                    "LOUD: probe observability failed for tenant %r: %s: %s"
+                    % (tenant_id, type(exc).__name__, exc)
                 )
-                journal_err = sidecar.append_journal_note(
-                    journal_store_dir, event)
-                if journal_err is not None:
-                    # Secondary observability only: note it on the
-                    # record and keep sweeping — the record is
-                    # collected below and the single bulk write
-                    # persists the final notes.
-                    record["notes"].append(journal_err)
-            pending_writes[tenant_id] = record
-        except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
-            # The tenant was already probed; only its observability
-            # failed. Note LOUD on the returned record and keep
-            # sweeping — S4's staleness rule reads a missing watermark
-            # as probe-loop trouble, which is the honest signal for a
-            # disk-full/permission failure.
-            record["notes"].append(
-                "LOUD: probe observability failed for tenant %r: %s: %s"
-                % (tenant_id, type(exc).__name__, exc)
-            )
-            errors.append(
-                {
-                    "tenant_id": tenant_id,
-                    "error": "%s: %s" % (type(exc).__name__, exc),
-                }
-            )
+                errors.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "error": "%s: %s" % (type(exc).__name__, exc),
+                    }
+                )
         tenants[tenant_id] = record
+
+    if wm_read_exc is not None:
+        # #1838: the sidecar-level fault is ONE sweep-level condition —
+        # a single errors[] entry (tenant_id None: not attributable to
+        # any tenant), not N per-tenant ones. The per-tenant
+        # watermark/journal legs were skipped for the whole sweep above;
+        # the S4 staleness rule reads the missing watermark as
+        # probe-loop trouble, which is the honest signal.
+        errors.append(
+            {
+                "tenant_id": None,
+                "error": (
+                    "LOUD: sweep probe-watermark sidecar unreadable "
+                    "(%s: %s) — per-tenant watermark/journal legs "
+                    "skipped for the whole sweep"
+                    % (type(wm_read_exc).__name__, wm_read_exc)
+                ),
+            }
+        )
 
     # The single locked read-modify-write for the whole sweep. The
     # mid-sweep-corruption case (pre-loop hint clean, fresh read inside

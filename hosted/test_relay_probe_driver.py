@@ -498,3 +498,51 @@ def test_probe_event_shape(tmp_path):
     assert row["trigger"] == "scheduled"
     assert row["attested"] is False
     assert row["component"] == "relay"
+
+
+def test_probe_watermark_symlink_plant_is_one_sweep_level_error(tmp_path):
+    # #1838 (probe half): a symlink plant at the probe watermark
+    # sidecar is ONE sweep-level condition — a single errors[] entry
+    # (tenant_id None), never N per-tenant ones. The sweep still
+    # probes every tenant (observability never wedges the sweep),
+    # writes nothing through the plant, and the per-tenant records
+    # carry no observability note (the sweep-level entry is the honest
+    # signal; S4's staleness rule reads the missing watermark as
+    # probe-loop trouble).
+    # Neuter check: re-adding the per-tenant raise produces 2
+    # errors[] entries and fails the single-entry assertion below.
+    store = _wired_store(tmp_path, {
+        "tnt-a": [_arc("box-a")],
+        "tnt-b": [_arc("box-b")],
+    })
+    wm = str(tmp_path / "wm.json")
+    victim = str(tmp_path / "victim.json")
+    with open(victim, "w", encoding="utf-8") as fh:
+        json.dump({"attacker": {"seed": "poison"}}, fh)
+    os.symlink(victim, wm)
+    estate = tmp_path / "estate"
+    estate.mkdir()
+    state_fn, post_live_fn, bundle_fn = _suppliers()
+    summary = probe.probe_all_tenants(
+        store, watermark_path=wm, journal_store_dir=str(estate),
+        provider_state_fn=state_fn, post_live_fn=post_live_fn,
+        bundle_fn=bundle_fn, history=str(tmp_path / "hist.jsonl"),
+        now=NOW,
+    )
+    # Both tenants were probed (no probe failure) and carry no
+    # observability note — the fault is not theirs.
+    for tid in ("tnt-a", "tnt-b"):
+        rec = summary["tenants"][tid]
+        assert rec["failed"] is False
+        assert not any("observability failed" in n for n in rec["notes"]), \
+            rec["notes"]
+    # Exactly one sweep-level errors[] entry naming the plant.
+    assert len(summary["errors"]) == 1
+    entry = summary["errors"][0]
+    assert entry["tenant_id"] is None
+    assert "LOUD" in entry["error"] and "symlink" in entry["error"], entry
+    # Nothing was written through the plant: the victim is untouched
+    # and the sidecar path is still the link.
+    with open(victim, encoding="utf-8") as fh:
+        assert json.load(fh) == {"attacker": {"seed": "poison"}}
+    assert os.path.islink(wm)

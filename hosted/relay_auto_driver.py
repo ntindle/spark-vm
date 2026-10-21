@@ -156,10 +156,12 @@ def _stale_probe_note(
 
     Missing, unreadable, or older-than-2x-cadence probe history is
     noted LOUD — the tick drives anyway (drive-only; the probe loop is
-    S5's problem, #1725). #1725 shipped the probe DRIVER as a module,
-    but nothing schedules probes yet (#1837) — until a scheduled probe
-    source feeds probe history, loud-stale ticks are the steady state
-    by design.
+    S5's, #1725). S5's scheduled packaging
+    (``hosted/relay-probe-driver.{service,timer}``, #1837) ships but
+    is inert until the operator enables it past the #1724 gate — until
+    a scheduled probe source feeds probe history, loud-stale ticks are
+    the steady state by design, and the missing piece is the enabled
+    schedule, not the S5 module.
     """
     try:
         probe = latest_probe_fn(vm_id)
@@ -299,7 +301,10 @@ def tick_all_tenants(
     Returns ``{"tick_at", "cadence_s", "tenants": {tenant_id: record},
     "errors": [...]}`` — ``errors`` carries per-tenant observability
     failures (watermark/journal), never drive failures (those are
-    ``failed=True`` on the tenant's own record).
+    ``failed=True`` on the tenant's own record), plus at most one
+    sweep-level entry (``tenant_id`` None) when the watermark sidecar
+    itself is unreadable (ELOOP plant, #1838) — one sidecar-level fault
+    is one sweep-level entry, never N per-tenant ones.
 
     The watermark sidecar gets exactly ONE read-modify-write per sweep
     (#1739): per-tenant records are collected in memory and merged in a
@@ -330,9 +335,10 @@ def tick_all_tenants(
     except OSError as exc:
         # sidecar.read_sidecar_marks raises OSError only for errno.ELOOP: a
         # symlink plant at the sidecar path (#1741). Defer it to the
-        # per-tenant observability handler below so the sweep still
-        # drives every tenant — the watermark simply does not persist
-        # this sweep, exactly as the old per-tenant raise did.
+        # sweep-level handler below (#1838): one sidecar-level fault is
+        # one sweep-level errors[] entry, never N per-tenant ones. The
+        # sweep still drives every tenant — the watermark simply does
+        # not persist this sweep.
         wm_corrupt = False
         wm_read_exc = exc
 
@@ -351,56 +357,75 @@ def tick_all_tenants(
             journal_timeout_s=journal_timeout_s,
             latest_probe_fn=latest_probe_fn,
         )
-        try:
-            if wm_read_exc is not None:
-                # #1741: the sidecar read refused a symlink plant — fail
-                # this tenant's observability loud, like the old
-                # per-tenant raise; the journal append below is skipped
-                # for the same reason it was unreachable before.
-                raise wm_read_exc
-            if wm_corrupt:
-                # F-AC-8 / D-AC-7: the sidecar was corrupt/unparseable
-                # and restarts from empty — history for every tenant
-                # was lost, so every record this sweep carries the
-                # LOUD note (the old per-tenant writes noted it only
-                # on the first tenant's record — an artifact of the
-                # incremental writes, not the contract). The note is
-                # appended before the journal event is built, so it
-                # rides the journaled tick-note; staleness self-heals
-                # from this tick onward.
-                record["notes"].append(sidecar.CORRUPT_SIDECAR_LOUD)
-            if journal_store_dir is not None:
-                event = _tick_event(
-                    tenant_id=tenant_id,
-                    anchor_box_id=anchor_box_id,
-                    tick_iso=tick_iso,
-                    record=record,
+        # #1838: the per-tenant watermark/journal legs run only when the
+        # sidecar itself was readable. A sidecar-level fault (wm_read_exc,
+        # the ELOOP plant above) skips these legs for the WHOLE sweep —
+        # the single sweep-level errors[] entry appended after the loop
+        # is the honest signal, not N per-tenant ones. The drive loop
+        # still ran every tenant above.
+        if wm_read_exc is None:
+            try:
+                if wm_corrupt:
+                    # F-AC-8 / D-AC-7: the sidecar was corrupt/unparseable
+                    # and restarts from empty — history for every tenant
+                    # was lost, so every record this sweep carries the
+                    # LOUD note (the old per-tenant writes noted it only
+                    # on the first tenant's record — an artifact of the
+                    # incremental writes, not the contract). The note is
+                    # appended before the journal event is built, so it
+                    # rides the journaled tick-note; staleness self-heals
+                    # from this tick onward.
+                    record["notes"].append(sidecar.CORRUPT_SIDECAR_LOUD)
+                if journal_store_dir is not None:
+                    event = _tick_event(
+                        tenant_id=tenant_id,
+                        anchor_box_id=anchor_box_id,
+                        tick_iso=tick_iso,
+                        record=record,
+                    )
+                    journal_err = sidecar.append_journal_note(journal_store_dir, event)
+                    if journal_err is not None:
+                        # Secondary observability only: note it on the
+                        # record and keep sweeping — the record is
+                        # collected below and the single bulk write
+                        # persists the final notes.
+                        record["notes"].append(journal_err)
+                pending_writes[tenant_id] = record
+            except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
+                # The tenant was already driven; only its observability
+                # failed. Note LOUD on the returned record and keep
+                # sweeping — the S4 staleness rule reads a missing watermark
+                # as driver trouble, which is the honest signal for a
+                # disk-full/permission failure.
+                record["notes"].append(
+                    "LOUD: tick observability failed for tenant %r: %s: %s"
+                    % (tenant_id, type(exc).__name__, exc)
                 )
-                journal_err = sidecar.append_journal_note(journal_store_dir, event)
-                if journal_err is not None:
-                    # Secondary observability only: note it on the
-                    # record and keep sweeping — the record is
-                    # collected below and the single bulk write
-                    # persists the final notes.
-                    record["notes"].append(journal_err)
-            pending_writes[tenant_id] = record
-        except Exception as exc:  # noqa: BLE001 — observability never wedges the sweep
-            # The tenant was already driven; only its observability
-            # failed. Note LOUD on the returned record and keep
-            # sweeping — the S4 staleness rule reads a missing watermark
-            # as driver trouble, which is the honest signal for a
-            # disk-full/permission failure.
-            record["notes"].append(
-                "LOUD: tick observability failed for tenant %r: %s: %s"
-                % (tenant_id, type(exc).__name__, exc)
-            )
-            errors.append(
-                {
-                    "tenant_id": tenant_id,
-                    "error": "%s: %s" % (type(exc).__name__, exc),
-                }
-            )
+                errors.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "error": "%s: %s" % (type(exc).__name__, exc),
+                    }
+                )
         tenants[tenant_id] = record
+
+    if wm_read_exc is not None:
+        # #1838: the sidecar-level fault is ONE sweep-level condition —
+        # a single errors[] entry (tenant_id None: not attributable to
+        # any tenant), not N per-tenant ones. The per-tenant
+        # watermark/journal legs were skipped for the whole sweep above;
+        # the S4 staleness rule reads the missing watermark as driver
+        # trouble, which is the honest signal.
+        errors.append(
+            {
+                "tenant_id": None,
+                "error": (
+                    "LOUD: sweep watermark sidecar unreadable (%s: %s) — "
+                    "per-tenant watermark/journal legs skipped for the "
+                    "whole sweep" % (type(wm_read_exc).__name__, wm_read_exc)
+                ),
+            }
+        )
 
     # #1739: the single locked read-modify-write for the whole sweep.
     # The mid-sweep-corruption case (pre-loop hint clean, fresh read

@@ -1,0 +1,39 @@
+[Unit]
+Description=Relay probe-driver sweep: probe every tenant's live anchor on the probe cadence
+# S5 packaging (#1837): the scheduled half of the probe loop's
+# both-supported story. The module this drives is stdlib-only (S5,
+# #1725).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the box owner (the same identity that runs the auto-driver
+# sweep and the wiring's --tick CLI manually).
+#
+# INSTALL-TIME TEMPLATING: the operator's install step replaces
+#   <CHECKOUT> with the spark-vm checkout root,
+#   <TENANT_STORE> with the tenant-record JSON store path,
+#   <ESTATE_STORE_DIR> with the fleet estate store dir.
+# (see docs/RELAY_PROBE_DRIVER_OPERATIONS.md;
+# test_relay_probe_driver_packaging.py pins the template placeholders,
+# never the operator's paths.)
+User=<BOX_OWNER>
+WorkingDirectory=<CHECKOUT>
+# Trust note: the timer executes the checkout's code, like the wiring's
+# --probe-now CLI it schedules for every tenant. The auto-deploy
+# installed-copy discipline (#85) is not applied here: this is a local
+# oneshot CLI on the operator's own box, not a network service, and the
+# timer grants no privilege beyond the operator's existing own. Revisit
+# if the driver ever leaves the operator's box.
+ExecStart=/usr/bin/python3 -m hosted.relay_probe_driver_sweep --store <TENANT_STORE> --journal-store-dir <ESTATE_STORE_DIR>
+# The sweep prints the probe-tick report JSON to stdout (D-AC-4: the raw
+# report's audience is the unit's journal; the probe watermark + fleet
+# journal are the durable observability). Control bytes are escaped by
+# json.dumps, so tenant-controlled notes cannot inject terminal
+# sequences into the journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

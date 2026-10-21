@@ -53,6 +53,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 - The owner alert taxonomy gains the sentinel transport-health class: when the tenant-plane → operator-plane shipment intake ships, a seq-gap ("the trail has a hole" — missing telemetry on a per-surface counter, or an epoch reset the intake can't account for) gets a dashboard chip while the gap is open, a push page only for persistent gaps, and a digest row — with the suppression rule that accounted restarts and self-healed blips never page. The intake that raises the alert is still unbuilt; this is the surfacing spec it fires into. (#1809)(#1832)
 
+- The relay probe loop gets its scheduled packaging (#1837): a systemd service+timer pair driving the S5 probe driver on the shared 5-minute cadence, a sweep CLI with the same operator contract as the auto-driver sweep, packaging tests, and an operator's guide — so the wiring driver's "stale probe history" notes can finally go quiet once the operator enables the timer. The timer stays inert until the S4 staleness alert (#1724) lands, matching the auto-driver's own enablement gate; until then the missing piece is the enabled schedule, not the probe module. (#1837)(#TBD)
+
 ### Security
 - The credential-management UI's token rotation no longer needs a manual service restart: the rotate command signals the running service (SIGHUP) and then verifies the server actually adopted the new token, warning loudly if it didn't. A minute-interval watchdog re-reads the token store as a fail-safe; if the store stays unreadable the server fails closed (denies all API auth) after five minutes rather than honoring a possibly-revoked token indefinitely. (#1751)(#1830)
 
@@ -268,6 +270,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
   rollouts: the displayed wave is the box's own assignment pin (empty
   when the box has no pin), instead of a hash-derived wave number naming
   a cohort the box was never in. (#1749)
+- A sabotaged watermark sidecar (a symlink planted at the sidecar path) no longer multiplies into one loud failure per tenant: both the wiring-driver sweep and the probe-driver sweep now record a single sweep-level entry and skip the per-tenant watermark/journal legs for the whole sweep, so one sidecar-level fault reads as exactly one fault. (#1838)(#TBD)
+
 
 ### Security
 - Answering a user-input prompt now binds the answer to the exact prompt content the operator classified: the prompt is re-read just before sending, and the answer is refused -- loudly, with nothing sent -- if the prompt was re-issued with different question text (or vanished) since classification. This narrows the race where a re-issued prompt could slip different text under the same prompt id between the operator's trust classification and the send -- from the whole classification-to-send window down to the single re-read→send gap (client-side only; `userInput/answer` has no server-side enforcement like `approval/decide`'s requirement id), protecting the explicit classification the trust policy depends on. The approvals listing shows the binding hash, and `muse-job answer` accepts it as `--expected-prompt-hash`, so an answer queued behind a busy supervisor is verified at drain time too when the flag is passed (without it, a queued answer is sent unbound, as before). Closes #1772. (#1828)
