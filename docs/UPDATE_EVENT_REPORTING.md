@@ -24,9 +24,13 @@ Today:
   (`{"ts":"…","event":"check"|"deploy"|"rollback",…}` — fifteen (event,
   result) shapes, §3), bounded at 12k lines / 10k newest. Nobody reads it
   off-box.
-- The toolset updater (SELF_UPDATE.md S2) plans the same audit format at
-  `/var/log/sparkvm-self-update/` — the same who/what/when/version shape
-  auto-deploy uses; its result vocabulary is still undefined. Same fate.
+- The toolset updater (SELF_UPDATE.md S2) *shipped* the standard shape in
+  slice 2 (#1649, 2026-10-20): its outcome pivots `event_emit` rows directly
+  to `update-events.jsonl` (`source: toolset-update`,
+  `component: toolset-cua-driver` — §4 S2), the box-side journal the
+  collector switches to reading in a remaining §4 S2 slice. The result
+  vocabulary is defined now; the unread-off-box fate stands until the
+  collector read switch lands.
 - The fleet collector (G16 S1) already pulls per-box `audit-tail.jsonl`
   into its estate dir — but treats the tail as cross-check evidence for
   *version claims*, not as an event stream. Outcomes are incidental.
@@ -52,7 +56,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `component` | enum \| null | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum. Null on fleet-scoped controller events (`freeze-hold`): the freeze flag governs all updaters, so no single updater value is honest |
 | `subcomponent` | string \| null | Audit-line component granularity (`proxy`, `confirm`, `cred_ui`, … — the values `deploy/components.conf` actually carries); null on lines that carry none |
 | `subcomponents` | string \| null | The plural `components` value verbatim (space-joined, from the `ok` line) for readers that need the un-fanned form; the canonical S1 fan-out emits one event per component in `subcomponent` instead |
-| `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted by `fleet/gate_publish.py` (G15 S3, issue #1543) on freeze flip/clear into the fleet journal (`--journal`, default `events.jsonl` next to the published gate document) |
+| `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted by `fleet/gate_publish.py` (G15 S3, issue #1543) on freeze flip/clear into the fleet journal (`--journal`, default `events.jsonl` next to the published gate document — the append leg opens O_NOFOLLOW, #1845) |
 | `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); `skipped-frozen` gained its legacy producer in #1630's first slice (the release gate's `fleet-freeze`/`wave-not-live` verdicts, audited by `deploy/auto-deploy.sh`); `deferred-arc` gained its legacy producer in #1630's second slice (box-side arc-awareness: `deploy/auto-deploy.sh` audits `check/deferred-arc` when an active arc defers a permitted update) and its second producer in #1649's slice 2 (the toolset updater's idle-gate jobs-active deferral); the `freeze`/`gate` triggers are reserved for S2 emitters; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
@@ -123,11 +127,13 @@ extra-input runs; absent `trigger` canonicalizes to `scheduled`.
 The audit line's `component` (and the plural `components` on the `ok`
 line) becomes the additive `subcomponent`/`subcomponents` field — one
 event per subcomponent for the plural success line; standard `component`
-is `repo` for every `auto-deploy` line. For the toolset
-updater, only the promise is known — SELF_UPDATE.md S2 commits to "the
-same format auto-deploy already uses" for who/what/when/versions, but its
-result vocabulary is undefined, so the toolset half of this table is
-planned-not-known until the updater ships.
+is `repo` for every `auto-deploy` line. The toolset half of this table is known since slice 2 (#1649, 2026-10-20 —
+§4 S2): `deploy/toolset-update.sh`'s eight wired `event_emit` sites emit
+standard shape directly (`source: toolset-update`,
+`component: toolset-cua-driver`); `trigger: manual` appears only on `--now`
+runs and on the manual-rollback rows (the timer path leaves the §2
+`scheduled` default); `--dry-run`, opt-out, and the lock-held deferral stay
+journal-silent.
 
 The canonicalizer is fail-closed on malformed lines: box-side `audit()`
 interpolates raw variables into JSON, so the collector parses with a
@@ -149,7 +155,10 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 - **Sink:** the estate dir the G16 S1 collector already pulls. No new
   box-side file, no new port. The canonicalizer runs inside
   `fleet/inventory.py` (or a sibling `fleet/events.py`) and appends
-  standard-shape events to the store's event journal; `received_at` is the
+  standard-shape events to the store's event journal — the append leg
+  opens with O_NOFOLLOW (#1841/#1845), so a pre-planted symlink at the
+  journal path fails loud (ELOOP) instead of silently redirecting the
+  fleet's event feed into an attacker-chosen file; `received_at` is the
   collect clock. Event dedup is on `(box_id, event_id)`, and for S1
   canonicalization `event_id` is synthesized deterministically — UUIDv5
   over `box_id|ts|event|result|from|to`, with a per-subcomponent suffix
@@ -302,10 +311,15 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   `deploy/precheck-fail` on pre-update snapshot failure,
   `check/deferred-arc` on the idle-gate jobs-active deferral,
   `check/skipped-frozen` on the local failure-freeze refusal,
-  `rollback/rolled-back|rollback-failed` on manual rollback — all with
-  `trigger=manual` on operator-driven paths); `cmd_install` installs the sink
-  library next to the script (installed-copy trust model); `--dry-run` and
-  opt-out stay journal-silent per the S1 noise discipline. Remaining slices:
+  `rollback/rolled-back|rollback-failed` on manual rollback); the
+  `started|succeeded|failed|precheck-fail` rows carry `trigger=manual` only
+  on `--now` runs (the timer path leaves the §2 `scheduled` default), the
+  manual-rollback rows always carry `trigger=manual` (operator-driven), and
+  the idle-gate `deferred-arc` / failure-freeze `skipped-frozen` rows never
+  carry it; `cmd_install` installs the sink
+  library next to the script (installed-copy trust model); `--dry-run`,
+  opt-out, and the lock-held deferral stay journal-silent per the S1 noise
+  discipline. Remaining slices:
   gate-hook wiring, and the collector read switch.
 - **Aggregation for G15's gates** (what §5 of the controller design reads):
   - per-wave outcome census over the soak window (the zero
@@ -442,7 +456,8 @@ waits on:
 ## Build slices
 
 - **S1 — canonicalize + alert (ship first):** fleet-side canonicalizer for
-  the auto-deploy audit shape (the toolset half is planned-not-known);
+  the auto-deploy audit shape (the toolset half was planned-not-known at
+  S1, then shipped in #1649's slice 2 — §4 S2);
   event journal in the fleet store with (box_id, event_id) dedup;
   `fleet events` CLI; the six alert rules with interim journal+exit-code
   transport; noop-stays-local noise discipline.
