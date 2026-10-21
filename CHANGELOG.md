@@ -58,6 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Documented the latest competitor-watch cycle (2026-10-21 morning): Vercel's own report on its $1M sandbox challenge discloses a snapshot swap flaw and a cross-tenant storage leak plus the Trail of Bits review results, Docker Sandboxes ships v0.49.1, and the Vercel Drives GA is now acknowledged on the legacy beta page — all folded into the competitor corpus. (#1876)
 
 - The box-side event journal now fails loud when it is configured but unwritable: `event_emit` prints a loud `[event-journal] JOURNAL UNWRITABLE — event NOT written` line to stderr naming the journal path and the event's (source, component, kind, outcome) whenever `EVENT_JOURNAL` is set but the append fails (unwritable dir, full disk, path-is-a-directory) — so a broken journal never reads as a quiet box on the gate-consumed feed. rc stays 0 (a broken journal never kills a `set -e` updater); unset `EVENT_JOURNAL` stays a silent no-op. (#1649)(#1871)
 
