@@ -488,12 +488,31 @@ def _publish_snapshot(store_dir, planes):
 
 
 def _append_journal(store_dir, journal_name, records):
-    """Append records as one O_APPEND write() per line, under the store lock."""
+    """Append records as one O_APPEND write() per line, under the store lock.
+
+    #1841: opens with O_NOFOLLOW — a pre-planted symlink at the journal
+    path fails loud (ELOOP, surfaced by _fail as exit 2) instead of
+    silently redirecting records into an arbitrary file. Same threat
+    class as the fleet journal append leg; O_NOFOLLOW covers the final
+    path component only."""
     path = os.path.join(store_dir, journal_name)
     lines = [json.dumps(r, sort_keys=True) + "\n" for r in records]
     with events.journal_lock(store_dir):
         try:
-            with open(path, "a", encoding="utf-8") as fh:
+            fd = os.open(path,
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            _fail(f"cannot append to {journal_name}: {exc}")
+        # Same fdopen-leak guard as fleet/events.py append_events (#1841),
+        # mirroring the #1755 journal_lock pattern in that module.
+        try:
+            fh = os.fdopen(fd, "a", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            with fh:
                 for line in lines:
                     fh.write(line)
                 fh.flush()
