@@ -231,12 +231,15 @@ def open_nofollow_read(path):
 
 
 def is_symlink_refusal(err):
-    """True when err is open_nofollow_read's plant-refusal marker.
+    """True when err is the plant-refusal marker ("refused: ..." prefix).
 
-    The one shared predicate for the refusal convention (mirrors
-    _load_journal's err-string discipline): call sites branch on this
-    to choose fail-closed-vs-degraded behavior instead of threading a
-    separate eloop flag.
+    The one shared predicate for the refusal convention: call sites
+    branch on this to choose fail-closed-vs-degraded behavior instead
+    of threading a separate flag. The convention follows the same
+    pattern _load_journal established — the refusal travels inside the
+    err string, never as a side channel — with its own "refused:"
+    marker so a refusal can never be mistaken for a generic
+    unreadable.
     """
     return isinstance(err, str) and err.startswith("refused:")
 
@@ -1512,7 +1515,11 @@ def append_events(store_dir, events):
             # Pre-existing journal files keep whatever permissions the
             # older plain-open path created them with (we never re-chmod
             # operator-owned files — #1537); the O_NOFOLLOW refusal
-            # applies at every open, not just creation.
+            # applies at every open, not just creation. Deliberately
+            # inline (not _open_nofollow_append): this leg's
+            # "cannot append to event journal" error contract is stable
+            # and tested — keep any future change to the shared
+            # primitive behavior-identical here.
             try:
                 fd = os.open(journal_path,
                              os.O_WRONLY | os.O_CREAT | os.O_APPEND
