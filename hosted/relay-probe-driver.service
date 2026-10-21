@@ -20,13 +20,31 @@ Type=oneshot
 # never the operator's paths.)
 User=<BOX_OWNER>
 WorkingDirectory=<CHECKOUT>
+# Pathology budget (#1836, mirrored from the S3 unit): a sweep that
+# cannot finish in 240s is wedged and gets killed (SIGTERM at 240s;
+# SIGKILL follows TimeoutStopSec). This is a PER-DEPLOYMENT guardrail
+# for the self-hosted path — the S2 plane port (D-AC-5) cannot inherit
+# a systemd unit file and must set its own bound from the plane's
+# execution limits. The module's per-leg bounds, honestly enumerated:
+# probe-history lock 60s (#1540), journal READ lock 30s (see the
+# --journal-timeout-s below), journal APPEND leg 300s fleet default
+# (#1746, open), tenant-store flock unbounded (releases on process
+# death). A killed sweep leaves partial journal notes and ZERO fresh
+# probe-watermark records (the #1739 bulk write never runs) — its only
+# signal until #1724 lands is `journalctl -u relay-probe-driver.service`
+# (the timer stays disabled until then per the §1 gate); once #1724
+# lands, the MISSING fresh probe watermark is the fail-visible signal
+# its staleness rule reads as probe-loop trouble. Do not raise this
+# above the timer period: test_relay_probe_driver_packaging.py pins
+# TimeoutStartSec < OnUnitActiveSec.
+TimeoutStartSec=240s
 # Trust note: the timer executes the checkout's code, like the wiring's
 # --probe-now CLI it schedules for every tenant. The auto-deploy
 # installed-copy discipline (#85) is not applied here: this is a local
 # oneshot CLI on the operator's own box, not a network service, and the
 # timer grants no privilege beyond the operator's existing own. Revisit
 # if the driver ever leaves the operator's box.
-ExecStart=/usr/bin/python3 -m hosted.relay_probe_driver_sweep --store <TENANT_STORE> --journal-store-dir <ESTATE_STORE_DIR>
+ExecStart=/usr/bin/python3 -m hosted.relay_probe_driver_sweep --store <TENANT_STORE> --journal-store-dir <ESTATE_STORE_DIR> --journal-timeout-s 30
 # The sweep prints the probe-tick report JSON to stdout (D-AC-4: the raw
 # report's audience is the unit's journal; the probe watermark + fleet
 # journal are the durable observability). Control bytes are escaped by

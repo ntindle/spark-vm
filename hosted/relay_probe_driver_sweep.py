@@ -15,8 +15,10 @@ The bundle supplier is the deployer's seam (D-RL2-3): this module
 supplies none, so a due tick with no bundle is noted LOUD (the
 dark-instrument steady state), never failed. Provider state defaults
 to ``running`` (mirrors the ``--probe-now`` CLI's
-``--provider-state``); the post-``live`` answer is derived from the
-real wiring store's anchor arc per tenant.
+``--provider-state``); the flag is inert until a bundle supplier is
+wired — with no bundle, the dial never runs and provider state is
+never consulted. The post-``live`` answer is derived from the real
+wiring store's anchor arc per tenant.
 
 The report JSON goes to stdout — the unit's journal is its audience
 (D-AC-4 observability is watermark + fleet journal, not stdout; stdout

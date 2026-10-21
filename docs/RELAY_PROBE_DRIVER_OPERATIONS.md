@@ -103,11 +103,21 @@ path.
 - No bundle wired (D-RL2-3): a due tick is noted LOUD
   (dark-instrument), never failed. The bundle supplier is the
   deployer's seam — this unit never invents one.
+- Pathology budget (#1836, mirrored from the S3 unit): the unit kills
+  a sweep that runs past `TimeoutStartSec=240s` — a wedged sweep's only
+  signal until #1724 lands is `journalctl -u relay-probe-driver.service`;
+  after #1724, the missing fresh probe watermark is the fail-visible
+  signal. The journal READ lock wait is tick-scale
+  (`--journal-timeout-s 30`); the journal APPEND leg is still the 300s
+  fleet default until #1746 lands.
 
 ## 6. Trust note
 
 Same trust model as the auto-driver sweep: the timer executes the
 checkout's code on the operator's own box; it grants no privilege
 beyond the operator's existing own. Provider state defaults to
-`running` (`--provider-state`, mirroring the `--probe-now` CLI); the
-post-`live` answer is derived from the real wiring store's anchor arc.
+Provider state defaults to `running` (`--provider-state`, mirroring the
+`--probe-now` CLI); the flag is inert until a bundle supplier is wired
+(the sweep ships with none, D-RL2-3 — with no bundle, the dial never
+runs and provider state is never consulted). The post-`live` answer is
+derived from the real wiring store's anchor arc.

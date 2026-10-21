@@ -133,6 +133,39 @@ def test_timer_period_matches_probe_cadence_default():
     assert tmr["Timer"].get("Persistent", "false").lower() == "false"
 
 
+def test_service_pins_pathology_budget_inside_firing_period():
+    # #1836 (mirrored from the S3 unit): the unit pins an explicit
+    # pathology budget, and the budget must fit inside the firing
+    # period or wedged sweeps pile up across timer firings.
+    # Neuter: deleting TimeoutStartSec, or raising it to 10min, fails.
+    svc = _parse_systemd(_read(SERVICE))
+    tmr = _parse_systemd(_read(TIMER))
+    raw = svc["Service"].get("TimeoutStartSec")
+    assert raw, "service file pins no TimeoutStartSec (#1836)"
+    budget_s = _period_to_seconds(raw)
+    assert budget_s == 240, \
+        "pathology budget changed from 240s without updating the pin: %r" % raw
+    period_s = _period_to_seconds(tmr["Timer"]["OnUnitActiveSec"])
+    assert budget_s < period_s, \
+        "pathology budget %ds must fit inside the firing period %ds" \
+        % (budget_s, period_s)
+
+
+def test_service_execstart_bounds_journal_lock_wait():
+    # #1836 (mirrored from the S3 unit): the per-box journal-lock wait
+    # is tick-scale on the scheduled path, not the 300s fleet default —
+    # a wedged journal lock fails loud per tenant after seconds instead
+    # of stalling the sweep up to 5 minutes per box instrument.
+    # Neuter: dropping --journal-timeout-s from ExecStart fails.
+    svc = _parse_systemd(_read(SERVICE))
+    exec_start = svc["Service"].get("ExecStart", "")
+    m = re.search(r"--journal-timeout-s\s+(\d+(?:\.\d+)?)", exec_start)
+    assert m, "ExecStart sets no --journal-timeout-s (#1836)"
+    bound = float(m.group(1))
+    assert 0 < bound <= 60, \
+        "journal-lock bound %ss is not tick-scale (want seconds, not minutes)" % bound
+
+
 # ---------------------------------------------------------------------------
 # One firing end-to-end through the real producer instruments
 
@@ -187,6 +220,8 @@ def test_cli_firing_produces_one_probe_tick_per_tenant(tmp_path):
     )
     assert proc.returncode == 0, "sweep failed: %s" % proc.stderr
     report = json.loads(proc.stdout)
+    assert report["errors"] == [], \
+        "clean sweep should carry no errors[] entries: %r" % report["errors"]
     assert set(report["tenants"]) == {"tnt-a", "tnt-b"}
     for tenant_id in ("tnt-a", "tnt-b"):
         rec = report["tenants"][tenant_id]
@@ -250,3 +285,18 @@ def test_operator_doc_carries_cold_operator_sections():
                    "## 3. Output audience", "sweep-vs-manual",
                    "#1724", "relay-probe-driver.service"):
         assert needle in doc, "operator doc missing %r" % needle
+
+
+def test_operator_doc_documents_pathology_budget():
+    # #1836 (mirrored from the S3 unit): the pathology budget is an
+    # operator-visible contract — a cold operator reading §5 must find
+    # the TimeoutStartSec bound and the tick-scale journal-lock wait,
+    # and why a killed sweep is signaled by a missing watermark rather
+    # than a LOUD record. Neuter: deleting the §5 bound bullet fails.
+    doc = _read(DOC)
+    assert "TimeoutStartSec=240s" in doc
+    assert "--journal-timeout-s 30" in doc
+    assert "#1836" in doc
+    # The inert --provider-state flag is disclosed honestly: it does
+    # nothing until a bundle supplier is wired.
+    assert "inert until a bundle supplier is wired" in doc
