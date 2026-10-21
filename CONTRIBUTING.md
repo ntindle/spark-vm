@@ -258,13 +258,14 @@ python3 scripts/lint-changelog-ritual.py
 # `docs index coverage`: every docs/*.md file needs a row in docs/README.md.
 # It runs inside the full suite, and CI also runs it standalone on every
 # PR — including docs-only ones, where the python suite is skipped. The
-# standalone job also runs the four doc-inventory pins (the link-check
+# standalone job also runs the five doc-claim pins (the link-check
 # exclusion inventory vs ci.yml; CONTRIBUTING's own gate inventory vs
 # ci.yml and the branch-protection ruleset; the CI.md job-table inventory
 # vs ci.yml's job ids; the wiring-tick operator doc's flags/report schema
-# vs hosted/relay_tenant_wiring.py), so the old one-file invocation is NOT
-# what CI runs — run all five files to replicate it.
-python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py -q
+# vs hosted/relay_tenant_wiring.py; the README/docs "(N tests)" suite-size
+# claims vs the test files), so the old one-file invocation is NOT
+# what CI runs — run all six files to replicate it.
+python3 -m pytest scripts/test_docs_index_coverage.py scripts/test_ci_md_link_excludes.py scripts/test_contributing_ci_gates.py scripts/test_ci_docs_job_inventory.py scripts/test_relay_wiring_tick_doc.py scripts/test_readme_test_count_pins.py -q
 ```
 
 ```bash

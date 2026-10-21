@@ -325,9 +325,9 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
         "print('clean')\n")
     (tmp / "scripts" / "test_docs_index_coverage.py").write_text(
         "def test_stub_ok():\n    assert True\n")
-    # Step 4 invokes CI's exact five-file docs-index invocation, so the
-    # scratch repo needs stubs for all five (dx 20261011-0429; dx 20261018-1829;
-    # docs 20261018-1929).
+    # Step 4 invokes CI's exact six-file docs-index invocation, so the
+    # scratch repo needs stubs for all six (dx 20261011-0429; dx 20261018-1829;
+    # docs 20261018-1929; dx 20261020-2259).
     (tmp / "scripts" / "test_ci_md_link_excludes.py").write_text(
         "def test_stub_ok():\n    assert True\n")
     (tmp / "scripts" / "test_contributing_ci_gates.py").write_text(
@@ -335,6 +335,8 @@ def test_main_flow_recursion_from_subdirectory_via_relative_path():
     (tmp / "scripts" / "test_ci_docs_job_inventory.py").write_text(
         "def test_stub_ok():\n    assert True\n")
     (tmp / "scripts" / "test_relay_wiring_tick_doc.py").write_text(
+        "def test_stub_ok():\n    assert True\n")
+    (tmp / "scripts" / "test_readme_test_count_pins.py").write_text(
         "def test_stub_ok():\n    assert True\n")
     shutil.copy(str(GATE), str(tmp / "scripts" / "local-gate.sh"))
     # Step 5 shells out to the shared selection helper — the scratch repo
@@ -386,7 +388,8 @@ def test_plan_mode_lists_every_step_without_running():
     assert "lint-changelog-ritual.py" in plan_line("changelog ritual lint")
     for f in ("test_docs_index_coverage.py", "test_ci_md_link_excludes.py",
               "test_contributing_ci_gates.py", "test_ci_docs_job_inventory.py",
-              "test_relay_wiring_tick_doc.py"):
+              "test_relay_wiring_tick_doc.py",
+              "test_readme_test_count_pins.py"):
         assert f in plan_line("docs index coverage"), \
             f"--plan's docs-index line omits {f}"
     assert "shellcheck" in plan_line("shellcheck")
@@ -431,7 +434,7 @@ def _local_gate_pytest_file_lists():
 
 
 def test_docs_index_step_matches_ci_job_invocation():
-    """Local-gate step 4 must run CI's exact five-file docs-index
+    """Local-gate step 4 must run CI's exact six-file docs-index
     invocation — every pytest line in the script naming test files must
     name the same set CI's `docs index coverage` job runs. This covers
     both the executable step-4 line and the --plan text: if one drifts
@@ -442,10 +445,12 @@ def test_docs_index_step_matches_ci_job_invocation():
     test_ci_docs_job_inventory.py — closed the docs-only escape hatch for
     the CI.md job table; docs 20261018-1929: the fifth file —
     test_relay_wiring_tick_doc.py — closed the same hatch for the
-    wiring-tick operator doc.)
+    wiring-tick operator doc; dx 20261020-2259: the sixth file —
+    test_readme_test_count_pins.py — closed the same hatch for
+    unregistered/stale "(N tests)" suite-size claims (#1848).)
 
-    Non-vacuity: revert step 4 to the single file and the step-4 entry
-    mismatches CI's five; add a sixth file to CI's job line and the
+    Non-vacuity: revert step 4 to the five-file form and the step-4 entry
+    mismatches CI's six; add a seventh file to CI's job line and the
     script-side entries mismatch back."""
     ci_files = _ci_docs_guard_files()
     gate_lists = _local_gate_pytest_file_lists()
