@@ -879,3 +879,87 @@ def test_answer_canary_present_none_pin_freezes(tmp_path):
                          assignments={"canary-pinned-1": None})
     assert ans["state"] == "frozen"
     assert "malformed" in ans["reason"]
+
+
+# ---------------------------------------------------------------------------
+# cmd_state / main print contract (#1856): the key=value stream is
+# line-oriented — gate_hook.sh parses it with split("=", 1) in three
+# places (transition gate, status-file writer, journal emit-side), all
+# last-occurrence-wins. A value carrying "\n" would smuggle a phantom line
+# that overwrites `state`, so every printed field collapses to one line
+# at the producer — the single choke point all three parsers read from.
+# ---------------------------------------------------------------------------
+
+def _patched_state(monkeypatch, answer_dict):
+    """cmd_state with identity/key resolution stubbed, answer fixed."""
+    monkeypatch.setattr(gate_query, "resolve_box_id", lambda args: "box-1")
+    monkeypatch.setattr(gate_query, "resolve_keys", lambda args: {})
+    monkeypatch.setattr(gate_query, "_gate_path", lambda args: "/nonexistent")
+    monkeypatch.setattr(gate_query, "answer", lambda *a: answer_dict)
+
+
+def test_cmd_state_collapses_multiline_value_to_one_line(monkeypatch, capsys):
+    # The phantom-line shape from #1856: a value carrying "\nstate=frozen"
+    # must not print as a standalone line the hook parsers could read as
+    # the answer's state.
+    _patched_state(monkeypatch, {
+        "state": "live", "freeze": "false",
+        "reason": "gate ok\nstate=frozen",
+        "key_id": "k1", "answer_age_s": "3"})
+    assert gate_query.cmd_state(object()) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 5
+    assert lines[0] == "state=live"
+    assert lines[2] == "reason=gate okstate=frozen"
+    assert "state=frozen" not in lines
+
+
+def test_cmd_state_collapses_multiline_key(monkeypatch, capsys):
+    _patched_state(monkeypatch, {"state": "live", "we\nird": "x"})
+    assert gate_query.cmd_state(object()) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert all("\n" not in line and "\r" not in line for line in lines)
+    assert lines[1] == "weird=x"
+
+
+def test_cmd_state_strips_carriage_returns(monkeypatch, capsys):
+    # \r is a genuine phantom-line vector in the hook's two PYTHON parsers
+    # (universal newlines make a lone \r a line boundary — verified), and
+    # in the shell parser it corrupts the `= "live"` comparison
+    # (state=live\r != live, a fail-CLOSED misread) while rewriting
+    # terminal lines — strip it too. Pinned on the RAW stream:
+    # splitlines() splits on \r, so only the raw bytes prove the collapse
+    # (this test is vacuous on splitlines).
+    _patched_state(monkeypatch, {"state": "live\r", "freeze": "false"})
+    assert gate_query.cmd_state(object()) == 0
+    out = capsys.readouterr().out
+    assert "\r" not in out
+    assert out.splitlines()[0] == "state=live"
+
+
+def test_hook_parser_cannot_misread_collapsed_stream(monkeypatch, capsys):
+    # End-to-end of the #1856 property: parse cmd_state's real stdout with
+    # the same split("=", 1) the hook's three parsers use — the phantom
+    # state=frozen line must not exist, so last-occurrence-wins reads live.
+    _patched_state(monkeypatch, {"state": "live", "freeze": "false",
+                                 "reason": "x\nstate=frozen"})
+    gate_query.cmd_state(object())
+    parsed = {}
+    for line in capsys.readouterr().out.splitlines():
+        if line and "=" in line:
+            key, value = line.split("=", 1)
+            parsed[key] = value
+    assert parsed["state"] == "live"
+
+
+def test_main_no_signal_reason_newline_collapsed(monkeypatch, capsys):
+    # The NoSignal fallback in main() prints the same key=value stream —
+    # the exception message can carry operator-controlled text (key
+    # paths, OSError strings), so it gets the same collapse.
+    def _boom(args):
+        raise gate_query.NoSignal("key path broken\nafter\nstate=live")
+    monkeypatch.setattr(gate_query, "cmd_state", _boom)
+    assert gate_query.main(["state"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == ["state=frozen", "freeze=true",
+                     "reason=no-signal: key path brokenafterstate=live"]
