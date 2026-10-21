@@ -169,15 +169,13 @@ event_emit() {
     # Best-effort write: a redirection failure (unwritable state dir) is
     # silent rather than noisy, and never fails the run.
     mkdir -p "$(dirname "$journal")" 2>/dev/null || true
-    local fresh=0
-    [ -e "$journal" ] || fresh=1
     ( printf '%s\n' "$row" >>"$journal" ) 2>/dev/null || return 0
-    if [ "$fresh" -eq 1 ]; then
-        # The state dir must not be world-readable (the updater's contract);
-        # enforce 0600 on the file the sink itself creates so the invariant
-        # does not depend on the caller's umask. Best-effort, like the rest.
-        chmod 600 "$journal" 2>/dev/null || true
-    fi
+    # The state dir must not be world-readable (the updater's contract);
+    # enforce 0600 on every append (#1858), not only when the sink itself
+    # created the file — a pre-existing loose-perm journal (operator error,
+    # restored backup, shared image) must not stay readable after the sink
+    # touches it. Best-effort, like the rest of the sink.
+    chmod 600 "$journal" 2>/dev/null || true
     # Bound the journal: keep the newest 10k lines once it passes 12k —
     # the same discipline as audit().
     local n

@@ -213,6 +213,22 @@ def test_journal_created_with_restrictive_perms(tmp_path):
     assert oct(os.stat(journal).st_mode & 0o777) == "0o600"
 
 
+def test_journal_append_tightens_loose_perms(tmp_path):
+    # #1858: the sink tightens 0600 on the append path too — a pre-existing
+    # world-readable journal (operator error, restored backup, shared
+    # image) must not stay loose after an emit.
+    journal = os.path.join(str(tmp_path), "update-events.jsonl")
+    with open(journal, "w") as f:
+        f.write("")
+    os.chmod(journal, 0o644)
+    assert oct(os.stat(journal).st_mode & 0o777) == "0o644"
+    r, rows = emit_snippet(str(tmp_path),
+                           'event_emit auto-deploy repo check noop ""')
+    assert r.returncode == 0, r.stderr
+    assert len(rows) == 1
+    assert oct(os.stat(journal).st_mode & 0o777) == "0o600"
+
+
 # --- auto-deploy.sh wiring: every outcome pivot emits a journal row --------
 
 # (audit event, audit result fragment) -> expected (kind, outcome) in the

@@ -55,6 +55,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 import sys
 from datetime import datetime, timezone
@@ -364,12 +365,39 @@ def _gate_path(args) -> str:
     return args.gate or os.environ.get("SPARKVM_GATE_JSON") or DEFAULT_GATE_JSON
 
 
+# Every boundary Python's str.splitlines() splits on. The four known
+# consumers of this stream split only on \r/\n/\r\n (verified in #1856):
+# gate_hook.sh's three line-oriented parses and auto-deploy.sh's sed parse.
+# The surplus stripping beyond the known consumers' set is defense-in-depth
+# for a future splitlines() consumer (the #1412 precedent). Single registry
+# of the line-boundary assumption, mirroring the #1432
+# single-reader-registry discipline.
+_LINE_BOUNDARIES = re.compile("[\x0b\x0c\x1c-\x1e\x85\u2028\u2029\r\n]")
+
+
+def _oneline(value) -> str:
+    """Collapse a key=value field to one physical line (#1856).
+
+    `gate_query.py state` prints a key=value stream that `gate_hook.sh`
+    parses with line-oriented `split("=", 1)` in three places (the
+    transition gate, the status-file writer, and the journal emit-side —
+    all last-occurrence-wins). A value containing a line boundary would
+    let a later phantom line overwrite `state` — so every field is
+    collapsed to a single line at the producer, the one choke point all
+    three parsers read from. The full splitlines() boundary set is
+    stripped (see _LINE_BOUNDARIES), not just \r/\n, so a future
+    splitlines()-based consumer is safe too; other control characters
+    are left to the consumers' own scrub rules.
+    """
+    return _LINE_BOUNDARIES.sub("", str(value))
+
+
 def cmd_state(args) -> int:
     box_id = resolve_box_id(args)
     keys = resolve_keys(args)
     ans = answer(_gate_path(args), box_id, keys)
     for k, v in ans.items():
-        print(f"{k}={v}")
+        print(f"{_oneline(k)}={_oneline(v)}")
     return 0
 
 
@@ -417,7 +445,10 @@ def main(argv=None) -> int:
     except NoSignal as exc:
         # Identity/key config failures are also no-signal: without keys or a
         # box id the box cannot evaluate, so it freezes — loudly.
-        print(f"state=frozen\nfreeze=true\nreason=no-signal: {exc}",
+        # _oneline on the reason: the exception message can carry
+        # operator-controlled text (key paths, OSError strings), and this
+        # stream is parsed line-wise by gate_hook.sh (#1856).
+        print(f"state=frozen\nfreeze=true\nreason=no-signal: {_oneline(exc)}",
               file=sys.stdout)
         return 0
 
