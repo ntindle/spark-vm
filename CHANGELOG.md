@@ -568,6 +568,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
   key/state paths. (#1742)
 
 
+### Changed
+
+- The hosted signup/onboarding design doc now matches the shipped control plane: box enrollment is the pairing-code protocol (8-char code, 15-min TTL, server-computed fingerprint, proof-of-possession redeem), box Bearer <redacted> rotate on a 24-hour cycle with an owner-only revoke, and fleet access rides owner API keys plus AgentID dashboard sign-in — the 2026-09-18 enrollment-token / SSH-cert flow is marked superseded, and the component map + open-questions list reflect the decided provider (Fly.io), the live sparkvm.dev waitlist page, and the still-open account-level binding work. (#TBD)
+
 ## [0.9.0] - 2026-10-18
 
 ### Security
