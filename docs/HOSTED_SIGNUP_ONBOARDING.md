@@ -1,9 +1,15 @@
 # Hosted spark-vm: signup & onboarding design
 
 **Status:** design doc for backlog item H3 (hosted-product track), written
-2026-09-18. Awaiting review; implementation follows once the operator picks
-the sandbox provider (Neo), the sentinel host, push infrastructure, and the
-landing site location.
+2026-09-18; reconciled 2026-10-22 against the shipped control-plane
+surface. The "awaiting operator decisions" premise below is stale:
+provider DECIDED (Fly.io), the H11 multi-tenancy audit shipped 2026-09-24
+(H5 design unblocked; sentinel host still operator-held), the landing page
+is live at sparkvm.dev (private waitlist since 2026-09-25), and the
+box-enrollment ceremony is superseded by the shipped pairing-code protocol
+(`pairing/README.md`, #844) + rotating box Bearer <redacted> (#846) + owner API
+keys (#843). Sections tagged **SHIPPED** point at real code; sections
+tagged **DESIGN** were never built and are still the plan.
 
 **Goal:** a Muse with no server of its own can discover spark-vm, sign up,
 prove who it is, get a provisioned VM, and reach its box — without the
@@ -73,9 +79,13 @@ Primary channels, in priority order:
    that funnel: "No server? Get a hosted box →" deep-linking to the signup
    page. (No such CTA exists in the README today — adding it is a small
    follow-up item.)
-3. **A signup landing page** (operator-hosted, URL TBD): one page, one job —
-   explain the product in 30 seconds, hand the visitor (human or their Muse)
-   to the signup flow. See §5 for its content.
+3. **The signup landing page** (SHIPPED 2026-09-25: `site/` deployed at
+   sparkvm.dev on Cloudflare Pages; currently in private waitlist —
+   waitlist CTAs carry `?src=` attribution buckets, invite tooling in
+   `site/waitlist_invites.py`). One page, one job — explain the product
+   in 30 seconds, hand the visitor (human or their Muse) to the signup
+   flow. See §5 for its content. The waitlist is the funnel's current
+   state, not a launched signup form.
 4. **Referral**: tenant Muses get a referral token; new signups attributed to
    the referrer. (Later — not MVP.)
 
@@ -88,50 +98,52 @@ human — the Muse can't sign contracts, and shouldn't hold the account.
 The hosted product must bind three things: the **account** (human), the
 **tenant VM**, and the **Muse** allowed to drive it. We reuse the identity
 pattern Spark already uses on musebook.lol (ed25519 keypair + signed
-requests), extended with a human approval step:
+requests), extended with a human approval step.
 
-1. **At signup**, the control plane creates a tenant record: `tenant_id`,
-   plus an enrollment token (single-use, 15-minute TTL). The token is shown
-   **once in the signup UI** (after the human's magic-link auth) for the
-   human to copy to their Muse. The signup UI is the token's only channel.
-2. **The Muse generates its own ed25519 keypair** locally (on its current
-   machine — never transmitted). It keeps the private key; the public key
-   goes to the control plane inside a *link request* carrying `tenant_id`,
-   the enrollment token, the Muse's `muse_id` (its stable identity), and a
-   display name for the box — the whole request **signed by the new
-   keypair** (proves possession). Pasting the token to the Muse is only
-   *transport*: the token is a bearer credential, and whoever submits it
-   first with their own keypair would win the binding, so the token alone
-   is deliberately **not** the approval.
-3. **The human approves the specific key fingerprint in the signup UI.**
-   The pending link request (tenant, muse_id, key fingerprint, requested
-   at) appears on the signup page; the human clicks Approve. Only then does
-   the control plane bind `tenant_id ↔ muse public key ↔ muse_id`. This is
-   the actual countersignature: link acceptance is gated on a recorded
-   human approval of *that key*, not on possession of a bearer token.
-4. The private key never leaves the Muse's machine. All later
-   tenant-scoped API calls (cert issuance, status polling, approval acks)
-   are signed with this key.
-5. **Revocation:** the human can rotate the Muse key or revoke the tenant
-   from the signup dashboard. The control plane then (a) stops issuing
-   certs for the old key — this gates *new* authentications only — and
-   (b) sends a signed revocation signal to a privileged helper on the VM
-   that terminates the tenant user's existing sessions (OpenSSH does not
-   re-validate certificates on established sessions or ControlMaster
-   channels, so expiry alone cannot kill them).
+**Reconciled 2026-10-22:** the box-enrollment half of this section shipped
+as the pairing-code protocol (#844 — see `pairing/README.md`); the
+account-level binding (tenant record ↔ human account ↔ tenant Muse
+identity) is still design (#1158, #1365, #1475). The shape survived the
+rebuild: the human approves a *specific key fingerprint*, and a bearer
+credential alone never wins the binding.
 
-**Returning Muses (session 2 and beyond).** Agent platforms are ephemeral:
+**Box enrollment (SHIPPED — #844).** The box generates its own ed25519
+keypair locally (private key never leaves the box) and POSTs
+`/v1/pairing/request` with `{name, pubkey}`. The plane stores the **code
+hash** plus the pubkey and returns an 8-character pairing code with a
+15-minute TTL. The box prints the code and the fingerprint — which the
+**server computes from the pubkey itself** (the client-sent value is
+ignored, so the owner always compares the true fingerprint). The owner
+lists pending requests (owner API key, #843), compares the fingerprint
+with the box screen, types the code, and approves: the plane issues a
+challenge nonce, the box signs it (proof of possession), and redeeming
+the signature consumes the pairing one-shot and returns the box id plus
+its first 24-hour bearer. Provisioned boxes skip the human ceremony via
+the attested path (provisioner-seeded single-use attestation token;
+plane-side auto-approval still open (#907); wire contract #1108).
+
+**Box credential lifecycle (SHIPPED — #846).** Box Bearer <redacted> live
+24 hours. The box rotates its own token before expiry by signing a rotate
+message with its ed25519 private key — a stolen bearer alone cannot
+rotate the legitimate box out — with a 15-minute previous-token grace.
+`POST /v1/boxes/{id}/revoke` is owner-only, immediate, idempotent. The
+SSH-cert revocation mechanics in old step 5 were never built; box-revoke
++ owner-key revoke (#843) is the shipped revocation story.
+
+**Returning Muses (session 2 and beyond) (DESIGN).** Agent platforms are ephemeral:
 the keypair may die with the session. The link binds `muse_id`, so a
 returning Muse presents its `muse_id` (+ previous public key if it still
-has it) to request a fresh enrollment token; the human approves it with
-one click in the signup dashboard (or via an email confirmation to the
+has it) to request a fresh pairing round; the human approves it with
+one click in the dashboard (or via an email confirmation to the
 human for the already-known `muse_id`). Tenant Muses *should* persist
 their keypair in their platform's storage, and the protocol *must* still
 work when they can't — via this re-link path. No fresh human
-copy-paste is required after the first link.
+copy-paste is required after the first link. (Design pending the
+account-level binding above; the pairing flow itself is re-runnable
+today for boxes.)
 
-*Key-identity companion:* the enrollment-token flow above onboards the
-*human*; the *agent's* key-pair onboarding — first-connect manifest,
+*Key-identity companion:* the pairing flow above onboards the
+*box*; the *agent's* key-pair onboarding — first-connect manifest,
 "same key -> same box" resume, the claim-url bookmark rule, and the
 rotate-vs-claim decision — is pinned in
 [KEY_IDENTITY_ONBOARDING.md](KEY_IDENTITY_ONBOARDING.md), which also
@@ -141,23 +153,28 @@ plan. Same key-pair primitive, different actor.
 ## 5. Signup flow (MVP)
 
 ```
-human ──▶ landing page ──▶ create account (email + magic link)
-   │
+human ──▶ landing page (sparkvm.dev, private waitlist today) ──▶ create account
+   │      (DESIGN: email + magic link — shipped auth surface is owner API
+   │       keys (#843/#845); AgentID agent session exchange exists
+   │       plane-side (#1225) but the dashboard AgentID sign-in half
+   │       (#1199) is still an open draft, §4)
    ├─▶ pick plan (paid tiers; card-required trial possible, trial terms TBD
    │       — operator decision: no free tier at launch)
    ├─▶ name the box ("nick's dev box")
-   ├─▶ copy the enrollment token (shown once) to their Muse
+   ├─▶ box enrollment: pairing code (8 chars, 15-min TTL) + fingerprint
+   │       approval in the dashboard (SHIPPED — #844, §4)
    │       │
-human's Muse ──▶ link request (signed, §4) ──▶ pending in signup UI
+box ──▶ pairing request (pubkey, §4) ──▶ pending in dashboard
    │                                                    │
-human ──▶ approves the key fingerprint ──▶ control plane binds tenant
-   │
+owner ──▶ approves the fingerprint ──▶ plane issues challenge;
+   │    box redeems (proof of possession) ──▶ first 24h bearer
 control plane ──▶ provision VM (H4 driver) ──▶ deploy spark-vm stack
    │
-   ├─▶ issue short-lived SSH certs: one for the Muse's key (full tenant
-   │    shell), one for the human (port-forward-only, no shell)
-   ├─▶ hand the Muse: relay hostname + cert (the connection bundle);
-   │    hand the human: one-command cred-ui tunnel script
+   ├─▶ issue credentials: 24h box bearer (#846) + owner API keys (#843);
+   │    (the SSH-cert issuance in the 2026-09-18 design is DESIGN, not built)
+   ├─▶ hand the box: relay hostname/port + pinned host-key fingerprint
+   │    (the connection bundle); hand the human: one-command cred-ui
+   │    tunnel script
    │
 Muse polls GET /tenant/status with its key; the signup page polls the same
 endpoint — when status flips to `live`, both sides see "your box is ready"
@@ -175,7 +192,7 @@ Time-to-first-box on the MVP path is **~15 minutes** (cloud-init provision;
 see §7). The "first 10 minutes" clock starts at box-ready, not at signup —
 the signup page says so plainly so nobody stares at a spinner.
 
-**The landing page** (operator-hosted) needs exactly:
+**The landing page** (SHIPPED: sparkvm.dev on Cloudflare Pages, private waitlist) needs exactly:
 
 - 30-second pitch (what it is, who it's for: a Muse that needs a bigger
   computer).
@@ -183,22 +200,23 @@ the signup page says so plainly so nobody stares at a spinner.
   "I don't" → hosted signup.
 - Plan/pricing summary (paid tiers; card-required trial possible, terms TBD —
   operator decision; no free tier at launch).
-- The enrollment token handoff + pending-key approval UI (show once, with
-  "copy for your Muse").
+- The pairing-code handoff + fingerprint approval UI (SHIPPED: 8-char code,
+  15-min TTL, shown with the server-computed fingerprint for the owner to
+  compare with the box screen — #844).
 - Link to status/docs; nothing else. It is a funnel, not a dashboard.
 
 **What the human does during signup (under 5 minutes of their time):**
 
-1. Email + magic link (no password to phish).
+1. (DESIGN) Create the account — email + magic link (no password to phish). The shipped auth surface is owner API keys (#843/#845); AgentID agent session exchange exists plane-side (#1225) but the dashboard AgentID sign-in half (#1199) is still an open draft (§4).
 2. Name the box, pick the plan.
-3. Copy the enrollment token to their Muse; approve the key fingerprint.
+3. (SHIPPED — #844) Approve the pairing code's fingerprint in the dashboard. The 2026-09-18 enrollment-token copy step is superseded — the pairing code is shown on the box screen.
 4. When the page says the box is live, open the cred-ui tunnel command and
    add the first credential — the one step that stays manual by design.
 
 ## 6. Provisioning (provider-agnostic; H4 builds the driver)
 
 The control plane talks to the sandbox provider through a narrow interface;
-only the driver is provider-specific (Neo today, someone else tomorrow):
+only the driver is provider-specific (Fly.io, DECIDED 2026-09-18; H4 may run against the live API within the $5/run + $25/month caps, DECIDED 2026-09-24):
 
 ```
 provision(tenant_id, spec)  -> vm_id, mgmt_endpoint
@@ -280,7 +298,7 @@ relay cannot see session content (see §2). Explicitly ruled out: a
 TLS-terminating control-plane proxy in front of cred-ui — it would let the
 control plane see secret values and break the §2 invariant.
 
-**Cert renewal.** The tenant Muse (or the tenant-side bootstrap client,
+**Cert renewal (DESIGN — the SSH-CA model was never built; shipped auth is 24h box bearer <redacted> rotated by the box itself, #846).** The tenant Muse (or the tenant-side bootstrap client,
 §9) renews at ~50% cert lifetime via the signed-key API; in-flight
 multiplexed sessions survive expiry (renewal only gates *new*
 connections). If the control plane is unreachable past expiry, new
@@ -355,15 +373,15 @@ onboarding friction.
 | `cred-ui` | ✅ localhost-only | unchanged; reached over the tenant's SSH tunnel |
 | CUA desktop stack (`cua/`) | ✅ | unchanged |
 | Deploy script (`proxy/deploy.sh`) | ✅ manual | wrapped by the provisioning sequence, unattended |
-| Identity linking (§4) | pattern only (musebook) | **build**: link API, enrollment tokens, fingerprint approval, re-link |
-| SSH relay (§6) | ❌ | **build**: TCP relay, no SSH termination |
-| SSH CA + cert issuance/renewal (§6) | ❌ | **build** (standard OpenSSH CA) |
-| Tenant-side bootstrap client | ❌ | **build**: one command the tenant Muse runs — keygen → link → cert → ssh-config. "Hand the Muse a config snippet and instructions" works for Spark; a bootstrap client is what makes it work for the tenth Muse with no hand-holding |
-| Provisioning driver (H4) | interface sketched (§6) | **build**: Neo driver against the §6 interface + fake driver for tests |
-| Landing + signup page | ❌ | **build** (operator hosts) |
+| Identity linking (§4) | ✅ box enrollment (pairing-code protocol, `pairing/`, #844) + box token rotation (#846) + owner API keys (#843) | **build**: account-level binding — tenant record (#1158), first-manifest-write actor (#1365), per-signup VAPID issuance (#1475) |
+| SSH relay (§6) | partial (relay probing/wiring machinery in `hosted/`) | **build**: tenant-facing TCP relay, no SSH termination |
+| SSH CA + cert issuance/renewal (§6) | ❌ (superseded) | **design only**: shipped auth is owner API keys (#843) + 24h box Bearer <redacted> (#846); no OpenSSH CA built |
+| Tenant-side bootstrap client | ✅ shape shipped (`pairing/spark_pair.py`: keygen → pairing → token storage, #844) | extend: ssh-config emission + `live` status polling |
+| Provisioning driver (H4) | interface sketched (§6); provider DECIDED Fly.io; live-API caps DECIDED ($5/run, $25/mo) | **build**: Fly driver against the §6 interface + fake driver for tests; upstream-asset preflight shipped (#1878) |
+| Landing + signup page | ✅ `site/` live at sparkvm.dev (private waitlist since 2026-09-25) | signup form proper + pairing-code handoff UI |
 | Audit log shipping (§10) | ❌ | **build** |
-| Sentinel integration (H5) | ❌ | separate design |
-| Billing | ❌ | operator decision |
+| Sentinel integration (H5) | H11 audit shipped 2026-09-24 (design unblocked) | **build** the H5 design; sentinel host still operator-held |
+| Billing | DECIDED: no free tier at launch; card-required trial possible | provider TBD; trial terms TBD |
 
 The strategy is deliberate: **the hosted product is a thin control plane
 over the existing self-hosted stack**. Every OSS improvement (proxy
@@ -399,8 +417,10 @@ Items marked **(NEEDS_USER.md)** are already tracked there (operator-
 internal, not in this repo); the rest are design decisions for the
 operator or for later loop runs.
 
-1. **(NEEDS_USER.md) Provider**: Neo confirmed? API credentials for the
-   H4 driver.
+1. **(NEEDS_USER.md) Provider**: RESOLVED 2026-09-18 — Fly.io (Machines API;
+   `custom.flyio` API token connected and verified). Loop-provisioned
+   machines may run against the live API within $5/run + $25/month caps
+   (DECIDED 2026-09-24, auto-destroy at slot end).
 2. **Tailnet shape**: DECIDED (2026-09-19 hosted unblock pass, P11):
    BYO Tailscale — the tenant box joins the account holder's own
    tailnet; the control plane mints no auth keys and no per-tenant
@@ -409,29 +429,37 @@ operator or for later loop runs.
    own tailnet admin, not the signup UI; the identity-service turn (H9)
    owns the exact enrollment handshake.
 3. **(NEEDS_USER.md) Sentinel host + API**: where it runs, how the
-   control plane and the sentinel talk (blocks H5 implementation).
-4. **(NEEDS_USER.md) Push**: VAPID keypair + self-hosted vs provider
-   push service (blocks H2).
-5. **(NEEDS_USER.md) Landing/signup hosting + domain**: where the page
-   lives.
-6. **(NEEDS_USER.md) Billing**: free tier limits, paid tiers, provider —
-   needed before charging, not before building.
-7. **Abuse**: signup rate limits and identity-verification level for the
-   free tier (email-only invites spam VMs; decide before launch, not
-   after).
+   control plane and the sentinel talk. No longer blocks H5's *design*
+   (H11 audit shipped 2026-09-24 — design is loop work; host still
+   operator-held).
+4. **(NEEDS_USER.md) Push**: VAPID keypair operator-generated at setup
+   (blocks H2 implementation).
+5. **(NEEDS_USER.md) Landing/signup hosting + domain**: RESOLVED
+   2026-09-25 — sparkvm.dev on Cloudflare Pages (project
+   `sparkvm-dev`), private waitlist. Signup form proper still to build
+   (§9).
+6. **(NEEDS_USER.md) Billing**: DECIDED 2026-09-18 — no free tier at
+   launch; card-required trial possible (trial terms TBD). Provider still
+   TBD — needed before charging, not before building.
+7. **Abuse**: signup rate limits and identity-verification level at
+   launch (email-only invites spam VMs; decide before launch, not
+   after). The card-on-file trial is the mining-abuse control — the
+   "free tier" framing in the 2026-09-18 version is superseded by the
+   no-free-tier decision.
 
 ## 12. Phased build plan
 
 - **Phase 0 (no operator input):** this doc; provisioning interface
-  types + fake driver for tests (the fake driver is what unblocks
-  interface work before the provider decision lands); SSH CA prototype;
-  link-API skeleton with enrollment tokens + fingerprint approval;
-  tenant-side bootstrap client.
-- **Phase 1 (needs provider creds):** Neo driver; end-to-end provision of
-  a real VM; golden-path deploy script hardening from the manual flow;
-  SSH relay.
-- **Phase 2 (needs landing host):** signup page with token handoff and
-  key approval; "box is ready" status polling; first-run checklist;
+  types + fake driver for tests; SSH CA prototype (DESIGN, superseded by
+  the bearer/box-token model); link-API skeleton with enrollment tokens
+  + fingerprint approval (SHIPPED as the pairing-code protocol, #844);
+  tenant-side bootstrap client (SHIPPED shape: `pairing/spark_pair.py`).
+- **Phase 1 (needs provider creds — resolved: Fly.io, $5/run +
+  $25/month caps):** Fly driver; end-to-end provision of a real VM;
+  golden-path deploy script hardening from the manual flow; SSH relay.
+- **Phase 2 (needs landing host — resolved: sparkvm.dev live, private
+  waitlist):** signup page with pairing-code handoff and fingerprint
+  approval; "box is ready" status polling; first-run checklist;
   human tunnel script.
 - **Phase 3:** sentinel integration (H5); push (H2); billing; golden
   image; referral.
@@ -439,4 +467,6 @@ operator or for later loop runs.
 ---
 
 *Design doc for backlog item H3 (hosted-product track), written 2026-09-18.
-Status: awaiting review.*
+Reconciled 2026-10-22 against the shipped control-plane surface: box enrollment
+(#844), box token lifecycle (#846), and owner API keys (#843) are shipped; the
+account-level binding is still design (#1158, #1365, #1475).*
