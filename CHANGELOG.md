@@ -245,6 +245,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
   convention the gate uses — so the fix happens locally instead of after a
   red CI run. (#1879)
 
+- Documented the latest competitor-watch cycle (2026-10-23 morning): Kiro's first-party local-sandboxing post read in full (GA in Kiro IDE and CLI, "one trust policy, enforced twice" at the tool boundary and kernel syscall layer — the Kiro entry is now backed by
+ the vendor's own disclosure), Docker Sandboxes folded in as the Harbor AI-agent eval framework backend, Microsandbox ships v0.7.9, and the Vercel changelog sitemap ticks to 1440 entries — all folded into the competitor corpus. (#TBD)
+
 ### Changed
 
 - Relay-liveness wiring internals hardened at the module boundary: the
