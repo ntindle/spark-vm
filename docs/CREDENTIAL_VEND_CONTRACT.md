@@ -282,7 +282,8 @@ endpoint answers a denied take with `429` + `Retry-After:
 <retry_after_s>` (the hint is advisory — the denial is the airtight
 part). The bucket only ever fires on abuse
 loops: at the §2.3 minimum TTL the legitimate cadence is already ~1
-mint per 300 s per name, so no legitimate box is throttled — the bound
+mint request per 300 s per box (all due names batched per the §5
+discipline, D-VC15), so no legitimate box is throttled — the bound
 is on the D1 write amplification of a compromised box minting in a
 tight loop. (Precedent note, kept honest: the pairing 50-pending cap
 in `CONTROL_PLANE_API_REFERENCE.md` is a *count* cap, not a rate
@@ -529,6 +530,22 @@ an outage degrades into bypassed identity):
   (it would put plane latency on every credentialed request); a
   lease-miss at swap time triggers an immediate blocking refresh
   (fetch-on-miss).
+- **Batched mints (D-VC15):** each re-check cycle — the fetcher's
+  single 300-s tick, the minimum of the per-lease `max(300 s, ttl/3)`
+  cadences — the fetcher collects *all* due names and issues a single
+  mint `POST` carrying them (first boot with no leases: `ceil(N/64)`
+  requests for N names, paced at most 10 requests per 300 s — a
+  >640-name first boot spreads its batches across rate-limit windows).
+  Per-name minting **as the steady-state refresh pattern** is
+  non-conformant; exceptional paths may issue additional mint requests
+  within bucket headroom: the swap-time fetch-on-miss mints the missed
+  name(s) in one batched `POST`, and a failed batched `POST` may be
+  retried once — the bucket's 10-requests-per-300-s capacity against the
+  ~1-request-per-cycle legitimate cadence is the headroom these paths
+  consume. The D105 per-box rate limiter (§2.2) counts mint *requests*
+  per `box_id`, and its "never touches legitimate traffic" claim rests
+  on this discipline — without batching, a box with 11+ minimum-TTL
+  names would eat 429s on legitimate traffic.
 - **Hard delete-on-expiry:** at expiry the value is wiped from memory. A
   subsequent swap request fails closed until a fresh lease lands.
 - **RAM-only cache:** vended values are never written to the box
@@ -652,6 +669,14 @@ is already explicit in the H11 audit (§3).
     only a fresh (plaintext-different) value, established by
     decrypt-compare with the data key, lifts the tombstone. Issue
     #1406.
+14. The D105 per-box mint rate limiter: an 11th take before the bucket
+   refills — 11 takes within ~30 s of a burst, or a sustained rate above
+   10 mints / 300 s — reads `429` with a `Retry-After` hint naming the
+   advisory `retry_after_s`. A client honoring the §5 batching discipline
+   (one mint request per re-check cycle, all due names batched; first-boot
+   batches paced at most 10 per 300 s; fetch-on-miss and single retries
+   within bucket headroom) sees no `429` over a sustained run at the §2.3
+   minimum TTL. Issue #1405.
 
 ## 11. What's next
 
