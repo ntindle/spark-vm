@@ -130,6 +130,17 @@ rotate the legitimate box out — with a 15-minute previous-token grace.
 SSH-cert revocation mechanics in old step 5 were never built; box-revoke
 + owner-key revoke (#843) is the shipped revocation story.
 
+**Dashboard auth surface (SHIPPED — #843/#845).** The dashboard's sign-in
+is the owner API key itself (#845): the owner pastes a key, which the
+dashboard keeps only in that tab's session storage — never in a cookie,
+localStorage, or a URL — and clears on sign-out or tab close. The same
+keys gate the fleet endpoints plane-side (#843), so the dashboard and the
+API share one credential, not two. AgentID is not part of that shipped
+surface: the plane-side agent-session exchange (`POST /v1/agent/exchange`,
+#1225) shipped, but the dashboard AgentID sign-in half (#1199) is still
+an open draft — an agent cannot yet sign in to the dashboard with
+AgentID, and the owner-key paste above is the shipped path.
+
 **Returning Muses (session 2 and beyond) (DESIGN).** Agent platforms are ephemeral:
 the keypair may die with the session. The link binds `muse_id`, so a
 returning Muse presents its `muse_id` (+ previous public key if it still
@@ -157,7 +168,7 @@ human ──▶ landing page (sparkvm.dev, private waitlist today) ──▶ cre
    │      (DESIGN: email + magic link — shipped auth surface is owner API
    │       keys (#843/#845); AgentID agent session exchange exists
    │       plane-side (#1225) but the dashboard AgentID sign-in half
-   │       (#1199) is still an open draft, §4)
+   │       (#1199) is still an open draft (§4, Dashboard auth surface)
    ├─▶ pick plan (paid tiers; card-required trial possible, trial terms TBD
    │       — operator decision: no free tier at launch)
    ├─▶ name the box ("nick's dev box")
@@ -207,7 +218,7 @@ the signup page says so plainly so nobody stares at a spinner.
 
 **What the human does during signup (under 5 minutes of their time):**
 
-1. (DESIGN) Create the account — email + magic link (no password to phish). The shipped auth surface is owner API keys (#843/#845); AgentID agent session exchange exists plane-side (#1225) but the dashboard AgentID sign-in half (#1199) is still an open draft (§4).
+1. (DESIGN) Create the account — email + magic link (no password to phish). The shipped auth surface is owner API keys (#843/#845); AgentID agent session exchange exists plane-side (#1225) but the dashboard AgentID sign-in half (#1199) is still an open draft (§4, Dashboard auth surface).
 2. Name the box, pick the plan.
 3. (SHIPPED — #844) Approve the pairing code's fingerprint in the dashboard. The 2026-09-18 enrollment-token copy step is superseded — the pairing code is shown on the box screen.
 4. When the page says the box is live, open the cred-ui tunnel command and
@@ -373,7 +384,7 @@ onboarding friction.
 | `cred-ui` | ✅ localhost-only | unchanged; reached over the tenant's SSH tunnel |
 | CUA desktop stack (`cua/`) | ✅ | unchanged |
 | Deploy script (`proxy/deploy.sh`) | ✅ manual | wrapped by the provisioning sequence, unattended |
-| Identity linking (§4) | ✅ box enrollment (pairing-code protocol, `pairing/`, #844) + box token rotation (#846) + owner API keys (#843) | **build**: account-level binding — tenant record (#1158), first-manifest-write actor (#1365), per-signup VAPID issuance (#1475) |
+| Identity linking (§4) | ✅ box enrollment (pairing-code protocol, `pairing/`, #844) + box token rotation (#846) + owner API keys (#843) + dashboard owner-key sign-in (#845) | **build**: account-level binding — tenant record (#1158), first-manifest-write actor (#1365), per-signup VAPID issuance (#1475) |
 | SSH relay (§6) | partial (relay probing/wiring machinery in `hosted/`) | **build**: tenant-facing TCP relay, no SSH termination |
 | SSH CA + cert issuance/renewal (§6) | ❌ (superseded) | **design only**: shipped auth is owner API keys (#843) + 24h box Bearer <redacted> (#846); no OpenSSH CA built |
 | Tenant-side bootstrap client | ✅ shape shipped (`pairing/spark_pair.py`: keygen → pairing → token storage, #844) | extend: ssh-config emission + `live` status polling |
