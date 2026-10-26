@@ -261,6 +261,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The hosted signup/onboarding design doc now matches the shipped control plane: box enrollment is the pairing-code protocol (8-char code, 15-min TTL, server-computed fingerprint, proof-of-possession redeem), box Bearer <redacted> rotate on a 24-hour cycle with an owner-only revoke, and fleet access rides owner API keys (the AgentID dashboard sign-in half is still an open draft) — the 2026-09-18 enrollment-token / SSH-cert flow is marked superseded, and the component map + open-questions list reflect the decided provider (Fly.io), the live sparkvm.dev waitlist page, and the still-open account-level binding work. (#1880)
 
+- The hosted signup/onboarding design doc now names the shipped dashboard sign-in explicitly — paste an owner API key, kept only in that tab — and points the signup flow at the new dashboard-auth section instead of a bare section pointer; the AgentID dashboard sign-in half stays an open draft. (#1882)
+
 ### Fixed
 
 - The release-gate key=value stream can no longer smuggle phantom lines: `gate_query.py state` collapses every printed field to one physical line at the producer (the single choke point all three of `gate_hook.sh`'s line-oriented parsers read from), so a value carrying `\nstate=frozen` — reachable via operator-controlled `key_id`/`box_id` or exception text in no-signal reasons — can't overwrite the answer's `state` under the parsers' last-occurrence-wins. The `no-signal` fallback print gets the same treatment. (#1856)(#1872)
