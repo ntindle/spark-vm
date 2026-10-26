@@ -261,7 +261,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The hosted signup/onboarding design doc now matches the shipped control plane: box enrollment is the pairing-code protocol (8-char code, 15-min TTL, server-computed fingerprint, proof-of-possession redeem), box Bearer <redacted> rotate on a 24-hour cycle with an owner-only revoke, and fleet access rides owner API keys (the AgentID dashboard sign-in half is still an open draft) — the 2026-09-18 enrollment-token / SSH-cert flow is marked superseded, and the component map + open-questions list reflect the decided provider (Fly.io), the live sparkvm.dev waitlist page, and the still-open account-level binding work. (#1880)
 
-- The hosted signup/onboarding design doc now names the shipped dashboard sign-in explicitly — paste an owner API key, kept only in that tab — and points the signup flow at the new dashboard-auth section instead of a bare section pointer; the AgentID dashboard sign-in half stays an open draft. (#TBD)
+- The hosted signup/onboarding design doc now names the shipped dashboard sign-in explicitly — paste an owner API key, kept only in that tab — and points the signup flow at the new dashboard-auth section instead of a bare section pointer; the AgentID dashboard sign-in half stays an open draft. (#1882)
 
 ### Fixed
 
