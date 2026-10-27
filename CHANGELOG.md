@@ -249,7 +249,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
  the vendor's own disclosure), Docker Sandboxes folded in as the Harbor AI-agent eval framework backend, Microsandbox ships v0.7.9, and the Vercel changelog sitemap ticks to 1440 entries — all folded into the competitor corpus. (#1881)
 
 - Documented the latest competitor-watch cycle (2026-10-25 morning): Microsandbox ships v0.7.10 and v0.7.11, the Harbor stable release expected October 23 did not land in Docker's release notes, and the Vercel changelog sitemap ticks to 1448 entries — all folded into the competitor corpus. (#1883)
-- Documented the latest competitor-watch cycle (2026-10-27 morning): Daytona's $60M Series B is now confirmed by the company's own announcement, Docker Sandboxes ships v0.49.2 and v0.50.0 with kit mounts and sandbox-escape hardening, and the Vercel changelog sitemap ticks to 1457 entries, and the Harbor stable release still has not landed in Docker's release notes — all folded into the competitor corpus. (#TBD)
+- Documented the latest competitor-watch cycle (2026-10-27 morning): Daytona's $60M Series B is now confirmed by the company's own announcement, Docker Sandboxes ships v0.49.2 and v0.50.0 with kit mounts and sandbox-escape hardening, and the Vercel changelog sitemap ticks to 1457 entries, and the Harbor stable release still has not landed in Docker's release notes — all folded into the competitor corpus. (#1884)
 
 ### Changed
 
