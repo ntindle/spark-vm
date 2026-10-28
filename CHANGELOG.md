@@ -264,6 +264,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The hosted signup/onboarding design doc now names the shipped dashboard sign-in explicitly — paste an owner API key, kept only in that tab — and points the signup flow at the new dashboard-auth section instead of a bare section pointer; the AgentID dashboard sign-in half stays an open draft. (#1882)
 
+- The hosted signup/onboarding design doc now answers where the first owner key comes from: on a fresh database the first box is enrolled from the CLI, its first 24-hour bearer mints the first owner key exactly once, and only then does the dashboard sign-in unlock — the signup flow and checklist now follow that order instead of listing owner-key issuance after fingerprint approval. (#1885)
+
 ### Fixed
 
 - The release-gate key=value stream can no longer smuggle phantom lines: `gate_query.py state` collapses every printed field to one physical line at the producer (the single choke point all three of `gate_hook.sh`'s line-oriented parsers read from), so a value carrying `\nstate=frozen` — reachable via operator-controlled `key_id`/`box_id` or exception text in no-signal reasons — can't overwrite the answer's `state` under the parsers' last-occurrence-wins. The `no-signal` fallback print gets the same treatment. (#1856)(#1872)

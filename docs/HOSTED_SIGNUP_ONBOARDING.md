@@ -114,12 +114,13 @@ hash** plus the pubkey and returns an 8-character pairing code with a
 15-minute TTL. The box prints the code and the fingerprint — which the
 **server computes from the pubkey itself** (the client-sent value is
 ignored, so the owner always compares the true fingerprint). The owner
-lists pending requests (owner API key, #843), compares the fingerprint
-with the box screen, types the code, and approves: the plane issues a
-challenge nonce, the box signs it (proof of possession), and redeeming
-the signature consumes the pairing one-shot and returns the box id plus
-its first 24-hour bearer. Provisioned boxes skip the human ceremony via
-the attested path (provisioner-seeded single-use attestation token;
+lists pending requests (owner API key, #843 — except the very first box,
+whose approval is CLI-only; see First owner key below), compares the
+fingerprint with the box screen, types the code, and approves: the plane
+issues a challenge nonce, the box signs it (proof of possession), and
+redeeming the signature consumes the pairing one-shot and returns the box
+id plus its first 24-hour bearer. Provisioned boxes skip the human ceremony
+via the attested path (provisioner-seeded single-use attestation token;
 plane-side auto-approval still open (#907); wire contract #1108).
 
 **Box credential lifecycle (SHIPPED — #846).** Box Bearer <redacted> live
@@ -140,6 +141,39 @@ surface: the plane-side agent-session exchange (`POST /v1/agent/exchange`,
 #1225) shipped, but the dashboard AgentID sign-in half (#1199) is still
 an open draft — an agent cannot yet sign in to the dashboard with
 AgentID, and the owner-key paste above is the shipped path.
+
+**First owner key (bootstrap — SHIPPED, #843).** The dashboard sign-in is
+the owner-key paste — but the first owner key has to come from somewhere:
+there is no setup secret and no pre-seeded key. On a fresh database, where
+no owner key exists yet, the first pairing approval is CLI-only:
+`spark_pair.py approve --pairing-id pair_... --bootstrap` accepts the typed
+pairing code with no `Authorization` header and records the approval as
+`approved_by='bootstrap'` (the pairing detail is likewise readable without
+a key, so the human can still verify the fingerprint first). The box
+redeems the challenge and receives its first 24-hour bearer, saved to
+`enrollment.json` (0600) on the box — and that box token is the authority
+for `POST /v1/owner/bootstrap`, which mints the FIRST owner key, once
+(save it immediately: it is returned exactly once and the plane stores
+only its hash; the full operator sequence is in
+`HOSTED_AUTH_OPERATOR_RUNBOOK.md`, Day 0). After any active owner key
+exists the endpoint answers `403 "bootstrap closed"`; later keys are
+minted with an owner key via `POST /v1/owner/keys` (#878). There is no
+account-creation step today — holding the first owner key is what makes
+you the owner — and the dashboard sign-in unlocks only after that key
+exists, so the very first box is always enrolled from the CLI, never from
+the dashboard. (A provisioned first box is the exception: the attested
+path auto-approves it, so there is no pairing to approve — see Box
+enrollment above.)
+
+Honest threat model, carried from `pairing/README.md`: on a fresh database
+anyone who can reach the Worker can request a pairing and self-approve it,
+so the first party to complete request → approve → redeem → owner-bootstrap
+becomes the owner (first-claim race). The pairing id is 64-bit (`pair_` +
+16 hex chars) and the code 40-bit (hashed): not guessable, but not a secret
+either. The operator wins the race by enrolling immediately after deploy
+on a trusted network; the window closes permanently at the first owner key. There is no better answer without a
+setup secret (deliberately removed in #843); the alternative is an
+unenrollable fresh database.
 
 **Returning Muses (session 2 and beyond) (DESIGN).** Agent platforms are ephemeral:
 the keypair may die with the session. The link binds `muse_id`, so a
@@ -165,6 +199,7 @@ plan. Same key-pair primitive, different actor.
 
 ```
 human ──▶ landing page (sparkvm.dev, private waitlist today) ──▶ create account
+   │      (DESIGN — never built; the first key is checklist step 1, below)
    │      (DESIGN: email + magic link — shipped auth surface is owner API
    │       keys (#843/#845); AgentID agent session exchange exists
    │       plane-side (#1225) but the dashboard AgentID sign-in half
@@ -173,15 +208,22 @@ human ──▶ landing page (sparkvm.dev, private waitlist today) ──▶ cre
    │       — operator decision: no free tier at launch)
    ├─▶ name the box ("nick's dev box")
    ├─▶ box enrollment: pairing code (8 chars, 15-min TTL) + fingerprint
-   │       approval in the dashboard (SHIPPED — #844, §4)
+   │       approval — in the dashboard once an owner key exists;
+   │       CLI-only (approve --bootstrap) for the very first box
+   │       (SHIPPED — #844, §4, First owner key)
    │       │
-box ──▶ pairing request (pubkey, §4) ──▶ pending in dashboard
+box ──▶ pairing request (pubkey, §4) ──▶ pending on the plane
+   │                                     (dashboard once signed in)
    │                                                    │
 owner ──▶ approves the fingerprint ──▶ plane issues challenge;
    │    box redeems (proof of possession) ──▶ first 24h bearer
 control plane ──▶ provision VM (H4 driver) ──▶ deploy spark-vm stack
    │
-   ├─▶ issue credentials: 24h box bearer (#846) + owner API keys (#843);
+   ├─▶ first owner key: the box's first 24h bearer (#846) is the
+   │    authority for POST /v1/owner/bootstrap, which mints the FIRST
+   │    owner key, once (SHIPPED — #843, §4, First owner key); later
+   │    keys are minted with an owner key (POST /v1/owner/keys, #878).
+   │    The dashboard sign-in unlocks only after that first key exists.
    │    (the SSH-cert issuance in the 2026-09-18 design is DESIGN, not built)
    ├─▶ hand the box: relay hostname/port + pinned host-key fingerprint
    │    (the connection bundle); hand the human: one-command cred-ui
@@ -218,9 +260,20 @@ the signup page says so plainly so nobody stares at a spinner.
 
 **What the human does during signup (under 5 minutes of their time):**
 
-1. (DESIGN) Create the account — email + magic link (no password to phish). The shipped auth surface is owner API keys (#843/#845); AgentID agent session exchange exists plane-side (#1225) but the dashboard AgentID sign-in half (#1199) is still an open draft (§4, Dashboard auth surface).
-2. Name the box, pick the plan.
-3. (SHIPPED — #844) Approve the pairing code's fingerprint in the dashboard. The 2026-09-18 enrollment-token copy step is superseded — the pairing code is shown on the box screen.
+1. (SHIPPED — #843) Get the first owner key: enroll the first box from
+   the CLI — on the box run `spark_pair.py redeem` (it waits for the
+   approval), then `spark_pair.py approve --pairing-id pair_... --bootstrap`;
+   the redeem completes and saves its first bearer to `enrollment.json`
+   (0600); `POST /v1/owner/bootstrap` with that bearer mints the first
+   owner key, once (save it immediately — returned exactly once; see
+   `HOSTED_AUTH_OPERATOR_RUNBOOK.md`, Day 0). That key is the dashboard
+   sign-in (§4, First owner key). (DESIGN) The email + magic-link account creation in the 2026-09-18 design was never built — there is no
+   account-creation step today; holding the first key is what makes you
+   the owner. AgentID agent session exchange exists plane-side (#1225)
+   but the dashboard AgentID sign-in half (#1199) is still an open draft
+   (§4, Dashboard auth surface).
+2. Pick the plan (the box was named when its pairing was requested in step 1).
+3. (SHIPPED — #844) Approve the pairing code's fingerprint in the dashboard (for later boxes; the first box's approval is the CLI step in 1 above). The 2026-09-18 enrollment-token copy step is superseded — the pairing code is shown on the box screen.
 4. When the page says the box is live, open the cred-ui tunnel command and
    add the first credential — the one step that stays manual by design.
 
@@ -384,7 +437,7 @@ onboarding friction.
 | `cred-ui` | ✅ localhost-only | unchanged; reached over the tenant's SSH tunnel |
 | CUA desktop stack (`cua/`) | ✅ | unchanged |
 | Deploy script (`proxy/deploy.sh`) | ✅ manual | wrapped by the provisioning sequence, unattended |
-| Identity linking (§4) | ✅ box enrollment (pairing-code protocol, `pairing/`, #844) + box token rotation (#846) + owner API keys (#843) + dashboard owner-key sign-in (#845) | **build**: account-level binding — tenant record (#1158), first-manifest-write actor (#1365), per-signup VAPID issuance (#1475) |
+| Identity linking (§4) | ✅ box enrollment (pairing-code protocol, `pairing/`, #844) + box token rotation (#846) + owner API keys (#843) + dashboard owner-key sign-in (#845) | **build**: account-level binding — tenant record (#1158), first-manifest-write actor (#1365), per-signup VAPID issuance (#1475). First owner key: minted from the first box's bearer via `POST /v1/owner/bootstrap` (one-shot; §4, First owner key); later keys via `POST /v1/owner/keys` (#878) |
 | SSH relay (§6) | partial (relay probing/wiring machinery in `hosted/`) | **build**: tenant-facing TCP relay, no SSH termination |
 | SSH CA + cert issuance/renewal (§6) | ❌ (superseded) | **design only**: shipped auth is owner API keys (#843) + 24h box Bearer <redacted> (#846); no OpenSSH CA built |
 | Tenant-side bootstrap client | ✅ shape shipped (`pairing/spark_pair.py`: keygen → pairing → token storage, #844) | extend: ssh-config emission + `live` status polling |
