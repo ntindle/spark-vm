@@ -264,7 +264,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - The hosted signup/onboarding design doc now names the shipped dashboard sign-in explicitly — paste an owner API key, kept only in that tab — and points the signup flow at the new dashboard-auth section instead of a bare section pointer; the AgentID dashboard sign-in half stays an open draft. (#1882)
 
-- The hosted signup/onboarding design doc now answers where the first owner key comes from: on a fresh database the first box is enrolled from the CLI, its first 24-hour bearer mints the first owner key exactly once, and only then does the dashboard sign-in unlock — the signup flow and checklist now follow that order instead of listing owner-key issuance after fingerprint approval. (#TBD)
+- The hosted signup/onboarding design doc now answers where the first owner key comes from: on a fresh database the first box is enrolled from the CLI, its first 24-hour bearer mints the first owner key exactly once, and only then does the dashboard sign-in unlock — the signup flow and checklist now follow that order instead of listing owner-key issuance after fingerprint approval. (#1885)
 
 ### Fixed
 
