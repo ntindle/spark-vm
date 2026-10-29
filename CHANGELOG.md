@@ -58,6 +58,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Documented the latest competitor-watch cycle (2026-10-29 morning): Akamai launches an agent sandbox in beta, a new sub-second-boot agent cloud entrant appears, and Vercel's sandbox changelog grows with two sandbox-titled entries — all folded into the competitor corpus. (#TBD)
+
 - Documented the latest competitor-watch cycle (2026-10-21 morning): Vercel's own report on its $1M sandbox challenge discloses a snapshot swap flaw and a cross-tenant storage leak plus the Trail of Bits review results, Docker Sandboxes ships v0.49.1, and the Vercel Drives GA is now acknowledged on the legacy beta page — all folded into the competitor corpus. (#1876)
 
 - The golden-image build now verifies the pinned upstream release assets before building: the build driver and the CI gate HEAD-check the cua-driver release's checksums file, so a missing or moved upstream release refuses in seconds with the URL and the pinned version — instead of failing two minutes into the docker build the way the v0.9.0 release gate did. (#1878)
