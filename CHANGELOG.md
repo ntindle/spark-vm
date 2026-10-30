@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
-- The repo README now points server-less readers at the hosted waitlist: a "No server? Join the hosted waitlist" link under the tagline, deep-linking to the live waitlist page — the signup form itself is still unbuilt, so the link says waitlist, not signup. (#TBD)
+- The repo README now points server-less readers at the hosted waitlist: a "No server? Join the hosted waitlist" link under the tagline, deep-linking to the live waitlist page — the signup form itself is still unbuilt, so the link says waitlist, not signup. (#1887)
 
 - Documented the latest competitor-watch cycle (2026-10-29 morning): Akamai launches an agent sandbox in beta, a new sub-second-boot agent cloud entrant appears, and Vercel's sandbox changelog grows with two sandbox-titled entries — all folded into the competitor corpus. (#1886)
 
