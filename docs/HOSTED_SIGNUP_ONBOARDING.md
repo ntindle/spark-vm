@@ -77,8 +77,10 @@ Primary channels, in priority order:
 2. **README as landing page**: the repo README already carries a
    "what/why/try it" surface. The hosted signup CTA belongs at the top of
    that funnel: "No server? Get a hosted box →" deep-linking to the signup
-   page. (No such CTA exists in the README today — adding it is a small
-   follow-up item.)
+   page. (SHIPPED 2026-10-30: the README header now carries "No server?
+   Join the hosted waitlist →" linking to sparkvm.dev/waitlist — waitlist
+   wording, not signup, because the signup form proper is still unbuilt
+   and the waitlist is the funnel's current state.)
 3. **The signup landing page** (SHIPPED 2026-09-25: `site/` deployed at
    sparkvm.dev on Cloudflare Pages; currently in private waitlist —
    waitlist CTAs carry `?src=` attribution buckets, invite tooling in

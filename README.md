@@ -14,6 +14,8 @@ desktop are still there tomorrow — and your secrets never touch its hands,
 because a swapping proxy stands between the agent and everything it isn't
 allowed to see.
 
+**No server?** [Join the hosted waitlist →](https://sparkvm.dev/waitlist)
+
 [📋 **Copy prompt**](#let-your-muse-do-it)
 
 <img src="assets/spark-coding.png" width="640" alt="Spark, hard at work next to the 12U homelab rack">
