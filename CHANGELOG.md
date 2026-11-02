@@ -58,6 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ## [Unreleased]
 
 ### Added
+- Documented the latest competitor-watch cycle (2026-11-02 morning): GitHub's Copilot cloud sandboxes reach general availability with November billing, Google announces Agent Compute Engine microVMs per agent, a Beta9 sandbox-escape pair and a Prefab UI sandbox escape land, and a Hugo theme file-read pair is confirmed — all folded into the competitor corpus. (#1890)
 - Documented the latest competitor-watch cycle (2026-10-31 morning): a new sub-second-boot VM entrant, two sandbox-escape advisories from Claude Code and GitLab's AI Gateway, vendor confirmation for the Akamai and InstaBox sandboxes, and Docker's Harbor integration reaching stable — all folded into the competitor corpus. (#1889)
 - Documented the latest competitor-watch cycle (2026-10-29 morning): Akamai launches an agent sandbox in beta, a new sub-second-boot agent cloud entrant appears, and Vercel's sandbox changelog grows with two sandbox-titled entries — all folded into the competitor corpus. (#1886)
 
